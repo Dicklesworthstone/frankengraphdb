@@ -1,0 +1,126 @@
+# Build artifacts
+/target
+/target_local
+target-*/
+target_*/
+crates/*/target/
+a.out
+
+# Database on-disk state — never commit. A live FrankenGraphDB directory holds the
+# only mutable file (manifest.root) plus content-addressed, RaptorQ-coded ECS
+# symbol stores; none of it belongs in git.
+manifest.root
+*.fgdb                 # .fgdb archives (verifiable ECS backup bundles) — often large
+/data/
+/*.fgdbdir/
+*.fgdbdir/
+/ecs-store/
+*.symbols
+*.capsule
+*.anchor
+
+# Simulation / verification ephemera (fgdb-sim, oracles, crashpacks)
+*.crashpack
+/crashpacks/
+/sim-traces/
+*.trace
+*.replay
+
+# Benchmark artifacts (fgdb-bench)
+/target/criterion/
+*.flamegraph
+flamegraph*.svg
+perf.data
+perf.data.old
+
+# beads viewer local config and caches
+.bv/
+
+# Agent mail
+.agent-mail-project-id
+.agent-mail.yaml
+
+# macOS (AppleDouble resource forks + Finder metadata)
+.DS_Store
+._*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Cargo lock is committed (workspace ships binaries: fgdbd, fgdb CLI)
+# Cargo.lock
+
+# Golden-artifact test sidecars (written next to a golden on mismatch / pending bless;
+# never committed — review the diff and re-bless via UPDATE_GOLDENS=1 instead).
+*.actual
+*.snap.new
+
+# Temporary files
+*.tmp
+*.bak
+*.corrupt
+*.corrupt-*
+
+# Beads recovery/orphan artifacts
+.beads/*.orphan_*
+.beads/*.corrupt_*
+.beads/*.pre_recovery_*
+.beads/*.recover*.sql
+.beads/*.bad_*
+.beads/*.backup_*
+.beads/*.rebuild_*
+.beads/recovery*/
+.beads_recovery/
+.beads_recovery_*/
+
+# Environment / local settings
+.env
+.claude/settings.local.json
+
+# Ephemeral files (core dumps, profiling, agent config backups, etc.)
+core.*
+core
+clippy.txt
+clippy.json
+clippy_results.json
+check_output.txt
+error.log
+rustc-ice-*.txt
+
+# NTM session state
+.ntm/
+
+# Root-level agent-generated scripts and scratch output
+*.log
+nohup.out
+/*.txt
+/*.py
+/*.sh
+/*.json
+!package.json
+/*.jsonl
+
+# ACFS / agent-mail / MCP ephemeral patterns
+codex.mcp.json
+cursor.mcp.json
+gemini.mcp.json
+cline.mcp.json
+opencode.json
+.opencode.json.*.bak
+windsurf.mcp.json
+*.mcp.json.*.bak
+
+# Agent session ephemeral files
+SESSION_TODO.md
+SESSION_REPORT.md
+SESSION_*.md
+verify_*.sh
+newfile.txt
+repro_*.rs
+
+# Python tooling cache (scripts/)
+__pycache__/
