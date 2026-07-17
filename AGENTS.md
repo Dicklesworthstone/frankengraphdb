@@ -43,10 +43,10 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 The leapfrog is not one trick; it is the *composition* of six bets, each at or beyond the current frontier, made feasible only because the foundation libraries already exist:
 
 - **B1 — One Version Universe.** MVCC versions, time-travel history, replication, change subscriptions, and git-style database branches are *the same mechanism*: an append-only, content-addressed, RaptorQ-coded commit stream (**Chronicle**).
-- **B2 — Graph-Structured LSM ("Strata").** Adjacency lives in three temperature tiers (versioned delta blocks → sealed compressed CSR runs → archived anchors): transactional writes *and* static-CSR scan speed on one store.
+- **B2 — Graph-Structured LSM ("Strata").** Adjacency lives in three temperature tiers (versioned delta blocks → sealed compressed CSR runs → archived anchors): one store targeting high transactional ingest *and* static-CSR-class scans, with the actual rates held to §17 benchmark gates.
 - **B3 — Unified Factorized/WCO Execution ("Loom").** One Free-Join-style operator family subsumes binary hash joins, worst-case-optimal multiway joins, and factorized intermediates, running vectorized and morsel-parallel over Strata runs that *are already tries*.
 - **B4 — Incremental Everything ("Ripple").** A DBSP-style Z-set delta algebra is the single engine for recursive queries, materialized views, standing queries/subscriptions, and incremental analytics — fed by the commit stream, which is *already* a Z-set stream.
-- **B5 — Determinism as a Product Feature.** CGSE tie-break policies, complexity witnesses, and plan certificates make every result reproducible and auditable; every adaptive decision emits a replayable **decision card**; the whole database runs under asupersync's lab runtime for DPOR-explored, seed-replayable, chaos-injected testing.
+- **B5 — Determinism as a Product Feature.** CGSE tie-break policies, complexity witnesses, and plan certificates make every eligible **STRICT** result byte-reproducible and auditable; every adaptive decision emits a replayable **decision card**; the whole database runs under asupersync's lab runtime for DPOR-explored, seed-replayable, chaos-injected testing.
 - **B6 — Agent-Native by Construction.** Branch-per-agent isolation, capability-scoped (macaroon) subgraph authorization, provenance as first-class edges, and one hybrid vector+text+graph retrieval operator — purpose-built for GraphRAG and multi-agent memory.
 
 **The single source of truth for what we are building and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md).** Read it before writing any subsystem.
@@ -73,7 +73,7 @@ Native query language is **GQL (ISO/IEC 39075:2024)** with an openCypher compati
 ## Spec-First Workflow
 
 Implementation follows the plan, not ad-hoc invention. Read in this order:
-1. [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md) — architecture, the six bets, every subsystem (Chronicle, Strata, Loom, Ripple, Beacon, Prism, Warden, Fabric, Aegis), the verification doctrine, and the workstream/gate sequencing (§19).
+1. [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md) — architecture, the six bets, every subsystem (Chronicle, Strata, Loom, Ripple, Beacon, Prism, Warden, Fabric, Aegis), the verification doctrine, the workstream/gate sequencing (§19), and the normative appendices (on-disk formats, intent log, GLA operators, FGP protocol, invariant registry, operation-cost registry).
 2. **The Invariant Registry (Appendix F / `invariants.toml`)** — every load-bearing invariant (FG-INV-01 … FG-INV-20) with its stable ID, statement, and enforcement mechanism (Lean lane, TLA+ model, runtime oracle, property test, or CI gate). **CI cross-checks that every ID has a live checker.**
 3. **The on-disk formats (Appendix A), the graph intent-log vocabulary (Appendix B), and the GLA operator inventory (Appendix C)** — the normative contracts a new crate must honor.
 
@@ -133,7 +133,7 @@ We are in early development with **no users**. Do things the **RIGHT** way with 
 ## Toolchain
 
 - Rust 2024 edition. Nightly toolchain (`rust-toolchain.toml`) — **required** for `core::arch` / `portable_simd` kernels and the features both foundations pin.
-- `#![forbid(unsafe_code)]` at every crate root; `unsafe_code = "forbid"` at the workspace. `unsafe` is permitted **only** inside named, ledgered SIMD/arena/VFS islands behind an `#[allow(unsafe_code)]` boundary, each load carrying a `// SAFETY:` note and a bit-identical scalar fallback. Every such island has a row in the unsafe-boundary ledger.
+- `#![forbid(unsafe_code)]` at every ordinary crate root and `unsafe_code = "forbid"` at the workspace — and `forbid` can never be lowered, so `unsafe` lives **only** in the separately named `fgdb-unsafe-*` boundary crates (SIMD/arena/VFS), whose roots use `#![deny(unsafe_code)]` plus narrowly scoped, ledgered `#[allow(unsafe_code)]` sites, each carrying a `// SAFETY:` note and a bit-identical scalar fallback. Safe-facing crates never relax `forbid`; every unsafe site has a row in the unsafe-boundary ledger and CI rejects an unledgered one.
 - Cargo only, with crate-boundary enforcement per §18.1 (foundation → Chronicle → Strata → Txn → Loom → Ripple → Beacon → Prism → Surface → Aegis → Verification). Durable run state and telemetry ride the ECS/Chronicle substrate — never an external database.
 
 ---

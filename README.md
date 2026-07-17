@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/frankengraphdb/ma
 
 ## TL;DR
 
-**The problem.** Every graph database on the market is a compromise fossilized around one old decision. Neo4j chose pointer-chasing on the JVM (great ergonomics, painful memory, a runtime that took 15 years to vectorize). TigerGraph chose MPP with a proprietary language and a platform-sized footprint. Kùzu got the *query* story right (columnar CSR + vectorization + factorization + worst-case-optimal joins), and then the company folded in 2025, leaving a Kùzu-shaped hole in the market with no durability, temporal, multi-writer, or verification story. Memgraph/FalkorDB are fast in-memory engines with thin durability. JanusGraph/NebulaGraph pay a permanent impedance tax on a generic KV underlay. The academic frontier has solved essentially every hard subproblem *in isolation*, yet **no shipping system has ever composed them**.
+**The problem.** Every graph database on the market is a compromise fossilized around one old decision. Neo4j chose pointer-chasing on the JVM (great ergonomics, painful memory, a runtime that took 15 years to vectorize). TigerGraph chose MPP with a proprietary language and a platform-sized footprint. Kùzu got the *query* story right (columnar CSR + vectorization + factorization + worst-case-optimal joins), and then it left the commons: Apple acquired Kùzu Inc. (agreed October 2025, disclosed February 2026 via Apple's EU DMA filing) and the upstream repository was archived read-only — community forks carry the architecture forward while inheriting its gaps, and no engine in the space has the durability, temporal, multi-writer, or verification story. Memgraph/FalkorDB are fast in-memory engines with thin durability. JanusGraph/NebulaGraph pay a permanent impedance tax on a generic KV underlay. The academic frontier has solved essentially every hard subproblem *in isolation*, yet **no shipping system has ever composed them**.
 
 **The solution.** `frankengraphdb` composes them. One codebase, three postures: an embedded library (`fgdb`), a server (`fgdbd`), and a CLI (`fgdb`), all speaking **GQL** (ISO/IEC 39075:2024) with an openCypher on-ramp. Larger-than-memory is first-class everywhere. It is, in a precise sense, *a database written in the asupersync programming model*, the way FoundationDB is a database written in Flow: structured concurrency, capability contexts, fountain coding, and a deterministic lab runtime are the substrate, not add-ons.
 
@@ -57,7 +57,7 @@ INSERT (:Person {name: 'Ada',  born: 1815})
        (:Person {name: 'Charles', born: 1791});
 
 -- Pattern match with a quantified path and a shortest-path selector
-MATCH SHORTEST (a:Person {name: 'Ada'})-[:KNOWS]->{1,4}(b:Person)
+MATCH p = SHORTEST (a:Person {name: 'Ada'})-[:KNOWS]->{1,4}(b:Person)
 RETURN b.name, path_length(p);
 
 -- Time travel: the graph as it was at a past commit; no separate temporal engine
@@ -97,10 +97,10 @@ No single trick makes this a leapfrog. The **composition** of six bets does, eac
 | Bet | One-line statement |
 |---|---|
 | **B1 · One Version Universe** | MVCC versions, time-travel history, replication stream, change subscriptions, and git-style branches are *the same mechanism*: an append-only, content-addressed, RaptorQ-coded commit stream (**Chronicle**). |
-| **B2 · Graph-Structured LSM ("Strata")** | Adjacency lives in three temperature tiers (versioned delta blocks → sealed compressed CSR runs → archived anchors), giving millions-of-ops/sec transactional writes *and* static-CSR analytics on the same store. |
+| **B2 · Graph-Structured LSM ("Strata")** | Adjacency lives in three temperature tiers (versioned delta blocks → sealed compressed CSR runs → archived anchors), so one store targets high transactional ingest *and* static-CSR-class scans; the actual rates are CI-enforced benchmark gates, not assumptions. |
 | **B3 · Unified Factorized/WCO Execution ("Loom")** | One Free-Join operator family subsumes binary hash joins, worst-case-optimal multiway joins, and factorized intermediates, running vectorized and morsel-parallel over Strata runs that *are already tries*. |
 | **B4 · Incremental Everything ("Ripple")** | A DBSP-style Z-set delta algebra is the single engine for recursive queries, materialized views, standing queries, and incremental analytics, fed by the commit stream, which is *already* a Z-set stream. |
-| **B5 · Determinism as a Product Feature** | CGSE tie-break policies, complexity witnesses, and plan certificates make every result reproducible and auditable; every adaptive decision emits a replayable **decision card**; the whole database runs under the lab runtime for DPOR-explored, seed-replayable testing. |
+| **B5 · Determinism as a Product Feature** | CGSE tie-break policies, complexity witnesses, and plan certificates make every eligible **STRICT** result byte-reproducible and auditable; every adaptive decision emits a replayable **decision card**; the whole database runs under the lab runtime for DPOR-explored, seed-replayable testing. |
 | **B6 · Agent-Native by Construction** | Branch-per-agent isolation with semantic merge, capability-scoped subgraph authorization, provenance as first-class edges, hybrid vector+text+graph retrieval in one planner, and deterministic replay of any agent's reads. |
 
 ---
@@ -165,7 +165,7 @@ DPOR, chaos, seed-replayable failures. Same code, a different Cx.
 - **Loom (B3):** one Graph-Logical Algebra, one cost model, no "graph engine bolted to SQL engine" seam. The `FreeJoin` operator is a continuum from binary hash joins to worst-case-optimal Generic Join; for graph atoms, sealed runs *already are* the tries, so intersections run as SIMD galloping over compressed neighbor lists. Factorization is a *type* in the algebra, not an executor trick: a 3-hop friends-of-friends result that would be 10⁸ flat rows stays ~10⁴ run slices, even over the wire.
 - **Ripple (B4):** a from-scratch DBSP-style Z-set circuit engine. Recursion is incremental fixpoint (semi-naïve for free). `CREATE MATERIALIZED VIEW … REFRESH INCREMENTAL` installs a circuit whose output is snapshot-consistent at a published watermark. `SUBSCRIBE TO MATCH …` is the same circuit fanned out over broadcast channels. Incremental analytics maintainers keep PageRank, connected components, and statistics warm under updates, each with a declared staleness contract.
 - **Beacon:** the index fabric. It holds property B-trees/hash, A+-style adjacency views, segment-based FTS/BM25, and a **transactional HNSW** vector index (the Strata pattern applied to the index itself, so vector search respects your snapshot, honors `AS OF`, is branch-scoped, and is fresh in commit-latency, not reindex-hours). All indexes share one lifecycle and one optimizer registration surface.
-- **Prism:** the entire `franken_networkx` catalog (`CALL fnx.pagerank`, `fnx.louvain`, …) exposed inside queries via a **zero-copy** `SnapshotGraphView`: algorithms traverse database memory with no materialization, under full snapshot isolation, with CGSE witnesses folded into the query certificate.
+- **Prism:** the entire `franken_networkx` catalog (`CALL fnx.pagerank`, `fnx.louvain`, …) exposed inside queries via an authorized `SnapshotGraphView`: algorithms traverse borrowed neighbor cursors without whole-graph materialization (an honest, explicit copy boundary where a trait contract requires one), under full snapshot isolation, with CGSE witnesses folded into the query certificate.
 - **Warden:** capability tokens (macaroons) with graph caveats (`labels⊆{…}`, `subgraph=MATCH-predicate`, `asof≤seq`, `ops⊆{…}`) that compile to mandatory planner predicates. Row/subgraph security with index-aware pushdown, encrypt-then-code at rest, TLS 1.3 in flight, per-branch DEK derivation for cryptographic branch hand-off.
 - **Fabric:** the surface. Embedded API, the native **FGP** wire protocol (with optional factorized frames and RaptorQ FEC for lossy links), HTTP/2 + gRPC + WebSocket, a Bolt-compat subset for Neo4j drivers/tools, Python bindings, and format import/export for the whole legacy graph ecosystem plus a Parquet-lite reader/writer.
 - **Aegis:** replication as *Chronicle over the network*. Raft sequences the ~100-byte marker stream while capsule bytes ride the fountain-coded plane; deterministic apply makes replicas **bit-identical** (divergence is detectable by `ObjectId` comparison). New replicas seed via bonded multi-donor ATP pulls. Sharding is designed-in but sequenced last (see [Limitations](#limitations)).
@@ -187,10 +187,10 @@ Honest framing. `frankengraphdb` is the only one of these that composes durabili
 | Git-style branches | ✓ O(1), 10k+ concurrent | ✗ | ✗ | ✗ | ✗ |
 | Incremental views / subscriptions | ✓ one Z-set engine | Partial (CDC) | ✗ | Triggers/streams | Partial |
 | Transactional vector search | ✓ (snapshot + `AS OF` + branch) | Plugin (eventual) | ✗ | Plugin | ✗ |
-| In-DB analytics catalog | 550+ (fnx, zero-copy) | GDS library | Limited | MAGE | Built-in |
+| In-DB analytics catalog | 550+ (fnx, cursor-borrowed) | GDS library | Limited | MAGE | Built-in |
 | Deterministic, replayable results | ✓ plan certificates | ✗ | ✗ | ✗ | ✗ |
 | Deterministic simulation testing | ✓ lab runtime + DPOR | ✗ | ✗ | ✗ | ✗ |
-| Status of the project | Active, self-owned ecosystem asset | Commercial | **Orphaned (2025)** | Commercial | Commercial |
+| Status of the project | Active, self-owned ecosystem asset | Commercial | **Archived 2025 (acquired by Apple)** | Commercial | Commercial |
 
 ## The `fgdb` CLI
 
@@ -294,7 +294,7 @@ fgdb load city.fgdbdir --edges roads.csv --vertices intersections.csv --format c
 
 # 2. Ask a question
 fgdb query city.fgdbdir \
-  "MATCH SHORTEST (a:Intersection {id: 42})-[:ROAD]->{1,20}(b:Intersection {id: 9001})
+  "MATCH p = SHORTEST (a:Intersection {id: 42})-[:ROAD]->{1,20}(b:Intersection {id: 9001})
    RETURN path_length(p) AS hops"
 
 # 3. Run an in-database analytic over the live snapshot (zero-copy fnx)
@@ -353,13 +353,13 @@ peers  = ["10.0.0.2:7688", "10.0.0.3:7688"]
 
 ## Performance
 
-Numbers below are the CI-enforced **gates** on the reference machine (32-core/64-thread, 256 GB RAM, PCIe-4 NVMe at 7 GB/s, single node), chosen from measured SOTA anchors with leapfrog margins. Four standing laws bind every published figure: **no benchmark-only semantics** (durability/isolation/result-consumption match production), **distributions not averages** (p50/p95/p99/p99.9 and worst hot-key), **never hide compaction** (foreground latency during compaction/checkpoint/GC/index-build is part of the result), and **memory is a first-class metric** (bytes/live-edge include versions, indexes, witnesses, and allocator slack).
+Numbers below are the provisional CI **gates** (§17 `EmpiricalGate`s, activated only under pinned benchmark manifests) on the reference machine (32-core/64-thread, 256 GB RAM, PCIe-4 NVMe at 7 GB/s, single node), chosen from measured SOTA anchors with leapfrog margins. Six standing laws bind every published figure: **no benchmark-only semantics** (durability/isolation/result-consumption match production), **distributions not averages** (p50/p95/p99/p99.9 and worst hot-key), **never hide compaction** (foreground latency during compaction/checkpoint/GC/index-build is part of the result), **memory is a first-class metric** (bytes/live-edge include versions, indexes, witnesses, and allocator slack), **adaptive numbers disclose their policy epoch**, and **no unpriced protocol weight** (every gate names its operation class in the plan's operation-cost registry and is derivable from it).
 
 | Domain | Gate |
 |---|---|
 | Cold bulk load (CSV/Parquet-lite → sealed runs) | ≥ 40M edges/s sustained (≥ 60% of NVMe seq-write ceiling) |
-| Transactional ingest (small txns, honest group-commit fsync) | ≥ 2M edge-inserts/s; commit p50 < 250 µs, p99 < 1.5 ms |
-| Point reads (vertex by key, 1-hop existence) | ≥ 8M lookups/s across cores; p99 < 15 µs warm |
+| Transactional ingest (small txns, honest group-commit fsync) | ≥ 2M edge-inserts/s for the pinned batch/txn mix; latency includes final rebase/constraint work, payload D1, root D2, and configured encryption/FEC |
+| Point reads (vertex by key, 1-hop existence; `SnapshotQuery` class) | ≥ 8M lookups/s across cores; p99 < 15 µs warm |
 | Neighbor scans, sealed runs (decoded-cache path) | ≥ 500M edges/s per core; ≥ 10B edges/s node aggregate |
 | 2-hop factorized count (10⁸-flat-row equivalent) | < 50 ms (must **not** materialize) |
 | Triangle count (WCOJ over compressed runs) | within 2× of best static-CSR WCOJ systems; ≥ 20× any pointer-chasing GDBMS |
@@ -420,5 +420,5 @@ The `frankengraphdb` source code is licensed under the **MIT License with an Ope
 
 ## See also
 
-- [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md`](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md), the master plan: the six bets, the foundation audit, the SOTA distillation (adopt/adapt/reject), every subsystem (Chronicle, Strata, Loom, Ripple, Beacon, Prism, Warden, Fabric, Aegis), the verification doctrine, the workstreams and convergence gates, the on-disk formats, the graph intent-log vocabulary, the GLA operator inventory, and the invariant registry.
+- [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md`](./COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md), the master plan: the six bets, the foundation audit, the SOTA distillation (adopt/adapt/reject), every subsystem (Chronicle, Strata, Loom, Ripple, Beacon, Prism, Warden, Fabric, Aegis), the verification doctrine, the workstreams and convergence gates, the on-disk formats, the graph intent-log vocabulary, the GLA operator inventory, the invariant registry, and the operation-cost registry.
 - [`AGENTS.md`](./AGENTS.md), conventions for human and AI agents working in this codebase, including the engineering doctrine and the verification ladder.
