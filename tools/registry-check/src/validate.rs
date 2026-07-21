@@ -100,7 +100,12 @@ fn validate_constitution(r: &Registries, out: &mut Vec<Violation>) {
     }
     // Twelve constraints FG-CON-01..12, in order.
     let expected: Vec<String> = (1..=12).map(|i| format!("FG-CON-{i:02}")).collect();
-    let actual: Vec<String> = r.constitution.constraints.iter().map(|c| c.id.clone()).collect();
+    let actual: Vec<String> = r
+        .constitution
+        .constraints
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
     if actual != expected {
         out.push(Violation::new(
             "bad_field",
@@ -251,7 +256,12 @@ fn validate_clause(
         ));
     }
     if clause.exact_statement.trim().is_empty() {
-        out.push(Violation::new("bad_field", reg, id, "empty exact_statement"));
+        out.push(Violation::new(
+            "bad_field",
+            reg,
+            id,
+            "empty exact_statement",
+        ));
     }
     if clause.owner.trim().is_empty() {
         out.push(Violation::new("bad_field", reg, id, "empty owner"));
@@ -322,7 +332,14 @@ fn validate_clause(
             ));
         }
     }
-    check_justification(id, &clause.claim_class, &clause.justified_by, ranks, reg, out);
+    check_justification(
+        id,
+        &clause.claim_class,
+        &clause.justified_by,
+        ranks,
+        reg,
+        out,
+    );
 }
 
 fn validate_invariants(r: &Registries, out: &mut Vec<Violation>) {
@@ -353,7 +370,12 @@ fn validate_invariants(r: &Registries, out: &mut Vec<Violation>) {
     }
     // Exactly the twenty-ID spine, in order.
     let expected = expected_invariant_ids();
-    let actual: Vec<String> = r.invariants.invariants.iter().map(|i| i.id.clone()).collect();
+    let actual: Vec<String> = r
+        .invariants
+        .invariants
+        .iter()
+        .map(|i| i.id.clone())
+        .collect();
     if actual != expected {
         let expected_set: BTreeSet<&String> = expected.iter().collect();
         let actual_set: BTreeSet<&String> = actual.iter().collect();
@@ -389,8 +411,12 @@ fn validate_invariants(r: &Registries, out: &mut Vec<Violation>) {
         .iter()
         .flat_map(|i| i.clauses.iter().map(|c| c.key.clone()))
         .collect();
-    let invariant_ids: BTreeSet<String> =
-        r.invariants.invariants.iter().map(|i| i.id.clone()).collect();
+    let invariant_ids: BTreeSet<String> = r
+        .invariants
+        .invariants
+        .iter()
+        .map(|i| i.id.clone())
+        .collect();
     let ranks = rank_index(r);
     let mut seen_keys = BTreeSet::new();
     for inv in &r.invariants.invariants {
@@ -403,7 +429,15 @@ fn validate_invariants(r: &Registries, out: &mut Vec<Violation>) {
                     "duplicate clause key",
                 ));
             }
-            validate_clause(r, clause, &inv.id, &clause_keys, &invariant_ids, &ranks, out);
+            validate_clause(
+                r,
+                clause,
+                &inv.id,
+                &clause_keys,
+                &invariant_ids,
+                &ranks,
+                out,
+            );
         }
     }
     // Dependency DAG acyclicity over clause keys (an FG-INV target expands
@@ -415,12 +449,10 @@ fn validate_invariants(r: &Registries, out: &mut Vec<Violation>) {
             for dep in &clause.dependencies {
                 if clause_keys.contains(dep) {
                     targets.push(dep.clone());
-                } else if invariant_ids.contains(dep) {
-                    if let Some(dep_inv) =
-                        r.invariants.invariants.iter().find(|i| &i.id == dep)
-                    {
-                        targets.extend(dep_inv.clauses.iter().map(|c| c.key.clone()));
-                    }
+                } else if invariant_ids.contains(dep)
+                    && let Some(dep_inv) = r.invariants.invariants.iter().find(|i| &i.id == dep)
+                {
+                    targets.extend(dep_inv.clauses.iter().map(|c| c.key.clone()));
                 }
             }
             edges.insert(clause.key.clone(), targets);
@@ -456,7 +488,9 @@ fn find_cycle(edges: &BTreeMap<String, Vec<String>>) -> Option<Vec<String>> {
         while let Some(&(node, idx)) = stack.last() {
             let children = edges.get(node).map(Vec::as_slice).unwrap_or(&[]);
             if idx < children.len() {
-                stack.last_mut().map(|f| f.1 += 1);
+                if let Some(frame) = stack.last_mut() {
+                    frame.1 += 1;
+                }
                 let child = children[idx].as_str();
                 match color.get(child) {
                     Some(Color::Gray) => {
@@ -565,7 +599,8 @@ fn validate_slo(r: &Registries, out: &mut Vec<Violation>) {
         if id_matches(&row.id, "FG-CFG-") {
             // Configuration-model claims: bounded_model, never invariants
             // (§15.0, Appendix G).
-            if row.claim_class != "bounded_model" || row.kind.as_deref() != Some("configuration_model")
+            if row.claim_class != "bounded_model"
+                || row.kind.as_deref() != Some("configuration_model")
             {
                 out.push(Violation::new(
                     "bad_field",
@@ -651,14 +686,22 @@ fn validate_checker_index(r: &Registries, root: &Path, out: &mut Vec<Violation>)
     let mut seen = BTreeSet::new();
     for c in &r.checker_index {
         if !seen.insert(c.symbol.clone()) {
-            out.push(Violation::new("bad_field", reg, &c.symbol, "duplicate symbol"));
+            out.push(Violation::new(
+                "bad_field",
+                reg,
+                &c.symbol,
+                "duplicate symbol",
+            ));
         }
         if !matches!(c.kind.as_str(), "cargo-test" | "script" | "binary" | "stub") {
             out.push(Violation::new(
                 "bad_field",
                 reg,
                 &c.symbol,
-                format!("kind {:?} not in {{cargo-test, script, binary, stub}}", c.kind),
+                format!(
+                    "kind {:?} not in {{cargo-test, script, binary, stub}}",
+                    c.kind
+                ),
             ));
         }
         match c.status.as_str() {
@@ -669,7 +712,10 @@ fn validate_checker_index(r: &Registries, root: &Path, out: &mut Vec<Violation>)
                         "artifact_missing",
                         reg,
                         &c.symbol,
-                        format!("status is \"live\" but artifact {:?} does not exist", c.artifact),
+                        format!(
+                            "status is \"live\" but artifact {:?} does not exist",
+                            c.artifact
+                        ),
                     ));
                 }
             }

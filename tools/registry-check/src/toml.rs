@@ -200,7 +200,9 @@ impl Scanner {
             Some('t') => Ok('\t'),
             Some('u') => self.parse_unicode_escape(4),
             Some('U') => self.parse_unicode_escape(8),
-            Some('\n') => Err(self.err("line-continuation backslash is outside the registry subset")),
+            Some('\n') => {
+                Err(self.err("line-continuation backslash is outside the registry subset"))
+            }
             Some(c) => Err(self.err(format!("unknown escape \\{c}"))),
         }
     }
@@ -208,7 +210,9 @@ impl Scanner {
     fn parse_unicode_escape(&mut self, len: usize) -> Result<char, TomlError> {
         let mut v: u32 = 0;
         for _ in 0..len {
-            let c = self.bump().ok_or_else(|| self.err("unterminated unicode escape"))?;
+            let c = self
+                .bump()
+                .ok_or_else(|| self.err("unterminated unicode escape"))?;
             let d = c
                 .to_digit(16)
                 .ok_or_else(|| self.err(format!("invalid hex digit {c:?} in unicode escape")))?;
@@ -329,31 +333,31 @@ impl Scanner {
     }
 
     fn parse_int(&mut self) -> Result<Value, TomlError> {
-        let mut token = String::new();
+        let mut digits = String::new();
         while let Some(c) = self.peek() {
             if c.is_ascii_alphanumeric() || c == '_' || c == '+' || c == '-' || c == '.' || c == ':'
             {
-                token.push(c);
+                digits.push(c);
                 self.bump();
             } else {
                 break;
             }
         }
-        if token.contains('.') || token.contains('e') || token.contains('E') {
+        if digits.contains('.') || digits.contains('e') || digits.contains('E') {
             return Err(self.err(format!(
-                "floats are outside the registry subset (token {token:?})"
+                "floats are outside the registry subset (token {digits:?})"
             )));
         }
-        if token.contains(':') || token.rmatch_indices('-').any(|(i, _)| i > 0) {
+        if digits.contains(':') || digits.rmatch_indices('-').any(|(i, _)| i > 0) {
             return Err(self.err(format!(
-                "dates/times are outside the registry subset (token {token:?})"
+                "dates/times are outside the registry subset (token {digits:?})"
             )));
         }
-        let normalized: String = token.chars().filter(|&c| c != '_').collect();
+        let normalized: String = digits.chars().filter(|&c| c != '_').collect();
         normalized
             .parse::<i64>()
             .map(Value::Int)
-            .map_err(|_| self.err(format!("invalid integer {token:?}")))
+            .map_err(|_| self.err(format!("invalid integer token {digits:?}")))
     }
 
     /// Array; opening bracket already consumed. Newlines and comments are
@@ -381,7 +385,9 @@ impl Scanner {
                         }
                         None => return Err(self.err("unterminated array")),
                         Some(c) => {
-                            return Err(self.err(format!("expected ',' or ']' in array, found {c:?}")))
+                            return Err(
+                                self.err(format!("expected ',' or ']' in array, found {c:?}"))
+                            );
                         }
                     }
                 }
@@ -427,14 +433,14 @@ fn navigate<'a>(
                     return Err(TomlError {
                         line,
                         msg: format!("path segment {seg:?} addresses a non-table array"),
-                    })
+                    });
                 }
             },
             _ => {
                 return Err(TomlError {
                     line,
                     msg: format!("path segment {seg:?} addresses a non-table value"),
-                })
+                });
             }
         };
     }
@@ -486,7 +492,7 @@ pub fn parse(text: &str) -> Result<Table, TomlError> {
                             return Err(TomlError {
                                 line,
                                 msg: format!("key {last:?} is not an array of tables"),
-                            })
+                            });
                         }
                     }
                 } else {
@@ -589,7 +595,7 @@ pub fn get_str_array(table: &Table, key: &str, ctx: &str) -> Result<Vec<String>,
                         return Err(ReadError {
                             path: format!("{ctx}.{key}[{i}]"),
                             msg: "expected string".into(),
-                        })
+                        });
                     }
                 }
             }
@@ -647,7 +653,7 @@ pub fn get_table_array<'a>(
                         return Err(ReadError {
                             path: format!("{ctx}.{key}[{i}]"),
                             msg: "expected table".into(),
-                        })
+                        });
                     }
                 }
             }

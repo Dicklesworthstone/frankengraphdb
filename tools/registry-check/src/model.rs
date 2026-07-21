@@ -302,7 +302,11 @@ pub fn slo_from(root: &Table) -> Result<SloRegistry, ReadError> {
         });
     }
     Ok(SloRegistry {
-        allowed_claim_classes: get_str_array(registry, "allowed_claim_classes", "slo.toml.registry")?,
+        allowed_claim_classes: get_str_array(
+            registry,
+            "allowed_claim_classes",
+            "slo.toml.registry",
+        )?,
         rows,
     })
 }
