@@ -1,0 +1,110 @@
+# =============================================================================
+# proof_lanes.toml — proof-lane manifests (G0)
+# =============================================================================
+# Bead: fgdb-g0-claim-registries-myx
+# Provenance: plan §2.1 (asupersync formal-layer house style: Lean-checked
+# invariants, TLA+ export discipline, proof-lane manifests), §15.5, §18/§19
+# G0 materialization lists, AGENTS.md "Formal anchors (scoped, honest)".
+#
+# Every `proof`-class claim binds to exactly one named lane here: the lane
+# names the formal system, the model scope (exactly what is and is not
+# proven), and the checked artifact. A proof-class clause in invariants.toml
+# whose `proof_lane` does not resolve here is a build error.
+#
+# Lane status:
+#   declared — the lane and its artifact path are registered; the artifact
+#              does not exist yet (pre-Genesis). A proof-class clause may cite
+#              a declared lane only while its own status is "stub".
+#   checked  — the artifact exists in-repo and is CI-checked; registry-check
+#              verifies the file is present.
+#
+# Row schema:
+#   [[lane]]
+#   id          = "lean-..." | "tla-..."
+#   lane        = "lean" | "tlaplus"
+#   model_scope = "..."     # honest scope statement: what the theorem covers
+#   artifact    = "..."     # repo-relative path to the checked artifact
+#   status      = "declared" | "checked"
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "proof_lanes"
+
+# --- Lean lanes (plan §15.5: MVCC visibility, block-level SSI safety,
+# --- merge-ladder rung-1 soundness, Z-set operator subset; Appendix F
+# --- enforcement columns: escrow conservation lane, chain model, slice model).
+
+[[lane]]
+id = "lean-mvcc-visibility"
+lane = "lean"
+model_scope = "MVCC visibility and the valid-time slice model: snapshot high sequence, branch ancestry per graph-reference role, slice-set intersection and boundary normalization (FG-INV-04 formal clauses). Does not cover the audit-visibility pipeline's distributed behavior (TLA+ scope) or the runtime oracles."
+artifact = "formal/lean/MvccVisibility.lean"
+status = "declared"
+
+[[lane]]
+id = "lean-block-ssi-safety"
+lane = "lean"
+model_scope = "Block-level SSI safety: committed SERIALIZABLE histories have acyclic dependency graphs under the dangerous-structure rule; the scoped theorem for FG-INV-05. Does not cover W12 Meta histories or the runtime SCC oracle."
+artifact = "formal/lean/BlockSsiSafety.lean"
+status = "declared"
+
+[[lane]]
+id = "lean-merge-ladder-rung1"
+lane = "lean"
+model_scope = "Merge-ladder rung-1 soundness: incremental re-evaluation reuse is legal iff extensionally equal to full re-evaluation under unchanged-observation certificates (FG-INV-17 formal clauses). Does not cover the capability-stripping type boundary (enforced by construction) or the differential oracle."
+artifact = "formal/lean/MergeLadderRung1.lean"
+status = "declared"
+
+[[lane]]
+id = "lean-zset-operators"
+lane = "lean"
+model_scope = "The Z-set operator subset: integrating ordered deltas equals batch evaluation for the registered exact derivative operators (FG-INV-15 formal clauses). Does not cover delivery/retention state machines or W12 batch publication."
+artifact = "formal/lean/ZsetOperators.lean"
+status = "declared"
+
+[[lane]]
+id = "lean-escrow-conservation"
+lane = "lean"
+model_scope = "Escrow conservation and bounds: custody is a disjoint exhaustive partition; finite-side conservation equations hold at every registered transition; values remain within bounds (FG-INV-02 escrow clauses). Does not cover lock-table or reservation runtime oracles."
+artifact = "formal/lean/EscrowConservation.lean"
+status = "declared"
+
+[[lane]]
+id = "lean-version-chain"
+lane = "lean"
+model_scope = "Version-chain shape: finiteness, acyclicity, strict newer-first commit order, single owning object generation (FG-INV-03). Does not cover arena decode or fuzz oracles."
+artifact = "formal/lean/VersionChain.lean"
+status = "declared"
+
+# --- TLA+ lanes (plan §15.5: two-fsync commit + recovery, compaction
+# --- publish/retire, Raft-marker interaction, branch fork/merge).
+
+[[lane]]
+id = "tla-two-fsync-commit-recovery"
+lane = "tlaplus"
+model_scope = "The two-fsync commit protocol and recovery: capsule fsync, marker append/fsync, two-slot root publication, crash-point matrix behavior (FG-INV-08/FG-INV-10 bounded_model clauses). Bounded model checking within declared instance sizes; not a full-system proof."
+artifact = "formal/tla/TwoFsyncCommit.tla"
+status = "declared"
+
+[[lane]]
+id = "tla-compaction-publish-retire"
+lane = "tlaplus"
+model_scope = "Compaction publish/retire: sealed-run publication, retirement ordering against open snapshots, GC quarantine interaction (FG-INV-14 bounded_model clauses). Bounded model checking within declared instance sizes."
+artifact = "formal/tla/CompactionPublishRetire.tla"
+status = "declared"
+
+[[lane]]
+id = "tla-raft-marker-interaction"
+lane = "tlaplus"
+model_scope = "Raft-marker interaction: marker-stream sequencing under leader change, exact-cut snapshots, contiguity of role orders and Raft indexes (FG-INV-08 bounded_model clauses). Bounded model checking within declared instance sizes."
+artifact = "formal/tla/RaftMarkerInteraction.tla"
+status = "declared"
+
+[[lane]]
+id = "tla-branch-fork-merge"
+lane = "tlaplus"
+model_scope = "Branch fork/merge: epoch boundary closure on fork, expected-head CAS on merge, merge-token single-terminal-outcome and imported-range coverage (FG-INV-13 bounded_model clauses). Bounded model checking within declared instance sizes."
+artifact = "formal/tla/BranchForkMerge.tla"
+status = "declared"

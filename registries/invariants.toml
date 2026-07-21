@@ -1,0 +1,139 @@
+# =============================================================================
+# invariants.toml — the invariant registry spine (G0)
+# =============================================================================
+# Bead: fgdb-g0-claim-registries-myx (schema, spine IDs, activation contract)
+# Bead: fgdb-g0-invariant-spine-tmm  (materializes the clause payload)
+# Provenance: plan Appendix F; §1 constraint 11; §19 Gate G0.
+#
+# This registry contains ONLY exact safety/liveness invariants and their
+# formally scoped proof/bounded_model clauses (§1.11). Statistical claims
+# live in evidence.toml; slo/benchmark/configuration-model claims live in
+# slo.toml. A statistical/slo/benchmark row in this file is a build error.
+#
+# There are EXACTLY twenty top-level invariant IDs (FG-INV-01 … FG-INV-20).
+# G0 materializes each row as one or more stable subordinate clause records;
+# subordinate clause keys do NOT create additional invariant IDs. The
+# twenty-ID table is hash-pinned below; adding a twenty-first ID (or removing
+# one) fails CI with the exact row-level diff.
+#
+# Clause record schema (activation contract, Appendix F preamble):
+#
+#   [[invariant.clause]]
+#   key                      = "FG-INV-04.visibility-endpoint"  # stable, ID-scoped
+#   claim_class              = "invariant"      # invariant | proof | bounded_model
+#   exact_statement          = '''...'''        # binding text, no paraphrase
+#   activation_predicate     = "true"           # boolean expr over capability-
+#                                               # manifest features/postures/roles
+#   dependencies             = ["FG-INV-09.object-id"]  # clause keys or FG-INV ids
+#   checker_entrypoint       = "..."            # must resolve in checker_index.toml
+#   negative_test_entrypoint = "..."            # must resolve in checker_index.toml
+#   model_or_proof_scope     = "..."            # model scope / bounds / fairness
+#   proof_lane               = "lean-..."       # REQUIRED for claim_class = proof;
+#                                               # must resolve in proof_lanes.toml
+#   owner                    = "..."
+#   first_gate               = "G1"             # G1 | G2 | G3 | G4
+#   status                   = "live"           # live | stub | dormant
+#   waiver                   = "forbidden"      # literal; anything else fails CI
+#   justified_by             = []               # optional; rank(justifier) >=
+#                                               # rank(clause) or the build fails
+#
+# CI (tools/registry-check) verifies: the twenty-ID set and table hash, the
+# clause dependency DAG (acyclic, registered targets only), checker/negative-
+# test symbol existence, waiver = "forbidden" on every clause, proof-lane
+# resolution for proof-class clauses, class-lattice legality of justified_by,
+# and the compiled-plus-negotiated activation closure: every clause reachable
+# under a capability manifest must be live, or the capability is absent.
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "invariants"
+allowed_claim_classes = ["invariant", "proof", "bounded_model"]
+waiver_policy = "forbidden"
+twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
+
+# -----------------------------------------------------------------------------
+# The twenty-ID spine. Titles are navigation aids; the binding clause text is
+# materialized by fgdb-g0-invariant-spine-tmm from Appendix F verbatim.
+# -----------------------------------------------------------------------------
+
+[[invariant]]
+id = "FG-INV-01"
+title = "Attempt/outcome uniqueness: at most one immutable semantic terminal outcome and final-effect digest per registered attempt; AttemptFamilyState admission discipline"
+
+[[invariant]]
+id = "FG-INV-02"
+title = "Exclusive-ownership generations: single legal live owner per exclusive unit; escrow custody partition and conservation"
+
+[[invariant]]
+id = "FG-INV-03"
+title = "Version chains: finite, acyclic, strictly newer-first by commit order, links within one owning object generation"
+
+[[invariant]]
+id = "FG-INV-04"
+title = "Visibility law: snapshot high sequence, branch ancestry, valid-time slices, audit-visibility pipeline, erasure/expiry conjuncts; no applied-hidden observation"
+
+[[invariant]]
+id = "FG-INV-05"
+title = "Serializability: acyclic dependency graphs; Local default strict serializable via DSG-union-real-time checking"
+
+[[invariant]]
+id = "FG-INV-06"
+title = "Witness conservatism: every logically relevant observation represented; refinement preserves concretization and may_affect"
+
+[[invariant]]
+id = "FG-INV-07"
+title = "Durable reference-graph acyclicity; registry-resolved fields; registered construction order; command-contract bijection"
+
+[[invariant]]
+id = "FG-INV-08"
+title = "Sequence contiguity: logical-command/marker/audit-pipeline orders, exact-cut Raft snapshots, visibility-advance discipline"
+
+[[invariant]]
+id = "FG-INV-09"
+title = "Identity recomputation: ObjectId/CiphertextId/EncodingId/PlacementId from registered transcripts; digest-recipe discipline"
+
+[[invariant]]
+id = "FG-INV-10"
+title = "Root publication: two-slot manifest.root selection, stale-writer fencing, format-compatibility activation; repair or fail closed"
+
+[[invariant]]
+id = "FG-INV-11"
+title = "Allocation continuity: monotonic epochs/leases/spent commitments per AllocationContinuityProfile; no alias/reuse; first-escape reservation"
+
+[[invariant]]
+id = "FG-INV-12"
+title = "Scalar coherence and answer-equivalent rewrites: values, multiplicity, order, visibility, security projection, AnswerContract preserved"
+
+[[invariant]]
+id = "FG-INV-13"
+title = "Commit immutability and branch-head CAS; fork/envelope epochs; distributed key staging/destruction; merge-token idempotency"
+
+[[invariant]]
+id = "FG-INV-14"
+title = "GC soundness: strong/uncut-conditional reachability, obligation roots, receipted Requested→Started→Completed physical GC"
+
+[[invariant]]
+id = "FG-INV-15"
+title = "Delta-integration equals batch evaluation; exactly-once payload ownership; independent result-retention state machine"
+
+[[invariant]]
+id = "FG-INV-16"
+title = "Obligation integrity: nothing lost, duplicated, refunded, released, or exposed while obligated; bounded liveness under declared fairness"
+
+[[invariant]]
+id = "FG-INV-17"
+title = "Deterministic rebase/merge: capability-stripped replay pinned to IntentSemanticsOid; drift regenerates before certification"
+
+[[invariant]]
+id = "FG-INV-18"
+title = "Authoritative base semantics: committed effects equal logical before/after state; synchronous constraints before commit; derived state discardable"
+
+[[invariant]]
+id = "FG-INV-19"
+title = "Replay grades: registry-rooted manifest derives structural maximum from evidence slots; grades only weaken, attributably"
+
+[[invariant]]
+id = "FG-INV-20"
+title = "Authorization precedes every observation or effect; SecurityStateBinding completeness; uniform nonrevealing failure"

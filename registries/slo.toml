@@ -1,0 +1,91 @@
+# =============================================================================
+# slo.toml — empirical operational targets and configuration models (G0)
+# =============================================================================
+# Bead: fgdb-g0-claim-registries-myx
+# Provenance: plan Appendix F non-invariant gate table; §1 constraints 11–12;
+# §15.0 ("slo.toml contains FG-CFG-*, performance, durability-model, and
+# controller targets"); Appendix G ("every µs or throughput budget is an
+# slo.toml row keyed {operation_class, posture, audit_class}").
+#
+# This registry carries:
+#   - FG-CFG-* configuration-model claims (claim_class = "bounded_model",
+#     kind = "configuration_model"): model-based statements valid only within
+#     declared parameter bounds. Never invariants.
+#   - slo rows (claim_class = "slo"): empirical operational targets, keyed
+#     {operation_class, posture, audit_class}. Populated by the §17/Appendix G
+#     beads (fgdb-g0-cost-registry-idt, perf-*); every §17 gate must be
+#     derivable from its operation class's Appendix G row.
+#   - benchmark rows (claim_class = "benchmark"): figures measured on a pinned
+#     fixture under a pinned benchmark manifest.
+#
+# An slo/benchmark row may inform policy; it may NEVER enforce or justify a
+# stronger claim (§1.11 lattice). A µs/throughput budget in invariants.toml is
+# a build error.
+#
+# Row schema:
+#   [[slo]]
+#   id                   = "FG-CFG-01" | "FG-SLO-..." ...
+#   claim_class          = "bounded_model" | "slo" | "benchmark"
+#   kind                 = "configuration_model" (for FG-CFG rows)
+#   qualified_claim      = "..."
+#   required_disclosures = ["...", ...]
+#   operation_class      = "..."   # slo/benchmark rows: Appendix G class key
+#   posture              = "..."   # slo/benchmark rows
+#   audit_class          = "..."   # slo/benchmark rows
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "slo"
+allowed_claim_classes = ["slo", "benchmark", "bounded_model"]
+
+[[slo]]
+id = "FG-CFG-01"
+claim_class = "bounded_model"
+kind = "configuration_model"
+qualified_claim = "Modeled durability target"
+required_disclosures = [
+  "CTMC/model version",
+  "fitted failure rates",
+  "failure domains",
+  "sensitivity bounds",
+  "repair/backup assumptions",
+  "per-tier fec_profile reconstruction and checkpoint-fold recode paths",
+]
+
+[[slo]]
+id = "FG-CFG-02"
+claim_class = "bounded_model"
+kind = "configuration_model"
+qualified_claim = "Modeled controller stability"
+required_disclosures = [
+  "model/equilibrium",
+  "parameter uncertainty",
+  "predicted margin",
+  "deterministic hard guards and soak results",
+]
+
+[[slo]]
+id = "FG-CFG-03"
+claim_class = "bounded_model"
+kind = "configuration_model"
+qualified_claim = "View/index staleness SLO feasibility"
+required_disclosures = [
+  "arrival/service assumptions",
+  "resource reservation",
+  "predicted envelope",
+  "actual watermark and fallback policy",
+]
+
+[[slo]]
+id = "FG-CFG-04"
+claim_class = "bounded_model"
+kind = "configuration_model"
+qualified_claim = "Maintenance-stream capacity model (Appendix G)"
+required_disclosures = [
+  "per-entry-class arrival/service assumptions",
+  "stated scale parameters (branch count, cursor count, delivery cadence, fan-out amplification factor, implied time-observation rate)",
+  "predicted versus measured head-of-line saturation",
+  "reserved-capacity and fallback policy",
+]

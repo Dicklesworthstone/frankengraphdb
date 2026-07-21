@@ -1,0 +1,58 @@
+# =============================================================================
+# claims_lint.toml — claims-lint scan configuration (G0)
+# =============================================================================
+# Bead: fgdb-g0-claim-registries-myx
+# Provenance: plan Appendix F preamble; bead acceptance criteria ("a
+# claims-lint CI job that greps merged prose artifacts for unregistered
+# load-bearing claim markers and fails with file/line").
+#
+# claims-lint scans the NORMATIVE merged prose artifacts for claim markers
+# (FG-<NAMESPACE>-<NN>) and fails the build if any marker does not resolve to
+# a registered row in invariants.toml / evidence.toml / slo.toml /
+# constitution.toml. Wildcard namespace references (FG-INV-*, FG-EVID-*, …)
+# are not claim citations and are ignored by the marker pattern.
+#
+# Historical review artifacts are excluded WITH RECORDED REASONS: they quote
+# superseded drafts (e.g. FG-INV-21…28 from a pre-adjudication proposal
+# numbering) and are preserved as history, not as load-bearing claims. Adding
+# an exclusion requires a reason string; an exclusion without a reason is a
+# schema error.
+# =============================================================================
+
+schema_version = 1
+
+[lint]
+# Marker: FG- + 2-5 uppercase namespace letters + '-' + exactly two digits,
+# not followed by more digits. Matches FG-INV-04, FG-CAL-01, FG-CFG-04, …
+marker_pattern = "FG-[A-Z]{2,5}-[0-9]{2}"
+
+# Normative merged prose artifacts (load-bearing claim markers must resolve).
+scan = [
+  "README.md",
+  "AGENTS.md",
+  "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md",
+]
+
+[[exclude]]
+path = "COMPREHENSIVE_PLAN_REVIEW_BY_KIMI_K3.md"
+reason = "Historical external review; quotes draft text; superseded by the adjudicated revision program."
+
+[[exclude]]
+path = "META_ANALYSIS_OF_KIMI_K3_REVIEW_BY_FABLE.md"
+reason = "Historical adjudication record of the Kimi K3 review; not a normative claim surface."
+
+[[exclude]]
+path = "PLAN_AUDIT_BY_SOL_ULTRA.md"
+reason = "Historical audit; references pre-adjudication invariant numbering (FG-INV-2x) that never entered the twenty-ID spine."
+
+[[exclude]]
+path = "ENHANCEMENT_PROPOSALS_FOR_THE_COMPREHENSIVE_PLAN.md"
+reason = "Historical proposal document (gitignored); proposed FG-INV-21+ IDs were absorbed into the twenty-ID spine's clauses, not minted as new IDs."
+
+[[exclude]]
+path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB__FABLE.md"
+reason = "Historical plan variant retained for provenance; the merged master plan is the normative artifact."
+
+[[exclude]]
+path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB__SOL.md"
+reason = "Historical plan variant retained for provenance; the merged master plan is the normative artifact."

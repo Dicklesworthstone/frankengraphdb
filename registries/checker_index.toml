@@ -1,0 +1,93 @@
+# =============================================================================
+# checker_index.toml — resolvable checker/negative-test symbol index (G0)
+# =============================================================================
+# Bead: fgdb-g0-claim-registries-myx
+# Provenance: plan Appendix F preamble ("resolvable enforcement and negative-
+# test entrypoints"; "CI verifies ... checker/test symbol existence").
+#
+# Every `checker_entrypoint` and `negative_test_entrypoint` named by a clause
+# in invariants.toml must resolve to a row here. Rows may be stub-registered
+# pre-Genesis (status = "stub") so the g0-invariant-spine bead can bind clause
+# records before their runtime oracles exist — but the symbol must still be a
+# registered, reviewable row, and a "live" row's artifact must exist in-repo.
+#
+# Row schema:
+#   [[checker]]
+#   symbol   = "..."        # the exact symbol clauses cite
+#   kind     = "cargo-test" | "script" | "binary" | "stub"
+#   artifact = "..."        # repo-relative path implementing the symbol
+#   status   = "live" | "stub"
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "checker_index"
+
+# --- The G0 claims-constitution suites (this bead's own enforcement). ---
+
+[[checker]]
+symbol = "claims_neg_missing_checker"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/claims.rs"
+status = "live"
+
+[[checker]]
+symbol = "claims_neg_waiver_present"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/claims.rs"
+status = "live"
+
+[[checker]]
+symbol = "claims_neg_statistical_in_invariants"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/claims.rs"
+status = "live"
+
+[[checker]]
+symbol = "claims_neg_unregistered_dependency"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/claims.rs"
+status = "live"
+
+[[checker]]
+symbol = "claims_hash_twenty_id_pin"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/claims.rs"
+status = "live"
+
+[[checker]]
+symbol = "claims_escalation_slo_cannot_justify_invariant"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/claims.rs"
+status = "live"
+
+[[checker]]
+symbol = "claims_proof_lane_manifest_resolves"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/claims.rs"
+status = "live"
+
+[[checker]]
+symbol = "claims_class_lattice_narrowing"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/claims.rs"
+status = "live"
+
+[[checker]]
+symbol = "claims_registry_toml_fuzz"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/claims.rs"
+status = "live"
+
+[[checker]]
+symbol = "claims_lint"
+kind = "binary"
+artifact = "tools/registry-check/src/main.rs"
+status = "live"
+
+[[checker]]
+symbol = "g0_claims_e2e"
+kind = "script"
+artifact = "scripts/g0_claims_e2e.sh"
+status = "live"

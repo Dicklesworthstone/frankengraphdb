@@ -1,0 +1,8 @@
+[toolchain]
+# Pinned date so every worker and local build resolves the SAME nightly.
+# Mirrors asupersync's pin: a floating "nightly" makes -D warnings gates
+# nondeterministic across workers as std deprecations roll through the fleet.
+# Bump deliberately, together with any std-API migration the new nightly
+# requires, and together with the asupersync/fnx foundation pins.
+channel = "nightly-2026-07-05"
+components = ["rustfmt", "clippy"]

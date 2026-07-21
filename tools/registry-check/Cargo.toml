@@ -1,0 +1,17 @@
+[package]
+name = "registry-check"
+version = "0.1.0"
+edition = "2024"
+description = "G0 claim-registry validator: schemas, claims-lint, activation closure, twenty-ID hash pin. Std-only by constitution (the closed dependency universe applies to the tooling that enforces it)."
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "registry_check"
+path = "src/lib.rs"
+
+[[bin]]
+name = "registry-check"
+path = "src/main.rs"

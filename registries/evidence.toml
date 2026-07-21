@@ -1,0 +1,124 @@
+# =============================================================================
+# evidence.toml — statistical claims registry (G0)
+# =============================================================================
+# Bead: fgdb-g0-claim-registries-myx
+# Provenance: plan Appendix F "Statistical, evidence, and configuration gates
+# (not invariants)"; §1 constraint 11; §15.0.
+#
+# This registry carries FG-CAL-* (calibration) and FG-EVID-* (evidence) rows:
+# statistical claims under named assumptions. E-processes may be anytime-valid
+# under their named filtration/null assumptions; conformal coverage is marginal
+# under its named exchangeability or online-validity conditions; drift alarms
+# do not retroactively preserve a broken assumption; OPE requires positivity/
+# overlap and sufficient effective sample size. A monitor that drives no named
+# decision is dead code, but binding it to a decision does not make it an
+# invariant. A statistical row may inform policy; it may NEVER enforce or
+# justify an invariant/proof/bounded_model claim (§1.11 lattice).
+#
+# Row schema:
+#   [[evidence]]
+#   id                   = "FG-CAL-01" | "FG-EVID-01" ...
+#   claim_class          = "statistical"          # the only class allowed here
+#   qualified_claim      = "..."                  # Appendix F column 2, verbatim
+#   required_disclosures = ["...", ...]           # Appendix F column 3, itemized
+#   binds_to             = []                     # named decision cards / gates
+#                                                 # (populated as consumers land;
+#                                                 # an unbound Sextant artifact is
+#                                                 # removed as dead instrumentation)
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "evidence"
+allowed_claim_classes = ["statistical"]
+
+[[evidence]]
+id = "FG-CAL-01"
+claim_class = "statistical"
+qualified_claim = "Adaptive policy evidence versus pinned fallback"
+required_disclosures = [
+  "null/outcome filtration",
+  "alpha",
+  "support/overlap",
+  "effective sample size",
+  "loss and fallback",
+  "stream-sequenced promotion only",
+]
+binds_to = []
+
+[[evidence]]
+id = "FG-CAL-02"
+claim_class = "statistical"
+qualified_claim = "Cardinality/risk interval coverage"
+required_disclosures = [
+  "population",
+  "selection/window",
+  "exchangeability or nonexchangeability method",
+  "strata",
+  "marginal target",
+  "realized coverage and drift",
+]
+binds_to = []
+
+[[evidence]]
+id = "FG-CAL-03"
+claim_class = "statistical"
+qualified_claim = "ANN recall/drift evidence"
+required_disclosures = [
+  "authorized snapshot population",
+  "keyed sample",
+  "exact baseline",
+  "candidate policy",
+  "confidence interval and rebuild action",
+]
+binds_to = []
+
+[[evidence]]
+id = "FG-EVID-01"
+claim_class = "statistical"
+qualified_claim = "Decision-card/OPE completeness"
+required_disclosures = [
+  "state/actions/features",
+  "logged probabilities",
+  "zero-support exclusions",
+  "clipping/estimator",
+  "policy epoch and fallback",
+]
+binds_to = []
+
+[[evidence]]
+id = "FG-EVID-02"
+claim_class = "statistical"
+qualified_claim = "Scrub/corpus-health evidence"
+required_disclosures = [
+  "population",
+  "keyed stratified sampling",
+  "dependence assumptions",
+  "exhaustive-sweep position and observed corruption",
+]
+binds_to = []
+
+[[evidence]]
+id = "FG-EVID-03"
+claim_class = "statistical"
+qualified_claim = "Endurance-gate evidence (defined-duration sustained load)"
+required_disclosures = [
+  "duration and cadence",
+  "compaction-debt ceiling stated in §6.6 write-amplification-model terms",
+  "long-run memory stability bound",
+  "steady-state occupancy-model prediction versus observation — divergence is itself a finding",
+]
+binds_to = []
+
+[[evidence]]
+id = "FG-EVID-04"
+claim_class = "statistical"
+qualified_claim = "Derived-state freshness (slo-class, never an invariant)"
+required_disclosures = [
+  "bound expressed in watermark/commit-sequence units",
+  "audit-pipeline and time-evidence dependencies named",
+  "realized lag distribution",
+  "typed FreshnessBreach rate and fallback policy",
+]
+binds_to = []

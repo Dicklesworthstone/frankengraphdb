@@ -1,0 +1,173 @@
+# =============================================================================
+# constitution.toml — the machine-readable claim constitution (G0)
+# =============================================================================
+# Bead: fgdb-g0-claim-registries-myx
+# Provenance: plan §1 (constraints 1–12), §1.11 (claim classes), README/AGENTS
+# six-bet vocabulary. Validated by `tools/registry-check`.
+#
+# This file is normative. It restates §1's twelve constitutional constraints
+# and the six-bet vocabulary as registered identifiers that every other
+# registry and bead may reference, and it defines the six claim classes and
+# their strength lattice (§1 constraint 11). A weaker claim class may inform
+# policy but may not enforce or justify a stronger one; `registry-check`
+# enforces that rule wherever a `justified_by` edge appears.
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "constitution"
+description = "Claim classes, the class-strength lattice, the twelve constitutional constraints, and the six-bet vocabulary."
+
+# -----------------------------------------------------------------------------
+# The six claim classes (§1 constraint 11). Higher rank = stronger class.
+# Enforcement/justification edges must point from equal-or-stronger to
+# equal-or-weaker: rank(justifier) >= rank(claim) or the build fails.
+# -----------------------------------------------------------------------------
+
+[[claim_class]]
+name = "invariant"
+rank = 6
+definition = "Must hold on every execution."
+carriers = ["invariants.toml"]
+
+[[claim_class]]
+name = "proof"
+rank = 5
+definition = "Theorem within a named formal model; every proof-class row names a proof-lane manifest (lane, model scope, checked artifact)."
+carriers = ["invariants.toml"]
+
+[[claim_class]]
+name = "bounded_model"
+rank = 4
+definition = "Checked only within declared bounds (bounded model checking, or a configuration-model claim such as FG-CFG-* whose validity is scoped to declared parameters)."
+carriers = ["invariants.toml", "slo.toml"]
+
+[[claim_class]]
+name = "statistical"
+rank = 3
+definition = "Confidence statement under named assumptions (filtration/null for e-processes, exchangeability for conformal coverage, positivity/overlap for OPE)."
+carriers = ["evidence.toml"]
+
+[[claim_class]]
+name = "slo"
+rank = 2
+definition = "Empirical operational target. Never an invariant; every microsecond or throughput budget is an slo row."
+carriers = ["slo.toml"]
+
+[[claim_class]]
+name = "benchmark"
+rank = 1
+definition = "Measured on a pinned fixture under a pinned benchmark manifest."
+carriers = ["slo.toml"]
+
+[lattice]
+law = "A weaker claim class may inform policy but may not enforce or justify a stronger one."
+edge_rule = "A row of class C may list a justifier row of class R in justified_by only when rank(R) >= rank(C). Inform edges are unconstrained but grant no enforcement."
+
+# -----------------------------------------------------------------------------
+# The twelve constitutional constraints (§1), registered as FG-CON-01..12.
+# Statements are verbatim from the plan; the plan remains the prose master,
+# this registry is the machine-checkable restatement other beads cite.
+# -----------------------------------------------------------------------------
+
+[[constraint]]
+id = "FG-CON-01"
+title = "The dependency universe is closed"
+statement = '''Allowed: `core`/`alloc`/`std`, the Rust nightly toolchain (both asupersync and franken_networkx already pin nightly), and the three foundation projects — `asupersync` (with whatever it vendors internally; its choices are its own), the `fnx-*` crates of `franken_networkx`, and *design-level* reuse of `frankensqlite` (we fork/adapt specific modules into `fgdb-*` crates rather than linking `fsqlite-*` wholesale, because graph objects are not SQLite pages — see §2.3). Everything else — compression codecs, sketches, ANN indexes, inverted indexes, radix trees, wire protocols, columnar readers — is built in-house (§18 is the complete inventory). No serde, no tokio, no rocksdb, no arrow, no tantivy, no hnswlib. The Python package may consume `fnx-python` as an allowed `fnx-*` foundation crate and therefore its already-pinned transitive binding runtime, but `fgdb-*` crates may not add a direct PyO3 dependency; the database engine, server, CLI, and durable formats remain free of that packaging boundary.'''
+
+[[constraint]]
+id = "FG-CON-02"
+title = "Memory safety is structural"
+statement = '''Every ordinary crate root and the workspace default use `unsafe_code = "forbid"`. Rust's `forbid` level cannot be lowered, so the few raw-pointer implementations (buffer arenas, SIMD kernels, VFS mappings) live in separately named `fgdb-unsafe-*` boundary crates whose roots use `deny(unsafe_code)` plus narrowly scoped, ledgered `allow` sites. Safe-facing crates never relax `forbid`. Every unsafe operation gets a ledger row: path, invariant, evidence, scalar or safe fallback, and no-claim boundary; CI rejects an unledgered site.'''
+
+[[constraint]]
+id = "FG-CON-03"
+title = "Cx everywhere"
+statement = '''Every function that performs I/O, takes a lock, allocates from a shared arena, or can block accepts `&Cx` (asupersync's capability context). This is what makes B5 possible: swap the `Cx`, and the entire database runs under the lab runtime with virtual time, deterministic scheduling, and fault injection. It is also what makes cancellation-correct query timeouts, deadline propagation, and capability narrowing (read-only connections *cannot* express writes) structural rather than conventional.'''
+
+[[constraint]]
+id = "FG-CON-04"
+title = "Deterministic by default, with an explicit domain"
+statement = '''The strict contract is: same evidence closure (root object and branch head, normalized query and parameters, semantic/capability/policy epochs, executable artifacts, index generations, numeric profile, and recorded external inputs) ⇒ byte-identical **canonical logical-result encoding**, including order. Transport chunking is not part of logical identity. Cross-machine strict mode uses the portable numeric profile in §8.6; relaxed floating execution is opt-in and certificate-declared.'''
+
+[[constraint]]
+id = "FG-CON-05"
+title = "Single artifact, three postures"
+statement = '''One codebase produces: (a) an embedded library (`fgdb`) usable like Kùzu/DuckDB from Rust and Python; (b) a server binary (`fgdbd`) speaking the native protocol, HTTP/2, gRPC, WebSocket, and a Bolt-compat subset; (c) a CLI binary (`fgdb`, implemented by the `fgdb-cli` crate). Larger-than-memory operation is first-class in all three.'''
+
+[[constraint]]
+id = "FG-CON-06"
+title = "The published recovery root is the source of truth"
+statement = '''Before history truncation, logical state is reconstructed from an authoritative checkpoint projection plus the complete contiguous `LogicalCommandRecord` stream. Transaction markers and committed effects are the transaction-only subsequence; schema, policy, delivery, accounting, audit, configuration, GC, and other control commands are equally necessary to reconstruct canonical state. After the truncation horizon advances, the newly installed checkpoint and retained logical-command suffix become the authoritative recovery basis; reclaimed capsules are no longer claimed to be available truth. The only **published** bytes updated in place are the two fixed root-pointer slots in §5.1. Newly created staging files may be written until sealed, but are unreachable and disposable by proved recovery rules; every reachable root object, checkpoint, marker batch, capsule, and derived object is immutable and content addressed. Derived indexes and views never become authoritative for base semantics or constraints.'''
+
+[[constraint]]
+id = "FG-CON-07"
+title = "No fossil inheritance"
+statement = '''No JVM, no GC, no mmap-as-durability, no generic KV underlay, no eventual-consistency defaults. These are the fossils we refuse to inherit.'''
+
+[[constraint]]
+id = "FG-CON-08"
+title = "Narrowed capability contexts"
+statement = '''Subsystems receive purpose-typed wrappers over `Cx` (`QueryCx`, `TxnCx`, `CommitCx`, `MaintCx`, `ReplCx`) exposing only their legal effects as obligations (`pin_snapshot`, `reserve_prepared_bytes`, `reserve_raft_payload_space`, `publish_segment`, ...). The sharpest instance: the merge ladder's intent-replay evaluator receives a `Cx` with **no clock, entropy, network, or filesystem capability** — deterministic rebase is guaranteed *by construction*, not by review.'''
+
+[[constraint]]
+id = "FG-CON-09"
+title = "Prohibited shortcuts (constitutional)"
+statement = '''No global-lock "interim" transaction model; no `HashMap<VId, Vec<EId>>` presented as storage; no snapshot isolation quietly labeled "ACID"; no parser-interprets-AST engine; no non-durable benchmark mode reported as a result; no serde-derived enum as a durable format; no detached background thread. Early code may implement a *subset* of each final abstraction — never a substitute for it.'''
+
+[[constraint]]
+id = "FG-CON-10"
+title = "Adaptivity is classified, or it does not ship"
+statement = '''Every adaptive decision is exactly one of: *answer-preserving physical* (cache eviction, prefetch, equivalent kernel selection, local pacing); *answer-affecting execution* (approximate generation/candidate/fusion/stopping choices represented by the execution's `AnswerRequirement`/realized `AnswerContract`); or *canonical-state-affecting* (view/index publication, watermark advancement, security/retention/configuration changes). Answer-affecting choices are legal only inside the requested requirement, are fully pinned in the bound plan/certificate/replay closure, and emit decision cards; a policy-table change that can alter them is stream-sequenced. Canonical-state-affecting choices change only through logical commands under stream-sequenced `DecisionPolicyEpoch` or their own typed epoch. Physical-only choices may adapt locally but still log cards and must pass answer-equivalence tests. Logged propensity supports off-policy evaluation only for candidate actions covered by the logging policy. Statistical promotion evidence is `FG-EVID-*`, never an `FG-INV-*` safety proof, and the deterministic fallback remains valid when assumptions fail.'''
+
+[[constraint]]
+id = "FG-CON-11"
+title = "Claims have types"
+statement = '''Every load-bearing statement is registered as exactly one of: `invariant` (must hold on every execution), `proof` (theorem within a named formal model), `bounded_model` (checked only within declared bounds), `statistical` (confidence statement under named assumptions), `slo` (empirical operational target), or `benchmark` (measured on a pinned fixture). A weaker claim class may inform policy but may not enforce or justify a stronger one. `invariants.toml` contains only exact safety/liveness invariants; `evidence.toml` and `slo.toml` carry statistical and empirical claims.'''
+
+[[constraint]]
+id = "FG-CON-12"
+title = "Costs are registered claims"
+statement = '''Constraint 11 governs what a statement may assert; this constraint governs what a mechanism may cost. Every operation class has a row in the operation-cost registry (Appendix G) stating its sequenced semantic commands, total Raft log entries, ordered durability barriers with their amortization law and fusion legality, external-authority interactions, and minted durable objects. Every §17 gate must be derivable from that registry — a latency gate must be ≥ its declared class's ordered-barrier count × the benchmark manifest's pinned measured fsync p50, and a gate that a registry row makes arithmetically impossible is a registry error that fails CI, never an ambitious target. Any change that adds sequenced commands, durability barriers, external-authority interactions, or per-object identity structure updates the registry in the same change; CI rejects a divergence. Structure lives in the registry; µs and throughput budgets are `slo.toml` rows and are never invariants.'''
+
+# -----------------------------------------------------------------------------
+# The six-bet vocabulary (B1–B6): registered identifiers referenced by beads,
+# registries, and gate contracts. One-line statements per README/AGENTS.
+# -----------------------------------------------------------------------------
+
+[[bet]]
+id = "B1"
+name = "One Version Universe"
+codename = "Chronicle"
+statement = '''MVCC versions, time-travel history, replication, change subscriptions, and git-style database branches are the same mechanism: an append-only, content-addressed, RaptorQ-coded commit stream (Chronicle).'''
+
+[[bet]]
+id = "B2"
+name = "Graph-Structured LSM"
+codename = "Strata"
+statement = '''Adjacency lives in three temperature tiers (versioned delta blocks → sealed compressed CSR runs → archived anchors): one store targeting high transactional ingest and static-CSR-class scans, with the actual rates held to §17 benchmark gates.'''
+
+[[bet]]
+id = "B3"
+name = "Unified Factorized/WCO Execution"
+codename = "Loom"
+statement = '''One Free-Join-style operator family subsumes binary hash joins, worst-case-optimal multiway joins, and factorized intermediates, running vectorized and morsel-parallel over Strata runs that are already tries.'''
+
+[[bet]]
+id = "B4"
+name = "Incremental Everything"
+codename = "Ripple"
+statement = '''A DBSP-style Z-set delta algebra is the single engine for recursive queries, materialized views, standing queries/subscriptions, and incremental analytics — fed by the commit stream, which is already a Z-set stream.'''
+
+[[bet]]
+id = "B5"
+name = "Determinism as a Product Feature"
+codename = "Certificates"
+statement = '''CGSE tie-break policies, complexity witnesses, and plan certificates make every eligible STRICT result byte-reproducible and auditable; every adaptive decision emits a replayable decision card; the whole database runs under asupersync's lab runtime for DPOR-explored, seed-replayable, chaos-injected testing.'''
+
+[[bet]]
+id = "B6"
+name = "Agent-Native by Construction"
+codename = "Warden+Fabric"
+statement = '''Branch-per-agent isolation, capability-scoped (macaroon) subgraph authorization, provenance as first-class edges, and one hybrid vector+text+graph retrieval operator — purpose-built for GraphRAG and multi-agent memory.'''

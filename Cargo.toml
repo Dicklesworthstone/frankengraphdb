@@ -1,0 +1,21 @@
+# FrankenGraphDB workspace root.
+#
+# Constitutional context (AGENTS.md doctrine, plan §18):
+#   - `fgdb-*` engine crates appear only with their first real final-abstraction
+#     slice (fgdb-g0-workspace-topology-1q9m). No empty prototype crates.
+#   - `tools/registry-check` is G0 constitutional tooling, not an engine crate:
+#     it validates the claim registries under `registries/` and is deliberately
+#     std-only (the closed dependency universe applies to the tooling that
+#     enforces it).
+#   - Workspace-level `unsafe_code = "forbid"`; only the (future) named
+#     `fgdb-unsafe-*` boundary crates may relax to `deny` + ledgered allows.
+
+[workspace]
+resolver = "3"
+members = ["tools/registry-check"]
+
+[workspace.package]
+edition = "2024"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

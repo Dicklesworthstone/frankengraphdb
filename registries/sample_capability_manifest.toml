@@ -1,0 +1,29 @@
+# =============================================================================
+# sample_capability_manifest.toml — G0 sample capability manifest
+# =============================================================================
+# Bead: fgdb-g0-claim-registries-myx
+# Provenance: plan Appendix F preamble ("the compiled-plus-negotiated
+# activation closure"; "Every reachable clause must be live; otherwise the
+# corresponding capability is absent").
+#
+# A capability manifest names the features/postures/roles a build or a
+# negotiated session claims. registry-check compiles the activation closure:
+# every invariants.toml clause whose activation_predicate evaluates true under
+# this manifest — plus the transitive dependency closure of those clauses —
+# must have status = "live". Any reachable non-live clause forces the
+# offending capability off; the closure report names the exact clause IDs
+# behind every capability declared absent.
+#
+# Pre-Genesis, the sample manifest is the spec-only surface: no runtime
+# features are active, so the closure is trivially satisfied. Workstream beads
+# grow this file (and add per-gate manifests) as capabilities land.
+# =============================================================================
+
+schema_version = 1
+
+[manifest]
+name = "g0-sample"
+description = "Pre-Genesis sample capability manifest: spec-only surface, no runtime features active."
+features = []
+postures = []
+roles = []
