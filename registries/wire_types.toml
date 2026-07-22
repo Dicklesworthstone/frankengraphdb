@@ -1,0 +1,194 @@
+# =============================================================================
+# wire_types.toml — identity class 5: embedded canonical types and closed tags
+# =============================================================================
+# Bead: fgdb-g0-identity-registries-hrx
+# Provenance: plan §5.1 (line 288); Appendix A/D.
+#
+# Every inline record, enum/union variant, discriminant, spec-body tag,
+# reference wrapper, and framing type used inside the other identity classes
+# has one stable, nonreusable `wire_type_id: u16`, and each union variant
+# additionally carries its exact containing-union `wire_tag: u16`.
+#
+# An inline type is NOT independently reachable and cannot be named by
+# StrongRef unless it is separately promoted to a top-level logical schema
+# with a distinct logical_object_kinds row. There is no prose catch-all
+# variant: the generated SequenceNeutralSpec, role-command, checkpoint-
+# vector, restore-state, and projection-slot inventories come from this
+# registry (populated by g0-command-contracts and the a-series beads).
+#
+# `kind` values: record | union | union_variant | reference_wrapper |
+# discriminant | framing.
+# Generated reference unions (LocalCommandInputRef, ...) are NOT rows here —
+# they are [[reference_union]] declarations in durable_fields.toml, generated
+# per containing schema and role. exact_wire_type resolution order is:
+# builtin scalar -> wire_types row -> reference_union.
+#
+# Same code-space law as all class registries.
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "wire_types"
+registry_epoch = 1
+
+[[type]]
+wire_type_id = 0x0001
+name = "StrongRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "typed strong reference to one registered top-level logical schema; a field using the bare wrapper MUST declare a concrete target_schema_id — polymorphic targets require a generated reference union"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0002
+name = "ConditionalCommandRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "conditional (cuttable) reference to the predecessor LogicalCommandRecord; retention governed by checkpoint cuts (FG-INV-14)"
+allowed_containing_schemas = ["LocalCommandOrigin"]
+max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0003
+name = "WeakDigest"
+kind = "record"
+status = "active"
+encoding_context = "256-bit weak-identity digest; never a reachability edge"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 32
+
+[[type]]
+wire_type_id = 0x0004
+name = "MarkerRef"
+kind = "record"
+status = "active"
+encoding_context = "{marker_oid, commit_seq}: the transaction-history identity used by branch heads, version origins/retirements, checkpoints, MMR leaves, and merges"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 48
+
+[[type]]
+wire_type_id = 0x0005
+name = "StrongMarkerRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "strong reference to a CommitMarker via MarkerRef identity"
+allowed_containing_schemas = ["LogicalCommandRecord"]
+max_size_bytes = 48
+
+[[type]]
+wire_type_id = 0x0006
+name = "LocalCommandOrigin"
+kind = "union"
+status = "active"
+encoding_context = "closed union: Prior | RecoveryBridge; normal work requires Prior; only the first guarded restore command may use RecoveryBridge"
+allowed_containing_schemas = ["LogicalCommandRecord"]
+max_size_bytes = 128
+
+[[type]]
+wire_type_id = 0x0007
+name = "LocalCommandOrigin.Prior"
+kind = "union_variant"
+status = "active"
+containing_union = "LocalCommandOrigin"
+wire_tag = 0x0001
+encoding_context = "{predecessor: ConditionalCommandRef}"
+allowed_containing_schemas = ["LocalCommandOrigin"]
+max_size_bytes = 48
+
+[[type]]
+wire_type_id = 0x0008
+name = "LocalCommandOrigin.RecoveryBridge"
+kind = "union_variant"
+status = "active"
+containing_union = "LocalCommandOrigin"
+wire_tag = 0x0002
+encoding_context = "{bridge_spec_ref: StrongRef<RecoveryBridgeSpec>, source_manifest_identity: WeakDigest, transform_and_projection_digest}"
+allowed_containing_schemas = ["LocalCommandOrigin"]
+max_size_bytes = 128
+
+[[type]]
+wire_type_id = 0x0009
+name = "RootBootstrap"
+kind = "record"
+status = "active"
+encoding_context = "everything needed before the object-location index exists: complete cipher/encoding descriptors, CiphertextId/EncodingId/ciphertext digest, specialized ContiguousSpan placement, noncircular opener bundle for root DEK and K_oid; no descriptor or identity-key field comes from the object being opened"
+allowed_containing_schemas = ["RootSlot"]
+max_size_bytes = 3584
+
+[[type]]
+wire_type_id = 0x000a
+name = "ContiguousSpan"
+kind = "record"
+status = "active"
+encoding_context = "specialized placement descriptor: placement epoch, failure-domain policy and domain ID, segment/offset/length, symbol-inventory digest"
+allowed_containing_schemas = ["RootBootstrap", "PlacementRecord"]
+max_size_bytes = 256
+
+[[type]]
+wire_type_id = 0x000b
+name = "DispatchOriginPlane"
+kind = "discriminant"
+status = "active"
+encoding_context = "closed tag: CanonicalProtocol | RestorePreBootstrap (g0-irreversible-dispatch owns the dispatch registries)"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 2
+
+[[type]]
+wire_type_id = 0x000c
+name = "DispatchOriginPlane.CanonicalProtocol"
+kind = "union_variant"
+status = "active"
+containing_union = "DispatchOriginPlane"
+wire_tag = 0x0001
+encoding_context = "canonical Protocol-plane origin"
+allowed_containing_schemas = ["DispatchOriginPlane"]
+max_size_bytes = 2
+
+[[type]]
+wire_type_id = 0x000d
+name = "DispatchOriginPlane.RestorePreBootstrap"
+kind = "union_variant"
+status = "active"
+containing_union = "DispatchOriginPlane"
+wire_tag = 0x0002
+encoding_context = "restore pre-bootstrap origin; never mutates into canonical for the same action"
+allowed_containing_schemas = ["DispatchOriginPlane"]
+max_size_bytes = 2
+
+[[type]]
+wire_type_id = 0x000e
+name = "AuthorityBoundHeader"
+kind = "record"
+status = "active"
+encoding_context = "{authority_binding_ref: AuthorityBindingRef<Role>, authority_digest, security_policy_epoch, revocation_index}; every repeated value must byte-match the AuthorityBindingRecord"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 256
+
+[[type]]
+wire_type_id = 0x000f
+name = "SecurityStateBinding"
+kind = "record"
+status = "reserved"
+encoding_context = "complete security-state binding (schema lands with warden/w9 beads; FG-INV-20)"
+allowed_containing_schemas = ["AuthorityBindingRecord"]
+max_size_bytes = 1024
+
+[[type]]
+wire_type_id = 0x0010
+name = "PreBootstrapArtifactRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "{artifact_id, authenticated_staging_locator, length, canonical_digest, dispatch_root_generation}; legal ONLY in the registered restore staging inode/root/capsule; never a StrongRef, never in the mark set"
+allowed_containing_schemas = ["restore-staging"]
+max_size_bytes = 128
+
+[[type]]
+wire_type_id = 0x0011
+name = "HlcTimestamp"
+kind = "record"
+status = "active"
+encoding_context = "hybrid logical clock instant (asupersync HLC encoding)"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16

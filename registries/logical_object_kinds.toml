@@ -1,0 +1,309 @@
+# =============================================================================
+# logical_object_kinds.toml — identity class 1: content-addressed logical objects
+# =============================================================================
+# Bead: fgdb-g0-identity-registries-hrx
+# Provenance: plan §5.1 (identity classes, lines 282–298); Appendix A.
+#
+# Each row assigns one stable, NONREUSABLE `object_kind: u16` to one top-level
+# canonical plaintext schema whose independent identity is the keyed
+#   ObjectId = BLAKE3_keyed(K_oid, "fgdb:logical:v1" ‖ DatabaseSecurityNamespaceId
+#                            ‖ canonical_plaintext_header ‖ canonical_plaintext_payload).
+# All StrongRef<T>/Conditional*Ref<T>/weak-digest TARGETS must resolve to rows
+# here — never to a physical record, bootstrap frame, or prebootstrap artifact.
+#
+# Code space (shared law for all five class registries):
+#   0x0000 / 0xffff        permanently invalid
+#   0x0001 ..= 0x7fff      permanent core assignments
+#   0x8000 ..= 0xbfff      negotiated extension assignments
+#   0xc000 ..= 0xfffe      test/experimental — production registries REJECT
+# A released code changes status to "retired" but is never reassigned.
+# `registry_epoch` changes only when rows are added or retired.
+#
+# Row fields:
+#   object_kind          u16 code (hex)
+#   name                 the top-level canonical plaintext schema
+#   status               active | reserved | retired | experimental
+#                        ("reserved": identity is fixed now, schema payload
+#                         lands with its owning bead — W12 kinds and
+#                         role-tagged variants reserve here per §19 G0)
+#   construction_order   ordinal class: a schema may STRONG/CONDITIONAL-
+#                        reference only schemas with construction_order <= its
+#                        own (every strong value must already be known; a
+#                        future applied result is never referenceable — the
+#                        construction-DAG checker enforces this)
+#   role_predicate       activation-predicate over roles/postures/features
+#   max_size_bytes       resource bound on the canonical encoding
+#   golden_corpus        reserved corpus path (populated by w1-generated-parsers)
+#
+# Reference fields and digest recipes live ONLY in durable_fields.toml (the
+# single cross-index — no second source of truth); a kind's field set is the
+# set of durable_fields rows naming it as containing_schema.
+#
+# Downstream population: beads fgdb-a01..a21 add the full Appendix A catalog;
+# fgdb-g0-command-contracts layers command/state registries on these classes.
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "logical_object_kinds"
+registry_epoch = 1
+
+# --- §5.1 layered canonical state core (active identity assignments) ---------
+
+[[kind]]
+object_kind = 0x0001
+name = "LogicalStatePayload"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 1073741824
+golden_corpus = "corpus/logical/logical_state_payload/"
+
+[[kind]]
+object_kind = 0x0002
+name = "LogicalCommandRecord"
+status = "active"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 1048576
+golden_corpus = "corpus/logical/logical_command_record/"
+
+[[kind]]
+object_kind = 0x0003
+name = "LogicalStateRoot"
+status = "active"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 65536
+golden_corpus = "corpus/logical/logical_state_root/"
+
+[[kind]]
+object_kind = 0x0004
+name = "CommitCommand"
+status = "active"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 268435456
+golden_corpus = "corpus/logical/commit_command/"
+
+[[kind]]
+object_kind = 0x0005
+name = "ControlCommand"
+status = "active"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/control_command/"
+
+[[kind]]
+object_kind = 0x0006
+name = "CommitMarker"
+status = "active"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 4096
+golden_corpus = "corpus/logical/commit_marker/"
+
+[[kind]]
+object_kind = 0x0007
+name = "RootManifest"
+status = "active"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/root_manifest/"
+
+[[kind]]
+object_kind = 0x0008
+name = "AuthorityBindingRecord"
+status = "active"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+max_size_bytes = 65536
+golden_corpus = "corpus/logical/authority_binding_record/"
+
+[[kind]]
+object_kind = 0x0009
+name = "CheckpointStateVector"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-local"
+max_size_bytes = 268435456
+golden_corpus = "corpus/logical/checkpoint_state_vector/"
+
+[[kind]]
+object_kind = 0x000a
+name = "CommitCapsule"
+status = "active"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 268435456
+golden_corpus = "corpus/logical/commit_capsule/"
+
+[[kind]]
+object_kind = 0x000b
+name = "PreparedCommitRecord"
+status = "active"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prepared_commit_record/"
+
+[[kind]]
+object_kind = 0x000c
+name = "RecoveryBridgeSpec"
+status = "reserved"
+construction_order = 10
+role_predicate = "restore-machinery"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_bridge_spec/"
+
+# --- Reserved W12 kinds and role-tagged Raft/root/checkpoint variants --------
+# §19 G0: "every reserved W12 kind and role-tagged Raft/root/checkpoint
+# variant" lands now, implementation trailing (beads a05–a08 populate the
+# schemas). Identity is permanent from this epoch.
+
+[[kind]]
+object_kind = 0x0101
+name = "RaftSnapshotLocal"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 1073741824
+golden_corpus = "corpus/logical/raft_snapshot_local/"
+
+[[kind]]
+object_kind = 0x0102
+name = "RaftSnapshotMeta"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 1073741824
+golden_corpus = "corpus/logical/raft_snapshot_meta/"
+
+[[kind]]
+object_kind = 0x0103
+name = "RaftSnapshotShard"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 1073741824
+golden_corpus = "corpus/logical/raft_snapshot_shard/"
+
+[[kind]]
+object_kind = 0x0104
+name = "RootManifestMeta"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/root_manifest_meta/"
+
+[[kind]]
+object_kind = 0x0105
+name = "RootManifestShard"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/root_manifest_shard/"
+
+[[kind]]
+object_kind = 0x0106
+name = "CheckpointStateVectorMeta"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 268435456
+golden_corpus = "corpus/logical/checkpoint_state_vector_meta/"
+
+[[kind]]
+object_kind = 0x0107
+name = "CheckpointStateVectorShard"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 268435456
+golden_corpus = "corpus/logical/checkpoint_state_vector_shard/"
+
+[[kind]]
+object_kind = 0x0108
+name = "MetaAuthorityBindingProjection"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-meta"
+max_size_bytes = 65536
+golden_corpus = "corpus/logical/meta_authority_binding_projection/"
+
+[[kind]]
+object_kind = 0x0109
+name = "ShardAuthorityBindingProjection"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-shard"
+max_size_bytes = 65536
+golden_corpus = "corpus/logical/shard_authority_binding_projection/"
+
+[[kind]]
+object_kind = 0x010a
+name = "MetaAppliedResult"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 268435456
+golden_corpus = "corpus/logical/meta_applied_result/"
+
+[[kind]]
+object_kind = 0x010b
+name = "ShardProtocolEvidence"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_protocol_evidence/"
+
+[[kind]]
+object_kind = 0x010c
+name = "ShardHistoryInventory"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 268435456
+golden_corpus = "corpus/logical/shard_history_inventory/"
+
+[[kind]]
+object_kind = 0x010d
+name = "GlobalKeyEnvelopeManifest"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_key_envelope_manifest/"
+
+[[kind]]
+object_kind = 0x010e
+name = "BackupManifestBody"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 268435456
+golden_corpus = "corpus/logical/backup_manifest_body/"
+
+[[kind]]
+object_kind = 0x010f
+name = "BackupManifestSignatureSet"
+status = "reserved"
+construction_order = 36
+role_predicate = "true"
+max_size_bytes = 1048576
+golden_corpus = "corpus/logical/backup_manifest_signature_set/"
+
+[[kind]]
+object_kind = 0x0110
+name = "BackupManifest"
+status = "reserved"
+construction_order = 37
+role_predicate = "true"
+max_size_bytes = 1048576
+golden_corpus = "corpus/logical/backup_manifest/"

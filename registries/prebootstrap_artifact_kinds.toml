@@ -1,0 +1,86 @@
+# =============================================================================
+# prebootstrap_artifact_kinds.toml — identity class 4: restore artifacts
+# predating target K_oid
+# =============================================================================
+# Bead: fgdb-g0-identity-registries-hrx
+# Provenance: plan §5.1 (line 287); §11 restore machinery.
+#
+# Identity law:
+#   PreBootstrapArtifactId = BLAKE3("fgdb:restore-prebootstrap:v1"
+#     ‖ target_claim_or_reservation_domain ‖ artifact_kind ‖ schema_version
+#     ‖ canonical_wrapper_bytes)
+# with reference form PreBootstrapArtifactRef<T> {artifact_id,
+# authenticated_staging_locator, length, canonical_digest,
+# dispatch_root_generation} — legal ONLY in the registered restore staging
+# inode/root/capsule.
+#
+# The artifact's actual schema is the distinct wrapper
+# {import_target_schema_id_for_T, inner_canonical_bytes, inner_digest,
+# artifact_metadata}; T is a compile-time import-target phantom and does NOT
+# make the inner target schema inhabit this class.
+#
+# These IDs are never ObjectId, never accepted by StrongRef, never enter the
+# current-database mark set, and never authorize ordinary reads. Contents are
+# portable plans, status/receipt/refusal bytes, availability certificates,
+# lease-owner generations, wrapped-key artifacts, and proof material only —
+# NEVER plaintext keys. Once target K_oid exists, generated canonical-import
+# records decode/copy the inner bytes into the sole target-keyed logical
+# identity and prove a total artifact-to-logical-object/disposition
+# bijection; no canonical logical object retains a staging locator after the
+# import floor closes.
+#
+# Rows are reserved here (identity fixed); beads fgdb-a17..a21 populate the
+# wrapper schemas, claim domains, codecs, lifecycles, and cleanup floors.
+# Same code-space law as all class registries.
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "prebootstrap_artifact_kinds"
+registry_epoch = 1
+
+[[kind]]
+artifact_kind = 0x0001
+name = "PortableRestorePlanArtifact"
+status = "reserved"
+target_claim_domain = "restore plan/claim domain (a17)"
+allowed_containers = "registered restore staging inode/root/capsule only"
+import_target = "canonical restore plan logical object (a17)"
+max_size_bytes = 16777216
+
+[[kind]]
+artifact_kind = 0x0002
+name = "RestoreStatusReceiptArtifact"
+status = "reserved"
+target_claim_domain = "restore status/receipt/refusal domain (a17/a18)"
+allowed_containers = "registered restore staging inode/root/capsule only"
+import_target = "canonical restore terminal-history logical object (a18)"
+max_size_bytes = 1048576
+
+[[kind]]
+artifact_kind = 0x0003
+name = "AvailabilityCertificateArtifact"
+status = "reserved"
+target_claim_domain = "source availability-certificate domain (a17)"
+allowed_containers = "registered restore staging inode/root/capsule only"
+import_target = "canonical availability-evidence logical object (a17)"
+max_size_bytes = 1048576
+
+[[kind]]
+artifact_kind = 0x0004
+name = "WrappedKeyArtifact"
+status = "reserved"
+target_claim_domain = "key-recovery claim domain (a15/a19); wrapped keys and wrap digests only — never plaintext keys"
+allowed_containers = "registered restore staging inode/root/capsule only"
+import_target = "canonical key-envelope logical object (a15)"
+max_size_bytes = 65536
+
+[[kind]]
+artifact_kind = 0x0005
+name = "PreBootstrapTerminalImportArtifact"
+status = "reserved"
+target_claim_domain = "prebootstrap dispatch terminal-import domain (g0-irreversible-dispatch, a17)"
+allowed_containers = "registered restore staging inode/root/capsule only"
+import_target = "contract-specific canonical import record (g0-irreversible-dispatch)"
+max_size_bytes = 16777216

@@ -1,0 +1,49 @@
+# =============================================================================
+# bootstrap_frames.toml — identity class 3: fixed-location mutable frames
+# =============================================================================
+# Bead: fgdb-g0-identity-registries-hrx
+# Provenance: plan §5.1 (lines 286, 344).
+#
+# Frames have LOCATION/GENERATION/CHECKSUM identity, not content-addressed
+# identity. They are the only published durable bytes updated in place.
+# No ordinary object/reference encoder may embed one as a graph node (the
+# validator rejects a strong/conditional reference targeting this class).
+#
+# Field layouts live in durable_fields.toml as rows with
+# containing_schema = the frame name and identity_class = "bootstrap_local";
+# frame fields reference logical objects only through NONRETAINING locator/
+# digest semantics (RootSlot.root_manifest_oid is a locator, never a
+# reachability edge).
+#
+# Same code-space law as all class registries.
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "bootstrap_frames"
+registry_epoch = 1
+
+[[frame]]
+frame_kind = 0x0001
+name = "RootSlot"
+status = "active"
+byte_size = 4096
+location = "manifest.root, two fixed 4 KiB slots (the only in-place-updated published bytes)"
+update_protocol = "two-slot alternation: write the losing slot, fsync, publish by slot_generation; recovery selects the highest structurally credible authenticated role closure (FG-INV-10)"
+tear_validation = "trailing tear_checksum over the complete slot bytes; a torn slot is structurally incredible and loses selection"
+opener_fields = "RootBootstrap: complete CipherDescriptorWithoutDigest, EncodingDescriptorWithoutId, CiphertextId, EncodingId, ciphertext digest, specialized ContiguousSpan placement descriptor, noncircular opener bundle for root DEK and K_oid (inline wrapped keys or authenticated KMS/HSM locators plus wrap digests); no descriptor or identity-key field comes from the object being opened"
+compatibility_gate = "recovery rejects a root whose authenticated namespace/database/incarnation/continuity/profile/visibility tuple disagrees with the slot; durable-format writes only under an activated FormatCompatibilityState (FG-INV-10)"
+recovery_vectors = "corpus/bootstrap/root_slot/"
+
+[[frame]]
+frame_kind = 0x0002
+name = "RaftHardFrame"
+status = "reserved"
+byte_size = 4096
+location = "reserved: fixed-location Raft hard-state frame (registered here per §5.1's 'any future registered bootstrap frame'; schema lands with fgdb-w2/aegis beads)"
+update_protocol = "reserved"
+tear_validation = "reserved"
+opener_fields = "reserved"
+compatibility_gate = "reserved"
+recovery_vectors = "corpus/bootstrap/raft_hard_frame/"

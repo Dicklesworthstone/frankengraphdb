@@ -343,6 +343,18 @@ impl Scanner {
                 break;
             }
         }
+        let normalized: String = digits.chars().filter(|&c| c != '_').collect();
+        // Hex integers (0x...) — the identity registries use u16 hex code
+        // spaces (§5.1). Checked before the float/date rejections because
+        // hex digits include 'e'.
+        if let Some(hex) = normalized
+            .strip_prefix("0x")
+            .or_else(|| normalized.strip_prefix("0X"))
+        {
+            return i64::from_str_radix(hex, 16)
+                .map(Value::Int)
+                .map_err(|_| self.err(format!("invalid hex integer token {digits:?}")));
+        }
         if digits.contains('.') || digits.contains('e') || digits.contains('E') {
             return Err(self.err(format!(
                 "floats are outside the registry subset (token {digits:?})"
@@ -353,7 +365,6 @@ impl Scanner {
                 "dates/times are outside the registry subset (token {digits:?})"
             )));
         }
-        let normalized: String = digits.chars().filter(|&c| c != '_').collect();
         normalized
             .parse::<i64>()
             .map(Value::Int)

@@ -32,4 +32,7 @@ cargo test
 echo "==> registry-check all (claim registries + claims-lint + closure)"
 cargo run -p registry-check --quiet -- all --root "$ROOT" > /dev/null
 
+echo "==> architecture-check (frozen ADR + reciprocal provenance)"
+cargo run -p registry-check --quiet --bin architecture-check -- --root "$ROOT" > /dev/null
+
 echo "ALL GATES GREEN"

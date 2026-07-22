@@ -1,0 +1,113 @@
+# =============================================================================
+# physical_record_kinds.toml — identity class 2: physical realizations/coordinates
+# =============================================================================
+# Bead: fgdb-g0-identity-registries-hrx
+# Provenance: plan §5.1 (physical pipeline, lines 280, 285, 342).
+#
+# Each row declares a NON-ObjectId identity law and its transcript. These
+# records can realize or locate logical objects but are NEVER accepted as
+# logical StrongRef targets and never acquire an ObjectKind merely because
+# they are durable bytes (a strong reference targeting a row of this registry
+# is the classic StrongRef-to-placement bug; the validator rejects it).
+#
+# The noncircular physical pipeline (identity_law values):
+#   ciphertext_id  CiphertextId  = hash(cipher descriptor ‖ ciphertext ‖ tag);
+#                  AEAD AAD = ("fgdb:object-aead:v1", ObjectId,
+#                  CipherDescriptorWithoutDigest); descriptor excludes FEC and
+#                  placement
+#   encoding_id    EncodingId = BLAKE3("fgdb:encoding:v1" ‖
+#                  canonical(EncodingDescriptorWithoutId {ciphertext_id,
+#                  fec_profile, transfer_length, oti_common, oti_scheme,
+#                  symbol_size, source_block_count, symbol_auth_profile}));
+#                  recoding changes EncodingId only
+#   placement_id   PlacementId = BLAKE3("fgdb:placement:v1" ‖
+#                  canonical(PlacementDescriptorWithoutId {encoding_id,
+#                  placement_epoch, failure_domain_policy, location_form}));
+#                  no ID is an input to itself; adding/moving symbols creates
+#                  a new descriptor/record, never a new encoding identity
+#   symbol_record  coordinate-keyed; MAC key K_symbol = KDF(DEK,
+#                  "fgdb:symbol-auth:v1" ‖ EncodingId) over the exact
+#                  canonical SymbolRecord transcript: every serialized header
+#                  field except the MAC bytes themselves, then the payload;
+#                  no shorter competing transcript
+#   locator_entry  authenticated metadata-tree locator entries mapping a
+#                  member OID to (pack_encoding, offset, length); entries are
+#                  NONRETAINING locators, never reachability edges
+#   pack           PackedObjectGroup: the pack (not the member) owns the
+#                  CiphertextId/EncodingId/PlacementId chain; members keep
+#                  their keyed ObjectIds. MANDATORY homogeneity law: one
+#                  write-key domain, one tenant/authority domain, one
+#                  retention/floor class per pack — a mixed pack fails closed
+#                  at build time. Reclamation coarsens to the pack.
+#
+# Same code-space law as all class registries (see logical_object_kinds.toml).
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "physical_record_kinds"
+registry_epoch = 1
+
+[[kind]]
+record_kind = 0x0001
+name = "CiphertextRecord"
+identity_law = "ciphertext_id"
+status = "active"
+transcript = "cipher descriptor (excludes FEC/placement) ‖ ciphertext ‖ profile-sized object tag; AAD binds ObjectId and CipherDescriptorWithoutDigest"
+owning_identity = "ObjectId (via AEAD AAD)"
+max_size_bytes = 1073741824
+
+[[kind]]
+record_kind = 0x0002
+name = "EncodingRecord"
+identity_law = "encoding_id"
+status = "active"
+transcript = "BLAKE3(\"fgdb:encoding:v1\" ‖ canonical(EncodingDescriptorWithoutId))"
+owning_identity = "CiphertextId"
+max_size_bytes = 65536
+
+[[kind]]
+record_kind = 0x0003
+name = "PlacementRecord"
+identity_law = "placement_id"
+status = "active"
+transcript = "BLAKE3(\"fgdb:placement:v1\" ‖ canonical(PlacementDescriptorWithoutId)); location_form is one contiguous span with authenticated symbol-inventory digest or an explicit canonical symbol/locator inventory"
+owning_identity = "EncodingId"
+max_size_bytes = 16777216
+
+[[kind]]
+record_kind = 0x0004
+name = "SymbolRecord"
+identity_law = "symbol_record"
+status = "active"
+transcript = "domain/version ‖ every serialized header field except the MAC bytes (framing lengths, identities, object kind, source block, ESI, transfer length, OTI, flags, auth profile, payload length) ‖ payload; MAC under K_symbol = KDF(DEK, \"fgdb:symbol-auth:v1\" ‖ EncodingId)"
+owning_identity = "EncodingId (coordinate-keyed)"
+max_size_bytes = 1048576
+
+[[kind]]
+record_kind = 0x0005
+name = "MetadataTreeLocatorEntry"
+identity_law = "locator_entry"
+status = "active"
+transcript = "authenticated (member_oid -> pack_encoding, offset, length); nonretaining"
+owning_identity = "containing metadata tree"
+max_size_bytes = 4096
+
+[[kind]]
+record_kind = 0x0006
+name = "PackedObjectGroup"
+identity_law = "pack"
+status = "active"
+transcript = "length-delimited canonical plaintext bytes of member logical objects; one compress/AEAD/FEC/placement pipeline owned by the pack; homogeneous in write-key domain, tenant/authority domain, and retention/floor class"
+owning_identity = "member ObjectIds (each verified over its own canonical plaintext)"
+max_size_bytes = 1073741824
+
+[[kind]]
+record_kind = 0x0007
+name = "MarkerBatch"
+identity_law = "pack"
+status = "active"
+transcript = "PackedObjectGroup specialization: length-delimited CommitMarker bytes; object-location index maps each marker OID to its authenticated (batch_encoding, offset, length) subobject locator"
+owning_identity = "member CommitMarker ObjectIds"
+max_size_bytes = 268435456

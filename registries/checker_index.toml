@@ -98,6 +98,72 @@ kind = "script"
 artifact = "scripts/g0_spine_e2e.sh"
 status = "live"
 
+[[checker]]
+symbol = "g0_identity_e2e"
+kind = "script"
+artifact = "scripts/g0_identity_e2e.sh"
+status = "live"
+
+# --- Frozen architecture-decision record and reciprocal provenance closure.
+
+[[checker]]
+symbol = "architecture_source_coverage"
+kind = "binary"
+artifact = "tools/registry-check/src/bin/architecture-check.rs"
+status = "live"
+
+[[checker]]
+symbol = "architecture_owner_closure"
+kind = "binary"
+artifact = "tools/registry-check/src/bin/architecture-check.rs"
+status = "live"
+
+[[checker]]
+symbol = "architecture_dependency_closure"
+kind = "binary"
+artifact = "tools/registry-check/src/bin/architecture-check.rs"
+status = "live"
+
+[[checker]]
+symbol = "architecture_research_dependency_firewall"
+kind = "binary"
+artifact = "tools/registry-check/src/bin/architecture-check.rs"
+status = "live"
+
+[[checker]]
+symbol = "architecture_decisions"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/architecture_decisions.rs"
+status = "live"
+
+[[checker]]
+symbol = "g0_architecture_decisions_e2e"
+kind = "script"
+artifact = "scripts/g0_architecture_decisions_e2e.sh"
+status = "live"
+
+# --- Identity-constitution byte-level walkers (stub-registered; made live by
+# --- w1-generated-parsers, which generates encoders/decoders/golden vectors
+# --- from the identity registries and implements the BLAKE3 identity laws).
+
+[[checker]]
+symbol = "idr_generated_encoder_decoder_roundtrip"
+kind = "stub"
+artifact = "crates/fgdb-formats/src/generated_codecs.rs"
+status = "stub"
+
+[[checker]]
+symbol = "idr_golden_corpus_replay"
+kind = "stub"
+artifact = "crates/fgdb-formats/src/golden_corpus.rs"
+status = "stub"
+
+[[checker]]
+symbol = "idr_blake3_identity_recompute"
+kind = "stub"
+artifact = "crates/fgdb-ecs/src/object_identity.rs"
+status = "stub"
+
 # --- Invariant-spine checker/negative-test stubs (fgdb-g0-invariant-spine).
 # --- Pre-Genesis: symbols are registered and resolvable; the implementing
 # --- oracles land with their workstreams (planned artifact paths recorded).

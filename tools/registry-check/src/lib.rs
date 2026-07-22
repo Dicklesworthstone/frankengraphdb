@@ -10,8 +10,10 @@
 //! applies to the tooling that enforces it, so the TOML parser, predicate
 //! language, JSON emitter, and hash pin are all in-house.
 
+pub mod architecture;
 pub mod closure;
 pub mod hash;
+pub mod identity;
 pub mod jsonl;
 pub mod lint;
 pub mod model;

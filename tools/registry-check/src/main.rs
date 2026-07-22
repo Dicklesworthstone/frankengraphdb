@@ -8,10 +8,12 @@
 //!   registry-check lint     --root <repo-root>
 //!   registry-check closure  --root <repo-root> --manifest <path>
 //!   registry-check hash     --root <repo-root>
+//!   registry-check identity --root <repo-root>
 //!   registry-check all      --root <repo-root> [--manifest <path>]
 
 use registry_check::closure;
 use registry_check::hash::id_table_hash;
+use registry_check::identity;
 use registry_check::jsonl::{arr, event, n, s};
 use registry_check::lint;
 use registry_check::model::{self, Registries};
@@ -51,8 +53,126 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn usage() -> String {
-    "usage: registry-check <validate|lint|closure|hash|all> --root <repo-root> [--manifest <path>]"
+    "usage: registry-check <validate|lint|closure|hash|identity|all> --root <repo-root> [--manifest <path>]"
         .to_string()
+}
+
+/// Validate the identity constitution (the five class registries plus
+/// durable_fields.toml); emit registry_generated / dag_checked /
+/// digest_verified events; return the violation count.
+fn run_identity(root: &Path) -> Result<usize, String> {
+    let ir = identity::load_identity(&root.join("registries")).map_err(|e| e.to_string())?;
+    let violations = identity::validate_identity(&ir);
+    let registry_rows: [(&str, i64, i64); 6] = [
+        (
+            "logical_object_kinds",
+            ir.logical.len() as i64,
+            ir.logical_epoch,
+        ),
+        (
+            "physical_record_kinds",
+            ir.physical.len() as i64,
+            ir.physical_epoch,
+        ),
+        (
+            "bootstrap_frames",
+            ir.bootstrap.len() as i64,
+            ir.bootstrap_epoch,
+        ),
+        (
+            "prebootstrap_artifact_kinds",
+            ir.prebootstrap.len() as i64,
+            ir.prebootstrap_epoch,
+        ),
+        ("wire_types", ir.wire.len() as i64, ir.wire_epoch),
+        ("durable_fields", ir.fields.len() as i64, ir.fields_epoch),
+    ];
+    for (name, rows, epoch) in registry_rows {
+        let count = violations.iter().filter(|v| v.registry == name).count();
+        println!(
+            "{}",
+            event(&[
+                ("event", s("registry_generated")),
+                ("registry", s(name)),
+                ("rows", n(rows)),
+                ("registry_epoch", n(epoch)),
+                ("violations", n(count as i64)),
+                ("outcome", s(if count == 0 { "pass" } else { "fail" })),
+            ])
+        );
+    }
+    for kind in &ir.logical {
+        let row_violations = violations
+            .iter()
+            .filter(|v| v.row_id == kind.name || v.row_id.starts_with(&format!("{}#", kind.name)))
+            .count();
+        println!(
+            "{}",
+            event(&[
+                ("event", s("row_checked")),
+                ("registry", s("logical_object_kinds")),
+                ("object_kind", s(format!("{:#06x}", kind.object_kind))),
+                ("row_id", s(&kind.name)),
+                ("status", s(&kind.status)),
+                ("construction_order", n(kind.construction_order)),
+                (
+                    "outcome",
+                    s(if row_violations == 0 { "pass" } else { "fail" }),
+                ),
+            ])
+        );
+    }
+    let dag_faults = violations
+        .iter()
+        .filter(|v| v.code.starts_with("dag_"))
+        .count();
+    println!(
+        "{}",
+        event(&[
+            ("event", s("dag_checked")),
+            ("registry", s("durable_fields")),
+            ("faults", n(dag_faults as i64)),
+            ("outcome", s(if dag_faults == 0 { "pass" } else { "fail" })),
+        ])
+    );
+    for f in ir.fields.iter().filter(|f| f.digest_class.is_some()) {
+        let row_id = format!("{}#{}", f.containing_schema, f.stable_name);
+        let row_violations = violations.iter().filter(|v| v.row_id == row_id).count();
+        println!(
+            "{}",
+            event(&[
+                ("event", s("digest_verified")),
+                ("registry", s("durable_fields")),
+                ("row_id", s(&row_id)),
+                (
+                    "digest_class",
+                    s(f.digest_class.clone().unwrap_or_default()),
+                ),
+                ("recipe_pin", s(f.recipe_pin.clone().unwrap_or_default()),),
+                (
+                    "outcome",
+                    s(if row_violations == 0 { "pass" } else { "fail" }),
+                ),
+            ])
+        );
+    }
+    for v in &violations {
+        println!(
+            "{}",
+            event(&[
+                ("event", s("violation")),
+                ("code", s(&v.code)),
+                ("registry", s(&v.registry)),
+                ("row_id", s(&v.row_id)),
+                ("msg", s(&v.msg)),
+            ])
+        );
+        eprintln!(
+            "violation[{}] {}::{}: {}",
+            v.code, v.registry, v.row_id, v.msg
+        );
+    }
+    Ok(violations.len())
 }
 
 fn load(root: &Path) -> Result<Registries, String> {
@@ -248,6 +368,7 @@ fn run() -> Result<usize, String> {
     match args.command.as_str() {
         "validate" => Ok(run_validate(&r, &args.root)),
         "hash" => Ok(run_hash(&r)),
+        "identity" => run_identity(&args.root),
         "lint" => run_lint(&r, &args.root),
         "closure" => {
             let manifest = args.manifest.ok_or("closure requires --manifest <path>")?;
@@ -256,6 +377,7 @@ fn run() -> Result<usize, String> {
         "all" => {
             let mut failures = run_validate(&r, &args.root);
             failures += run_hash(&r);
+            failures += run_identity(&args.root)?;
             failures += run_lint(&r, &args.root)?;
             let manifest = args
                 .manifest

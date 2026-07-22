@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "G0 claim-registry validator: schemas, claims-lint, activation closure, twenty-ID hash pin. Std-only by constitution (the closed dependency universe applies to the tooling that enforces it)."
 publish = false
+default-run = "registry-check"
 
 [lints]
 workspace = true
