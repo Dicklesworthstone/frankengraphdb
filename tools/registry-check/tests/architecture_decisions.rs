@@ -95,6 +95,34 @@ fn architecture_identity_and_semantic_pins_are_independent() {
 }
 
 #[test]
+fn transparency_decisions_bind_the_exact_governed_invariants() -> Result<(), String> {
+    let registry = real_registry();
+    let expected = ["FG-INV-08", "FG-INV-10", "FG-INV-16"];
+
+    for id in [
+        "FG-ADR-GAP-VERIFIABILITY-ACCUMULATOR",
+        "FG-ADR-CAL-TRANSPARENCY-AUTHENTICATED-STORAGE",
+    ] {
+        let decision = registry
+            .decisions
+            .iter()
+            .find(|decision| decision.id == id)
+            .ok_or_else(|| format!("missing transparency decision {id}"))?;
+        assert_eq!(
+            decision
+                .affected_invariants
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            expected,
+            "{id} must bind the complete transparency invariant set"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn architecture_owner_reverse_walk_is_total_and_deterministic() {
     let registry = real_registry();
     let first = architecture::provenance_index(&registry);

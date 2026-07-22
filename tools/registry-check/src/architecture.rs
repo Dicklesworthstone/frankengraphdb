@@ -68,14 +68,14 @@ pub const BEAD_RESOLUTION_PRECEDENCE: [&str; 4] =
     ["direct_owner", "bet_label", "exact_override", "family_rule"];
 pub const ALLOWED_BET_LABELS: [&str; 6] = ["b1", "b2", "b3", "b4", "b5", "b6"];
 pub const ALLOWED_FAMILY_MATCH_KINDS: [&str; 2] = ["prefix", "appendix_a"];
-pub const PINNED_BEAD_COUNT: usize = 294;
+pub const PINNED_BEAD_COUNT: usize = 297;
 pub const PINNED_DIRECT_OWNER_COUNT: usize = 98;
-pub const PINNED_BET_LABEL_COUNT: usize = 154;
-pub const PINNED_EXACT_OVERRIDE_COUNT: usize = 10;
-pub const PINNED_FAMILY_RULE_COUNT: usize = 32;
+pub const PINNED_BET_LABEL_COUNT: usize = 155;
+pub const PINNED_EXACT_OVERRIDE_COUNT: usize = 11;
+pub const PINNED_FAMILY_RULE_COUNT: usize = 33;
 pub const PINNED_BEAD_FAMILY_TABLE_COUNT: usize = 14;
-pub const PINNED_BEAD_OVERRIDE_TABLE_COUNT: usize = 10;
-pub const PINNED_BEAD_BINDING_HASH: &str = "fnv1a64:252288593290c2fd";
+pub const PINNED_BEAD_OVERRIDE_TABLE_COUNT: usize = 11;
+pub const PINNED_BEAD_BINDING_HASH: &str = "fnv1a64:93d10c0944e04624";
 
 pub const PLANNED_CRATES: [&str; 70] = [
     "fgdb-types",
@@ -158,7 +158,7 @@ pub const PINNED_BIBLIOGRAPHY_COUNT: usize = 138;
 pub const PINNED_DECISION_ID_HASH: &str = "fnv1a64:21402ba5834603dd";
 pub const PINNED_BIBLIOGRAPHY_ID_HASH: &str = "fnv1a64:212896d82dc8caf7";
 pub const PINNED_BIBLIOGRAPHY_ANCHOR_HASH: &str = "fnv1a64:35bc497bde8cd1d4";
-pub const PINNED_SEMANTIC_CONTRACT_HASH: &str = "fnv1a64:61dde116193bd39f";
+pub const PINNED_SEMANTIC_CONTRACT_HASH: &str = "fnv1a64:eed24c34cbad7100";
 
 /// All non-bibliography counts are deliberately pinned.  Bibliography is
 /// normalized independently and its registry count is checked against the

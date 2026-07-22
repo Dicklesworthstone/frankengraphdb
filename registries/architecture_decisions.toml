@@ -166,19 +166,19 @@ count = 138
 source_path = ".beads/issues.jsonl"
 resolution_precedence = ["direct_owner", "bet_label", "exact_override", "family_rule"]
 allowed_bet_labels = ["b1", "b2", "b3", "b4", "b5", "b6"]
-bead_count = 294
+bead_count = 297
 direct_owner_count = 98
-bet_label_count = 154
-exact_override_count = 10
-family_rule_count = 32
-binding_hash = "fnv1a64:252288593290c2fd"
+bet_label_count = 155
+exact_override_count = 11
+family_rule_count = 33
+binding_hash = "fnv1a64:93d10c0944e04624"
 
 [[bead_family]]
 id = "appendix-a-catalog"
 match_kind = "appendix_a"
 pattern = "fgdb-a01..a21|fgdb-appendix-a-catalog-"
 decision_ids = ["FG-ADR-CON-06"]
-expected_match_count = 22
+expected_match_count = 23
 
 [[bead_family]]
 id = "risk-governance"
@@ -320,6 +320,11 @@ decision_ids = ["FG-ADR-BET-B6", "FG-ADR-CON-05"]
 id = "roadmap-external-verifier"
 bead_id = "fgdb-roadmap-external-verifier-sdk-uz3s"
 decision_ids = ["FG-ADR-BET-B5", "FG-ADR-CON-11"]
+
+[[bead_override]]
+id = "transparency-adr-invariant-closure"
+bead_id = "fgdb-transparency-adr-invariant-closure-ayeg"
+decision_ids = ["FG-ADR-GAP-VERIFIABILITY-ACCUMULATOR", "FG-ADR-CAL-TRANSPARENCY-AUTHENTICATED-STORAGE"]
 
 [[source_block]]
 id = "plan-thesis-foundations-sota-v1"
@@ -2002,7 +2007,7 @@ owner_beads = ["fgdb-w2-transparency-u929"]
 owner_crates = ["fgdb-chronicle", "fgdb-audit"]
 affected_bets = ["B1", "B5"]
 affected_constraints = ["FG-CON-01", "FG-CON-11"]
-affected_invariants = ["FG-INV-10"]
+affected_invariants = ["FG-INV-08", "FG-INV-10", "FG-INV-16"]
 affected_evidence = []
 affected_slos = []
 affected_cost_rows = ["reserved:transparency-append"]
@@ -3287,7 +3292,7 @@ owner_beads = ["fgdb-w2-transparency-u929"]
 owner_crates = ["fgdb-chronicle", "fgdb-audit"]
 affected_bets = ["B1", "B5"]
 affected_constraints = ["FG-CON-11"]
-affected_invariants = ["FG-INV-10"]
+affected_invariants = ["FG-INV-08", "FG-INV-10", "FG-INV-16"]
 affected_evidence = []
 affected_slos = []
 affected_cost_rows = ["reserved:transparency-append"]
