@@ -1,4 +1,4 @@
-//! Canonical, resource-bounded signed-limb exact integers.
+//! Canonical, allocation-bounded signed-limb exact integers.
 //!
 //! [`BigInt`] is the exact arithmetic kernel that Ripple's checked `i128`
 //! `ZWeight` fast path will promote into before overflow. Its private
@@ -126,6 +126,42 @@ impl fmt::Display for ArithmeticError {
 
 impl std::error::Error for ArithmeticError {}
 
+/// Stable rejection surface for importing an already allocated canonical
+/// magnitude from the separately owned codec layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstructionError {
+    LimbLimitExceeded { required_limbs: usize, limit: usize },
+    ZeroWithMagnitude { limb_count: usize },
+    NonzeroSignWithoutMagnitude { sign: Sign },
+    HighZeroLimb { sign: Sign, limb_count: usize },
+}
+
+impl fmt::Display for ConstructionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::LimbLimitExceeded {
+                required_limbs,
+                limit,
+            } => write!(
+                f,
+                "canonical magnitude has {required_limbs} limbs, limit is {limit}"
+            ),
+            Self::ZeroWithMagnitude { limb_count } => {
+                write!(f, "zero sign carried {limb_count} magnitude limbs")
+            }
+            Self::NonzeroSignWithoutMagnitude { sign } => {
+                write!(f, "{sign:?} sign requires a nonempty magnitude")
+            }
+            Self::HighZeroLimb { sign, limb_count } => write!(
+                f,
+                "{sign:?} magnitude with {limb_count} limbs has a high zero limb"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConstructionError {}
+
 impl BigInt {
     /// The canonical zero.
     pub const fn zero() -> Self {
@@ -179,12 +215,52 @@ impl BigInt {
         &self.limbs
     }
 
+    /// Imports a canonical sign and little-endian magnitude without copying or
+    /// defining any durable byte representation.
+    ///
+    /// A boxed slice makes the transferred allocation exactly length-shaped.
+    /// The codec must enforce its byte-length bound before allocating that
+    /// slice; this constructor independently enforces the logical limb limit.
+    pub fn from_canonical_limbs(
+        sign: Sign,
+        limbs_le: Box<[u64]>,
+        limit: LimbLimit,
+    ) -> Result<Self, ConstructionError> {
+        let limb_count = limbs_le.len();
+        if limb_count > limit.max_limbs() {
+            return Err(ConstructionError::LimbLimitExceeded {
+                required_limbs: limb_count,
+                limit: limit.max_limbs(),
+            });
+        }
+        match (sign, limb_count) {
+            (Sign::Zero, 0) => return Ok(Self::zero()),
+            (Sign::Zero, _) => {
+                return Err(ConstructionError::ZeroWithMagnitude { limb_count });
+            }
+            (Sign::Negative | Sign::Positive, 0) => {
+                return Err(ConstructionError::NonzeroSignWithoutMagnitude { sign });
+            }
+            (Sign::Negative | Sign::Positive, _) => {}
+        }
+        if limbs_le.last() == Some(&0) {
+            return Err(ConstructionError::HighZeroLimb { sign, limb_count });
+        }
+        Ok(Self {
+            negative: sign == Sign::Negative,
+            limbs: limbs_le.into_vec(),
+        })
+    }
+
     fn allocate_limbs(
         operation: ArithmeticOperation,
         required_limbs: usize,
         limit: LimbLimit,
     ) -> Result<Vec<u64>, ArithmeticError> {
         limit.ensure(operation, required_limbs)?;
+        if required_limbs > (isize::MAX as usize) / std::mem::size_of::<u64>() {
+            return Err(ArithmeticError::CapacityOverflow { operation });
+        }
         let mut limbs = Vec::new();
         limbs
             .try_reserve_exact(required_limbs)
@@ -210,13 +286,27 @@ impl BigInt {
     }
 
     pub fn from_u64(v: u64) -> Self {
-        Self::from_sign_magnitude(false, vec![v])
+        if v == 0 {
+            Self::zero()
+        } else {
+            Self {
+                negative: false,
+                limbs: vec![v],
+            }
+        }
     }
 
     pub fn from_u128(v: u128) -> Self {
         let lo = (v & u128::from(u64::MAX)) as u64;
         let hi = (v >> 64) as u64;
-        Self::from_sign_magnitude(false, vec![lo, hi])
+        if hi != 0 {
+            Self {
+                negative: false,
+                limbs: vec![lo, hi],
+            }
+        } else {
+            Self::from_u64(lo)
+        }
     }
 
     pub fn from_i128(v: i128) -> Self {
@@ -225,16 +315,19 @@ impl BigInt {
         let mag = v.unsigned_abs();
         let lo = (mag & u128::from(u64::MAX)) as u64;
         let hi = (mag >> 64) as u64;
-        Self::from_sign_magnitude(negative, vec![lo, hi])
+        let limbs = if hi != 0 {
+            vec![lo, hi]
+        } else if lo != 0 {
+            vec![lo]
+        } else {
+            return Self::zero();
+        };
+        Self { negative, limbs }
     }
 
     /// Fallibly copies this value within an explicit limb budget.
     pub fn checked_clone(&self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
-        let mut limbs = Self::allocate_limbs(
-            ArithmeticOperation::Clone,
-            self.limbs.len(),
-            limit,
-        )?;
+        let mut limbs = Self::allocate_limbs(ArithmeticOperation::Clone, self.limbs.len(), limit)?;
         limbs.extend_from_slice(&self.limbs);
         Ok(Self {
             negative: self.negative,
@@ -306,9 +399,8 @@ impl BigInt {
         operation: ArithmeticOperation,
         limit: LimbLimit,
     ) -> Result<Vec<u64>, ArithmeticError> {
-        let required = Self::add_magnitude_required(a, b).map_err(|_| {
-            ArithmeticError::CapacityOverflow { operation }
-        })?;
+        let required = Self::add_magnitude_required(a, b)
+            .map_err(|_| ArithmeticError::CapacityOverflow { operation })?;
         let mut out = Self::allocate_limbs(operation, required, limit)?;
         let mut carry = 0u128;
         for index in 0..required {
@@ -374,11 +466,12 @@ impl BigInt {
         let (high, carry_from_low) = high.overflowing_add(u64::from(carry_low));
         accumulator[1] = high;
         let carry = u64::from(carry_high || carry_from_low);
-        accumulator[2] = accumulator[2].checked_add(carry).ok_or(
-            ArithmeticError::CapacityOverflow {
-                operation: ArithmeticOperation::Multiply,
-            },
-        )?;
+        accumulator[2] =
+            accumulator[2]
+                .checked_add(carry)
+                .ok_or(ArithmeticError::CapacityOverflow {
+                    operation: ArithmeticOperation::Multiply,
+                })?;
         Ok(())
     }
 
@@ -391,13 +484,9 @@ impl BigInt {
         let first_left = column.saturating_sub(b.len() - 1);
         let last_left = column.min(a.len() - 1);
         if first_left <= last_left {
-            for left_index in first_left..=last_left {
+            for (left_index, &left) in a.iter().enumerate().take(last_left + 1).skip(first_left) {
                 let right_index = column - left_index;
-                Self::add_product_to_accumulator(
-                    accumulator,
-                    a[left_index],
-                    b[right_index],
-                )?;
+                Self::add_product_to_accumulator(accumulator, left, b[right_index])?;
             }
         }
         Ok(())
@@ -448,11 +537,7 @@ impl BigInt {
         Ok(required)
     }
 
-    fn mul_magnitude(
-        a: &[u64],
-        b: &[u64],
-        limit: LimbLimit,
-    ) -> Result<Vec<u64>, ArithmeticError> {
+    fn mul_magnitude(a: &[u64], b: &[u64], limit: LimbLimit) -> Result<Vec<u64>, ArithmeticError> {
         let required = Self::mul_magnitude_required(a, b)?;
         let mut out = Self::allocate_limbs(ArithmeticOperation::Multiply, required, limit)?;
         if required == 0 {
@@ -478,11 +563,7 @@ impl BigInt {
     }
 
     pub fn checked_neg(&self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
-        let mut limbs = Self::allocate_limbs(
-            ArithmeticOperation::Negate,
-            self.limbs.len(),
-            limit,
-        )?;
+        let mut limbs = Self::allocate_limbs(ArithmeticOperation::Negate, self.limbs.len(), limit)?;
         limbs.extend_from_slice(&self.limbs);
         Ok(Self {
             negative: !self.negative && !limbs.is_empty(),
@@ -490,50 +571,27 @@ impl BigInt {
         })
     }
 
-    pub fn checked_add(
-        &self,
-        other: &Self,
-        limit: LimbLimit,
-    ) -> Result<Self, ArithmeticError> {
+    pub fn checked_add(&self, other: &Self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
         if self.negative == other.negative {
             return Ok(Self::from_sign_magnitude(
                 self.negative,
-                Self::add_magnitude(
-                    &self.limbs,
-                    &other.limbs,
-                    ArithmeticOperation::Add,
-                    limit,
-                )?,
+                Self::add_magnitude(&self.limbs, &other.limbs, ArithmeticOperation::Add, limit)?,
             ));
         }
         match Self::cmp_magnitude(&self.limbs, &other.limbs) {
             Ordering::Equal => Ok(Self::zero()),
             Ordering::Greater => Ok(Self::from_sign_magnitude(
                 self.negative,
-                Self::sub_magnitude(
-                    &self.limbs,
-                    &other.limbs,
-                    ArithmeticOperation::Add,
-                    limit,
-                )?,
+                Self::sub_magnitude(&self.limbs, &other.limbs, ArithmeticOperation::Add, limit)?,
             )),
             Ordering::Less => Ok(Self::from_sign_magnitude(
                 other.negative,
-                Self::sub_magnitude(
-                    &other.limbs,
-                    &self.limbs,
-                    ArithmeticOperation::Add,
-                    limit,
-                )?,
+                Self::sub_magnitude(&other.limbs, &self.limbs, ArithmeticOperation::Add, limit)?,
             )),
         }
     }
 
-    pub fn checked_sub(
-        &self,
-        other: &Self,
-        limit: LimbLimit,
-    ) -> Result<Self, ArithmeticError> {
+    pub fn checked_sub(&self, other: &Self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
         if self.negative != other.negative {
             return Ok(Self::from_sign_magnitude(
                 self.negative,
@@ -568,11 +626,9 @@ impl BigInt {
         }
     }
 
-    pub fn checked_mul(
-        &self,
-        other: &Self,
-        limit: LimbLimit,
-    ) -> Result<Self, ArithmeticError> {
+    pub fn checked_mul(&self, other: &Self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
+        // `LimbLimit` bounds result allocation. CPU work is intentionally a
+        // separate concern for the downstream resource-ledger/Cx wrapper.
         Ok(Self::from_sign_magnitude(
             self.negative != other.negative,
             Self::mul_magnitude(&self.limbs, &other.limbs, limit)?,
@@ -629,6 +685,32 @@ mod tests {
         h.finish()
     }
 
+    /// Independent multiplication oracle: decompose the right magnitude into
+    /// bits and use only signed-limb addition and doubling.
+    fn shift_add_product(left: &BigInt, right: &BigInt) -> BigInt {
+        let mut result = BigInt::zero();
+        let mut addend = BigInt::from_sign_magnitude(false, left.limbs.clone());
+        for &limb in &right.limbs {
+            for bit in 0..64 {
+                if limb & (1u64 << bit) != 0 {
+                    result = result
+                        .checked_add(&addend, TEST_LIMIT)
+                        .expect("shift-add oracle result fits its test budget");
+                }
+                addend = addend
+                    .checked_add(&addend, TEST_LIMIT)
+                    .expect("shift-add oracle addend fits its test budget");
+            }
+        }
+        if left.negative != right.negative {
+            result
+                .checked_neg(TEST_LIMIT)
+                .expect("shift-add oracle sign fits its test budget")
+        } else {
+            result
+        }
+    }
+
     #[test]
     fn zero_is_canonical_and_unique() {
         assert!(BigInt::zero().is_canonical());
@@ -645,6 +727,73 @@ mod tests {
         assert_eq!(cancellation, BigInt::zero());
         assert_eq!(cancellation.sign(), Sign::Zero);
         assert!(!cancellation.is_negative());
+    }
+
+    #[test]
+    fn scalar_constructors_retain_no_known_zero_limb_slack() {
+        for value in [
+            BigInt::from_u64(0),
+            BigInt::from_u64(1),
+            BigInt::from_u128(0),
+            BigInt::from_u128(u128::from(u64::MAX)),
+            BigInt::from_u128(u128::from(u64::MAX) + 1),
+            BigInt::from_i128(0),
+            BigInt::from_i128(-1),
+            BigInt::from_i128(i128::MIN),
+        ] {
+            assert_eq!(value.limbs.capacity(), value.limbs.len());
+            assert!(value.is_canonical());
+        }
+    }
+
+    #[test]
+    fn canonical_limb_import_is_zero_copy_bounded_and_strict() {
+        let negative = BigInt::from_canonical_limbs(
+            Sign::Negative,
+            vec![0, 1].into_boxed_slice(),
+            LimbLimit::new(2),
+        )
+        .expect("canonical two-limb input");
+        assert_eq!(negative.sign(), Sign::Negative);
+        assert_eq!(negative.magnitude_limbs_le(), &[0, 1]);
+        assert_eq!(negative.limbs.capacity(), negative.limbs.len());
+
+        assert_eq!(
+            BigInt::from_canonical_limbs(
+                Sign::Positive,
+                vec![0, 1].into_boxed_slice(),
+                LimbLimit::new(1),
+            ),
+            Err(ConstructionError::LimbLimitExceeded {
+                required_limbs: 2,
+                limit: 1,
+            })
+        );
+        assert_eq!(
+            BigInt::from_canonical_limbs(Sign::Zero, vec![1].into_boxed_slice(), LimbLimit::new(1),),
+            Err(ConstructionError::ZeroWithMagnitude { limb_count: 1 })
+        );
+        assert_eq!(
+            BigInt::from_canonical_limbs(
+                Sign::Positive,
+                Vec::new().into_boxed_slice(),
+                LimbLimit::new(0),
+            ),
+            Err(ConstructionError::NonzeroSignWithoutMagnitude {
+                sign: Sign::Positive,
+            })
+        );
+        assert_eq!(
+            BigInt::from_canonical_limbs(
+                Sign::Negative,
+                vec![1, 0].into_boxed_slice(),
+                LimbLimit::new(2),
+            ),
+            Err(ConstructionError::HighZeroLimb {
+                sign: Sign::Negative,
+                limb_count: 2,
+            })
+        );
     }
 
     #[test]
@@ -704,6 +853,78 @@ mod tests {
             .expect("u64::MAX squared occupies two limbs");
         assert_eq!(square.magnitude_limbs_le(), &[1, u64::MAX - 1]);
         assert!(square.is_canonical());
+
+        let max_three = BigInt::from_sign_magnitude(false, vec![u64::MAX, u64::MAX, u64::MAX]);
+        let carried = max_three
+            .checked_add(&one, LimbLimit::new(4))
+            .expect("three-limb carry chain fits four limbs");
+        assert_eq!(carried.magnitude_limbs_le(), &[0, 0, 0, 1]);
+        assert_eq!(
+            carried
+                .checked_sub(&one, LimbLimit::new(3))
+                .expect("three-limb borrow chain returns to its input"),
+            max_three
+        );
+
+        let two_to_64_squared = two_to_64
+            .checked_mul(&two_to_64, LimbLimit::new(3))
+            .expect("two-by-two product takes n+m-1 limbs");
+        assert_eq!(two_to_64_squared.magnitude_limbs_le(), &[0, 0, 1]);
+        assert_eq!(
+            two_to_64.checked_mul(&two_to_64, LimbLimit::new(2)),
+            Err(ArithmeticError::LimbLimitExceeded {
+                operation: ArithmeticOperation::Multiply,
+                required_limbs: 3,
+                limit: 2,
+            })
+        );
+
+        let max_two = BigInt::from_sign_magnitude(false, vec![u64::MAX, u64::MAX]);
+        let four_limb_product = max_two
+            .checked_mul(&max_two, LimbLimit::new(4))
+            .expect("maximal two-by-two product takes n+m limbs");
+        assert_eq!(four_limb_product.limb_count(), 4);
+        assert_eq!(
+            max_two.checked_mul(&max_two, LimbLimit::new(3)),
+            Err(ArithmeticError::LimbLimitExceeded {
+                operation: ArithmeticOperation::Multiply,
+                required_limbs: 4,
+                limit: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn multi_limb_products_match_shift_add_oracle_and_exact_budget() {
+        for seed in [19u64, 0x5EED_5EED, u64::MAX - 1] {
+            let mut rng = SplitMix64(seed);
+            for _ in 0..80 {
+                let left = rng.bigint(3);
+                let right = rng.bigint(3);
+                let expected = shift_add_product(&left, &right);
+                let actual = left
+                    .checked_mul(&right, TEST_LIMIT)
+                    .expect("three-limb product fits the test budget");
+                assert_eq!(
+                    actual, expected,
+                    "seed={seed}, left={left:?}, right={right:?}"
+                );
+
+                let required_limbs = expected.limb_count();
+                if required_limbs != 0 {
+                    let limit = required_limbs - 1;
+                    assert_eq!(
+                        left.checked_mul(&right, LimbLimit::new(limit)),
+                        Err(ArithmeticError::LimbLimitExceeded {
+                            operation: ArithmeticOperation::Multiply,
+                            required_limbs,
+                            limit,
+                        }),
+                        "seed={seed}, multiplication did not report its exact result size"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -728,8 +949,7 @@ mod tests {
                 ArithmeticOperation::Add,
             ),
             (
-                BigInt::from_i128(i128::MAX)
-                    .checked_sub(&BigInt::from_i128(-1), LimbLimit::new(1)),
+                BigInt::from_i128(i128::MAX).checked_sub(&BigInt::from_i128(-1), LimbLimit::new(1)),
                 ArithmeticOperation::Subtract,
             ),
             (
@@ -764,6 +984,17 @@ mod tests {
                 operation: ArithmeticOperation::Add,
                 required_limbs: 1,
                 limit: 0,
+            })
+        );
+
+        assert_eq!(
+            BigInt::allocate_limbs(
+                ArithmeticOperation::Clone,
+                (isize::MAX as usize) / std::mem::size_of::<u64>() + 1,
+                LimbLimit::new(usize::MAX),
+            ),
+            Err(ArithmeticError::CapacityOverflow {
+                operation: ArithmeticOperation::Clone,
             })
         );
     }
@@ -807,9 +1038,7 @@ mod tests {
                 assert_eq!(left, right, "seed={seed}, multiply associativity");
 
                 let b_plus_c = b.checked_add(&c, TEST_LIMIT).expect("b + c");
-                let left = a
-                    .checked_mul(&b_plus_c, TEST_LIMIT)
-                    .expect("a * (b + c)");
+                let left = a.checked_mul(&b_plus_c, TEST_LIMIT).expect("a * (b + c)");
                 let ab = a.checked_mul(&b, TEST_LIMIT).expect("a * b");
                 let ac = a.checked_mul(&c, TEST_LIMIT).expect("a * c");
                 let right = ab.checked_add(&ac, TEST_LIMIT).expect("ab + ac");
@@ -834,12 +1063,10 @@ mod tests {
             for _ in 0..500 {
                 let x = rng.next() as i64;
                 let y = rng.next() as i64;
-                let (bx, by) = (BigInt::from_i128(x), BigInt::from_i128(y));
+                let (bx, by) = (BigInt::from_i64(x), BigInt::from_i64(y));
                 let ctx = format!("seed={seed} x={x} y={y}");
                 assert_eq!(
-                    bx.checked_add(&by, TEST_LIMIT)
-                        .expect("i64 sum")
-                        .to_i128(),
+                    bx.checked_add(&by, TEST_LIMIT).expect("i64 sum").to_i128(),
                     Some(i128::from(x) + i128::from(y)),
                     "sum: {ctx}"
                 );
@@ -902,5 +1129,4 @@ mod tests {
             }
         }
     }
-
 }

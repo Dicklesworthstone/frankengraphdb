@@ -7,7 +7,7 @@
 
 use crate::appendix_reference::{ReferenceTarget, census_plan_references};
 use crate::appendix_source::{
-    AppendixSourceCensus, SchemaCandidate, SchemaOwnerStatus, SourceSliceSpec,
+    AppendixSourceCensus, FieldCandidate, SchemaCandidate, SchemaOwnerStatus, SourceSliceSpec,
     census_appendix_source,
 };
 use crate::hash::sha256_hex;
@@ -17,7 +17,7 @@ use crate::{architecture, model};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 pub const CATALOG_SCHEMA_VERSION: i64 = 2;
 pub const CATALOG_NAME: &str = "appendix_a_catalog";
@@ -95,6 +95,8 @@ struct EvidenceScenarioSpec {
     status: &'static str,
     event_ids: &'static [&'static str],
     gate_ids: &'static [&'static str],
+    target_manifest_sha256: Option<&'static str>,
+    target_row_ids: &'static [&'static str],
 }
 
 const APPENDIX_EVIDENCE_SCENARIOS: [EvidenceScenarioSpec; 1] = [EvidenceScenarioSpec {
@@ -105,7 +107,70 @@ const APPENDIX_EVIDENCE_SCENARIOS: [EvidenceScenarioSpec; 1] = [EvidenceScenario
     status: "live",
     event_ids: &APPENDIX_EVIDENCE_EVENT_IDS,
     gate_ids: &["G0"],
+    target_manifest_sha256: Some(EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256),
+    target_row_ids: &[],
 }];
+
+#[derive(Debug, Clone, Copy)]
+struct CheckerContractSpec {
+    id: &'static str,
+    kind: &'static str,
+    artifact: &'static str,
+    status: &'static str,
+}
+
+const APPENDIX_MAINTENANCE_CHECKERS: [CheckerContractSpec; 3] = [
+    CheckerContractSpec {
+        id: "appendix_a_catalog_closure",
+        kind: "binary",
+        artifact: "tools/registry-check/src/appendix_a.rs",
+        status: "live",
+    },
+    CheckerContractSpec {
+        id: "appendix_a_catalog_projection_diff",
+        kind: "binary",
+        artifact: "tools/registry-check/src/appendix_a.rs",
+        status: "live",
+    },
+    CheckerContractSpec {
+        id: "appendix_a_catalog_source",
+        kind: "binary",
+        artifact: "tools/registry-check/src/appendix_a.rs",
+        status: "live",
+    },
+];
+
+#[derive(Debug, Clone, Copy)]
+struct SemanticBindingContractPin {
+    row_id: &'static str,
+    target_row_id: &'static str,
+    target_source_key: &'static str,
+    owner_bead_id: &'static str,
+    owner_crate: &'static str,
+    consumer_crates: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EvidenceBindingContractPin {
+    row_id: &'static str,
+    target_row_id: &'static str,
+    target_source_key: &'static str,
+    evidence_id: &'static str,
+    phase: &'static str,
+    status: &'static str,
+    owner_bead_id: &'static str,
+    checker_ids: &'static [&'static str],
+    scenario_ids: &'static [&'static str],
+    event_ids: &'static [&'static str],
+    gate_ids: &'static [&'static str],
+}
+
+// These independent, readable pins are deliberately empty while all A01-A21
+// slices are declared. A slice may add completion metadata only by adding the
+// exact reciprocal target/source/owner/evidence contract here in reviewed
+// code; changing the opaque transcript digest alone is never authorization.
+const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
+const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
 
 pub const PROJECTION_CLASSES: [&str; 6] = [
     "logical_object_kinds",
@@ -759,6 +824,11 @@ pub const SLICE_PINS: [SlicePin; 21] = [
 
 /// Parse one canonical catalog from the repository's strict TOML subset.
 pub fn parse_catalog(text: &str) -> Result<Catalog, Vec<Violation>> {
+    let catalog = parse_catalog_structural(text)?;
+    enforce_catalog_semantics(catalog)
+}
+
+fn parse_catalog_structural(text: &str) -> Result<Catalog, Vec<Violation>> {
     let root = match toml::parse(text) {
         Ok(root) => root,
         Err(error) => {
@@ -1002,6 +1072,10 @@ pub fn parse_catalog(text: &str) -> Result<Catalog, Vec<Violation>> {
         evidence,
         source_symbol_dispositions,
     };
+    Ok(catalog)
+}
+
+fn enforce_catalog_semantics(catalog: Catalog) -> Result<Catalog, Vec<Violation>> {
     let mut semantic = validate_catalog(&catalog);
     if semantic.is_empty() {
         Ok(catalog)
@@ -1014,6 +1088,11 @@ pub fn parse_catalog(text: &str) -> Result<Catalog, Vec<Violation>> {
 /// Load and parse a catalog file.  The file itself must also be UTF-8 LF
 /// without a BOM so the canonical source machinery never has two text modes.
 pub fn load_catalog_file(path: &Path) -> Result<Catalog, Vec<Violation>> {
+    let catalog = load_catalog_file_structural(path)?;
+    enforce_catalog_semantics(catalog)
+}
+
+fn load_catalog_file_structural(path: &Path) -> Result<Catalog, Vec<Violation>> {
     let bytes = fs::read(path).map_err(|error| {
         vec![Violation::new(
             "catalog_read",
@@ -1029,21 +1108,24 @@ pub fn load_catalog_file(path: &Path) -> Result<Catalog, Vec<Violation>> {
             format!("catalog is not UTF-8: {error}"),
         )]
     })?;
-    parse_catalog(text)
+    parse_catalog_structural(text)
 }
 
 /// Load the canonical repository catalog and verify its pinned plan source.
 pub fn load_and_verify(repo_root: &Path) -> Result<Catalog, Vec<Violation>> {
-    let catalog = load_catalog_file(&repo_root.join(CATALOG_PATH))?;
-    let source_path = repo_root.join(&catalog.source_manifest.plan_path);
-    let source = fs::read(&source_path).map_err(|error| {
-        vec![Violation::new(
-            "source_read",
-            "source_manifest",
-            format!("cannot read {}: {error}", source_path.display()),
-        )]
-    })?;
-    let mut violations = appendix_a_catalog_source(&catalog, &source);
+    let catalog = load_catalog_file_structural(&repo_root.join(CATALOG_PATH))?;
+    let mut violations = validate_catalog(&catalog);
+    if violations.is_empty() {
+        let source_path = repo_root.join(&catalog.source_manifest.plan_path);
+        match fs::read(&source_path) {
+            Ok(source) => violations.extend(appendix_a_catalog_source(&catalog, &source)),
+            Err(error) => violations.push(Violation::new(
+                "source_read",
+                "source_manifest",
+                format!("cannot read {}: {error}", source_path.display()),
+            )),
+        }
+    }
     violations.extend(verify_repository_bindings(repo_root, &catalog));
     sort_violations(&mut violations);
     if violations.is_empty() {
@@ -1081,13 +1163,31 @@ pub fn verify_repository_bindings(repo_root: &Path, catalog: &Catalog) -> Vec<Vi
         .map(|entry| entry.bead_id.as_str())
         .collect();
     let planned_crates: BTreeSet<&str> = architecture::PLANNED_CRATES.iter().copied().collect();
+    let workspace_crates = workspace_package_names(repo_root).ok();
 
     let mut out = Vec::new();
+    if workspace_crates.is_none() {
+        out.push(Violation::new(
+            "catalog_repository_workspace_unavailable",
+            "repository_bindings",
+            "cannot resolve actual Cargo workspace packages needed by Appendix implementation ownership",
+        ));
+    }
     if !bead_ids.contains(catalog.maintenance_proof.owner_bead_id.as_str()) {
         out.push(Violation::new(
             "catalog_maintenance_owner_bead_unresolved",
             "maintenance_proof",
             "maintenance owner_bead_id must resolve in the authoritative Beads index",
+        ));
+    }
+    if workspace_crates
+        .as_ref()
+        .is_some_and(|crates| !crates.contains(catalog.maintenance_proof.owner_crate.as_str()))
+    {
+        out.push(Violation::new(
+            "catalog_maintenance_owner_crate_unresolved",
+            "maintenance_proof",
+            "maintenance owner_crate must resolve to an actual Cargo workspace package",
         ));
     }
     for row in &catalog.semantic_bindings {
@@ -1098,11 +1198,14 @@ pub fn verify_repository_bindings(repo_root: &Path, catalog: &Catalog) -> Vec<Vi
                 "semantic owner_bead_id must resolve in the authoritative Beads index",
             ));
         }
-        if !planned_crates.contains(row.owner_crate.as_str()) {
+        if workspace_crates
+            .as_ref()
+            .is_some_and(|crates| !crates.contains(row.owner_crate.as_str()))
+        {
             out.push(Violation::new(
                 "catalog_semantic_owner_crate_unresolved",
                 &row.row_id,
-                "semantic owner_crate must resolve in the planned crate registry",
+                "semantic owner_crate must resolve to an actual Cargo workspace package",
             ));
         }
         if row
@@ -1141,22 +1244,31 @@ pub fn verify_repository_bindings(repo_root: &Path, catalog: &Catalog) -> Vec<Vi
             "checker_index.toml contains duplicate symbols",
         ));
     }
-    validate_scenario_registry(&checker_by_id, &mut out);
+    validate_maintenance_checker_registry(&checker_by_id, &mut out);
+    validate_scenario_registry(repo_root, &checker_by_id, catalog, &mut out);
     validate_checker_bindings(
+        repo_root,
         "maintenance_proof",
         &catalog.maintenance_proof.evidence_status,
         &catalog.maintenance_proof.checker_ids,
-        "catalog_maintenance_checker_unresolved",
-        "catalog_maintenance_checker_not_live",
+        CheckerBindingCodes {
+            unresolved: "catalog_maintenance_checker_unresolved",
+            not_live: "catalog_maintenance_checker_not_live",
+            artifact_missing: "catalog_maintenance_checker_artifact_missing",
+        },
         &checker_by_id,
         &mut out,
     );
     validate_scenario_bindings(
         "maintenance_proof",
         &catalog.maintenance_proof.evidence_status,
-        &catalog.maintenance_proof.scenario_ids,
-        &catalog.maintenance_proof.event_ids,
-        &catalog.maintenance_proof.gate_ids,
+        ScenarioBindingRefs {
+            scenario_ids: &catalog.maintenance_proof.scenario_ids,
+            event_ids: &catalog.maintenance_proof.event_ids,
+            gate_ids: &catalog.maintenance_proof.gate_ids,
+            target_row_id: None,
+        },
+        catalog,
         &mut out,
     );
     for row in &catalog.evidence {
@@ -1168,25 +1280,99 @@ pub fn verify_repository_bindings(repo_root: &Path, catalog: &Catalog) -> Vec<Vi
             ));
         }
         validate_checker_bindings(
+            repo_root,
             &row.row_id,
             &row.status,
             &row.checker_ids,
-            "catalog_evidence_checker_unresolved",
-            "catalog_live_evidence_checker_not_live",
+            CheckerBindingCodes {
+                unresolved: "catalog_evidence_checker_unresolved",
+                not_live: "catalog_live_evidence_checker_not_live",
+                artifact_missing: "catalog_live_evidence_checker_artifact_missing",
+            },
             &checker_by_id,
             &mut out,
         );
         validate_scenario_bindings(
             &row.row_id,
             &row.status,
-            &row.scenario_ids,
-            &row.event_ids,
-            &row.gate_ids,
+            ScenarioBindingRefs {
+                scenario_ids: &row.scenario_ids,
+                event_ids: &row.event_ids,
+                gate_ids: &row.gate_ids,
+                target_row_id: Some(&row.target_row_id),
+            },
+            catalog,
             &mut out,
         );
     }
     sort_violations(&mut out);
     out
+}
+
+fn workspace_package_names(repo_root: &Path) -> Result<BTreeSet<String>, String> {
+    let workspace_text = fs::read_to_string(repo_root.join("Cargo.toml"))
+        .map_err(|error| format!("Cargo.toml: {error}"))?;
+    let workspace_manifest =
+        toml::parse(&workspace_text).map_err(|error| format!("Cargo.toml: {error}"))?;
+    let workspace = toml::get_table(&workspace_manifest, "workspace", "Cargo.toml")
+        .map_err(|error| error.to_string())?;
+    let members = toml::get_str_array(workspace, "members", "Cargo.toml.workspace")
+        .map_err(|error| error.to_string())?;
+    let mut member_paths = Vec::new();
+    for member in members {
+        if let Some(parent) = member.strip_suffix("/*") {
+            if !safe_repository_relative(parent) {
+                return Err(format!("unsafe Cargo workspace member glob {member:?}"));
+            }
+            let mut children = fs::read_dir(repo_root.join(parent))
+                .map_err(|error| format!("workspace member glob {member:?}: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("workspace member glob {member:?}: {error}"))?;
+            children.sort_by_key(|entry| entry.file_name());
+            member_paths.extend(
+                children
+                    .into_iter()
+                    .filter(|child| child.path().join("Cargo.toml").is_file())
+                    .map(|child| Path::new(parent).join(child.file_name())),
+            );
+        } else if safe_repository_relative(&member) {
+            member_paths.push(Path::new(&member).to_owned());
+        } else {
+            return Err(format!("unsafe Cargo workspace member path {member:?}"));
+        }
+    }
+    member_paths.sort();
+    member_paths.dedup();
+
+    let mut packages = BTreeSet::new();
+    for member_path in member_paths {
+        let manifest_path = repo_root.join(&member_path).join("Cargo.toml");
+        let manifest_text = fs::read_to_string(&manifest_path)
+            .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+        let manifest = toml::parse(&manifest_text)
+            .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+        let package = toml::get_table(&manifest, "package", "workspace member Cargo.toml")
+            .map_err(|error| error.to_string())?;
+        let package_name = toml::get_str(package, "name", "workspace member Cargo.toml.package")
+            .map_err(|error| error.to_string())?;
+        if !packages.insert(package_name) {
+            return Err("Cargo workspace contains duplicate package names".to_owned());
+        }
+    }
+    Ok(packages)
+}
+
+fn safe_repository_relative(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
+fn live_checker_artifact_exists(repo_root: &Path, checker: &model::Checker) -> bool {
+    safe_repository_relative(&checker.artifact) && repo_root.join(&checker.artifact).is_file()
 }
 
 fn load_appendix_checker_index(repo_root: &Path) -> Option<Vec<model::Checker>> {
@@ -1202,8 +1388,29 @@ fn load_appendix_checker_index(repo_root: &Path) -> Option<Vec<model::Checker>> 
     model::checker_index_from(&root).ok()
 }
 
-fn validate_scenario_registry(
+fn validate_maintenance_checker_registry(
     checker_by_id: &BTreeMap<&str, &model::Checker>,
+    out: &mut Vec<Violation>,
+) {
+    for contract in APPENDIX_MAINTENANCE_CHECKERS {
+        match checker_by_id.get(contract.id).copied() {
+            Some(checker)
+                if checker.kind == contract.kind
+                    && checker.artifact == contract.artifact
+                    && checker.status == contract.status => {}
+            _ => out.push(Violation::new(
+                "catalog_maintenance_checker_registry_drift",
+                "maintenance_proof",
+                "Appendix maintenance checker ID, kind, artifact, and live status must byte-match the compiled contract",
+            )),
+        }
+    }
+}
+
+fn validate_scenario_registry(
+    repo_root: &Path,
+    checker_by_id: &BTreeMap<&str, &model::Checker>,
+    catalog: &Catalog,
     out: &mut Vec<Violation>,
 ) {
     for scenario in APPENDIX_EVIDENCE_SCENARIOS {
@@ -1218,30 +1425,85 @@ fn validate_scenario_registry(
                 "compiled Appendix scenario does not resolve to its exact checker contract",
             )),
         }
+        if checker_by_id
+            .get(scenario.checker_id)
+            .is_some_and(|checker| {
+                checker.status == "live" && !live_checker_artifact_exists(repo_root, checker)
+            })
+        {
+            out.push(Violation::new(
+                "catalog_scenario_checker_artifact_missing",
+                "repository_bindings",
+                "compiled live Appendix scenario checker must resolve to a safe existing repository artifact",
+            ));
+        }
+        let target_scope_valid = match scenario.target_manifest_sha256 {
+            Some(sha256) => {
+                scenario.target_row_ids.is_empty()
+                    && sha256 == catalog.target_manifest.target_source_assignment_sha256
+                    && sha256 == EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256
+            }
+            None => {
+                !scenario.target_row_ids.is_empty()
+                    && scenario
+                        .target_row_ids
+                        .windows(2)
+                        .all(|pair| pair[0] < pair[1])
+                    && scenario.target_row_ids.iter().all(|target_row_id| {
+                        catalog
+                            .targets
+                            .iter()
+                            .any(|target| target.target_row_id == *target_row_id)
+                    })
+            }
+        };
+        if !target_scope_valid {
+            out.push(Violation::new(
+                "catalog_scenario_target_scope_drift",
+                "repository_bindings",
+                "compiled Appendix scenario must bind either the released target manifest or one exact sorted target set",
+            ));
+        }
     }
 }
 
+struct CheckerBindingCodes<'a> {
+    unresolved: &'a str,
+    not_live: &'a str,
+    artifact_missing: &'a str,
+}
+
 fn validate_checker_bindings(
+    repo_root: &Path,
     row_id: &str,
     evidence_status: &str,
     ids: &[String],
-    unresolved_code: &str,
-    not_live_code: &str,
+    codes: CheckerBindingCodes<'_>,
     checker_by_id: &BTreeMap<&str, &model::Checker>,
     out: &mut Vec<Violation>,
 ) {
     for id in ids {
         match checker_by_id.get(id.as_str()) {
             None => out.push(Violation::new(
-                unresolved_code,
+                codes.unresolved,
                 row_id,
                 "every checker ID must resolve in checker_index.toml",
             )),
             Some(checker) if evidence_status == "live" && checker.status != "live" => {
                 out.push(Violation::new(
-                    not_live_code,
+                    codes.not_live,
                     row_id,
                     "live evidence requires every referenced checker to be live",
+                ));
+            }
+            Some(checker)
+                if evidence_status == "live"
+                    && !live_checker_artifact_exists(repo_root, checker) =>
+            {
+                out.push(Violation::new(
+                    codes.artifact_missing,
+                    row_id,
+                    "live evidence requires every referenced checker artifact to be a safe existing repository file",
                 ));
             }
             Some(_) => {}
@@ -1249,14 +1511,26 @@ fn validate_checker_bindings(
     }
 }
 
+struct ScenarioBindingRefs<'a> {
+    scenario_ids: &'a [String],
+    event_ids: &'a [String],
+    gate_ids: &'a [String],
+    target_row_id: Option<&'a str>,
+}
+
 fn validate_scenario_bindings(
     row_id: &str,
     evidence_status: &str,
-    scenario_ids: &[String],
-    event_ids: &[String],
-    gate_ids: &[String],
+    bindings: ScenarioBindingRefs<'_>,
+    catalog: &Catalog,
     out: &mut Vec<Violation>,
 ) {
+    let ScenarioBindingRefs {
+        scenario_ids,
+        event_ids,
+        gate_ids,
+        target_row_id,
+    } = bindings;
     let mut allowed_events = BTreeSet::new();
     let mut allowed_gates = BTreeSet::new();
     for scenario_id in scenario_ids {
@@ -1276,6 +1550,15 @@ fn validate_scenario_bindings(
                 "catalog_live_evidence_scenario_not_live",
                 row_id,
                 "live evidence requires every referenced scenario to be live",
+            ));
+        }
+        if target_row_id
+            .is_some_and(|target_row_id| !scenario_covers_target(scenario, target_row_id, catalog))
+        {
+            out.push(Violation::new(
+                "catalog_evidence_scenario_target_uncovered",
+                row_id,
+                "referenced scenario does not cover this exact catalog target",
             ));
         }
         allowed_events.extend(scenario.event_ids.iter().copied());
@@ -1310,6 +1593,24 @@ fn validate_scenario_bindings(
             row_id,
             "every evidence gate must be declared by a referenced scenario",
         ));
+    }
+}
+
+fn scenario_covers_target(
+    scenario: &EvidenceScenarioSpec,
+    target_row_id: &str,
+    catalog: &Catalog,
+) -> bool {
+    match scenario.target_manifest_sha256 {
+        Some(sha256) => {
+            scenario.target_row_ids.is_empty()
+                && sha256 == catalog.target_manifest.target_source_assignment_sha256
+                && catalog
+                    .targets
+                    .iter()
+                    .any(|target| target.target_row_id == target_row_id)
+        }
+        None => scenario.target_row_ids.contains(&target_row_id),
     }
 }
 
@@ -1986,6 +2287,11 @@ fn verify_annotation_source_contracts(
         .iter()
         .map(|field| (field.key.source_key(), field))
         .collect();
+    let schema_by_source_key: BTreeMap<String, &SchemaCandidate> = census
+        .schemas
+        .iter()
+        .map(|schema| (schema.key.source_key(), schema))
+        .collect();
 
     for annotation in &catalog.annotations {
         let Some(target) = target_by_projection
@@ -1994,37 +2300,213 @@ fn verify_annotation_source_contracts(
         else {
             continue;
         };
-        let Some(field) = field_by_source_key.get(&target.source_key).copied() else {
-            continue;
-        };
-        let source_is_exact = !field.ambiguous
-            && !field.type_conflict
-            && matches!(field.exact_types.as_slice(), [_])
-            && matches!(field.cardinalities.as_slice(), [_]);
-        if !source_is_exact {
-            if target.definition_status == "complete" {
+        if let Some(field) = field_by_source_key.get(&target.source_key).copied() {
+            let source_is_exact = !field.ambiguous
+                && !field.type_conflict
+                && matches!(field.exact_types.as_slice(), [_])
+                && matches!(field.cardinalities.as_slice(), [_]);
+            if !source_is_exact {
+                if target.definition_status == "complete" {
+                    out.push(Violation::new(
+                        "source_annotation_contract_ambiguous",
+                        &annotation.row_id,
+                        "complete field annotation requires one unambiguous source exact_type and cardinality",
+                    ));
+                }
+                continue;
+            }
+            let exact_type = &field.exact_types[0];
+            let cardinality = field.cardinalities[0].as_str();
+            if annotation.exact_type != exact_type.as_str() || annotation.cardinality != cardinality
+            {
                 out.push(Violation::new(
-                    "source_annotation_contract_ambiguous",
+                    "source_annotation_contract_mismatch",
                     &annotation.row_id,
-                    "complete field annotation requires one unambiguous source exact_type and cardinality",
+                    format!(
+                        "field annotation must byte-match source exact_type {exact_type:?} and cardinality {cardinality:?}"
+                    ),
                 ));
             }
             continue;
         }
-        let exact_type = &field.exact_types[0];
-        let cardinality = field.cardinalities[0].as_str();
-        if annotation.exact_type != exact_type.as_str()
-            || annotation.cardinality != cardinality
-        {
-            out.push(Violation::new(
-                "source_annotation_contract_mismatch",
-                &annotation.row_id,
-                format!(
-                    "field annotation must byte-match source exact_type {exact_type:?} and cardinality {cardinality:?}"
-                ),
-            ));
+
+        if let Some(schema) = schema_by_source_key.get(&target.source_key).copied() {
+            let exact_type_matches = annotation.exact_type == schema.key.family;
+            let expansions_match =
+                top_level_annotation_expansions_match(annotation, schema, &census.schemas);
+            if !exact_type_matches || !expansions_match {
+                out.push(Violation::new(
+                    "source_annotation_contract_mismatch",
+                    &annotation.row_id,
+                    format!(
+                        "top-level annotation must name source family {:?} and discharge generic signature {:?} through exact concrete role/generic expansions",
+                        schema.key.family, schema.key.generic_signature
+                    ),
+                ));
+            }
         }
     }
+}
+
+fn top_level_annotation_expansions_match(
+    annotation: &Annotation,
+    schema: &SchemaCandidate,
+    schemas: &[SchemaCandidate],
+) -> bool {
+    let formals = generic_formals_from_signature(&schema.key.generic_signature);
+    let requires_role_expansions = formals.contains("Role");
+    let requires_generic_expansions = formals.iter().any(|formal| formal != "Role");
+    let (expected_role_expansions, expected_generic_expansions) =
+        source_concrete_expansion_sets(schema, schemas);
+    let actual_role_expansions: BTreeSet<&str> = annotation
+        .role_expansions
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let actual_generic_expansions: BTreeSet<&str> = annotation
+        .generic_expansions
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    expansion_set_matches(
+        &annotation.role_expansions,
+        &actual_role_expansions,
+        requires_role_expansions,
+        &expected_role_expansions,
+    ) && expansion_set_matches(
+        &annotation.generic_expansions,
+        &actual_generic_expansions,
+        requires_generic_expansions,
+        &expected_generic_expansions,
+    )
+}
+
+fn expansion_set_matches(
+    actual: &[String],
+    actual_set: &BTreeSet<&str>,
+    required: bool,
+    expected: &BTreeSet<String>,
+) -> bool {
+    if !required {
+        return actual.is_empty();
+    }
+    if actual.is_empty() || actual.len() != actual_set.len() {
+        return false;
+    }
+    expected.is_empty()
+        || (actual.len() == expected.len()
+            && actual_set
+                .iter()
+                .copied()
+                .eq(expected.iter().map(String::as_str)))
+}
+
+fn source_concrete_expansion_sets(
+    schema: &SchemaCandidate,
+    schemas: &[SchemaCandidate],
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let Some(formal_parameters) = generic_signature_parameters(&schema.key.generic_signature)
+    else {
+        return (BTreeSet::new(), BTreeSet::new());
+    };
+    let mut role_expansions = BTreeSet::new();
+    let mut generic_expansions = BTreeSet::new();
+
+    for (index, formal_parameter) in formal_parameters.iter().enumerate() {
+        let Some(formal) = generic_parameter_formal(formal_parameter) else {
+            continue;
+        };
+        if let Some((_, bound)) = formal_parameter.split_once(':')
+            && bound.contains('|')
+            && let Some(values) = concrete_parameter_alternatives(bound)
+        {
+            expansion_set_for_formal(formal, &mut role_expansions, &mut generic_expansions)
+                .extend(values);
+        }
+        for candidate in schemas
+            .iter()
+            .filter(|candidate| candidate.key.family == schema.key.family)
+        {
+            let Some(candidate_parameters) =
+                generic_signature_parameters(&candidate.key.generic_signature)
+            else {
+                continue;
+            };
+            if candidate_parameters.len() != formal_parameters.len() {
+                continue;
+            }
+            let Some(values) = candidate_parameters
+                .get(index)
+                .and_then(|parameter| concrete_parameter_alternatives(parameter))
+            else {
+                continue;
+            };
+            expansion_set_for_formal(formal, &mut role_expansions, &mut generic_expansions)
+                .extend(values);
+        }
+    }
+    (role_expansions, generic_expansions)
+}
+
+fn expansion_set_for_formal<'a>(
+    formal: &str,
+    role_expansions: &'a mut BTreeSet<String>,
+    generic_expansions: &'a mut BTreeSet<String>,
+) -> &'a mut BTreeSet<String> {
+    if formal == "Role" {
+        role_expansions
+    } else {
+        generic_expansions
+    }
+}
+
+fn generic_signature_parameters(signature: &str) -> Option<Vec<&str>> {
+    if signature.is_empty() {
+        return Some(Vec::new());
+    }
+    let inner = signature.strip_prefix('<')?.strip_suffix('>')?.trim();
+    if inner.is_empty() {
+        return None;
+    }
+    Some(inner.split(',').map(str::trim).collect())
+}
+
+fn generic_parameter_formal(parameter: &str) -> Option<&str> {
+    const KNOWN_FORMALS: [&str; 9] = [
+        "T",
+        "Role",
+        "Contract",
+        "Kind",
+        "Profile",
+        "Disposition",
+        "Operation",
+        "Action",
+        "Tag",
+    ];
+    let formal = parameter
+        .split_once(':')
+        .map_or(parameter.trim(), |(formal, _)| formal.trim());
+    KNOWN_FORMALS.contains(&formal).then_some(formal)
+}
+
+fn concrete_parameter_alternatives(parameter: &str) -> Option<Vec<String>> {
+    if generic_parameter_formal(parameter).is_some() {
+        return None;
+    }
+    let values: Vec<String> = parameter
+        .split('|')
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect();
+    (!values.is_empty()
+        && values.iter().all(|value| {
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        }))
+    .then_some(values)
 }
 
 fn verify_top_level_source_candidates(
@@ -3510,6 +3992,279 @@ fn validate_binding_contract_pins(catalog: &Catalog, out: &mut Vec<Violation>) {
             ),
         ));
     }
+    validate_readable_binding_contract(catalog, out);
+}
+
+fn validate_readable_binding_contract(catalog: &Catalog, out: &mut Vec<Violation>) {
+    validate_readable_binding_contract_with(
+        catalog,
+        &SEMANTIC_BINDING_CONTRACT,
+        &EVIDENCE_BINDING_CONTRACT,
+        EXPECTED_SEMANTIC_BINDING_COUNT,
+        EXPECTED_EVIDENCE_BINDING_COUNT,
+        out,
+    );
+}
+
+fn validate_readable_binding_contract_with(
+    catalog: &Catalog,
+    semantic_contract: &[SemanticBindingContractPin],
+    evidence_contract: &[EvidenceBindingContractPin],
+    expected_semantic_count: usize,
+    expected_evidence_count: usize,
+    out: &mut Vec<Violation>,
+) {
+    if semantic_contract.len() != expected_semantic_count
+        || evidence_contract.len() != expected_evidence_count
+    {
+        out.push(Violation::new(
+            "catalog_binding_contract_pin_inconsistent",
+            "binding_contract",
+            "readable per-target binding pins and released transcript counts must be updated together",
+        ));
+    }
+
+    let target_by_id: BTreeMap<&str, &Target> = catalog
+        .targets
+        .iter()
+        .map(|target| (target.target_row_id.as_str(), target))
+        .collect();
+    let semantic_pins: BTreeMap<&str, &SemanticBindingContractPin> = semantic_contract
+        .iter()
+        .map(|pin| (pin.row_id, pin))
+        .collect();
+    if semantic_pins.len() != semantic_contract.len() {
+        out.push(Violation::new(
+            "catalog_semantic_binding_contract_ambiguous",
+            "semantic_binding",
+            "readable semantic binding contract contains duplicate row IDs",
+        ));
+    }
+    for row in &catalog.semantic_bindings {
+        let source_key = target_by_id
+            .get(row.target_row_id.as_str())
+            .map(|target| target.source_key.as_str());
+        match semantic_pins.get(row.row_id.as_str()).copied() {
+            Some(pin)
+                if row.target_row_id == pin.target_row_id
+                    && source_key == Some(pin.target_source_key)
+                    && row.owner_bead_id == pin.owner_bead_id
+                    && row.owner_crate == pin.owner_crate
+                    && row
+                        .consumer_crates
+                        .iter()
+                        .map(String::as_str)
+                        .eq(pin.consumer_crates.iter().copied()) => {}
+            Some(_) => out.push(Violation::new(
+                "catalog_semantic_binding_contract_mismatch",
+                &row.row_id,
+                "semantic binding does not byte-match its readable target/source/owner/consumer contract",
+            )),
+            None => out.push(Violation::new(
+                "catalog_semantic_binding_contract_unapproved",
+                &row.row_id,
+                "semantic binding has no independent readable per-target contract",
+            )),
+        }
+    }
+    let semantic_rows: BTreeSet<&str> = catalog
+        .semantic_bindings
+        .iter()
+        .map(|row| row.row_id.as_str())
+        .collect();
+    for pin in semantic_contract {
+        if !semantic_rows.contains(pin.row_id) {
+            out.push(Violation::new(
+                "catalog_semantic_binding_contract_missing",
+                pin.row_id,
+                "readable semantic binding contract has no reciprocal catalog row",
+            ));
+        }
+    }
+
+    let evidence_pins: BTreeMap<&str, &EvidenceBindingContractPin> = evidence_contract
+        .iter()
+        .map(|pin| (pin.row_id, pin))
+        .collect();
+    if evidence_pins.len() != evidence_contract.len() {
+        out.push(Violation::new(
+            "catalog_evidence_binding_contract_ambiguous",
+            "evidence",
+            "readable evidence binding contract contains duplicate row IDs",
+        ));
+    }
+    for row in &catalog.evidence {
+        let source_key = target_by_id
+            .get(row.target_row_id.as_str())
+            .map(|target| target.source_key.as_str());
+        match evidence_pins.get(row.row_id.as_str()).copied() {
+            Some(pin)
+                if row.target_row_id == pin.target_row_id
+                    && source_key == Some(pin.target_source_key)
+                    && row.evidence_id == pin.evidence_id
+                    && row.phase == pin.phase
+                    && row.status == pin.status
+                    && row.owner_bead_id == pin.owner_bead_id
+                    && row
+                        .checker_ids
+                        .iter()
+                        .map(String::as_str)
+                        .eq(pin.checker_ids.iter().copied())
+                    && row
+                        .scenario_ids
+                        .iter()
+                        .map(String::as_str)
+                        .eq(pin.scenario_ids.iter().copied())
+                    && row
+                        .event_ids
+                        .iter()
+                        .map(String::as_str)
+                        .eq(pin.event_ids.iter().copied())
+                    && row
+                        .gate_ids
+                        .iter()
+                        .map(String::as_str)
+                        .eq(pin.gate_ids.iter().copied()) => {}
+            Some(_) => out.push(Violation::new(
+                "catalog_evidence_binding_contract_mismatch",
+                &row.row_id,
+                "evidence binding does not byte-match its readable target/source/owner/checker/scenario/event/gate contract",
+            )),
+            None => out.push(Violation::new(
+                "catalog_evidence_binding_contract_unapproved",
+                &row.row_id,
+                "evidence binding has no independent readable per-target contract",
+            )),
+        }
+    }
+    let evidence_rows: BTreeSet<&str> = catalog
+        .evidence
+        .iter()
+        .map(|row| row.row_id.as_str())
+        .collect();
+    for pin in evidence_contract {
+        if !evidence_rows.contains(pin.row_id) {
+            out.push(Violation::new(
+                "catalog_evidence_binding_contract_missing",
+                pin.row_id,
+                "readable evidence binding contract has no reciprocal catalog row",
+            ));
+        }
+    }
+}
+
+fn semantic_binding_contract_matches_with(
+    contract: &[SemanticBindingContractPin],
+    catalog: &Catalog,
+    row: &SemanticBinding,
+) -> bool {
+    let Some(pin) = contract.iter().find(|pin| pin.row_id == row.row_id) else {
+        return false;
+    };
+    let source_key = catalog
+        .targets
+        .iter()
+        .find(|target| target.target_row_id == row.target_row_id)
+        .map(|target| target.source_key.as_str());
+    row.target_row_id == pin.target_row_id
+        && source_key == Some(pin.target_source_key)
+        && row.owner_bead_id == pin.owner_bead_id
+        && row.owner_crate == pin.owner_crate
+        && row
+            .consumer_crates
+            .iter()
+            .map(String::as_str)
+            .eq(pin.consumer_crates.iter().copied())
+}
+
+fn evidence_binding_contract_matches_with(
+    contract: &[EvidenceBindingContractPin],
+    catalog: &Catalog,
+    row: &EvidenceBinding,
+) -> bool {
+    let Some(pin) = contract.iter().find(|pin| pin.row_id == row.row_id) else {
+        return false;
+    };
+    let source_key = catalog
+        .targets
+        .iter()
+        .find(|target| target.target_row_id == row.target_row_id)
+        .map(|target| target.source_key.as_str());
+    row.target_row_id == pin.target_row_id
+        && source_key == Some(pin.target_source_key)
+        && row.evidence_id == pin.evidence_id
+        && row.phase == pin.phase
+        && row.status == pin.status
+        && row.owner_bead_id == pin.owner_bead_id
+        && row
+            .checker_ids
+            .iter()
+            .map(String::as_str)
+            .eq(pin.checker_ids.iter().copied())
+        && row
+            .scenario_ids
+            .iter()
+            .map(String::as_str)
+            .eq(pin.scenario_ids.iter().copied())
+        && row
+            .event_ids
+            .iter()
+            .map(String::as_str)
+            .eq(pin.event_ids.iter().copied())
+        && row
+            .gate_ids
+            .iter()
+            .map(String::as_str)
+            .eq(pin.gate_ids.iter().copied())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ApprovedBindingCounts {
+    semantic: BTreeMap<String, usize>,
+    static_live: BTreeMap<String, usize>,
+    runtime: BTreeMap<String, usize>,
+}
+
+fn approved_binding_counts(catalog: &Catalog) -> ApprovedBindingCounts {
+    approved_binding_counts_with(
+        catalog,
+        &SEMANTIC_BINDING_CONTRACT,
+        &EVIDENCE_BINDING_CONTRACT,
+    )
+}
+
+fn approved_binding_counts_with(
+    catalog: &Catalog,
+    semantic_contract: &[SemanticBindingContractPin],
+    evidence_contract: &[EvidenceBindingContractPin],
+) -> ApprovedBindingCounts {
+    let mut counts = ApprovedBindingCounts::default();
+    for row in &catalog.semantic_bindings {
+        if semantic_binding_contract_matches_with(semantic_contract, catalog, row) {
+            *counts
+                .semantic
+                .entry(row.target_row_id.clone())
+                .or_default() += 1;
+        }
+    }
+    for row in &catalog.evidence {
+        if !evidence_binding_contract_matches_with(evidence_contract, catalog, row) {
+            continue;
+        }
+        if row.phase == "static"
+            && row.status == "live"
+            && row.gate_ids.iter().any(|gate| gate == "G0")
+        {
+            *counts
+                .static_live
+                .entry(row.target_row_id.clone())
+                .or_default() += 1;
+        }
+        if row.phase == "runtime" {
+            *counts.runtime.entry(row.target_row_id.clone()).or_default() += 1;
+        }
+    }
+    counts
 }
 
 fn validate_source_manifest_pin(manifest: &SourceManifest, out: &mut Vec<Violation>) {
@@ -4102,26 +4857,24 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
     for reservation in &catalog.reservations {
         schema_family_by_id.insert(reservation.row_id.as_str(), reservation.symbol.clone());
     }
-    for candidate in &catalog.top_level_candidates {
-        schema_family_by_id.insert(candidate.row_id.as_str(), candidate.symbol.clone());
-    }
-    for projection in &catalog.projection_rows {
-        schema_family_by_id.insert(
-            projection.row_id.as_str(),
-            projection.canonical_symbol.clone(),
-        );
-    }
-    for target in &catalog.targets {
-        if let Some(projection) = projection_by_row_id.get(target.target_row_id.as_str()) {
-            schema_family_by_id.insert(
-                target.row_id.as_str(),
-                projection.canonical_symbol.clone(),
-            );
+    let known_schema_ids: BTreeSet<&str> = schema_family_by_id.keys().copied().collect();
+    let mut reference_alias_semantics = BTreeMap::new();
+    for union in &catalog.identity.unions {
+        let semantics: BTreeSet<&str> = union
+            .arms
+            .iter()
+            .map(|arm| arm.reference_semantics.as_str())
+            .collect();
+        if let Some(semantics) = semantics.first().filter(|_| semantics.len() == 1) {
+            reference_alias_semantics.insert(union.union_name.clone(), (*semantics).to_owned());
         }
     }
-    let known_schema_ids: BTreeSet<&str> = schema_family_by_id.keys().copied().collect();
     let mut annotation_counts: BTreeMap<&str, usize> = BTreeMap::new();
     for row in &catalog.annotations {
+        let top_level_definition_family = target_by_projection
+            .get(row.target_row_id.as_str())
+            .and_then(|target| candidate_by_key.get(target.source_key.as_str()))
+            .map(|candidate| candidate.symbol.as_str());
         let mut generic_formals = annotation_generic_formals(
             row,
             &target_by_projection,
@@ -4199,19 +4952,35 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
             out.push(Violation::new(
                 "catalog_annotation_target_schema_unresolved",
                 &row.row_id,
-                "every target_schema_id must resolve to an exact reservation, source-candidate, target, or projection row ID",
+                "every target_schema_id must resolve to the one canonical permanent reservation row ID for that schema family",
             ));
         }
         let reference_families = validate_annotation_reference_shape(
-            &row.row_id,
-            &row.exact_type,
+            AnnotationReferenceRequest {
+                row_id: &row.row_id,
+                exact_type: &row.exact_type,
+                reference_semantics: &row.reference_semantics,
+                top_level_definition_family,
+            },
+            &reference_alias_semantics,
             &reservation_symbols,
             &generic_formals,
             out,
         );
-        validate_annotation_reference_targets(
+        if top_level_definition_family.is_some_and(|family| row.exact_type.trim() == family)
+            && !row.target_schema_ids.is_empty()
+        {
+            out.push(Violation::new(
+                "catalog_annotation_reference_target_mismatch",
+                &row.row_id,
+                "a top-level schema definition cannot claim arbitrary reference targets",
+            ));
+        }
+        validate_annotation_reference_targets(row, &reference_families, &schema_family_by_id, out);
+        validate_annotation_identity_field_contract(
             row,
-            &reference_families,
+            &projection_by_row_id,
+            &catalog.identity,
             &schema_family_by_id,
             out,
         );
@@ -4236,7 +5005,11 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
         }
     }
 
-    let mut binding_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let ApprovedBindingCounts {
+        semantic: binding_counts,
+        static_live: static_live_counts,
+        runtime: runtime_counts,
+    } = approved_binding_counts(catalog);
     for row in &catalog.semantic_bindings {
         validate_metadata_row_id(&row.row_id, "semantic-binding", out);
         insert_owned_row_id(&mut all_row_ids, &row.row_id, out);
@@ -4247,14 +5020,9 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
             &projection_targets,
             out,
         );
-        *binding_counts
-            .entry(row.target_row_id.as_str())
-            .or_default() += 1;
         validate_semantic_binding(row, &slice_map, out);
     }
 
-    let mut static_live_counts: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut runtime_counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut evidence_keys = BTreeSet::new();
     for row in &catalog.evidence {
         validate_metadata_row_id(&row.row_id, "evidence", out);
@@ -4273,17 +5041,6 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
                 &row.row_id,
                 "duplicate target/evidence_id pair",
             ));
-        }
-        if row.phase == "static" && row.status == "live" && row.gate_ids.iter().any(|id| id == "G0")
-        {
-            *static_live_counts
-                .entry(row.target_row_id.as_str())
-                .or_default() += 1;
-        }
-        if row.phase == "runtime" {
-            *runtime_counts
-                .entry(row.target_row_id.as_str())
-                .or_default() += 1;
         }
     }
 
@@ -4371,6 +5128,13 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
                     "complete_slice_target_declared",
                     &row.row_id,
                     "complete slice contains a target that is still declared",
+                ));
+            }
+            if !row.source_key.starts_with("top|") && !row.source_key.starts_with("field|") {
+                out.push(Violation::new(
+                    "complete_slice_source_contract_unverified",
+                    &row.target_row_id,
+                    "complete target requires a source-reconciled top-level or field contract; union, arm, reference-only, and projection fallback targets remain declared until their exact source checker exists",
                 ));
             }
             let annotation_count = annotation_counts
@@ -5225,17 +5989,46 @@ fn contains_placeholder_marker(value: &str) -> bool {
     {
         return true;
     }
+    let tokens: Vec<_> = trimmed
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|token| !token.is_empty())
+        .collect();
+    for (index, token) in tokens.iter().enumerate() {
+        if ["TODO", "TBD", "FIXME", "PLACEHOLDER"]
+            .iter()
+            .any(|sentinel| token.eq_ignore_ascii_case(sentinel))
+        {
+            return true;
+        }
+        if token.eq_ignore_ascii_case("UNKNOWN") || token.eq_ignore_ascii_case("UNRESOLVED") {
+            let negated = index.checked_sub(1).is_some_and(|previous| {
+                ["NO", "NONE", "WITHOUT", "ZERO"]
+                    .iter()
+                    .any(|negation| tokens[previous].eq_ignore_ascii_case(negation))
+            });
+            if !negated {
+                return true;
+            }
+        }
+    }
     let upper = trimmed.to_ascii_uppercase();
-    ["TODO", "TBD", "FIXME", "PLACEHOLDER", "UNKNOWN", "UNRESOLVED"]
-        .iter()
-        .any(|sentinel| {
-            upper.strip_prefix(sentinel).is_some_and(|remainder| {
-                remainder.as_bytes().first().is_some_and(|byte| {
-                    byte.is_ascii_whitespace()
-                        || matches!(*byte, b':' | b'/' | b'-' | b'_' | b'(' | b'[')
-                })
+    [
+        "TODO",
+        "TBD",
+        "FIXME",
+        "PLACEHOLDER",
+        "UNKNOWN",
+        "UNRESOLVED",
+    ]
+    .iter()
+    .any(|sentinel| {
+        upper.strip_prefix(sentinel).is_some_and(|remainder| {
+            remainder.as_bytes().first().is_some_and(|byte| {
+                byte.is_ascii_whitespace()
+                    || matches!(*byte, b':' | b'/' | b'-' | b'_' | b'(' | b'[')
             })
         })
+    })
 }
 
 fn contains_residual_formal(value: &str, formals: &BTreeSet<String>) -> bool {
@@ -5244,16 +6037,68 @@ fn contains_residual_formal(value: &str, formals: &BTreeSet<String>) -> bool {
         .any(|token| !token.is_empty() && formals.contains(token))
 }
 
+#[derive(Debug, Default)]
+struct AnnotationReferenceShape {
+    families: BTreeSet<String>,
+    requires_targets: bool,
+}
+
+struct AnnotationReferenceRequest<'a> {
+    row_id: &'a str,
+    exact_type: &'a str,
+    reference_semantics: &'a str,
+    top_level_definition_family: Option<&'a str>,
+}
+
 fn validate_annotation_reference_shape(
-    row_id: &str,
-    exact_type: &str,
+    request: AnnotationReferenceRequest<'_>,
+    reference_alias_semantics: &BTreeMap<String, String>,
     known_reference_families: &BTreeSet<&str>,
     generic_formals: &BTreeSet<String>,
     out: &mut Vec<Violation>,
-) -> BTreeSet<String> {
+) -> AnnotationReferenceShape {
+    let AnnotationReferenceRequest {
+        row_id,
+        exact_type,
+        reference_semantics,
+        top_level_definition_family,
+    } = request;
+    const GENERIC_STRONG_WRAPPERS: [&str; 4] = [
+        "CertifiedRemoteStrongRef",
+        "RegisteredStrongRef",
+        "StrongCiphertextRef",
+        "StrongRef",
+    ];
+    const FIXED_STRONG_WRAPPERS: [(&str, &[&str]); 5] = [
+        (
+            "RemoteConfigurationRef",
+            &["RemoteAuthorityConfigurationEvidence"],
+        ),
+        ("StrongCommandRef", &["LogicalCommandRecord"]),
+        (
+            "StrongGlobalCommandRef",
+            &["GlobalControlRecord", "GlobalTxnRecord"],
+        ),
+        ("StrongMarkerRef", &["CommitMarker"]),
+        ("StrongShardCommandRef", &["ShardCommandRecord"]),
+    ];
+    const CONDITIONAL_WRAPPERS: [(&str, &[&str]); 6] = [
+        ("ConditionalCommandRef", &["LogicalCommandRecord"]),
+        ("ConditionalCoordinateRef", &[]),
+        (
+            "ConditionalGlobalCommandRef",
+            &["GlobalControlRecord", "GlobalTxnRecord"],
+        ),
+        ("ConditionalGlobalTxnInputRef", &["GlobalTxnCommand"]),
+        ("ConditionalMarkerRef", &["CommitMarker"]),
+        ("ConditionalShardCommandRef", &["ShardCommandRecord"]),
+    ];
+    let is_declared_definition_type =
+        top_level_definition_family.is_some_and(|family| exact_type.trim() == family);
     let bytes = exact_type.as_bytes();
     let mut cursor = 0usize;
-    let mut families = BTreeSet::new();
+    let mut shape = AnnotationReferenceShape::default();
+    let mut observed_semantics = BTreeSet::new();
     while cursor < bytes.len() {
         if !bytes[cursor].is_ascii_alphabetic() && bytes[cursor] != b'_' {
             cursor += 1;
@@ -5267,30 +6112,88 @@ fn validate_annotation_reference_shape(
             cursor += 1;
         }
         let identifier = &exact_type[identifier_start..cursor];
-        if !identifier.ends_with("StrongRef") {
+        let is_definition_identifier =
+            is_declared_definition_type && top_level_definition_family == Some(identifier);
+        if is_definition_identifier {
+            if let Some(semantics) = registered_reference_definition_semantics(identifier) {
+                observed_semantics.insert(semantics.to_owned());
+            }
             continue;
         }
-        if !matches!(
-            identifier,
-            "StrongRef" | "RegisteredStrongRef" | "CertifiedRemoteStrongRef"
-        ) {
+        if let Some(alias_semantics) = reference_alias_semantics.get(identifier) {
+            observed_semantics.insert(alias_semantics.clone());
+            if matches!(alias_semantics.as_str(), "strong" | "conditional") {
+                shape.requires_targets = true;
+            }
+            continue;
+        }
+        let is_generic_strong = GENERIC_STRONG_WRAPPERS.contains(&identifier);
+        let fixed_strong_families = FIXED_STRONG_WRAPPERS
+            .iter()
+            .find(|(wrapper, _)| *wrapper == identifier)
+            .map(|(_, families)| *families);
+        let is_fixed_strong = fixed_strong_families.is_some();
+        let looks_like_strong = identifier.ends_with("StrongRef")
+            || (identifier.starts_with("Strong") && identifier.ends_with("Ref"));
+        let is_strong = is_generic_strong || is_fixed_strong || looks_like_strong;
+        let is_conditional = identifier.starts_with("Conditional") && identifier.ends_with("Ref");
+        let fixed_conditional_families = CONDITIONAL_WRAPPERS
+            .iter()
+            .find(|(wrapper, _)| *wrapper == identifier)
+            .map(|(_, families)| *families);
+        let is_weak_digest = identifier == "WeakDigest";
+        if !is_strong && !is_conditional && !is_weak_digest {
+            continue;
+        }
+        shape.requires_targets = true;
+        let wrapper_registered = if is_strong {
+            observed_semantics.insert("strong".to_owned());
+            is_generic_strong || is_fixed_strong
+        } else if is_conditional {
+            observed_semantics.insert("conditional".to_owned());
+            fixed_conditional_families.is_some()
+        } else {
+            observed_semantics.insert("weak_digest".to_owned());
+            true
+        };
+        if !wrapper_registered {
             out.push(Violation::new(
                 "catalog_annotation_reference_invalid",
                 row_id,
-                "annotation exact_type uses an unregistered StrongRef wrapper",
+                "annotation exact_type uses an unregistered reference wrapper",
             ));
-            continue;
+        }
+        if let Some(families) = fixed_strong_families {
+            shape
+                .families
+                .extend(families.iter().map(|family| (*family).to_owned()));
+        }
+        if let Some(families) = fixed_conditional_families {
+            shape
+                .families
+                .extend(families.iter().map(|family| (*family).to_owned()));
         }
         while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
             cursor += 1;
         }
         if bytes.get(cursor) != Some(&b'<') {
+            if is_generic_strong {
+                out.push(Violation::new(
+                    "catalog_annotation_reference_invalid",
+                    row_id,
+                    "StrongRef wrappers must carry one concrete catalog target",
+                ));
+            }
+            continue;
+        }
+        if is_fixed_strong
+            || fixed_conditional_families.is_some_and(|families| !families.is_empty())
+        {
             out.push(Violation::new(
                 "catalog_annotation_reference_invalid",
                 row_id,
-                "StrongRef wrappers must carry one concrete catalog target",
+                "fixed-target reference wrappers cannot carry a generic target",
             ));
-            continue;
         }
         let open = cursor;
         let Some(close) = matching_angle(bytes, open) else {
@@ -5299,31 +6202,80 @@ fn validate_annotation_reference_shape(
                 row_id,
                 "StrongRef wrapper has an unbalanced target expression",
             ));
-            return families;
+            return shape;
         };
         let target = exact_type[open + 1..close].trim();
         let family = concrete_reference_family(target);
-        let prefix_is_array = exact_type[..identifier_start].trim_end().ends_with('[');
-        let suffix_is_array = exact_type[close + 1..]
-            .trim_start()
-            .starts_with([']', '[']);
         let valid_family = family.is_some_and(|family| {
             !generic_formals.contains(family) && known_reference_families.contains(family)
         });
-        if prefix_is_array || suffix_is_array || !valid_family {
+        if !valid_family {
             out.push(Violation::new(
                 "catalog_annotation_reference_invalid",
                 row_id,
-                "StrongRef wrappers must carry one concrete catalog target",
+                "reference wrappers must carry one concrete catalog target",
             ));
         } else if let Some(family) = family {
-            families.insert(family.to_owned());
+            shape.families.insert(family.to_owned());
         }
         // Continue inside the target so nested StrongRef wrappers are checked
         // independently instead of being hidden by the outer application.
         cursor = open + 1;
     }
-    families
+    let semantics_allowed = matches!(
+        reference_semantics,
+        "none" | "embedded" | "strong" | "conditional" | "weak_digest" | "locator" | "identity"
+    );
+    let unregistered_definition_semantics = is_declared_definition_type
+        && top_level_definition_family
+            .and_then(registered_reference_definition_semantics)
+            .is_none()
+        && !matches!(reference_semantics, "none" | "embedded");
+    let declares_wrapped_reference = matches!(reference_semantics, "strong" | "conditional");
+    if !semantics_allowed
+        || unregistered_definition_semantics
+        || observed_semantics.len() > 1
+        || (declares_wrapped_reference
+            && !is_declared_definition_type
+            && observed_semantics.len() != 1)
+        || observed_semantics
+            .first()
+            .is_some_and(|observed| observed != reference_semantics)
+    {
+        out.push(Violation::new(
+            "catalog_annotation_reference_semantics_mismatch",
+            row_id,
+            "reference_semantics must be a registered value and match the concrete reference wrapper",
+        ));
+    }
+    if matches!(reference_semantics, "strong" | "conditional") && !is_declared_definition_type {
+        shape.requires_targets = true;
+    }
+    shape
+}
+
+fn registered_reference_definition_semantics(family: &str) -> Option<&'static str> {
+    match family {
+        "CertifiedRemoteStrongRef"
+        | "RegisteredStrongRef"
+        | "RemoteConfigurationRef"
+        | "StrongCiphertextRef"
+        | "StrongCommandRef"
+        | "StrongGlobalCommandRef"
+        | "StrongMarkerRef"
+        | "StrongRef"
+        | "StrongShardCommandRef" => Some("strong"),
+        "ConditionalCommandRef"
+        | "ConditionalCoordinateRef"
+        | "ConditionalGlobalCommandRef"
+        | "ConditionalGlobalTxnInputRef"
+        | "ConditionalMarkerRef"
+        | "ConditionalShardCommandRef" => Some("conditional"),
+        "CommandRef" | "MarkerRef" => Some("identity"),
+        "PreBootstrapArtifactRef" => Some("locator"),
+        "WeakDigest" => Some("weak_digest"),
+        _ => None,
+    }
 }
 
 fn concrete_reference_family(value: &str) -> Option<&str> {
@@ -5352,9 +6304,7 @@ fn concrete_reference_family(value: &str) -> Option<&str> {
         return None;
     }
     let close = matching_angle(suffix.as_bytes(), 0)?;
-    if close + 1 != suffix.len()
-        || !valid_concrete_type_arguments(&suffix[1..close])
-    {
+    if close + 1 != suffix.len() || !valid_concrete_type_arguments(&suffix[1..close]) {
         return None;
     }
     Some(family)
@@ -5421,11 +6371,11 @@ fn has_top_level_separator(value: &str, separator: u8) -> bool {
 
 fn validate_annotation_reference_targets(
     row: &Annotation,
-    reference_families: &BTreeSet<String>,
+    reference_shape: &AnnotationReferenceShape,
     schema_family_by_id: &BTreeMap<&str, String>,
     out: &mut Vec<Violation>,
 ) {
-    if reference_families.is_empty() {
+    if !reference_shape.requires_targets {
         return;
     }
     let mut resolved_families = BTreeSet::new();
@@ -5438,14 +6388,75 @@ fn validate_annotation_reference_targets(
             None => all_resolved = false,
         }
     }
-    if !all_resolved
-        || row.target_schema_ids.len() != reference_families.len()
-        || resolved_families != *reference_families
-    {
+    let explicit_families_match = reference_shape.families.is_empty()
+        || (row.target_schema_ids.len() == reference_shape.families.len()
+            && resolved_families == reference_shape.families);
+    if !all_resolved || row.target_schema_ids.is_empty() || !explicit_families_match {
         out.push(Violation::new(
             "catalog_annotation_reference_target_mismatch",
             &row.row_id,
             "StrongRef families must map one-for-one to exact catalog target_schema_ids",
+        ));
+    }
+}
+
+fn validate_annotation_identity_field_contract(
+    row: &Annotation,
+    projection_by_row_id: &BTreeMap<&str, &ProjectionRowMeta>,
+    identity: &IdentityRegistries,
+    schema_family_by_id: &BTreeMap<&str, String>,
+    out: &mut Vec<Violation>,
+) {
+    let Some(projection) = projection_by_row_id
+        .get(row.target_row_id.as_str())
+        .copied()
+    else {
+        return;
+    };
+    if projection.projection != "durable_fields" || projection.row_kind != "field" {
+        return;
+    }
+    let Some(field) = identity.fields.iter().find(|field| {
+        format!("{}.{}", field.containing_schema, field.stable_name) == projection.canonical_symbol
+    }) else {
+        out.push(Violation::new(
+            "catalog_annotation_field_contract_unresolved",
+            &row.row_id,
+            "field annotation target does not resolve in the authoritative durable-field registry",
+        ));
+        return;
+    };
+
+    let mut expected_targets = BTreeSet::new();
+    if let Some(target) = &field.target_schema_id {
+        expected_targets.insert(target.clone());
+    } else {
+        for union in identity.unions.iter().filter(|union| {
+            union.containing_schema == field.containing_schema && union.field_tag == field.field_tag
+        }) {
+            expected_targets.extend(union.arms.iter().map(|arm| arm.target_schema_id.clone()));
+        }
+    }
+    let mut actual_targets = BTreeSet::new();
+    let mut all_targets_resolved = true;
+    for schema_id in &row.target_schema_ids {
+        match schema_family_by_id.get(schema_id.as_str()) {
+            Some(target) => {
+                actual_targets.insert(target.clone());
+            }
+            None => all_targets_resolved = false,
+        }
+    }
+    if row.cardinality != field.cardinality
+        || row.reference_semantics != field.reference_semantics
+        || !all_targets_resolved
+        || row.target_schema_ids.len() != expected_targets.len()
+        || actual_targets != expected_targets
+    {
+        out.push(Violation::new(
+            "catalog_annotation_field_contract_mismatch",
+            &row.row_id,
+            "field annotation cardinality, reference semantics, and exact target schema IDs must byte-match the authoritative durable-field row or reference union",
         ));
     }
 }
@@ -6107,4 +7118,262 @@ fn sort_violations(violations: &mut [Violation]) {
     violations.sort_by(|left, right| {
         (&left.row_id, &left.code, &left.msg).cmp(&(&right.row_id, &right.code, &right.msg))
     });
+}
+
+#[cfg(test)]
+mod binding_contract_tests {
+    use super::*;
+
+    const TARGET_ROW_ID: &str = "a01:bootstrap-frame:root-slot";
+    const TARGET_SOURCE_KEY: &str = "top|RootSlot";
+
+    fn catalog_with_bindings() -> Catalog {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        catalog.semantic_bindings.push(SemanticBinding {
+            row_id: "a01:semantic-binding:bootstrap-frame-root-slot".to_owned(),
+            target_row_id: TARGET_ROW_ID.to_owned(),
+            owner_bead_id: "fgdb-w2-owner-fixture".to_owned(),
+            owner_crate: "fgdb-chronicle".to_owned(),
+            consumer_crates: vec!["fgdb".to_owned(), "fgdb-server".to_owned()],
+        });
+        catalog.evidence.push(EvidenceBinding {
+            row_id: "a01:evidence:bootstrap-frame-root-slot-static-contract".to_owned(),
+            target_row_id: TARGET_ROW_ID.to_owned(),
+            evidence_id: "static-contract".to_owned(),
+            phase: "static".to_owned(),
+            status: "live".to_owned(),
+            owner_bead_id: "fgdb-verification-owner-fixture".to_owned(),
+            checker_ids: vec!["appendix_a_catalog_closure".to_owned()],
+            scenario_ids: vec!["g0_identity_e2e".to_owned()],
+            event_ids: vec!["appendix_closure_checked".to_owned()],
+            gate_ids: vec!["G0".to_owned()],
+        });
+        catalog.evidence.push(EvidenceBinding {
+            row_id: "a01:evidence:bootstrap-frame-root-slot-runtime-contract".to_owned(),
+            target_row_id: TARGET_ROW_ID.to_owned(),
+            evidence_id: "runtime-contract".to_owned(),
+            phase: "runtime".to_owned(),
+            status: "planned".to_owned(),
+            owner_bead_id: "fgdb-verification-owner-fixture".to_owned(),
+            checker_ids: vec!["appendix_a_catalog_closure".to_owned()],
+            scenario_ids: vec!["g0_identity_e2e".to_owned()],
+            event_ids: vec!["appendix_closure_checked".to_owned()],
+            gate_ids: vec!["G0".to_owned()],
+        });
+        catalog
+    }
+
+    const fn semantic_pin() -> SemanticBindingContractPin {
+        SemanticBindingContractPin {
+            row_id: "a01:semantic-binding:bootstrap-frame-root-slot",
+            target_row_id: TARGET_ROW_ID,
+            target_source_key: TARGET_SOURCE_KEY,
+            owner_bead_id: "fgdb-w2-owner-fixture",
+            owner_crate: "fgdb-chronicle",
+            consumer_crates: &["fgdb", "fgdb-server"],
+        }
+    }
+
+    const fn static_evidence_pin() -> EvidenceBindingContractPin {
+        EvidenceBindingContractPin {
+            row_id: "a01:evidence:bootstrap-frame-root-slot-static-contract",
+            target_row_id: TARGET_ROW_ID,
+            target_source_key: TARGET_SOURCE_KEY,
+            evidence_id: "static-contract",
+            phase: "static",
+            status: "live",
+            owner_bead_id: "fgdb-verification-owner-fixture",
+            checker_ids: &["appendix_a_catalog_closure"],
+            scenario_ids: &["g0_identity_e2e"],
+            event_ids: &["appendix_closure_checked"],
+            gate_ids: &["G0"],
+        }
+    }
+
+    const fn runtime_evidence_pin() -> EvidenceBindingContractPin {
+        EvidenceBindingContractPin {
+            row_id: "a01:evidence:bootstrap-frame-root-slot-runtime-contract",
+            target_row_id: TARGET_ROW_ID,
+            target_source_key: TARGET_SOURCE_KEY,
+            evidence_id: "runtime-contract",
+            phase: "runtime",
+            status: "planned",
+            owner_bead_id: "fgdb-verification-owner-fixture",
+            checker_ids: &["appendix_a_catalog_closure"],
+            scenario_ids: &["g0_identity_e2e"],
+            event_ids: &["appendix_closure_checked"],
+            gate_ids: &["G0"],
+        }
+    }
+
+    #[test]
+    fn readable_binding_contract_exercises_nonempty_reciprocal_paths() {
+        let catalog = catalog_with_bindings();
+        let semantic = [semantic_pin()];
+        let evidence = [static_evidence_pin(), runtime_evidence_pin()];
+        let mut violations = Vec::new();
+        validate_readable_binding_contract_with(
+            &catalog,
+            &semantic,
+            &evidence,
+            semantic.len(),
+            evidence.len(),
+            &mut violations,
+        );
+        assert!(
+            violations.is_empty(),
+            "exact readable reciprocal bindings failed: {violations:?}"
+        );
+
+        let counts = approved_binding_counts_with(&catalog, &semantic, &evidence);
+        assert_eq!(counts.semantic.get(TARGET_ROW_ID), Some(&1));
+        assert_eq!(counts.static_live.get(TARGET_ROW_ID), Some(&1));
+        assert_eq!(counts.runtime.get(TARGET_ROW_ID), Some(&1));
+        assert_eq!(
+            approved_binding_counts_with(&catalog, &[], &[]),
+            ApprovedBindingCounts::default(),
+            "unapproved rows must not satisfy complete-slice counts"
+        );
+    }
+
+    #[test]
+    fn readable_binding_contract_rejects_mismatch_missing_duplicate_and_count_drift() {
+        let mut catalog = catalog_with_bindings();
+        let semantic = [semantic_pin()];
+        let evidence = [static_evidence_pin(), runtime_evidence_pin()];
+
+        catalog.semantic_bindings[0].owner_crate = "fgdb-warden".to_owned();
+        catalog.evidence[0].event_ids = vec!["appendix_source_manifest".to_owned()];
+        let mut violations = Vec::new();
+        validate_readable_binding_contract_with(
+            &catalog,
+            &semantic,
+            &evidence,
+            semantic.len(),
+            evidence.len(),
+            &mut violations,
+        );
+        assert!(
+            violations.iter().any(|violation| {
+                violation.code == "catalog_semantic_binding_contract_mismatch"
+            })
+        );
+        assert!(
+            violations.iter().any(|violation| {
+                violation.code == "catalog_evidence_binding_contract_mismatch"
+            })
+        );
+
+        catalog.semantic_bindings.clear();
+        let duplicate_semantic = [semantic_pin(), semantic_pin()];
+        let mut violations = Vec::new();
+        validate_readable_binding_contract_with(
+            &catalog,
+            &duplicate_semantic,
+            &evidence,
+            duplicate_semantic.len(),
+            evidence.len(),
+            &mut violations,
+        );
+        for expected in [
+            "catalog_semantic_binding_contract_ambiguous",
+            "catalog_semantic_binding_contract_missing",
+        ] {
+            assert!(
+                violations
+                    .iter()
+                    .any(|violation| violation.code == expected),
+                "missing reciprocal branch {expected}: {violations:?}"
+            );
+        }
+
+        let mut violations = Vec::new();
+        validate_readable_binding_contract_with(
+            &catalog,
+            &semantic,
+            &evidence,
+            0,
+            evidence.len(),
+            &mut violations,
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|violation| { violation.code == "catalog_binding_contract_pin_inconsistent" })
+        );
+    }
+
+    #[test]
+    fn live_repository_bindings_require_existing_checker_artifacts() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let workspace = workspace_package_names(&root).expect("workspace packages resolve");
+        assert!(workspace.contains("fgdb-types"));
+        assert!(
+            !workspace.contains("fgdb-warden"),
+            "planned crates must not masquerade as present implementation owners"
+        );
+        let checkers = load_appendix_checker_index(&root).expect("checker index loads");
+        let checker_by_id: BTreeMap<&str, &model::Checker> = checkers
+            .iter()
+            .map(|checker| (checker.symbol.as_str(), checker))
+            .collect();
+        let root_without_artifacts = root.join("registries");
+
+        let mut violations = Vec::new();
+        validate_scenario_registry(
+            &root_without_artifacts,
+            &checker_by_id,
+            &catalog,
+            &mut violations,
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|violation| { violation.code == "catalog_scenario_checker_artifact_missing" }),
+            "a live scenario checker with no artifact was accepted: {violations:?}"
+        );
+
+        let checker_ids = vec!["appendix_a_catalog_closure".to_owned()];
+        let mut violations = Vec::new();
+        validate_checker_bindings(
+            &root_without_artifacts,
+            "fixture",
+            "live",
+            &checker_ids,
+            CheckerBindingCodes {
+                unresolved: "unresolved",
+                not_live: "not_live",
+                artifact_missing: "artifact_missing",
+            },
+            &checker_by_id,
+            &mut violations,
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.code == "artifact_missing"),
+            "live evidence accepted a missing checker artifact: {violations:?}"
+        );
+
+        let mut tampered_checkers = checkers.clone();
+        tampered_checkers
+            .iter_mut()
+            .find(|checker| checker.symbol == "appendix_a_catalog_source")
+            .expect("Appendix source checker")
+            .artifact = "Cargo.toml".to_owned();
+        let tampered_by_id: BTreeMap<&str, &model::Checker> = tampered_checkers
+            .iter()
+            .map(|checker| (checker.symbol.as_str(), checker))
+            .collect();
+        let mut violations = Vec::new();
+        validate_maintenance_checker_registry(&tampered_by_id, &mut violations);
+        assert!(
+            violations.iter().any(|violation| {
+                violation.code == "catalog_maintenance_checker_registry_drift"
+            }),
+            "a maintenance checker was rebound to an unrelated existing artifact: {violations:?}"
+        );
+    }
 }

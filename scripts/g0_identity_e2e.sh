@@ -254,10 +254,22 @@ stage_except() { # stage_except <name> <basename> -> leave one output uncreated
 
 stage_appendix() { # stage_appendix <name> -> complete isolated Appendix root
   local name="$1"
+  local manifest relative
   stage "$name"
   mkdir -p "$WORK/$name/.beads"
   cp "$ROOT/.beads/issues.jsonl" "$WORK/$name/.beads/"
   cp "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" "$WORK/$name/"
+  cp "$ROOT/Cargo.toml" "$WORK/$name/"
+  for manifest in "$ROOT"/crates/*/Cargo.toml "$ROOT"/tools/*/Cargo.toml; do
+    [ -f "$manifest" ] || continue
+    relative="${manifest#"$ROOT"/}"
+    mkdir -p "$WORK/$name/${relative%/*}"
+    cp "$manifest" "$WORK/$name/$relative"
+  done
+  mkdir -p "$WORK/$name/scripts" "$WORK/$name/tools/registry-check/src"
+  cp "$ROOT/scripts/g0_identity_e2e.sh" "$WORK/$name/scripts/"
+  cp "$ROOT/tools/registry-check/src/appendix_a.rs" \
+    "$WORK/$name/tools/registry-check/src/"
 }
 
 expect_appendix_violation() { # fixture code row_id
@@ -995,6 +1007,43 @@ for code in \
   fi
 done
 
+log "phase 3j-binding-pins: real but unrelated repository metadata cannot self-authorize"
+stage_appendix neg-appendix-unrelated-bindings
+cat >> "$WORK/neg-appendix-unrelated-bindings/registries/appendix_a_catalog.toml" <<'EOF'
+
+[[semantic_binding]]
+row_id = "a01:semantic-binding:bootstrap-frame-root-slot"
+target_row_id = "a01:bootstrap-frame:root-slot"
+owner_bead_id = "fgdb-durable-capability-validation-evidence-dqym"
+owner_crate = "fgdb-types"
+consumer_crates = ["fgdb", "fgdb-server"]
+
+[[evidence]]
+row_id = "a01:evidence:bootstrap-frame-root-slot-static-contract"
+target_row_id = "a01:bootstrap-frame:root-slot"
+evidence_id = "static-contract"
+phase = "static"
+status = "live"
+owner_bead_id = "fgdb-durable-capability-validation-evidence-dqym"
+checker_ids = ["appendix_a_catalog_closure"]
+scenario_ids = ["g0_identity_e2e"]
+event_ids = ["appendix_closure_checked"]
+gate_ids = ["G0"]
+EOF
+expect_appendix_violation \
+  neg-appendix-unrelated-bindings catalog_semantic_binding_contract_drift \
+  semantic_binding
+if grep -q '"code":"catalog_evidence_binding_contract_drift"' \
+    "$WORK/neg-appendix-unrelated-bindings.jsonl" &&
+   grep -q '"code":"catalog_semantic_binding_contract_unapproved"' \
+    "$WORK/neg-appendix-unrelated-bindings.jsonl" &&
+   grep -q '"code":"catalog_evidence_binding_contract_unapproved"' \
+    "$WORK/neg-appendix-unrelated-bindings.jsonl"; then
+  ok "real but unrelated metadata rejected by readable reciprocal pins"
+else
+  die "real but unrelated metadata bypassed readable reciprocal pins"
+fi
+
 log "phase 3j-annotation: placeholder annotations cannot self-assert"
 stage_appendix neg-appendix-annotation-placeholder
 cat >> "$WORK/neg-appendix-annotation-placeholder/registries/appendix_a_catalog.toml" <<'EOF'
@@ -1014,7 +1063,7 @@ role_expansions = ["Local"]
 reference_semantics = "strong"
 target_schema_ids = ["NonexistentSchema"]
 construction_order = "root-first"
-retention_and_cut_rule = "TODO"
+retention_and_cut_rule = "TODO: define later"
 digest_recipe = "slot-checksum"
 redaction_class = "public-commitment"
 resource_bounds = "fixed-4096-bytes"
@@ -1031,6 +1080,35 @@ if grep -q '"code":"catalog_annotation_target_schema_unresolved"' \
 else
   die "placeholder annotation omitted schema/reference diagnostics"
 fi
+
+log "phase 3j-annotation-reference: malformed and unregistered reference shapes fail closed"
+stage_appendix neg-appendix-annotation-reference
+cat >> "$WORK/neg-appendix-annotation-reference/registries/appendix_a_catalog.toml" <<'EOF'
+
+[[annotation]]
+row_id = "a01:annotation:bootstrap-frame-root-slot"
+target_row_id = "a01:bootstrap-frame:root-slot"
+exact_type = "StrongRef<RootManifest,Anything>"
+cardinality = "one"
+layout = "fixed"
+role = "Local"
+posture = "bootstrap"
+authority = "root"
+locality = "local"
+generic_expansions = ["RootManifest"]
+role_expansions = []
+reference_semantics = "strong"
+target_schema_ids = ["a05:reservation:root-manifest"]
+construction_order = "root-first"
+retention_and_cut_rule = "fixed-location"
+digest_recipe = "slot-checksum"
+redaction_class = "public-commitment"
+resource_bounds = "fixed-4096-bytes"
+compatibility = "v1"
+EOF
+expect_appendix_violation \
+  neg-appendix-annotation-reference catalog_annotation_reference_invalid \
+  catalog_row
 
 log "phase 3k: maintenance proof ownership and evidence are release-pinned"
 stage_appendix neg-appendix-maintenance
@@ -1081,7 +1159,7 @@ expect_appendix_structural_error \
   neg-appendix-projection-schema catalog_projection_schema logical_object_kinds
 
 # --- Verdict -----------------------------------------------------------------
-log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-annotation-placeholder,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second}.jsonl"
+log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second}.jsonl"
 log "result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 log "G0 identity e2e: ALL GREEN"

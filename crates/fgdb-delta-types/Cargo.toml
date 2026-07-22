@@ -8,5 +8,17 @@ publish = false
 [dependencies.fgdb-types]
 path = "../fgdb-types"
 
+[dev-dependencies.fgdb-bigint]
+path = "../fgdb-bigint"
+
+[dev-dependencies.fgdb-claim]
+path = "../fgdb-claim"
+
+[dev-dependencies.fgdb-evidence]
+path = "../fgdb-evidence"
+
+[dev-dependencies.fgdb-resource]
+path = "../fgdb-resource"
+
 [lints]
 workspace = true

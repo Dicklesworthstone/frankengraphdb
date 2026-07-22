@@ -39,8 +39,8 @@ cmp "$FIRST" "$SECOND"
 echo "==> assert deterministic event and provenance coverage"
 test "$(rg -c '"event":"architecture_decision_checked"' "$FIRST")" -eq 256
 test "$(rg -c '"event":"source_block_checked"' "$FIRST")" -eq 2
-test "$(rg -c '"event":"architecture_bead_provenance_indexed"' "$FIRST")" -eq 298
-rg -q '"event":"architecture_registry_checked".*"decision_count":256.*"bead_count":298.*"bead_binding_hash":"fnv1a64:290be1c112c28198".*"violations":0.*"outcome":"pass"' "$FIRST"
+test "$(rg -c '"event":"architecture_bead_provenance_indexed"' "$FIRST")" -eq 299
+rg -q '"event":"architecture_registry_checked".*"decision_count":256.*"bead_count":299.*"bead_binding_hash":"fnv1a64:7ff10744115e68f5".*"violations":0.*"outcome":"pass"' "$FIRST"
 rg -q '"event":"source_block_checked".*"exact_match":true.*"outcome":"pass"' "$FIRST"
 rg -q '"event":"architecture_decision_checked".*"decision_id":"FG-ADR-BET-B1".*"owner_bead":"fgdb-w2-commit-protocol-9w3u".*"owner_crate":"fgdb-branch".*"profile_id":"FG-ADR-PROFILE-CONSTITUTIONAL".*"rationale":.*"contradiction_class":"none".*"replay_command":.*"outcome":"pass"' "$FIRST"
 for owner_kind in bead crate checker evidence; do
@@ -78,20 +78,20 @@ counts = collections.Counter(event["event"] for event in events)
 assert counts["architecture_registry_checked"] == 1, counts
 assert counts["architecture_decision_checked"] == 256, counts
 assert counts["source_block_checked"] == 2, counts
-assert counts["architecture_bead_provenance_indexed"] == 298, counts
+assert counts["architecture_bead_provenance_indexed"] == 299, counts
 assert counts["architecture_violation"] == 0, counts
 
 registry = next(event for event in events if event["event"] == "architecture_registry_checked")
 assert registry["decision_count"] == 256, registry
-assert registry["bead_count"] == 298, registry
-assert registry["bead_binding_hash"] == "fnv1a64:290be1c112c28198", registry
+assert registry["bead_count"] == 299, registry
+assert registry["bead_binding_hash"] == "fnv1a64:7ff10744115e68f5", registry
 assert registry["violations"] == 0 and registry["outcome"] == "pass", registry
 
 beads = [event for event in events if event["event"] == "architecture_bead_provenance_indexed"]
 class_counts = collections.Counter(event["resolution_class"] for event in beads)
 assert class_counts == {
     "direct_owner": 98,
-    "bet_label": 155,
+    "bet_label": 156,
     "exact_override": 12,
     "family_rule": 33,
 }, class_counts
