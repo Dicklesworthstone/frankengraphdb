@@ -21,7 +21,7 @@ SECOND="$EVIDENCE_DIR/second.txt"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$EVIDENCE_DIR/target}"
 
 echo "==> verify the foundation crates stay inside the closed universe (path deps only)"
-for crate in fgdb-types fgdb-claim fgdb-delta-types fgdb-evidence fgdb-resource; do
+for crate in fgdb-bigint fgdb-types fgdb-claim fgdb-delta-types fgdb-evidence fgdb-resource; do
   if cargo tree -p "$crate" --edges normal --prefix none | grep -vE '^fgdb-' | grep -q .; then
     echo "ERROR: $crate has a non-fgdb normal dependency" >&2
     exit 1
@@ -29,7 +29,7 @@ for crate in fgdb-types fgdb-claim fgdb-delta-types fgdb-evidence fgdb-resource;
 done
 
 echo "==> run every foundation test target"
-cargo test -p fgdb-types -p fgdb-claim -p fgdb-delta-types -p fgdb-evidence -p fgdb-resource --all-targets
+cargo test -p fgdb-bigint -p fgdb-types -p fgdb-claim -p fgdb-delta-types -p fgdb-evidence -p fgdb-resource --all-targets
 cargo test -p fgdb-claim --doc
 
 echo "==> reproduce the foundation transcript twice"
@@ -41,6 +41,15 @@ echo "==> assert the scripted typed rejections are present"
 grep -q "lattice violation (typed): claim-lattice violation" "$FIRST"
 grep -q "rejection (typed): resource ceiling exceeded on cpu_micros" "$FIRST"
 grep -q "scalar reject non-canonical float" "$FIRST"
+grep -q "scalar reject invalid memcomparable marker" "$FIRST"
+grep -q "scalar reject absent collation resolver" "$FIRST"
+grep -q "scalar reject missing collation artifact" "$FIRST"
+grep -q "scalar reject forged collation sort key" "$FIRST"
+grep -q "scalar reject absent tzdb resolver" "$FIRST"
+grep -q "scalar reject missing tzdb artifact" "$FIRST"
+grep -q "timestamp reject tzdb offset mismatch" "$FIRST"
+grep -q "decimal half-even boundary: source=25e-19 coefficient=2" "$FIRST"
+grep -q "decimal reject profile overflow" "$FIRST"
 grep -q "zweight demoted back: Some(170141183460469231731687303715884105727)" "$FIRST"
 
 echo "==> transcript sha256"

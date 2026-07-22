@@ -347,7 +347,10 @@ mod tests {
                 elem: ElementId::Vertex(VId(1)),
                 property: PropertyKeyId(2),
                 before: None,
-                after: Some(CanonicalScalar::Text("Ada".into())),
+                after: Some(
+                    CanonicalScalar::ucs_basic_text("Ada")
+                        .expect("small UCS_BASIC fixture is canonical"),
+                ),
             },
             DeltaRow::ValidTime {
                 elem: ElementId::Edge(EId(1)),

@@ -27,8 +27,90 @@ use fgdb_delta_types::{
 use fgdb_evidence::{CalibrationWindow, EvidenceEnvelope, FallbackBehavior};
 use fgdb_resource::{ResourceCeiling, ResourceVector};
 use fgdb_types::{
-    BranchId, CanonicalF64, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef, ObjectId, VId,
+    BranchId, CanonicalDecimal, CanonicalF64, CanonicalScalar, CanonicalText, CanonicalTimestamp,
+    CollationResolver, CollationResolverError, CommitSeq, EId, GraphId, MAX_DECIMAL_COEFFICIENT,
+    MarkerRef, NonBinaryTextBinding, ObjectId, TzdbResolver, VId,
 };
+
+const ZONED_FIXTURE_INSTANT: i128 = 1_735_689_600_123_456_789;
+
+struct FoundationResolver {
+    available: bool,
+}
+
+impl CollationResolver for FoundationResolver {
+    fn artifact_available(&self, object_id: &ObjectId) -> bool {
+        self.available && [oid(0x31), oid(0x32), oid(0x33), oid(0x34)].contains(object_id)
+    }
+
+    fn canonical_sort_key_len(
+        &self,
+        _: &NonBinaryTextBinding,
+        text: &str,
+    ) -> Result<usize, CollationResolverError> {
+        text.len()
+            .checked_add(4)
+            .ok_or(CollationResolverError::new(1))
+    }
+
+    fn write_canonical_sort_key(
+        &self,
+        binding: &NonBinaryTextBinding,
+        text: &str,
+        output: &mut [u8],
+    ) -> Result<usize, CollationResolverError> {
+        let expected = self.canonical_sort_key_len(binding, text)?;
+        if output.len() != expected {
+            return Err(CollationResolverError::new(2));
+        }
+        output[..4].copy_from_slice(&[
+            binding.unicode_data_oid.as_bytes()[0],
+            binding.normalization_oid.as_bytes()[0],
+            binding.segmentation_oid.as_bytes()[0],
+            binding.collation_oid.as_bytes()[0],
+        ]);
+        output[4..].copy_from_slice(text.as_bytes());
+        Ok(expected)
+    }
+
+    fn canonical_sort_key_matches(
+        &self,
+        binding: &NonBinaryTextBinding,
+        text: &str,
+        candidate: &[u8],
+    ) -> Result<bool, CollationResolverError> {
+        let prefix = [
+            binding.unicode_data_oid.as_bytes()[0],
+            binding.normalization_oid.as_bytes()[0],
+            binding.segmentation_oid.as_bytes()[0],
+            binding.collation_oid.as_bytes()[0],
+        ];
+        Ok(candidate.len() == text.len() + prefix.len()
+            && candidate.starts_with(&prefix)
+            && &candidate[prefix.len()..] == text.as_bytes())
+    }
+}
+
+impl TzdbResolver for FoundationResolver {
+    fn contains_tzdb(&self, tzdb_oid: &ObjectId) -> bool {
+        self.available && tzdb_oid == &oid(0x40)
+    }
+
+    fn canonical_utc_offset_seconds(
+        &self,
+        tzdb_oid: &ObjectId,
+        zone_identifier: &str,
+        instant_utc_nanos: i128,
+    ) -> Option<i32> {
+        (tzdb_oid == &oid(0x40)
+            && zone_identifier == "America/New_York"
+            && instant_utc_nanos == ZONED_FIXTURE_INSTANT)
+            .then_some(-5 * 60 * 60)
+    }
+}
+
+const AVAILABLE_RESOLVER: FoundationResolver = FoundationResolver { available: true };
+const MISSING_RESOLVER: FoundationResolver = FoundationResolver { available: false };
 
 /// FNV-1a over the transcript bytes: deterministic across processes.
 struct Fnv1a(u64);
@@ -68,40 +150,117 @@ fn main() {
     let mut t = Transcript {
         digest: Fnv1a::new(),
     };
-    t.emit("== foundation_types_e2e transcript v1 ==");
+    t.emit("== foundation_types_e2e transcript v3 ==");
 
     // 1. Canonical scalars: every variant, encode/decode round trip.
-    let scalars = [
+    let text_binding = NonBinaryTextBinding::new(oid(0x31), oid(0x32), oid(0x33), oid(0x34));
+    let pinned_text = CanonicalText::new_non_binary("Straße", text_binding, &AVAILABLE_RESOLVER)
+        .expect("pinned text artifacts available");
+    let zoned_timestamp = CanonicalTimestamp::zoned(
+        ZONED_FIXTURE_INSTANT,
+        -5 * 60 * 60,
+        "America/New_York",
+        oid(0x40),
+        &AVAILABLE_RESOLVER,
+    )
+    .expect("zoned timestamp fixture");
+    let pinned_text_scalar = CanonicalScalar::Text(pinned_text);
+    let zoned_timestamp_scalar = CanonicalScalar::Timestamp(zoned_timestamp);
+    let scalars = vec![
         CanonicalScalar::Null,
         CanonicalScalar::Bool(true),
         CanonicalScalar::Int(-41999),
+        CanonicalScalar::Decimal(
+            CanonicalDecimal::from_scaled_half_even(12_345, 2).expect("123.45 decimal"),
+        ),
         CanonicalScalar::Float(CanonicalF64::new(-0.0)),
         CanonicalScalar::Float(CanonicalF64::new(f64::NAN)),
         CanonicalScalar::Float(CanonicalF64::new(2.5)),
-        CanonicalScalar::Text("frankengraphdb".into()),
-        CanonicalScalar::Bytes(vec![0xF0, 0x0D]),
+        CanonicalScalar::ucs_basic_text("frankengraphdb").expect("bounded UCS_BASIC text"),
+        pinned_text_scalar.clone(),
+        CanonicalScalar::Timestamp(
+            CanonicalTimestamp::offset_only(42_000_000_000, 90 * 60)
+                .expect("offset-only timestamp fixture"),
+        ),
+        zoned_timestamp_scalar.clone(),
+        CanonicalScalar::bytes(vec![0xF0, 0x0D]).expect("bounded byte scalar"),
     ];
     for s in &scalars {
-        let enc = s.encode();
-        let back = CanonicalScalar::decode(&enc).expect("round trip");
+        let enc = s.encode().expect("bounded scalar encoding");
+        let back =
+            CanonicalScalar::decode_with_resolver(&enc, &AVAILABLE_RESOLVER).expect("round trip");
         assert_eq!(&back, s);
         t.emit(&format!("scalar {:?} encodes {}", s, hex(&enc)));
     }
+    let pinned_text_encoding = pinned_text_scalar.encode().expect("pinned text encoding");
+    t.emit(&format!(
+        "scalar reject absent collation resolver: {}",
+        CanonicalScalar::decode(&pinned_text_encoding).unwrap_err()
+    ));
+    t.emit(&format!(
+        "scalar reject missing collation artifact: {}",
+        CanonicalScalar::decode_with_resolver(&pinned_text_encoding, &MISSING_RESOLVER)
+            .unwrap_err()
+    ));
+    let mut forged_text_encoding = pinned_text_encoding.clone();
+    forged_text_encoding[1 + 1 + 4 * 32] ^= 1;
+    t.emit(&format!(
+        "scalar reject forged collation sort key: {}",
+        CanonicalScalar::decode_with_resolver(&forged_text_encoding, &AVAILABLE_RESOLVER)
+            .unwrap_err()
+    ));
+    let zoned_timestamp_encoding = zoned_timestamp_scalar
+        .encode()
+        .expect("zoned timestamp encoding");
+    t.emit(&format!(
+        "scalar reject absent tzdb resolver: {}",
+        CanonicalScalar::decode(&zoned_timestamp_encoding).unwrap_err()
+    ));
+    t.emit(&format!(
+        "scalar reject missing tzdb artifact: {}",
+        CanonicalScalar::decode_with_resolver(&zoned_timestamp_encoding, &MISSING_RESOLVER)
+            .unwrap_err()
+    ));
+    t.emit(&format!(
+        "timestamp reject tzdb offset mismatch: {}",
+        CanonicalTimestamp::zoned(
+            ZONED_FIXTURE_INSTANT,
+            -4 * 60 * 60,
+            "America/New_York",
+            oid(0x40),
+            &AVAILABLE_RESOLVER,
+        )
+        .unwrap_err()
+    ));
+    let half_even = CanonicalDecimal::from_scaled_half_even(25, 19)
+        .expect("2.5 units at scale 18 rounds to even 2");
+    t.emit(&format!(
+        "decimal half-even boundary: source=25e-19 coefficient={}",
+        half_even.coefficient()
+    ));
+    let decimal_max = CanonicalDecimal::from_coefficient(MAX_DECIMAL_COEFFICIENT)
+        .expect("profile maximum is canonical");
+    let decimal_one = CanonicalDecimal::from_coefficient(1).expect("one coefficient is canonical");
+    t.emit(&format!(
+        "decimal reject profile overflow: {}",
+        decimal_max.checked_add(decimal_one).unwrap_err()
+    ));
     // Typed malformed rejections.
     let bad_float = {
-        let mut e = vec![0x03];
-        e.extend_from_slice(&0x7FF0_0000_0000_0001u64.to_le_bytes());
+        let mut e = vec![0x04];
+        e.extend_from_slice(&0xFFF0_0000_0000_0001u64.to_be_bytes());
         e
     };
     t.emit(&format!(
         "scalar reject non-canonical float: {}",
         CanonicalScalar::decode(&bad_float).unwrap_err()
     ));
-    let mut huge = vec![0x05];
-    huge.extend_from_slice(&u64::MAX.to_le_bytes());
+    let mut malformed_bytes = vec![0x07];
+    malformed_bytes.extend_from_slice(&[0; 8]);
+    malformed_bytes.push(0xF6);
     t.emit(&format!(
-        "scalar reject oversized declared length: {}",
-        CanonicalScalar::decode(&huge).unwrap_err()
+        "scalar reject invalid memcomparable marker: {}",
+        CanonicalScalar::decode(&malformed_bytes).unwrap_err()
     ));
 
     // 2. ZWeight promotion across the i128 boundary and back.
@@ -131,7 +290,10 @@ fn main() {
             vid: VId(1),
             birth_ordinal: 1,
             labels: vec![LabelId(7)],
-            props: vec![(PropertyKeyId(1), CanonicalScalar::Text("Ada".into()))],
+            props: vec![(
+                PropertyKeyId(1),
+                CanonicalScalar::ucs_basic_text("Ada").expect("bounded UCS_BASIC text"),
+            )],
             valid_time: None,
         },
         DeltaRow::CreateEdge {
