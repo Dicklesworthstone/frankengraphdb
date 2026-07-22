@@ -16,6 +16,8 @@ members = [
     "crates/fgdb-bigint",
     "crates/fgdb-claim",
     "crates/fgdb-delta-types",
+    "crates/fgdb-evidence",
+    "crates/fgdb-resource",
     "crates/fgdb-types",
     "tools/registry-check",
 ]

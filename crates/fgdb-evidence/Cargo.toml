@@ -1,0 +1,15 @@
+[package]
+name = "fgdb-evidence"
+version = "0.0.1"
+edition = "2024"
+description = "Evidence envelopes: immutable bindings from a section-15.0 evidence claim to its content-addressed evidence identity, declared selection/calibration context, regime epoch, and deterministic fallback (bead fgdb-w1-foundation-types-tjk)."
+publish = false
+
+[dependencies.fgdb-claim]
+path = "../fgdb-claim"
+
+[dependencies.fgdb-types]
+path = "../fgdb-types"
+
+[lints]
+workspace = true
