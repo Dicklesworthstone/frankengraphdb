@@ -49,7 +49,8 @@ use std::path::Path;
 /// Builtin scalar wire types (documented in durable_fields.toml).
 /// `digest256` REQUIRES a declared digest_class; `id256`/`oid256` are raw
 /// 256-bit identities, not digests-of-something.
-pub const BUILTIN_WIRE_TYPES: [&str; 10] = [
+pub const BUILTIN_WIRE_TYPES: [&str; 11] = [
+    "u8",
     "u16",
     "u32",
     "u64",
@@ -840,10 +841,10 @@ fn predicate_allows_role(predicate: &str, role: &str) -> bool {
 pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const LOGICAL: &str = "fnv1a64:1455c06e68eeebb1";
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
-    const BOOTSTRAP: &str = "fnv1a64:cd78e3afad681953";
+    const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:4e1bb00445c8159e";
-    const FIELDS: &str = "fnv1a64:8030df467fea65b8";
+    const WIRE: &str = "fnv1a64:3225fb5d17c23088";
+    const FIELDS: &str = "fnv1a64:d63c00f968930c2e";
 
     let logical = rows_pin(
         r.logical
@@ -945,7 +946,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "bootstrap_frames",
-            expected_epoch: 1,
+            expected_epoch: 2,
             actual_epoch: r.bootstrap_epoch,
             expected_pin: BOOTSTRAP,
             actual_pin: bootstrap,
@@ -959,14 +960,14 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "wire_types",
-            expected_epoch: 1,
+            expected_epoch: 2,
             actual_epoch: r.wire_epoch,
             expected_pin: WIRE,
             actual_pin: wire,
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 1,
+            expected_epoch: 2,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,
@@ -1334,7 +1335,7 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         }
         if !matches!(
             f.reference_semantics.as_str(),
-            "none" | "strong" | "conditional" | "weak_digest" | "locator"
+            "none" | "strong" | "conditional" | "weak_digest" | "locator" | "external_root"
         ) {
             out.push(v(
                 "bad_field",
@@ -1382,7 +1383,11 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         let is_builtin = BUILTIN_WIRE_TYPES.contains(&f.exact_wire_type.as_str());
         let is_wire = wire_names.contains(f.exact_wire_type.as_str());
         let is_union = union_by_name.contains_key(f.exact_wire_type.as_str());
-        if !is_builtin && !is_wire && !is_union {
+        // A bootstrap frame may appear inline as a field's exact type
+        // (RootSlot.bootstrap: RootBootstrap at a pinned offset, §5.1) —
+        // frames are schemas in the bootstrap identity class, not wire types.
+        let is_inline_frame = bootstrap_names.contains(f.exact_wire_type.as_str());
+        if !is_builtin && !is_wire && !is_union && !is_inline_frame {
             out.push(v(
                 "field_unresolved_wire_type",
                 "durable_fields",
@@ -1420,10 +1425,27 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 ),
             ));
         }
-        // Reference discipline.
-        let is_retaining = matches!(f.reference_semantics.as_str(), "strong" | "conditional");
+        // Reference discipline. `external_root` is the distinct traversal
+        // class for the bootstrap-slot root identity (Appendix A ~1435):
+        // followed as strong by GC from OUTSIDE the object graph, legal only
+        // inside a bootstrap frame — an in-graph object must use an ordinary
+        // strong/conditional edge instead.
+        let is_retaining = matches!(
+            f.reference_semantics.as_str(),
+            "strong" | "conditional" | "external_root"
+        );
         if is_retaining {
-            if bootstrap_names.contains(f.containing_schema.as_str()) {
+            let in_frame = bootstrap_names.contains(f.containing_schema.as_str());
+            if f.reference_semantics == "external_root" {
+                if !in_frame {
+                    out.push(v(
+                        "external_root_outside_frame",
+                        "durable_fields",
+                        &row_id,
+                        "external_root references are legal only inside bootstrap frames; in-graph objects use strong/conditional edges",
+                    ));
+                }
+            } else if in_frame {
                 out.push(v(
                     "frame_strong_ref",
                     "durable_fields",
