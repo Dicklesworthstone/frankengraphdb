@@ -11,6 +11,7 @@
 //! language, JSON emitter, and hash pin are all in-house.
 
 pub mod appendix_a;
+pub mod appendix_source;
 pub mod architecture;
 pub mod closure;
 pub mod hash;

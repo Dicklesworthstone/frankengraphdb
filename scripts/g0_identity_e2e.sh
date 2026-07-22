@@ -84,7 +84,8 @@ fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_source_manifest"' \
     '"line_count":1271' \
-    '"byte_count":950186' \
+    '"byte_count":950365' \
+    '"sha256":"db855855638b3df0001ccd2a7f0801943bb33ed59291421497149f71196201ff"' \
     '"outcome":"pass"'; then
   ok "Appendix A exact source manifest is pinned"
 else
@@ -107,10 +108,33 @@ APPENDIX_PROJECTION_PASSES=$(awk '
   && ok "all six generated projections byte-match" \
   || die "expected six passing Appendix A projections, found $APPENDIX_PROJECTION_PASSES"
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
+    '"event":"appendix_closure_checked"' \
+    '"reservations":716' \
+    '"existing_reservations":14' \
+    '"reserved_reservations":702' \
+    '"source_dispositions":751' \
+    '"bindings":844' \
+    '"statuses":844' \
+    '"unresolved_source_symbols":1' \
+    '"appendix_defined_symbols":458' \
+    '"external_definition_symbols":257' \
+    '"source_location_pairs":1724' \
+    '"g0_projection_dispositions":35' \
+    '"outcome":"pass"'; then
+  ok "Appendix A type/owner/evidence closure is exact"
+else
+  die "Appendix A closure event is missing or drifted"
+fi
+if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_completed"' \
     '"slices":21' \
     '"projection_rows":128' \
     '"projection_files":6' \
+    '"reservations":716' \
+    '"source_dispositions":751' \
+    '"bindings":844' \
+    '"statuses":844' \
+    '"unresolved_source_symbols":1' \
     '"violations":0' \
     '"outcome":"pass"'; then
   ok "Appendix A catalog closure is exact"
@@ -225,6 +249,29 @@ expect_appendix_violation() { # fixture code row_id
       "\"code\":\"$expected_code\"" \
       "\"row_id\":\"$expected_row_id\""; then
     ok "$fixture rejected with $expected_code at $expected_row_id"
+  else
+    die "$fixture omitted $expected_code at $expected_row_id"
+  fi
+}
+
+expect_appendix_structural_error() { # fixture code row_id
+  local fixture="$1"
+  local expected_code="$2"
+  local expected_row_id="$3"
+  local status
+  if "$BIN" appendix --root "$WORK/$fixture" \
+      >"$WORK/$fixture.jsonl" 2>"$WORK/$fixture.err"; then
+    die "$fixture unexpectedly passed Appendix validation"
+  else
+    status=$?
+    [ "$status" -eq 2 ] \
+      || die "$fixture exited $status instead of structural status 2"
+  fi
+  if jsonl_line_has_all "$WORK/$fixture.jsonl" \
+      '"event":"violation"' \
+      "\"code\":\"$expected_code\"" \
+      "\"row_id\":\"$expected_row_id\""; then
+    ok "$fixture rejected structurally with $expected_code at $expected_row_id"
   else
     die "$fixture omitted $expected_code at $expected_row_id"
   fi
@@ -592,6 +639,33 @@ awk '
   > "$WORK/neg-appendix-bead/registries/appendix_a_catalog.toml"
 expect_appendix_violation neg-appendix-bead catalog_pin_mismatch a01
 
+log "phase 3a-redaction: attacker-controlled catalog values never reach diagnostics"
+stage_appendix neg-appendix-redaction
+APPENDIX_SECRET_SENTINEL='APPENDIX_SECRET_SENTINEL_7f7c9d5b'
+awk -v sentinel="$APPENDIX_SECRET_SENTINEL" '
+  !title_changed && $0 == "title = \"Appendix A exact catalog: Reference semantics, RootSlot, and RootBootstrap\"" {
+    print "title = \"" sentinel "\""
+    title_changed = 1
+    next
+  }
+  !row_changed && $0 == "row_id = \"a03:logical-kind:logical-state-payload\"" {
+    print "row_id = \"" sentinel "\""
+    row_changed = 1
+    next
+  }
+  { print }
+  END { if (!title_changed || !row_changed) exit 42 }
+' "$ROOT/registries/appendix_a_catalog.toml" \
+  > "$WORK/neg-appendix-redaction/registries/appendix_a_catalog.toml"
+expect_appendix_violation neg-appendix-redaction catalog_pin_mismatch a01
+if grep -Fq "$APPENDIX_SECRET_SENTINEL" \
+    "$WORK/neg-appendix-redaction.jsonl" \
+    "$WORK/neg-appendix-redaction.err"; then
+  die "Appendix diagnostic leaked attacker-controlled catalog text"
+else
+  ok "Appendix JSONL and stderr redact attacker-controlled catalog text"
+fi
+
 log "phase 3b: exact Appendix source-byte drift"
 stage_appendix neg-appendix-source
 awk '
@@ -625,27 +699,193 @@ else
   die "Appendix projection-diff JSONL changed across identical runs"
 fi
 
-log "phase 3d: explicit projection generation is idempotent"
+log "phase 3d: projection generation is a read-only, deterministic verifier"
+stage_appendix neg-appendix-generate-write
+printf '\n# planted generation-write sentinel\n' \
+  >> "$WORK/neg-appendix-generate-write/registries/logical_object_kinds.toml"
+sha256sum \
+  "$WORK/neg-appendix-generate-write/registries/logical_object_kinds.toml" \
+  "$WORK/neg-appendix-generate-write/registries/physical_record_kinds.toml" \
+  "$WORK/neg-appendix-generate-write/registries/bootstrap_frames.toml" \
+  "$WORK/neg-appendix-generate-write/registries/prebootstrap_artifact_kinds.toml" \
+  "$WORK/neg-appendix-generate-write/registries/wire_types.toml" \
+  "$WORK/neg-appendix-generate-write/registries/durable_fields.toml" \
+  > "$WORK/neg-appendix-generate-write-before.sha256"
+status=0
+"$BIN" appendix-generate --root "$WORK/neg-appendix-generate-write" \
+  >"$WORK/neg-appendix-generate-write.jsonl" \
+  2>"$WORK/neg-appendix-generate-write.err" || status=$?
+[ "$status" -eq 1 ] \
+  || die "drifted projection generation fixture did not exit with status 1"
+sha256sum \
+  "$WORK/neg-appendix-generate-write/registries/logical_object_kinds.toml" \
+  "$WORK/neg-appendix-generate-write/registries/physical_record_kinds.toml" \
+  "$WORK/neg-appendix-generate-write/registries/bootstrap_frames.toml" \
+  "$WORK/neg-appendix-generate-write/registries/prebootstrap_artifact_kinds.toml" \
+  "$WORK/neg-appendix-generate-write/registries/wire_types.toml" \
+  "$WORK/neg-appendix-generate-write/registries/durable_fields.toml" \
+  > "$WORK/neg-appendix-generate-write-after.sha256"
+if cmp -s "$WORK/neg-appendix-generate-write-before.sha256" \
+    "$WORK/neg-appendix-generate-write-after.sha256" &&
+   jsonl_line_has_all "$WORK/neg-appendix-generate-write.jsonl" \
+    '"code":"projection_byte_diff"' \
+    '"outcome":"fail"'; then
+  ok "Appendix generation rejects drift without writing any projection"
+else
+  die "Appendix generation changed a checked-in projection"
+fi
+
 stage_appendix appendix-generate
+sha256sum \
+  "$WORK/appendix-generate/registries/logical_object_kinds.toml" \
+  "$WORK/appendix-generate/registries/physical_record_kinds.toml" \
+  "$WORK/appendix-generate/registries/bootstrap_frames.toml" \
+  "$WORK/appendix-generate/registries/prebootstrap_artifact_kinds.toml" \
+  "$WORK/appendix-generate/registries/wire_types.toml" \
+  "$WORK/appendix-generate/registries/durable_fields.toml" \
+  > "$WORK/appendix-generate-before.sha256"
 if "$BIN" appendix-generate --root "$WORK/appendix-generate" \
     >"$WORK/appendix-generate-first.jsonl" \
     2>"$WORK/appendix-generate-first.err" &&
    "$BIN" appendix-generate --root "$WORK/appendix-generate" \
     >"$WORK/appendix-generate-second.jsonl" \
     2>"$WORK/appendix-generate-second.err"; then
-  ok "Appendix projections generate successfully twice"
+  ok "Appendix projections render and verify successfully twice"
 else
-  die "Appendix projection generation failed"
+  die "Appendix projection verification failed"
 fi
+sha256sum \
+  "$WORK/appendix-generate/registries/logical_object_kinds.toml" \
+  "$WORK/appendix-generate/registries/physical_record_kinds.toml" \
+  "$WORK/appendix-generate/registries/bootstrap_frames.toml" \
+  "$WORK/appendix-generate/registries/prebootstrap_artifact_kinds.toml" \
+  "$WORK/appendix-generate/registries/wire_types.toml" \
+  "$WORK/appendix-generate/registries/durable_fields.toml" \
+  > "$WORK/appendix-generate-after.sha256"
 if cmp -s "$WORK/appendix-generate-first.jsonl" \
-    "$WORK/appendix-generate-second.jsonl"; then
-  ok "Appendix projection generation JSONL and bytes are idempotent"
+    "$WORK/appendix-generate-second.jsonl" &&
+   cmp -s "$WORK/appendix-generate-before.sha256" \
+    "$WORK/appendix-generate-after.sha256"; then
+  ok "Appendix projection verification is deterministic and byte-preserving"
 else
-  die "Appendix projection generation changed across identical runs"
+  die "Appendix projection verification changed JSONL or checked-in bytes"
 fi
 
+log "phase 3e: exact owner binding is mandatory"
+stage_appendix neg-appendix-owner
+awk '
+  !changed && $0 == "owner_bead_id = \"fgdb-a01-reference-roots-2k0q\"" {
+    print "owner_bead_id = \"fgdb-a01-wrong-owner\""
+    changed = 1
+    next
+  }
+  { print }
+  END { if (!changed) exit 42 }
+' "$ROOT/registries/appendix_a_catalog.toml" \
+  > "$WORK/neg-appendix-owner/registries/appendix_a_catalog.toml"
+expect_appendix_violation \
+  neg-appendix-owner catalog_owner_mismatch catalog_row
+
+log "phase 3f: every primary target requires one status row"
+stage_appendix neg-appendix-status
+awk '
+  !removed && $0 == "[[status]]" { removed = 1; skipping = 1; next }
+  skipping && /^\[\[/ { skipping = 0 }
+  !skipping { print }
+  END { if (!removed) exit 42 }
+' "$ROOT/registries/appendix_a_catalog.toml" \
+  > "$WORK/neg-appendix-status/registries/appendix_a_catalog.toml"
+expect_appendix_violation \
+  neg-appendix-status catalog_metadata_count status
+
+log "phase 3g: row IDs are derived from typed projection identity"
+stage_appendix neg-appendix-row-id
+awk '
+  !changed && $0 == "row_id = \"a03:logical-kind:logical-state-payload\"" {
+    print "row_id = \"a03:logical-kind:logical-state-payload-wrong\""
+    changed = 1
+    next
+  }
+  { print }
+  END { if (!changed) exit 42 }
+' "$ROOT/registries/appendix_a_catalog.toml" \
+  > "$WORK/neg-appendix-row-id/registries/appendix_a_catalog.toml"
+expect_appendix_violation \
+  neg-appendix-row-id catalog_row_id_derived_mismatch \
+  catalog_row
+
+log "phase 3h: G0 projection ownership cannot be broadened"
+stage_appendix neg-appendix-g0-owner
+awk '
+  !changed && $0 == "slice_id = \"a03\"" {
+    print "slice_id = \"g0\""
+    relabel = 1
+    changed = 1
+    next
+  }
+  relabel && $0 == "row_id = \"a03:logical-kind:logical-state-payload\"" {
+    print "row_id = \"g0:logical-kind:logical-state-payload\""
+    relabel = 0
+    next
+  }
+  { print }
+  END { if (!changed || relabel) exit 42 }
+' "$ROOT/registries/appendix_a_catalog.toml" \
+  > "$WORK/neg-appendix-g0-owner/registries/appendix_a_catalog.toml"
+expect_appendix_violation \
+  neg-appendix-g0-owner g0_projection_allowlist_drift g0
+
+log "phase 3i: unresolved-family partition is release-pinned"
+stage_appendix neg-appendix-unresolved
+awk '
+  $0 == "symbol = \"ActivatedDeltaRetentionCut\"" { target = 1 }
+  target && $0 == "disposition = \"external-definition\"" {
+    print "disposition = \"unresolved\""
+    changed = 1
+    target = 0
+    next
+  }
+  { print }
+  END { if (!changed) exit 42 }
+' "$ROOT/registries/appendix_a_catalog.toml" \
+  > "$WORK/neg-appendix-unresolved/registries/appendix_a_catalog.toml"
+expect_appendix_violation \
+  neg-appendix-unresolved catalog_source_disposition_partition unresolved
+
+log "phase 3k: unknown catalog keys are structural load failures"
+stage_appendix neg-appendix-unknown-key
+awk '
+  !changed && $0 == "schema_version = 1" {
+    print
+    print "unknown_catalog_root = true"
+    changed = 1
+    next
+  }
+  { print }
+  END { if (!changed) exit 42 }
+' "$ROOT/registries/appendix_a_catalog.toml" \
+  > "$WORK/neg-appendix-unknown-key/registries/appendix_a_catalog.toml"
+expect_appendix_structural_error \
+  neg-appendix-unknown-key catalog_unknown_key catalog
+
+log "phase 3l: malformed projection schemas are structural load failures"
+stage_appendix neg-appendix-projection-schema
+awk '
+  !changed && $0 == "[[logical_kind]]" {
+    print
+    print "unknown_projection_key = true"
+    changed = 1
+    next
+  }
+  { print }
+  END { if (!changed) exit 42 }
+' "$ROOT/registries/appendix_a_catalog.toml" \
+  > "$WORK/neg-appendix-projection-schema/registries/appendix_a_catalog.toml"
+expect_appendix_structural_error \
+  neg-appendix-projection-schema catalog_projection_schema logical_object_kinds
+
 # --- Verdict -----------------------------------------------------------------
-log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-union-role,neg-appendix-bead,neg-appendix-source,neg-appendix-projection,appendix-generate-first,appendix-generate-second}.jsonl"
+log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-union-role,neg-appendix-bead,neg-appendix-source,neg-appendix-projection,neg-appendix-owner,neg-appendix-status,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-unresolved,neg-appendix-unknown-key,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second}.jsonl"
 log "result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 log "G0 identity e2e: ALL GREEN"

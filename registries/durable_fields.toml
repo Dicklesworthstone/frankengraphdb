@@ -1,4 +1,7 @@
-# GENERATED from appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
+# GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
+# Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
+# Appendix A lines 1384-2654; sha256=db855855638b3df0001ccd2a7f0801943bb33ed59291421497149f71196201ff.
+# Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
 [registry]
@@ -6,32 +9,317 @@ name = "durable_fields"
 registry_epoch = 1
 
 [[field]]
-containing_schema = "LogicalStatePayload"
+containing_schema = "AuthorityBindingRecord"
 field_tag = 0x0001
-stable_name = "applied_logical_command_seq"
+stable_name = "role"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "AuthorityOwningRole closed set Local|Meta; Shards never originate an authority record"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "AuthorityBindingRecord"
+field_tag = 0x0002
+stable_name = "database_security_namespace_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "binding scope"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "AuthorityBindingRecord"
+field_tag = 0x0003
+stable_name = "cluster_incarnation"
 exact_wire_type = "u64"
 cardinality = "one"
 identity_class = "scalar"
 reference_semantics = "none"
-construction_order = 20
-role_predicate = "true"
-retention_and_cut_rule = "lives/dies with the payload object"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "binding scope"
 version_status = "active"
 max_size_bytes = 8
 
 [[field]]
-containing_schema = "LogicalStatePayload"
-field_tag = 0x0002
-stable_name = "applied_commit_seq"
+containing_schema = "AuthorityBindingRecord"
+field_tag = 0x0004
+stable_name = "service_visibility_epoch"
 exact_wire_type = "u64"
 cardinality = "one"
 identity_class = "scalar"
 reference_semantics = "none"
-construction_order = 20
-role_predicate = "true"
-retention_and_cut_rule = "lives/dies with the payload object"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "binding scope; equal-scalar/different-root substitution is a mandatory negative fixture (FG-INV-20)"
 version_status = "active"
 max_size_bytes = 8
+
+[[field]]
+containing_schema = "AuthorityBindingRecord"
+field_tag = 0x0005
+stable_name = "tenant"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "binding subject"
+version_status = "active"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "AuthorityBindingRecord"
+field_tag = 0x0006
+stable_name = "principal"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "binding subject"
+version_status = "active"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "AuthorityBindingRecord"
+field_tag = 0x0007
+stable_name = "non_widenable_authority_ceiling_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "ceiling commitment; widening is a mandatory negative fixture"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "AuthorityBindingRecord"
+field_tag = 0x0008
+stable_name = "purpose_class"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "purpose discrimination"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "AuthorityBindingRecord"
+field_tag = 0x0009
+stable_name = "security_state_binding"
+exact_wire_type = "SecurityStateBinding"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "one complete SecurityStateBinding (FG-INV-20); scalar epochs alone fail G0"
+version_status = "active"
+max_size_bytes = 1024
+
+[[field]]
+containing_schema = "AuthorityBindingRecord"
+field_tag = 0x000a
+stable_name = "authority_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "authority transcript digest; header copies must byte-match"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "authority transcript (warden/w9 beads register the exact recipe; registered here as a transcript-class digest, never inferred from the name)"
+
+[[field]]
+containing_schema = "AuthorityBindingRecord"
+field_tag = 0x000b
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "BodyDigest<AuthorityBindingRecord>"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:authority-binding:v1"
+bd_schema_major = 1
+bd_included_field_tags = []
+bd_excluded_field_tags = [11]
+recipe_pin = "fnv1a64:2be6808e91bd9d0d"
+
+[[field]]
+containing_schema = "BackupManifest"
+field_tag = 0x0001
+stable_name = "body_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BackupManifestBody"
+construction_order = 37
+role_predicate = "true"
+retention_and_cut_rule = "acyclic Body -> SignatureSet -> Manifest construction; contains no self digest"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BackupManifest"
+field_tag = 0x0002
+stable_name = "signature_set_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BackupManifestSignatureSet"
+construction_order = 37
+role_predicate = "true"
+retention_and_cut_rule = "acyclic construction"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BackupManifestSignatureSet"
+field_tag = 0x0001
+stable_name = "body_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BackupManifestBody"
+construction_order = 36
+role_predicate = "true"
+retention_and_cut_rule = "signatures over the separately identified body"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "CheckpointStateVector"
+field_tag = 0x0001
+stable_name = "mandatory_inventory"
+exact_wire_type = "MandatoryInventoryRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+construction_order = 35
+role_predicate = "role-local"
+retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
+version_status = "reserved"
+max_size_bytes = 268435456
+
+[[field]]
+containing_schema = "CommitCapsule"
+field_tag = 0x0001
+stable_name = "command_inputs"
+exact_wire_type = "LocalCommandInputRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "strong within the capsule's retention tier"
+version_status = "active"
+max_size_bytes = 1048576
+
+[[field]]
+containing_schema = "CommitCommand"
+field_tag = 0x0001
+stable_name = "intent_body"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "graph intent log payload (Appendix B; bead a10 populates the exact schema)"
+version_status = "active"
+max_size_bytes = 268435456
+
+[[field]]
+containing_schema = "CommitMarker"
+field_tag = 0x0001
+stable_name = "commit_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "marker identity component (MarkerRef {marker_oid, commit_seq})"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "CommitMarker"
+field_tag = 0x0002
+stable_name = "capsule_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CommitCapsule"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "strong until retention-tier cooling (B1); markers stay independently addressable"
+version_status = "active"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ControlCommand"
+field_tag = 0x0001
+stable_name = "control_body"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "control-command payload (bead a10 populates the exact schema)"
+version_status = "active"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "GlobalKeyEnvelopeManifest"
+field_tag = 0x0001
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "BodyDigest<GlobalKeyEnvelopeManifest>"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:global-key-envelope-manifest:v1"
+bd_schema_major = 1
+bd_included_field_tags = []
+bd_excluded_field_tags = [1]
+recipe_pin = "fnv1a64:55336bfa5c150521"
 
 [[field]]
 containing_schema = "LogicalCommandRecord"
@@ -121,6 +409,34 @@ max_size_bytes = 32
 digest_class = "weak_identity"
 
 [[field]]
+containing_schema = "LogicalStatePayload"
+field_tag = 0x0001
+stable_name = "applied_logical_command_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the payload object"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "LogicalStatePayload"
+field_tag = 0x0002
+stable_name = "applied_commit_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the payload object"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
 containing_schema = "LogicalStateRoot"
 field_tag = 0x0001
 stable_name = "payload_ref"
@@ -151,75 +467,18 @@ version_status = "active"
 max_size_bytes = 40
 
 [[field]]
-containing_schema = "CommitCommand"
+containing_schema = "MetaAppliedResult"
 field_tag = 0x0001
-stable_name = "intent_body"
+stable_name = "result_body"
 exact_wire_type = "bytes"
 cardinality = "one"
 identity_class = "scalar"
 reference_semantics = "none"
-construction_order = 10
-role_predicate = "true"
-retention_and_cut_rule = "graph intent log payload (Appendix B; bead a10 populates the exact schema)"
-version_status = "active"
+construction_order = 20
+role_predicate = "role-meta"
+retention_and_cut_rule = "reserved; a05-a07 populate the exact schema"
+version_status = "reserved"
 max_size_bytes = 268435456
-
-[[field]]
-containing_schema = "ControlCommand"
-field_tag = 0x0001
-stable_name = "control_body"
-exact_wire_type = "bytes"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "true"
-retention_and_cut_rule = "control-command payload (bead a10 populates the exact schema)"
-version_status = "active"
-max_size_bytes = 16777216
-
-[[field]]
-containing_schema = "CommitMarker"
-field_tag = 0x0001
-stable_name = "commit_seq"
-exact_wire_type = "u64"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 15
-role_predicate = "true"
-retention_and_cut_rule = "marker identity component (MarkerRef {marker_oid, commit_seq})"
-version_status = "active"
-max_size_bytes = 8
-
-[[field]]
-containing_schema = "CommitMarker"
-field_tag = 0x0002
-stable_name = "capsule_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "CommitCapsule"
-construction_order = 15
-role_predicate = "true"
-retention_and_cut_rule = "strong until retention-tier cooling (B1); markers stay independently addressable"
-version_status = "active"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "CommitCapsule"
-field_tag = 0x0001
-stable_name = "command_inputs"
-exact_wire_type = "LocalCommandInputRef"
-cardinality = "many"
-identity_class = "logical"
-reference_semantics = "strong"
-construction_order = 10
-role_predicate = "true"
-retention_and_cut_rule = "strong within the capsule's retention tier"
-version_status = "active"
-max_size_bytes = 1048576
 
 [[field]]
 containing_schema = "PreparedCommitRecord"
@@ -236,19 +495,92 @@ version_status = "active"
 max_size_bytes = 16777216
 
 [[field]]
-containing_schema = "RootManifest"
+containing_schema = "RaftSnapshotLocal"
 field_tag = 0x0001
-stable_name = "logical_state_root_ref"
-exact_wire_type = "StrongRef"
+stable_name = "body_digest"
+exact_wire_type = "digest256"
 cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "BodyDigest<RaftSnapshotLocal>; exact-cut snapshot identity component (FG-INV-08)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:raft-snapshot-local:v1"
+bd_schema_major = 1
+bd_included_field_tags = []
+bd_excluded_field_tags = [1]
+recipe_pin = "fnv1a64:3dedb18b0ac32f0c"
+
+[[field]]
+containing_schema = "RaftSnapshotMeta"
+field_tag = 0x0001
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-meta"
+retention_and_cut_rule = "BodyDigest<RaftSnapshotMeta>"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:raft-snapshot-meta:v1"
+bd_schema_major = 1
+bd_included_field_tags = []
+bd_excluded_field_tags = [1]
+recipe_pin = "fnv1a64:59702ceb4c836ec2"
+
+[[field]]
+containing_schema = "RaftSnapshotMeta"
+field_tag = 0x0002
+stable_name = "applied_results"
+exact_wire_type = "MetaAppliedResultRef"
+cardinality = "many"
 identity_class = "logical"
 reference_semantics = "strong"
-target_schema_id = "LogicalStateRoot"
 construction_order = 40
-role_predicate = "true"
-retention_and_cut_rule = "strong while this manifest is a published or retained root"
-version_status = "active"
-max_size_bytes = 40
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong within the snapshot cut"
+version_status = "reserved"
+max_size_bytes = 268435456
+
+[[field]]
+containing_schema = "RaftSnapshotShard"
+field_tag = 0x0001
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-shard"
+retention_and_cut_rule = "BodyDigest<RaftSnapshotShard>"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:raft-snapshot-shard:v1"
+bd_schema_major = 1
+bd_included_field_tags = []
+bd_excluded_field_tags = [1]
+recipe_pin = "fnv1a64:69bb104a85eb6128"
+
+[[field]]
+containing_schema = "RaftSnapshotShard"
+field_tag = 0x0002
+stable_name = "protocol_evidence"
+exact_wire_type = "ShardProtocolEvidenceRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+construction_order = 40
+role_predicate = "role-shard"
+retention_and_cut_rule = "shard rows are projections or shard-owned protocol state only; never a second Meta semantic authority"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "RecoveryBridgeSpec"
@@ -264,6 +596,21 @@ retention_and_cut_rule = "weak identity of the source manifest; never retains it
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "RootManifest"
+field_tag = 0x0001
+stable_name = "logical_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LogicalStateRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong while this manifest is a published or retained root"
+version_status = "active"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "RootSlot"
@@ -467,257 +814,6 @@ digest_class = "transcript"
 transcript_recipe = "checksum over the complete 4 KiB slot bytes excluding exactly the tear_checksum field itself; a mismatch makes the slot structurally incredible"
 
 [[field]]
-containing_schema = "AuthorityBindingRecord"
-field_tag = 0x0001
-stable_name = "role"
-exact_wire_type = "u16"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "role-local || role-meta"
-retention_and_cut_rule = "AuthorityOwningRole closed set Local|Meta; Shards never originate an authority record"
-version_status = "active"
-max_size_bytes = 2
-
-[[field]]
-containing_schema = "AuthorityBindingRecord"
-field_tag = 0x0002
-stable_name = "database_security_namespace_id"
-exact_wire_type = "id256"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "role-local || role-meta"
-retention_and_cut_rule = "binding scope"
-version_status = "active"
-max_size_bytes = 32
-
-[[field]]
-containing_schema = "AuthorityBindingRecord"
-field_tag = 0x0003
-stable_name = "cluster_incarnation"
-exact_wire_type = "u64"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "role-local || role-meta"
-retention_and_cut_rule = "binding scope"
-version_status = "active"
-max_size_bytes = 8
-
-[[field]]
-containing_schema = "AuthorityBindingRecord"
-field_tag = 0x0004
-stable_name = "service_visibility_epoch"
-exact_wire_type = "u64"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "role-local || role-meta"
-retention_and_cut_rule = "binding scope; equal-scalar/different-root substitution is a mandatory negative fixture (FG-INV-20)"
-version_status = "active"
-max_size_bytes = 8
-
-[[field]]
-containing_schema = "AuthorityBindingRecord"
-field_tag = 0x0005
-stable_name = "tenant"
-exact_wire_type = "bytes"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "role-local || role-meta"
-retention_and_cut_rule = "binding subject"
-version_status = "active"
-max_size_bytes = 256
-
-[[field]]
-containing_schema = "AuthorityBindingRecord"
-field_tag = 0x0006
-stable_name = "principal"
-exact_wire_type = "bytes"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "role-local || role-meta"
-retention_and_cut_rule = "binding subject"
-version_status = "active"
-max_size_bytes = 256
-
-[[field]]
-containing_schema = "AuthorityBindingRecord"
-field_tag = 0x0007
-stable_name = "non_widenable_authority_ceiling_digest"
-exact_wire_type = "digest256"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "role-local || role-meta"
-retention_and_cut_rule = "ceiling commitment; widening is a mandatory negative fixture"
-version_status = "active"
-max_size_bytes = 32
-digest_class = "target"
-
-[[field]]
-containing_schema = "AuthorityBindingRecord"
-field_tag = 0x0008
-stable_name = "purpose_class"
-exact_wire_type = "u16"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "role-local || role-meta"
-retention_and_cut_rule = "purpose discrimination"
-version_status = "active"
-max_size_bytes = 2
-
-[[field]]
-containing_schema = "AuthorityBindingRecord"
-field_tag = 0x0009
-stable_name = "security_state_binding"
-exact_wire_type = "SecurityStateBinding"
-cardinality = "one"
-identity_class = "inline"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "role-local || role-meta"
-retention_and_cut_rule = "one complete SecurityStateBinding (FG-INV-20); scalar epochs alone fail G0"
-version_status = "active"
-max_size_bytes = 1024
-
-[[field]]
-containing_schema = "AuthorityBindingRecord"
-field_tag = 0x000a
-stable_name = "authority_digest"
-exact_wire_type = "digest256"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "role-local || role-meta"
-retention_and_cut_rule = "authority transcript digest; header copies must byte-match"
-version_status = "active"
-max_size_bytes = 32
-digest_class = "transcript"
-transcript_recipe = "authority transcript (warden/w9 beads register the exact recipe; registered here as a transcript-class digest, never inferred from the name)"
-
-[[field]]
-containing_schema = "AuthorityBindingRecord"
-field_tag = 0x000b
-stable_name = "body_digest"
-exact_wire_type = "digest256"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 10
-role_predicate = "role-local || role-meta"
-retention_and_cut_rule = "BodyDigest<AuthorityBindingRecord>"
-version_status = "active"
-max_size_bytes = 32
-digest_class = "body"
-bd_domain_separator = "fgdb:body:authority-binding:v1"
-bd_schema_major = 1
-bd_included_field_tags = []
-bd_excluded_field_tags = [11]
-recipe_pin = "fnv1a64:2be6808e91bd9d0d"
-
-[[field]]
-containing_schema = "RaftSnapshotLocal"
-field_tag = 0x0001
-stable_name = "body_digest"
-exact_wire_type = "digest256"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 40
-role_predicate = "role-local"
-retention_and_cut_rule = "BodyDigest<RaftSnapshotLocal>; exact-cut snapshot identity component (FG-INV-08)"
-version_status = "reserved"
-max_size_bytes = 32
-digest_class = "body"
-bd_domain_separator = "fgdb:body:raft-snapshot-local:v1"
-bd_schema_major = 1
-bd_included_field_tags = []
-bd_excluded_field_tags = [1]
-recipe_pin = "fnv1a64:3dedb18b0ac32f0c"
-
-[[field]]
-containing_schema = "RaftSnapshotMeta"
-field_tag = 0x0001
-stable_name = "body_digest"
-exact_wire_type = "digest256"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 40
-role_predicate = "role-meta"
-retention_and_cut_rule = "BodyDigest<RaftSnapshotMeta>"
-version_status = "reserved"
-max_size_bytes = 32
-digest_class = "body"
-bd_domain_separator = "fgdb:body:raft-snapshot-meta:v1"
-bd_schema_major = 1
-bd_included_field_tags = []
-bd_excluded_field_tags = [1]
-recipe_pin = "fnv1a64:59702ceb4c836ec2"
-
-[[field]]
-containing_schema = "RaftSnapshotMeta"
-field_tag = 0x0002
-stable_name = "applied_results"
-exact_wire_type = "MetaAppliedResultRef"
-cardinality = "many"
-identity_class = "logical"
-reference_semantics = "strong"
-construction_order = 40
-role_predicate = "role-meta"
-retention_and_cut_rule = "strong within the snapshot cut"
-version_status = "reserved"
-max_size_bytes = 268435456
-
-[[field]]
-containing_schema = "RaftSnapshotShard"
-field_tag = 0x0001
-stable_name = "body_digest"
-exact_wire_type = "digest256"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 40
-role_predicate = "role-shard"
-retention_and_cut_rule = "BodyDigest<RaftSnapshotShard>"
-version_status = "reserved"
-max_size_bytes = 32
-digest_class = "body"
-bd_domain_separator = "fgdb:body:raft-snapshot-shard:v1"
-bd_schema_major = 1
-bd_included_field_tags = []
-bd_excluded_field_tags = [1]
-recipe_pin = "fnv1a64:69bb104a85eb6128"
-
-[[field]]
-containing_schema = "RaftSnapshotShard"
-field_tag = 0x0002
-stable_name = "protocol_evidence"
-exact_wire_type = "ShardProtocolEvidenceRef"
-cardinality = "many"
-identity_class = "logical"
-reference_semantics = "strong"
-construction_order = 40
-role_predicate = "role-shard"
-retention_and_cut_rule = "shard rows are projections or shard-owned protocol state only; never a second Meta semantic authority"
-version_status = "reserved"
-max_size_bytes = 16777216
-
-[[field]]
 containing_schema = "ShardHistoryInventory"
 field_tag = 0x0001
 stable_name = "body_digest"
@@ -738,99 +834,6 @@ bd_excluded_field_tags = [1]
 recipe_pin = "fnv1a64:7f652e0dd29a56aa"
 
 [[field]]
-containing_schema = "GlobalKeyEnvelopeManifest"
-field_tag = 0x0001
-stable_name = "body_digest"
-exact_wire_type = "digest256"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 35
-role_predicate = "role-meta"
-retention_and_cut_rule = "BodyDigest<GlobalKeyEnvelopeManifest>"
-version_status = "reserved"
-max_size_bytes = 32
-digest_class = "body"
-bd_domain_separator = "fgdb:body:global-key-envelope-manifest:v1"
-bd_schema_major = 1
-bd_included_field_tags = []
-bd_excluded_field_tags = [1]
-recipe_pin = "fnv1a64:55336bfa5c150521"
-
-[[field]]
-containing_schema = "BackupManifestSignatureSet"
-field_tag = 0x0001
-stable_name = "body_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "BackupManifestBody"
-construction_order = 36
-role_predicate = "true"
-retention_and_cut_rule = "signatures over the separately identified body"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "BackupManifest"
-field_tag = 0x0001
-stable_name = "body_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "BackupManifestBody"
-construction_order = 37
-role_predicate = "true"
-retention_and_cut_rule = "acyclic Body -> SignatureSet -> Manifest construction; contains no self digest"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "BackupManifest"
-field_tag = 0x0002
-stable_name = "signature_set_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "BackupManifestSignatureSet"
-construction_order = 37
-role_predicate = "true"
-retention_and_cut_rule = "acyclic construction"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "CheckpointStateVector"
-field_tag = 0x0001
-stable_name = "mandatory_inventory"
-exact_wire_type = "MandatoryInventoryRef"
-cardinality = "many"
-identity_class = "logical"
-reference_semantics = "strong"
-construction_order = 35
-role_predicate = "role-local"
-retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
-version_status = "reserved"
-max_size_bytes = 268435456
-
-[[field]]
-containing_schema = "MetaAppliedResult"
-field_tag = 0x0001
-stable_name = "result_body"
-exact_wire_type = "bytes"
-cardinality = "one"
-identity_class = "scalar"
-reference_semantics = "none"
-construction_order = 20
-role_predicate = "role-meta"
-retention_and_cut_rule = "reserved; a05-a07 populate the exact schema"
-version_status = "reserved"
-max_size_bytes = 268435456
-
-[[field]]
 containing_schema = "ShardProtocolEvidence"
 field_tag = 0x0001
 stable_name = "evidence_body"
@@ -845,15 +848,21 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[reference_union]]
-union_name = "CommandRef"
-containing_schema = "LogicalCommandRecord"
-field_tag = 0x0003
+union_name = "MandatoryInventoryRef"
+containing_schema = "CheckpointStateVector"
+field_tag = 0x0001
 role = "local"
 
 [[reference_union]]
 union_name = "LocalCommandInputRef"
 containing_schema = "CommitCapsule"
 field_tag = 0x0001
+role = "local"
+
+[[reference_union]]
+union_name = "CommandRef"
+containing_schema = "LogicalCommandRecord"
+field_tag = 0x0003
 role = "local"
 
 [[reference_union]]
@@ -868,40 +877,34 @@ containing_schema = "RaftSnapshotShard"
 field_tag = 0x0002
 role = "shard"
 
-[[reference_union]]
+[[reference_union_arm]]
 union_name = "MandatoryInventoryRef"
 containing_schema = "CheckpointStateVector"
 field_tag = 0x0001
-role = "local"
-
-[[reference_union_arm]]
-union_name = "CommandRef"
-containing_schema = "LogicalCommandRecord"
-field_tag = 0x0003
 arm_tag = 0x0001
-stable_name = "CommitCommand"
-target_schema_id = "CommitCommand"
+stable_name = "PreparedCommitRecord"
+target_schema_id = "PreparedCommitRecord"
 role = "local"
 identity_class = "logical"
 reference_semantics = "strong"
 role_predicate = "role-local"
-retention_and_cut_rule = "strong until checkpoint suffix retirement (FG-INV-14)"
-version_status = "active"
+retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[reference_union_arm]]
-union_name = "CommandRef"
-containing_schema = "LogicalCommandRecord"
-field_tag = 0x0003
+union_name = "MandatoryInventoryRef"
+containing_schema = "CheckpointStateVector"
+field_tag = 0x0001
 arm_tag = 0x0002
-stable_name = "ControlCommand"
-target_schema_id = "ControlCommand"
+stable_name = "CommitCapsule"
+target_schema_id = "CommitCapsule"
 role = "local"
 identity_class = "logical"
 reference_semantics = "strong"
 role_predicate = "role-local"
-retention_and_cut_rule = "strong until checkpoint suffix retirement (FG-INV-14)"
-version_status = "active"
+retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[reference_union_arm]]
@@ -931,6 +934,36 @@ identity_class = "logical"
 reference_semantics = "strong"
 role_predicate = "role-local"
 retention_and_cut_rule = "strong within the capsule's retention tier"
+version_status = "active"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "CommandRef"
+containing_schema = "LogicalCommandRecord"
+field_tag = 0x0003
+arm_tag = 0x0001
+stable_name = "CommitCommand"
+target_schema_id = "CommitCommand"
+role = "local"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicate = "role-local"
+retention_and_cut_rule = "strong until checkpoint suffix retirement (FG-INV-14)"
+version_status = "active"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "CommandRef"
+containing_schema = "LogicalCommandRecord"
+field_tag = 0x0003
+arm_tag = 0x0002
+stable_name = "ControlCommand"
+target_schema_id = "ControlCommand"
+role = "local"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicate = "role-local"
+retention_and_cut_rule = "strong until checkpoint suffix retirement (FG-INV-14)"
 version_status = "active"
 max_size_bytes = 40
 
@@ -961,35 +994,5 @@ identity_class = "logical"
 reference_semantics = "strong"
 role_predicate = "role-shard"
 retention_and_cut_rule = "shard rows are projections or shard-owned protocol state only; never a second Meta semantic authority"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[reference_union_arm]]
-union_name = "MandatoryInventoryRef"
-containing_schema = "CheckpointStateVector"
-field_tag = 0x0001
-arm_tag = 0x0001
-stable_name = "PreparedCommitRecord"
-target_schema_id = "PreparedCommitRecord"
-role = "local"
-identity_class = "logical"
-reference_semantics = "strong"
-role_predicate = "role-local"
-retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[reference_union_arm]]
-union_name = "MandatoryInventoryRef"
-containing_schema = "CheckpointStateVector"
-field_tag = 0x0001
-arm_tag = 0x0002
-stable_name = "CommitCapsule"
-target_schema_id = "CommitCapsule"
-role = "local"
-identity_class = "logical"
-reference_semantics = "strong"
-role_predicate = "role-local"
-retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
 version_status = "reserved"
 max_size_bytes = 40

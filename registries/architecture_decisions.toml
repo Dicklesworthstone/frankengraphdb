@@ -166,12 +166,12 @@ count = 138
 source_path = ".beads/issues.jsonl"
 resolution_precedence = ["direct_owner", "bet_label", "exact_override", "family_rule"]
 allowed_bet_labels = ["b1", "b2", "b3", "b4", "b5", "b6"]
-bead_count = 297
+bead_count = 298
 direct_owner_count = 98
 bet_label_count = 155
-exact_override_count = 11
+exact_override_count = 12
 family_rule_count = 33
-binding_hash = "fnv1a64:93d10c0944e04624"
+binding_hash = "fnv1a64:290be1c112c28198"
 
 [[bead_family]]
 id = "appendix-a-catalog"
@@ -325,6 +325,11 @@ decision_ids = ["FG-ADR-BET-B5", "FG-ADR-CON-11"]
 id = "transparency-adr-invariant-closure"
 bead_id = "fgdb-transparency-adr-invariant-closure-ayeg"
 decision_ids = ["FG-ADR-GAP-VERIFIABILITY-ACCUMULATOR", "FG-ADR-CAL-TRANSPARENCY-AUTHENTICATED-STORAGE"]
+
+[[bead_override]]
+id = "appendix-a-variant-qualified-ref-correction"
+bead_id = "fgdb-a9c8"
+decision_ids = ["FG-ADR-CON-06"]
 
 [[source_block]]
 id = "plan-thesis-foundations-sota-v1"

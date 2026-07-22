@@ -1,4 +1,7 @@
-# GENERATED from appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
+# GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
+# Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
+# Appendix A lines 1384-2654; sha256=db855855638b3df0001ccd2a7f0801943bb33ed59291421497149f71196201ff.
+# Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
 [registry]
@@ -135,7 +138,7 @@ wire_type_id = 0x000e
 name = "AuthorityBoundHeader"
 kind = "record"
 status = "active"
-encoding_context = "{authority_binding_ref: AuthorityBindingRef<Role>, authority_digest, security_policy_epoch, revocation_index}; every repeated value must byte-match the AuthorityBindingRecord"
+encoding_context = "{authority_binding_ref: role-tagged AuthorityBindingRef with the exact Local, Meta, or Shard arm, authority_digest, security_policy_epoch, revocation_index}; every repeated value must byte-match the AuthorityBindingRecord"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 256
 

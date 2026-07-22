@@ -61,7 +61,7 @@ fn usage() -> String {
         "<validate|lint|closure|hash|identity|appendix|appendix-generate|all> ",
         "--root <repo-root> [--manifest <path>]\n",
         "  appendix           verify the Appendix A catalog, source, and checked-in projections\n",
-        "  appendix-generate  explicitly rewrite and byte-verify the six Appendix A projections"
+        "  appendix-generate  render in memory and byte-verify the six Appendix A projections"
     )
     .to_string()
 }
@@ -81,11 +81,61 @@ fn appendix_violation_message(violation: &appendix_a::Violation) -> String {
     match violation.code.as_str() {
         "catalog_read" => "cannot read the canonical Appendix A catalog".to_string(),
         "source_read" => "cannot read the canonical Appendix A plan source".to_string(),
-        "projection_read" => format!(
-            "cannot read checked-in Appendix A projection {:?}",
-            violation.row_id
-        ),
-        _ => violation.msg.clone(),
+        "projection_read" => "cannot read a checked-in Appendix A projection".to_string(),
+        _ => "Appendix A contract check failed".to_string(),
+    }
+}
+
+fn appendix_violation_row_id(violation: &appendix_a::Violation) -> &str {
+    let row_id = violation.row_id.as_str();
+    let fixed_row_id = matches!(
+        row_id,
+        "catalog"
+            | "catalog_rows"
+            | "source_manifest"
+            | "reference_manifest"
+            | "slice_manifest"
+            | "projection_rows"
+            | "projection_files"
+            | "reservation"
+            | "annotation"
+            | "maintenance_proof"
+            | "top_level_candidate"
+            | "target"
+            | "semantic_binding"
+            | "evidence"
+            | "source_symbol_disposition"
+            | "g0"
+            | "plan"
+            | "a01"
+            | "a02"
+            | "a03"
+            | "a04"
+            | "a05"
+            | "a06"
+            | "a07"
+            | "a08"
+            | "a09"
+            | "a10"
+            | "a11"
+            | "a12"
+            | "a13"
+            | "a14"
+            | "a15"
+            | "a16"
+            | "a17"
+            | "a18"
+            | "a19"
+            | "a20"
+            | "a21"
+    );
+    let fixed_projection = appendix_a::PROJECTION_FILES
+        .iter()
+        .any(|(registry, file)| row_id == *registry || row_id == *file);
+    if fixed_row_id || fixed_projection {
+        row_id
+    } else {
+        "catalog_row"
     }
 }
 
@@ -97,6 +147,8 @@ fn appendix_has_structural_error(violations: &[appendix_a::Violation]) -> bool {
                 | "catalog_encoding"
                 | "catalog_toml_parse"
                 | "catalog_schema"
+                | "catalog_unknown_key"
+                | "catalog_projection_schema"
                 | "source_read"
                 | "projection_read"
         )
@@ -106,13 +158,14 @@ fn appendix_has_structural_error(violations: &[appendix_a::Violation]) -> bool {
 fn emit_appendix_violations(violations: &[appendix_a::Violation]) {
     for violation in violations {
         let msg = appendix_violation_message(violation);
+        let row_id = appendix_violation_row_id(violation);
         println!(
             "{}",
             event(&[
                 ("event", s("violation")),
                 ("code", s(&violation.code)),
                 ("registry", s(appendix_a::CATALOG_NAME)),
-                ("row_id", s(&violation.row_id)),
+                ("row_id", s(row_id)),
                 ("msg", s(&msg)),
             ])
         );
@@ -120,7 +173,7 @@ fn emit_appendix_violations(violations: &[appendix_a::Violation]) {
             "violation[{}] {}::{}: {}",
             violation.code,
             appendix_a::CATALOG_NAME,
-            violation.row_id,
+            row_id,
             msg
         );
     }
@@ -139,6 +192,12 @@ fn finish_appendix_load_failure(
             ("slices", n(0)),
             ("projection_rows", n(0)),
             ("projection_files", n(0)),
+            ("reservations", n(0)),
+            ("source_dispositions", n(0)),
+            ("top_level_candidates", n(0)),
+            ("targets", n(0)),
+            ("semantic_bindings", n(0)),
+            ("evidence_rows", n(0)),
             ("violations", n(violations.len() as i64)),
             ("outcome", s(if structural { "error" } else { "fail" })),
         ])
@@ -174,6 +233,22 @@ fn emit_appendix_catalog(
         ])
     );
 
+    let reference = &catalog.reference_manifest;
+    println!(
+        "{}",
+        event(&[
+            ("event", s("appendix_reference_manifest")),
+            ("target_count", n(reference.target_count)),
+            ("target_ids_sha256", s(&reference.target_ids_sha256)),
+            ("occurrence_count", n(reference.occurrence_count)),
+            (
+                "occurrence_transcript_sha256",
+                s(&reference.occurrence_transcript_sha256),
+            ),
+            ("outcome", s("pass")),
+        ])
+    );
+
     for slice in &catalog.slices {
         println!(
             "{}",
@@ -195,6 +270,34 @@ fn emit_appendix_catalog(
                     arr(slice.expected_projection_classes.clone()),
                 ),
                 ("definition_status", s(&slice.definition_status)),
+                (
+                    "top_level_candidate_count",
+                    n(slice.top_level_candidate_count),
+                ),
+                (
+                    "top_level_candidate_ids_sha256",
+                    s(&slice.top_level_candidate_ids_sha256),
+                ),
+                ("field_candidate_count", n(slice.field_candidate_count)),
+                (
+                    "field_candidate_ids_sha256",
+                    s(&slice.field_candidate_ids_sha256),
+                ),
+                ("union_candidate_count", n(slice.union_candidate_count)),
+                (
+                    "union_candidate_ids_sha256",
+                    s(&slice.union_candidate_ids_sha256),
+                ),
+                ("arm_candidate_count", n(slice.arm_candidate_count)),
+                (
+                    "arm_candidate_ids_sha256",
+                    s(&slice.arm_candidate_ids_sha256),
+                ),
+                ("ambiguity_count", n(slice.ambiguity_count)),
+                (
+                    "ambiguity_ids_sha256",
+                    s(&slice.ambiguity_ids_sha256),
+                ),
                 ("outcome", s("pass")),
             ])
         );
@@ -228,6 +331,85 @@ fn emit_appendix_catalog(
             ])
         );
     }
+    println!(
+        "{}",
+        event(&[
+            ("event", s("appendix_closure_checked")),
+            ("reservations", n(catalog.reservations.len() as i64)),
+            (
+                "existing_reservations",
+                n(catalog
+                    .reservations
+                    .iter()
+                    .filter(|row| row.disposition == "existing")
+                    .count() as i64),
+            ),
+            (
+                "reserved_reservations",
+                n(catalog
+                    .reservations
+                    .iter()
+                    .filter(|row| row.disposition == "reserved")
+                    .count() as i64),
+            ),
+            (
+                "source_dispositions",
+                n(catalog.source_symbol_dispositions.len() as i64),
+            ),
+            (
+                "top_level_candidates",
+                n(catalog.top_level_candidates.len() as i64),
+            ),
+            ("targets", n(catalog.targets.len() as i64)),
+            (
+                "semantic_bindings",
+                n(catalog.semantic_bindings.len() as i64),
+            ),
+            ("evidence_rows", n(catalog.evidence.len() as i64)),
+            (
+                "reference_only_symbols",
+                n(catalog
+                    .source_symbol_dispositions
+                    .iter()
+                    .filter(|row| row.disposition == "reference-only")
+                    .count() as i64),
+            ),
+            (
+                "appendix_structural_symbols",
+                n(catalog
+                    .source_symbol_dispositions
+                    .iter()
+                    .filter(|row| row.disposition == "appendix-structural-definition")
+                    .count() as i64),
+            ),
+            (
+                "outside_structural_symbols",
+                n(catalog
+                    .source_symbol_dispositions
+                    .iter()
+                    .filter(|row| row.disposition == "outside-structural-definition")
+                    .count() as i64),
+            ),
+            (
+                "source_location_pairs",
+                n(catalog
+                    .source_symbol_dispositions
+                    .iter()
+                    .filter(|row| row.slice_id != "g0")
+                    .map(|row| row.source_locations.len())
+                    .sum::<usize>() as i64),
+            ),
+            (
+                "g0_projection_dispositions",
+                n(catalog
+                    .source_symbol_dispositions
+                    .iter()
+                    .filter(|row| row.slice_id == "g0")
+                    .count() as i64),
+            ),
+            ("outcome", s("pass")),
+        ])
+    );
 }
 
 /// Verify Appendix A without mutating its generated consumer registries.
@@ -236,7 +418,7 @@ fn run_appendix(root: &Path) -> Result<usize, String> {
         Ok(catalog) => catalog,
         Err(violations) => return finish_appendix_load_failure("appendix_completed", &violations),
     };
-    let violations = appendix_a::verify_projections(root, &catalog);
+    let violations = appendix_a::appendix_a_catalog_projection_diff(root, &catalog);
     emit_appendix_catalog(&catalog, &violations);
     emit_appendix_violations(&violations);
     let structural = appendix_has_structural_error(&violations);
@@ -249,6 +431,29 @@ fn run_appendix(root: &Path) -> Result<usize, String> {
             (
                 "projection_files",
                 n(appendix_a::PROJECTION_FILES.len() as i64),
+            ),
+            ("reservations", n(catalog.reservations.len() as i64)),
+            (
+                "source_dispositions",
+                n(catalog.source_symbol_dispositions.len() as i64),
+            ),
+            (
+                "top_level_candidates",
+                n(catalog.top_level_candidates.len() as i64),
+            ),
+            ("targets", n(catalog.targets.len() as i64)),
+            (
+                "semantic_bindings",
+                n(catalog.semantic_bindings.len() as i64),
+            ),
+            ("evidence_rows", n(catalog.evidence.len() as i64)),
+            (
+                "reference_only_symbols",
+                n(catalog
+                    .source_symbol_dispositions
+                    .iter()
+                    .filter(|row| row.disposition == "reference-only")
+                    .count() as i64),
             ),
             ("violations", n(violations.len() as i64)),
             (
@@ -270,7 +475,7 @@ fn run_appendix(root: &Path) -> Result<usize, String> {
     }
 }
 
-/// Explicitly regenerate Appendix A consumer registries, then byte-verify them.
+/// Render Appendix A consumer registries in memory, then byte-verify them.
 fn run_appendix_generate(root: &Path) -> Result<usize, String> {
     let catalog = match appendix_a::load_and_verify(root) {
         Ok(catalog) => catalog,
@@ -278,26 +483,7 @@ fn run_appendix_generate(root: &Path) -> Result<usize, String> {
             return finish_appendix_load_failure("appendix_generation_completed", &violations);
         }
     };
-    if appendix_a::write_projections(root, &catalog).is_err() {
-        let violation = appendix_a::Violation {
-            code: "projection_write".to_string(),
-            row_id: "projection_files".to_string(),
-            msg: "cannot write one or more checked-in Appendix A projections".to_string(),
-        };
-        emit_appendix_violations(std::slice::from_ref(&violation));
-        println!(
-            "{}",
-            event(&[
-                ("event", s("appendix_generation_completed")),
-                ("projection_files", n(0)),
-                ("violations", n(1)),
-                ("outcome", s("error")),
-            ])
-        );
-        return Err("Appendix A projection generation failed".to_string());
-    }
-
-    let violations = appendix_a::verify_projections(root, &catalog);
+    let violations = appendix_a::appendix_a_catalog_projection_diff(root, &catalog);
     let generated = appendix_a::generated_projections(&catalog);
     for ((file, contents), (registry, _expected_file)) in
         generated.into_iter().zip(appendix_a::PROJECTION_FILES)

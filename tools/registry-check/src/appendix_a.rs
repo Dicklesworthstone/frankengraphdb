@@ -13,13 +13,13 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-pub const CATALOG_SCHEMA_VERSION: i64 = 1;
+pub const CATALOG_SCHEMA_VERSION: i64 = 2;
 pub const CATALOG_NAME: &str = "appendix_a_catalog";
-pub const CATALOG_EPOCH: i64 = 1;
-pub const ROW_ID_GRAMMAR_VERSION: i64 = 1;
+pub const CATALOG_EPOCH: i64 = 2;
+pub const ROW_ID_GRAMMAR_VERSION: i64 = 2;
 pub const DIAGNOSTIC_VERSION: i64 = 1;
 pub const CANONICAL_ORDER: &str =
-    "projection-registry,assigned-code,containing-schema,field-tag,arm-tag,row-id";
+    "source-key,projection-registry,assigned-code,containing-schema,field-tag,arm-tag,row-id";
 pub const CATALOG_PATH: &str = "registries/appendix_a_catalog.toml";
 pub const PLAN_PATH: &str = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md";
 pub const SOURCE_ENCODING: &str = "utf-8-lf";
@@ -28,15 +28,20 @@ pub const HASH_ALGORITHM: &str = "sha256";
 pub const APPENDIX_START_LINE: i64 = 1384;
 pub const APPENDIX_END_LINE: i64 = 2654;
 pub const APPENDIX_LINE_COUNT: i64 = 1271;
-pub const APPENDIX_BYTE_COUNT: i64 = 950_186;
+pub const APPENDIX_BYTE_COUNT: i64 = 950_365;
 pub const APPENDIX_SHA256: &str =
-    "a56ab455985cc8cabf66180b02fbd64fdb19a390b557be369f79f13a56e0d6b6";
+    "db855855638b3df0001ccd2a7f0801943bb33ed59291421497149f71196201ff";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
 pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 128;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
     "6b848d7420a156e55f05618ac350f1ff551f4cbb34271678bb5798b957edfc09";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 716;
+pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 14;
+pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 702;
+pub const EXPECTED_RESERVATION_HIGH_WATER: u16 = 0x04bd;
+pub const EXPECTED_RESERVATION_ASSIGNMENT_SHA256: &str =
+    "44f11e32e50ca5bc2d6174f9b407211e70a1c46e3f44a8eb9f4a5b0b38e663d2";
 pub const EXPECTED_SOURCE_FAMILY_SHA256: &str =
     "1582c908562899402a96d30e10af6ebf359d31ec0368747a272b181ec8d40e08";
 pub const EXPECTED_SOURCE_LOCATION_PAIR_COUNT: usize = 1_724;
@@ -54,16 +59,17 @@ pub const EXPECTED_REFERENCE_ONLY_SOURCE_FAMILY_SHA256: &str =
     "bffbdf3d10a4ac39029a9807aa3c81df1c586f7de93accc3e549324e038c2268";
 pub const EXPECTED_SOURCE_CENSUS_TRANSCRIPT_SHA256: &str =
     "15f86ef2816b4b770f8d4b3f896c5c0d1f08736f073abe65374dde11466bae35";
+pub const EXPECTED_SCAFFOLD_METADATA_BYTE_COUNT: usize = 845_375;
+pub const EXPECTED_SCAFFOLD_METADATA_SHA256: &str =
+    "02e3a35443b9ef0d80bc67a66682eb5b4aff5229486381bdfa5f45300f0d99f4";
 pub const EXPECTED_G0_PROJECTION_ROW_COUNT: usize = 35;
 pub const EXPECTED_G0_PROJECTION_ROW_IDS_SHA256: &str =
     "ff344794c0f061e83016f9f4844591a75d07bff597d439258d2b2632fc810d61";
-pub const G0_IDENTITY_OWNER_BEAD: &str = "fgdb-g0-identity-registries-hrx";
-pub const CATALOG_OWNER_CRATE: &str = "registry-check";
-pub const CATALOG_CONSUMER: &str = "appendix-a-catalog";
-pub const CATALOG_CHECKER_ID: &str = "appendix_a_catalog_closure";
-pub const CATALOG_SCENARIO_ID: &str = "g0_identity_e2e";
-pub const CATALOG_GATE_ID: &str = "G0";
-pub const UNRESOLVED_SOURCE_SYMBOL: &str = "DurableCapabilityValidationEvidence";
+pub const EXPECTED_SLICE_PROJECTION_CLASSES_SHA256: &str =
+    "1bf2a60d904083bc19a196b6dc86c67f57c33009031460a5f7be2b32c10146fd";
+pub const MAINTENANCE_PROOF_ROW_ID: &str = "catalog:maintenance-proof:appendix-a";
+pub const MAINTENANCE_OWNER_BEAD: &str = "fgdb-appendix-a-catalog-scaffold-gvvf";
+pub const MAINTENANCE_OWNER_CRATE: &str = "registry-check";
 
 pub const PROJECTION_CLASSES: [&str; 6] = [
     "logical_object_kinds",
@@ -86,10 +92,12 @@ pub const PROJECTION_FILES: [(&str, &str); 6] = [
     ("durable_fields", "durable_fields.toml"),
 ];
 
-const ROOT_KEYS: [&str; 18] = [
+const ROOT_KEYS: [&str; 22] = [
     "schema_version",
     "catalog",
     "source_manifest",
+    "reference_manifest",
+    "maintenance_proof",
     "slice",
     "projection_epoch",
     "reservation",
@@ -101,9 +109,11 @@ const ROOT_KEYS: [&str; 18] = [
     "field",
     "reference_union",
     "reference_union_arm",
+    "top_level_candidate",
+    "target",
     "annotation",
-    "binding",
-    "status",
+    "semantic_binding",
+    "evidence",
     "source_symbol_disposition",
 ];
 
@@ -128,7 +138,14 @@ const SOURCE_MANIFEST_KEYS: [&str; 8] = [
     "next_heading",
 ];
 
-const SLICE_KEYS: [&str; 13] = [
+const REFERENCE_MANIFEST_KEYS: [&str; 4] = [
+    "target_count",
+    "target_ids_sha256",
+    "occurrence_count",
+    "occurrence_transcript_sha256",
+];
+
+const SLICE_KEYS: [&str; 23] = [
     "ordinal",
     "id",
     "bead_id",
@@ -142,8 +159,29 @@ const SLICE_KEYS: [&str; 13] = [
     "successor",
     "expected_projection_classes",
     "definition_status",
+    "top_level_candidate_count",
+    "top_level_candidate_ids_sha256",
+    "field_candidate_count",
+    "field_candidate_ids_sha256",
+    "union_candidate_count",
+    "union_candidate_ids_sha256",
+    "arm_candidate_count",
+    "arm_candidate_ids_sha256",
+    "ambiguity_count",
+    "ambiguity_ids_sha256",
 ];
 
+const MAINTENANCE_PROOF_KEYS: [&str; 9] = [
+    "row_id",
+    "owner_bead_id",
+    "owner_crate",
+    "covered_artifacts",
+    "checker_ids",
+    "scenario_ids",
+    "event_ids",
+    "gate_ids",
+    "evidence_status",
+];
 const PROJECTION_EPOCH_KEYS: [&str; 2] = ["registry", "registry_epoch"];
 const CATALOG_ROW_KEYS: [&str; 2] = ["slice_id", "row_id"];
 const RESERVATION_KEYS: [&str; 7] = [
@@ -155,7 +193,25 @@ const RESERVATION_KEYS: [&str; 7] = [
     "code_reservation",
     "disposition",
 ];
-const ANNOTATION_KEYS: [&str; 12] = [
+const TOP_LEVEL_CANDIDATE_KEYS: [&str; 8] = [
+    "row_id",
+    "slice_id",
+    "symbol",
+    "generic_signature",
+    "source_key",
+    "source_kind",
+    "identity_class",
+    "source_locations",
+];
+const TARGET_KEYS: [&str; 6] = [
+    "row_id",
+    "target_row_id",
+    "slice_id",
+    "source_key",
+    "target_kind",
+    "definition_status",
+];
+const ANNOTATION_KEYS: [&str; 19] = [
     "row_id",
     "target_row_id",
     "exact_type",
@@ -167,24 +223,33 @@ const ANNOTATION_KEYS: [&str; 12] = [
     "locality",
     "generic_expansions",
     "role_expansions",
+    "reference_semantics",
+    "target_schema_ids",
+    "construction_order",
+    "retention_and_cut_rule",
+    "digest_recipe",
+    "redaction_class",
+    "resource_bounds",
     "compatibility",
 ];
-const BINDING_KEYS: [&str; 9] = [
+const SEMANTIC_BINDING_KEYS: [&str; 5] = [
     "row_id",
     "target_row_id",
     "owner_bead_id",
     "owner_crate",
-    "consumers",
-    "checker_ids",
-    "scenario_ids",
-    "gate_ids",
-    "evidence_status",
+    "consumer_crates",
 ];
-const STATUS_KEYS: [&str; 4] = [
+const EVIDENCE_KEYS: [&str; 10] = [
     "row_id",
     "target_row_id",
-    "definition_status",
-    "evidence_status",
+    "evidence_id",
+    "phase",
+    "status",
+    "owner_bead_id",
+    "checker_ids",
+    "scenario_ids",
+    "event_ids",
+    "gate_ids",
 ];
 const SOURCE_SYMBOL_DISPOSITION_KEYS: [&str; 5] = [
     "row_id",
@@ -205,15 +270,32 @@ pub struct Catalog {
     pub hash_algorithm: String,
     pub source_encoding: String,
     pub source_manifest: SourceManifest,
+    pub reference_manifest: ReferenceManifest,
+    pub maintenance_proof: MaintenanceProof,
     pub slices: Vec<Slice>,
     pub projection_epochs: BTreeMap<String, i64>,
     pub identity: IdentityRegistries,
     pub projection_rows: Vec<ProjectionRowMeta>,
     pub reservations: Vec<Reservation>,
+    pub top_level_candidates: Vec<TopLevelCandidate>,
+    pub targets: Vec<Target>,
     pub annotations: Vec<Annotation>,
-    pub bindings: Vec<Binding>,
-    pub statuses: Vec<Status>,
+    pub semantic_bindings: Vec<SemanticBinding>,
+    pub evidence: Vec<EvidenceBinding>,
     pub source_symbol_dispositions: Vec<SourceSymbolDisposition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceProof {
+    pub row_id: String,
+    pub owner_bead_id: String,
+    pub owner_crate: String,
+    pub covered_artifacts: Vec<String>,
+    pub checker_ids: Vec<String>,
+    pub scenario_ids: Vec<String>,
+    pub event_ids: Vec<String>,
+    pub gate_ids: Vec<String>,
+    pub evidence_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +319,28 @@ pub struct Reservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopLevelCandidate {
+    pub row_id: String,
+    pub slice_id: String,
+    pub symbol: String,
+    pub generic_signature: String,
+    pub source_key: String,
+    pub source_kind: String,
+    pub identity_class: String,
+    pub source_locations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub row_id: String,
+    pub target_row_id: String,
+    pub slice_id: String,
+    pub source_key: String,
+    pub target_kind: String,
+    pub definition_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Annotation {
     pub row_id: String,
     pub target_row_id: String,
@@ -249,28 +353,37 @@ pub struct Annotation {
     pub locality: String,
     pub generic_expansions: Vec<String>,
     pub role_expansions: Vec<String>,
+    pub reference_semantics: String,
+    pub target_schema_ids: Vec<String>,
+    pub construction_order: String,
+    pub retention_and_cut_rule: String,
+    pub digest_recipe: String,
+    pub redaction_class: String,
+    pub resource_bounds: String,
     pub compatibility: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Binding {
+pub struct SemanticBinding {
     pub row_id: String,
     pub target_row_id: String,
     pub owner_bead_id: String,
     pub owner_crate: String,
-    pub consumers: Vec<String>,
-    pub checker_ids: Vec<String>,
-    pub scenario_ids: Vec<String>,
-    pub gate_ids: Vec<String>,
-    pub evidence_status: String,
+    pub consumer_crates: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Status {
+pub struct EvidenceBinding {
     pub row_id: String,
     pub target_row_id: String,
-    pub definition_status: String,
-    pub evidence_status: String,
+    pub evidence_id: String,
+    pub phase: String,
+    pub status: String,
+    pub owner_bead_id: String,
+    pub checker_ids: Vec<String>,
+    pub scenario_ids: Vec<String>,
+    pub event_ids: Vec<String>,
+    pub gate_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,6 +423,14 @@ pub struct SourceManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceManifest {
+    pub target_count: i64,
+    pub target_ids_sha256: String,
+    pub occurrence_count: i64,
+    pub occurrence_transcript_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slice {
     pub ordinal: i64,
     pub id: String,
@@ -324,6 +445,16 @@ pub struct Slice {
     pub successor: String,
     pub expected_projection_classes: Vec<String>,
     pub definition_status: String,
+    pub top_level_candidate_count: i64,
+    pub top_level_candidate_ids_sha256: String,
+    pub field_candidate_count: i64,
+    pub field_candidate_ids_sha256: String,
+    pub union_candidate_count: i64,
+    pub union_candidate_ids_sha256: String,
+    pub arm_candidate_count: i64,
+    pub arm_candidate_ids_sha256: String,
+    pub ambiguity_count: i64,
+    pub ambiguity_ids_sha256: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -585,8 +716,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 2603,
         end_line: 2654,
         line_count: 52,
-        byte_count: 41_031,
-        sha256: "fdf6e10777e4c3ed64b0a54cf78b504757bf1456840cca7ac90b12ca7231e89b",
+        byte_count: 41_210,
+        sha256: "8149f67df01ff6f93810e9e419faef9f890710a524dcdda0580ae352561fcaa0",
     },
 ];
 
@@ -609,6 +740,9 @@ pub fn parse_catalog(text: &str) -> Result<Catalog, Vec<Violation>> {
     let schema_version = read_int(&root, "schema_version", "catalog", &mut violations);
     let catalog_table = read_table(&root, "catalog", "catalog", &mut violations);
     let manifest_table = read_table(&root, "source_manifest", "catalog", &mut violations);
+    let reference_manifest_table =
+        read_table(&root, "reference_manifest", "catalog", &mut violations);
+    let maintenance_table = read_table(&root, "maintenance_proof", "catalog", &mut violations);
 
     let header = catalog_table.and_then(|table| {
         exact_keys(table, &CATALOG_KEYS, "catalog", &mut violations);
@@ -659,6 +793,24 @@ pub fn parse_catalog(text: &str) -> Result<Catalog, Vec<Violation>> {
         );
         parse_source_manifest(table, &mut violations)
     });
+    let reference_manifest = reference_manifest_table.and_then(|table| {
+        exact_keys(
+            table,
+            &REFERENCE_MANIFEST_KEYS,
+            "reference_manifest",
+            &mut violations,
+        );
+        parse_reference_manifest(table, &mut violations)
+    });
+    let maintenance_proof = maintenance_table.and_then(|table| {
+        exact_keys(
+            table,
+            &MAINTENANCE_PROOF_KEYS,
+            "maintenance_proof",
+            &mut violations,
+        );
+        parse_maintenance_proof(table, &mut violations)
+    });
 
     let slice_tables = read_table_array(&root, "slice", "catalog", &mut violations);
     let mut slices = Vec::new();
@@ -677,9 +829,11 @@ pub fn parse_catalog(text: &str) -> Result<Catalog, Vec<Violation>> {
         .as_ref()
         .and_then(|epochs| parse_identity_projections(&root, epochs, &mut violations));
     let reservations = parse_reservations(&root, &mut violations);
+    let top_level_candidates = parse_top_level_candidates(&root, &mut violations);
+    let targets = parse_targets(&root, &mut violations);
     let annotations = parse_annotations(&root, &mut violations);
-    let bindings = parse_bindings(&root, &mut violations);
-    let statuses = parse_statuses(&root, &mut violations);
+    let semantic_bindings = parse_semantic_bindings(&root, &mut violations);
+    let evidence = parse_evidence(&root, &mut violations);
     let source_symbol_dispositions = parse_source_symbol_dispositions(&root, &mut violations);
 
     if !violations.is_empty() {
@@ -717,6 +871,20 @@ pub fn parse_catalog(text: &str) -> Result<Catalog, Vec<Violation>> {
             "source manifest was not constructed",
         )]);
     };
+    let Some(reference_manifest) = reference_manifest else {
+        return Err(vec![Violation::new(
+            "catalog_schema",
+            "reference_manifest",
+            "reference manifest was not constructed",
+        )]);
+    };
+    let Some(maintenance_proof) = maintenance_proof else {
+        return Err(vec![Violation::new(
+            "catalog_schema",
+            "maintenance_proof",
+            "maintenance proof was not constructed",
+        )]);
+    };
     let Some(projection_epochs) = projection_epochs else {
         return Err(vec![Violation::new(
             "catalog_schema",
@@ -733,15 +901,19 @@ pub fn parse_catalog(text: &str) -> Result<Catalog, Vec<Violation>> {
     };
     let (
         Some(reservations),
+        Some(top_level_candidates),
+        Some(targets),
         Some(annotations),
-        Some(bindings),
-        Some(statuses),
+        Some(semantic_bindings),
+        Some(evidence),
         Some(source_symbol_dispositions),
     ) = (
         reservations,
+        top_level_candidates,
+        targets,
         annotations,
-        bindings,
-        statuses,
+        semantic_bindings,
+        evidence,
         source_symbol_dispositions,
     )
     else {
@@ -762,14 +934,18 @@ pub fn parse_catalog(text: &str) -> Result<Catalog, Vec<Violation>> {
         hash_algorithm,
         source_encoding,
         source_manifest,
+        reference_manifest,
+        maintenance_proof,
         slices,
         projection_epochs,
         identity,
         projection_rows,
         reservations,
+        top_level_candidates,
+        targets,
         annotations,
-        bindings,
-        statuses,
+        semantic_bindings,
+        evidence,
         source_symbol_dispositions,
     };
     let mut semantic = validate_catalog(&catalog);
@@ -813,7 +989,7 @@ pub fn load_and_verify(repo_root: &Path) -> Result<Catalog, Vec<Violation>> {
             format!("cannot read {}: {error}", source_path.display()),
         )]
     })?;
-    let violations = verify_source(&catalog, &source);
+    let violations = appendix_a_catalog_source(&catalog, &source);
     if violations.is_empty() {
         Ok(catalog)
     } else {
@@ -879,13 +1055,382 @@ pub fn verify_projections(repo_root: &Path, catalog: &Catalog) -> Vec<Violation>
     out
 }
 
-/// Explicitly replace the six checked-in projections with canonical output.
-pub fn write_projections(repo_root: &Path, catalog: &Catalog) -> Result<(), String> {
-    for (file, generated) in generated_projections(catalog) {
-        let path = repo_root.join("registries").join(file);
-        fs::write(&path, generated.as_bytes())
-            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+/// Live checker-index entry point for the pinned Appendix source and census.
+pub fn appendix_a_catalog_source(catalog: &Catalog, source: &[u8]) -> Vec<Violation> {
+    verify_source(catalog, source)
+}
+
+/// Live checker-index entry point for deterministic consumer projection diffs.
+pub fn appendix_a_catalog_projection_diff(repo_root: &Path, catalog: &Catalog) -> Vec<Violation> {
+    verify_projections(repo_root, catalog)
+}
+
+/// Live checker-index entry point for exact type/owner/evidence closure.
+pub fn appendix_a_catalog_closure(catalog: &Catalog) -> Vec<Violation> {
+    let mut out = Vec::new();
+    validate_catalog_metadata(catalog, &mut out);
+    sort_violations(&mut out);
+    out
+}
+
+pub fn generated_scaffold_metadata(
+    catalog: &Catalog,
+    source: &[u8],
+) -> Result<String, Vec<Violation>> {
+    let strong_refs = strong_ref_census(source);
+    let definitions = definition_census(source, &strong_refs);
+    let mut violations = Vec::new();
+    if strong_refs.families.len() != EXPECTED_TYPE_RESERVATION_COUNT
+        || strong_refs.family_sha256 != EXPECTED_SOURCE_FAMILY_SHA256
+        || strong_refs.location_pair_count != EXPECTED_SOURCE_LOCATION_PAIR_COUNT
+        || strong_refs.location_sha256 != EXPECTED_SOURCE_LOCATION_SHA256
+    {
+        violations.push(Violation::new(
+            "source_family_census_drift",
+            "source_manifest",
+            "cannot generate metadata from a source whose StrongRef census differs from the release pins",
+        ));
     }
+    if definitions.first_locations.len() != EXPECTED_DEFINED_SOURCE_FAMILY_COUNT
+        || definitions.family_sha256 != EXPECTED_DEFINED_SOURCE_FAMILY_SHA256
+        || definitions.location_sha256 != EXPECTED_DEFINITION_LOCATION_SHA256
+    {
+        violations.push(Violation::new(
+            "source_definition_census_drift",
+            "source_manifest",
+            "cannot generate metadata from a source whose definition census differs from the release pins",
+        ));
+    }
+    if !violations.is_empty() {
+        return Err(violations);
+    }
+
+    let logical_codes: BTreeMap<&str, u16> = catalog
+        .identity
+        .logical
+        .iter()
+        .filter_map(|row| {
+            u16::try_from(row.object_kind)
+                .ok()
+                .map(|code| (row.name.as_str(), code))
+        })
+        .collect();
+    let reserved_codes =
+        stable_reservation_codes(&catalog.reservations, &strong_refs.families, &logical_codes)?;
+
+    let mut owner_by_family = BTreeMap::new();
+    for (family, locations) in &strong_refs.families {
+        let location = definitions
+            .first_locations
+            .get(family)
+            .or_else(|| locations.first())
+            .ok_or_else(|| {
+                vec![Violation::new(
+                    "catalog_reservation_owner_missing",
+                    family,
+                    "family has neither a definition nor a reference location",
+                )]
+            })?;
+        let scope = location
+            .split_once(':')
+            .map(|parts| parts.0)
+            .ok_or_else(|| {
+                vec![Violation::new(
+                    "catalog_source_location_invalid",
+                    family,
+                    format!("cannot derive owner slice from {location:?}"),
+                )]
+            })?;
+        owner_by_family.insert(family.as_str(), scope);
+    }
+
+    let mut out = String::new();
+    writeln!(
+        &mut out,
+        "\n# ============================================================================="
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "# Generated G0 Appendix-A reference-target reservation census."
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "# StrongRef families: {EXPECTED_TYPE_RESERVATION_COUNT}; family sha256: {EXPECTED_SOURCE_FAMILY_SHA256}"
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "# Definition classifier: {EXPECTED_DEFINED_SOURCE_FAMILY_COUNT} Appendix definitions; sha256: {EXPECTED_DEFINED_SOURCE_FAMILY_SHA256}"
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "# ============================================================================="
+    )
+    .expect("writing to String cannot fail");
+
+    for slice in &catalog.slices {
+        writeln!(
+            &mut out,
+            "\n# -----------------------------------------------------------------------------"
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "# {} — {}",
+            slice.id.to_ascii_uppercase(),
+            slice.title
+        )
+        .expect("writing to String cannot fail");
+        writeln!(
+            &mut out,
+            "# -----------------------------------------------------------------------------"
+        )
+        .expect("writing to String cannot fail");
+
+        for (family, locations) in strong_refs
+            .families
+            .iter()
+            .filter(|(family, _)| owner_by_family.get(family.as_str()) == Some(&slice.id.as_str()))
+        {
+            let Some(code) = logical_codes
+                .get(family.as_str())
+                .copied()
+                .or_else(|| reserved_codes.get(family).copied())
+            else {
+                return Err(vec![Violation::new(
+                    "catalog_reservation_allocation_missing",
+                    family,
+                    "type family has neither a released logical code nor a preserved reservation",
+                )]);
+            };
+            let reservation_disposition = if logical_codes.contains_key(family.as_str()) {
+                "existing"
+            } else {
+                "reserved"
+            };
+            write_reservation_row(&mut out, &slice.id, family, code, reservation_disposition);
+            let source_disposition = if definitions.first_locations.contains_key(family) {
+                "appendix-structural-definition"
+            } else {
+                "reference-only"
+            };
+            write_source_disposition_row(
+                &mut out,
+                &slice.id,
+                family,
+                source_disposition,
+                locations,
+                None,
+            )?;
+        }
+    }
+
+    writeln!(
+        &mut out,
+        "\n# -----------------------------------------------------------------------------"
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "# G0 — released identity rows defined outside the pinned Appendix slice"
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        &mut out,
+        "# -----------------------------------------------------------------------------"
+    )
+    .expect("writing to String cannot fail");
+    let mut g0_rows: Vec<&ProjectionRowMeta> = catalog
+        .projection_rows
+        .iter()
+        .filter(|row| row.slice_id == "g0")
+        .collect();
+    g0_rows.sort_by_key(|row| row.row_id.as_str());
+    for row in &g0_rows {
+        let Some(file) = PROJECTION_FILES
+            .iter()
+            .find(|(registry, _)| *registry == row.projection)
+            .map(|(_, file)| format!("registries/{file}"))
+        else {
+            return Err(vec![Violation::new(
+                "catalog_projection_registry_unknown",
+                &row.row_id,
+                "projection row names an unknown registry",
+            )]);
+        };
+        write_source_disposition_row(
+            &mut out,
+            "g0",
+            &row.canonical_symbol,
+            "projection-source",
+            &[file],
+            Some(&row.row_id),
+        )?;
+    }
+    Ok(out)
+}
+
+fn stable_reservation_codes(
+    reservations: &[Reservation],
+    families: &BTreeMap<String, Vec<String>>,
+    logical_codes: &BTreeMap<&str, u16>,
+) -> Result<BTreeMap<String, u16>, Vec<Violation>> {
+    let mut existing_by_symbol = BTreeMap::new();
+    let mut used_codes = BTreeMap::new();
+    let mut violations = Vec::new();
+
+    for row in reservations {
+        let Some(code) = parse_code_reservation(&row.code_reservation) else {
+            violations.push(Violation::new(
+                "catalog_reservation_code_invalid",
+                &row.row_id,
+                "cannot preserve an invalid released reservation code",
+            ));
+            continue;
+        };
+        if existing_by_symbol
+            .insert(row.symbol.clone(), code)
+            .is_some()
+        {
+            violations.push(Violation::new(
+                "catalog_reservation_duplicate",
+                &row.row_id,
+                "cannot allocate from duplicate released reservation symbols",
+            ));
+        }
+        if let Some(previous) = used_codes.insert(code, row.symbol.as_str()) {
+            violations.push(Violation::new(
+                "catalog_reservation_code_duplicate",
+                &row.row_id,
+                format!("released reservation code collides with {previous:?}"),
+            ));
+        }
+    }
+    for (symbol, code) in logical_codes {
+        if let Some(previous) = used_codes.insert(*code, *symbol) {
+            if previous != *symbol {
+                violations.push(Violation::new(
+                    "catalog_reservation_code_collision",
+                    *symbol,
+                    format!("logical assignment collides with {previous:?}"),
+                ));
+            }
+        }
+        if let Some(reserved) = existing_by_symbol.get(*symbol)
+            && reserved != code
+        {
+            violations.push(Violation::new(
+                "catalog_reservation_promotion_drift",
+                *symbol,
+                "a promoted logical row must retain its released reservation code",
+            ));
+        }
+    }
+    if !violations.is_empty() {
+        return Err(violations);
+    }
+
+    let mut next_code = used_codes
+        .keys()
+        .copied()
+        .filter(|code| (0x0200..=0x7fff).contains(code))
+        .max()
+        .map_or(Some(0x0200), |code| code.checked_add(1));
+    let mut assigned = BTreeMap::new();
+    for family in families.keys() {
+        if logical_codes.contains_key(family.as_str()) {
+            continue;
+        }
+        if let Some(code) = existing_by_symbol.get(family).copied() {
+            assigned.insert(family.clone(), code);
+            continue;
+        }
+        let Some(code) = next_code.filter(|code| *code <= 0x7fff) else {
+            return Err(vec![Violation::new(
+                "catalog_reservation_space_exhausted",
+                family,
+                "no permanent core reservation code remains",
+            )]);
+        };
+        assigned.insert(family.clone(), code);
+        next_code = code.checked_add(1);
+    }
+    Ok(assigned)
+}
+
+pub fn reservation_assignment_sha256(rows: &[Reservation]) -> String {
+    let mut ordered: Vec<_> = rows.iter().collect();
+    ordered.sort_by(|left, right| {
+        (&left.symbol, &left.code_reservation, &left.disposition).cmp(&(
+            &right.symbol,
+            &right.code_reservation,
+            &right.disposition,
+        ))
+    });
+    let mut transcript = String::new();
+    for row in ordered {
+        writeln!(
+            &mut transcript,
+            "{}|{}|{}",
+            row.symbol, row.code_reservation, row.disposition
+        )
+        .expect("writing to String cannot fail");
+    }
+    sha256_hex(transcript.as_bytes())
+}
+
+fn write_reservation_row(
+    out: &mut String,
+    slice_id: &str,
+    family: &str,
+    code: u16,
+    disposition: &str,
+) {
+    writeln!(out, "\n[[reservation]]").expect("writing to String cannot fail");
+    write_string(
+        out,
+        "row_id",
+        &format!("{slice_id}:reservation:{}", lower_kebab(family)),
+    );
+    write_string(out, "slice_id", slice_id);
+    write_string(out, "symbol", family);
+    write_string(out, "row_kind", "logical-kind");
+    write_string(out, "identity_class", "logical");
+    write_string(out, "code_reservation", &format!("0x{code:04x}"));
+    write_string(out, "disposition", disposition);
+}
+
+fn write_source_disposition_row(
+    out: &mut String,
+    slice_id: &str,
+    symbol: &str,
+    disposition: &str,
+    locations: &[String],
+    g0_target_row_id: Option<&str>,
+) -> Result<(), Vec<Violation>> {
+    writeln!(out, "\n[[source_symbol_disposition]]").expect("writing to String cannot fail");
+    let row_id = if let Some(target_row_id) = g0_target_row_id {
+        g0_disposition_row_id(target_row_id).ok_or_else(|| {
+            vec![Violation::new(
+                "catalog_row_id_invalid",
+                target_row_id,
+                "G0 target row ID does not have the closed three-part grammar",
+            )]
+        })?
+    } else {
+        format!(
+            "{slice_id}:source-symbol-disposition:{}",
+            lower_kebab(symbol)
+        )
+    };
+    write_string(out, "row_id", &row_id);
+    write_string(out, "slice_id", slice_id);
+    write_string(out, "symbol", symbol);
+    write_string(out, "disposition", disposition);
+    write_string_array(out, "source_locations", locations);
     Ok(())
 }
 
@@ -944,6 +1489,7 @@ pub fn validate_catalog(catalog: &Catalog) -> Vec<Violation> {
     );
 
     validate_source_manifest_pin(&catalog.source_manifest, &mut out);
+    validate_reference_manifest(catalog, &mut out);
 
     if catalog.slices.len() != SLICE_PINS.len() {
         out.push(Violation::new(
@@ -1026,6 +1572,27 @@ pub fn validate_catalog(catalog: &Catalog) -> Vec<Violation> {
         }
     }
 
+    let mut projection_class_transcript = String::new();
+    for slice in &catalog.slices {
+        writeln!(
+            &mut projection_class_transcript,
+            "{}|{}",
+            slice.id,
+            slice.expected_projection_classes.join(",")
+        )
+        .expect("writing to String cannot fail");
+    }
+    let projection_class_sha256 = sha256_hex(projection_class_transcript.as_bytes());
+    if projection_class_sha256 != EXPECTED_SLICE_PROJECTION_CLASSES_SHA256 {
+        out.push(Violation::new(
+            "slice_projection_class_assignment_drift",
+            "slice_manifest",
+            format!(
+                "slice projection-class transcript must have sha256 {EXPECTED_SLICE_PROJECTION_CLASSES_SHA256}, found {projection_class_sha256}"
+            ),
+        ));
+    }
+
     for (index, slice) in catalog.slices.iter().enumerate() {
         let expected_predecessor = index
             .checked_sub(1)
@@ -1090,7 +1657,7 @@ pub fn validate_catalog(catalog: &Catalog) -> Vec<Violation> {
     }
 
     validate_projection_catalog(catalog, &mut out);
-    validate_catalog_metadata(catalog, &mut out);
+    out.extend(appendix_a_catalog_closure(catalog));
 
     sort_violations(&mut out);
     out
@@ -1224,6 +1791,149 @@ pub fn strong_ref_census(source: &[u8]) -> StrongRefCensus {
     }
 }
 
+/// Classify the StrongRef families that Appendix A defines, using the pinned
+/// prose grammar documented by the scaffold Bead. Mentions and field uses do
+/// not count: a definition requires an inline body/alias, an explicit
+/// definitional verb after a standalone code span, or a fenced declaration.
+pub fn definition_census(source: &[u8], strong_refs: &StrongRefCensus) -> DefinitionCensus {
+    let spans = source_line_spans(source);
+    let known: BTreeSet<&str> = strong_refs.families.keys().map(String::as_str).collect();
+    let mut first_lines: BTreeMap<String, i64> = BTreeMap::new();
+    for line_number in APPENDIX_START_LINE..=APPENDIX_END_LINE {
+        let Some(raw_line) = extract_lines(source, &spans, line_number, line_number) else {
+            continue;
+        };
+        let line = raw_line.strip_suffix(b"\n").unwrap_or(raw_line);
+        let mut candidates = code_span_definition_candidates(line);
+        if let Some(family) = fenced_definition_candidate(line) {
+            candidates.insert(family);
+        }
+        for family in candidates {
+            if known.contains(family.as_str()) {
+                first_lines.entry(family).or_insert(line_number);
+            }
+        }
+    }
+
+    let first_locations: BTreeMap<String, String> = first_lines
+        .into_iter()
+        .filter_map(|(family, line)| {
+            SLICE_PINS
+                .iter()
+                .find(|slice| (slice.start_line..=slice.end_line).contains(&line))
+                .map(|slice| (family, format!("{}:{line}", slice.id)))
+        })
+        .collect();
+    let mut family_transcript = String::new();
+    let mut location_transcript = String::new();
+    for (family, location) in &first_locations {
+        writeln!(&mut family_transcript, "{family}").expect("writing to String cannot fail");
+        writeln!(&mut location_transcript, "{family}|{location}")
+            .expect("writing to String cannot fail");
+    }
+    DefinitionCensus {
+        first_locations,
+        family_sha256: sha256_hex(family_transcript.as_bytes()),
+        location_sha256: sha256_hex(location_transcript.as_bytes()),
+    }
+}
+
+fn code_span_definition_candidates(line: &[u8]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut cursor = 0usize;
+    while let Some(relative_open) = line[cursor..].iter().position(|byte| *byte == b'`') {
+        let open = cursor + relative_open;
+        let Some(relative_close) = line[open + 1..].iter().position(|byte| *byte == b'`') else {
+            break;
+        };
+        let close = open + 1 + relative_close;
+        let span = &line[open + 1..close];
+        if let Some((family, consumed)) = definition_family_prefix(span) {
+            let rest = &span[consumed..];
+            if rest
+                .iter()
+                .copied()
+                .find(|byte| !byte.is_ascii_whitespace())
+                .is_some_and(|byte| matches!(byte, b'{' | b'='))
+            {
+                out.insert(family.clone());
+            }
+            if rest.is_empty()
+                && line.get(close + 1).is_some_and(u8::is_ascii_whitespace)
+                && following_word(&line[close + 1..])
+                    .is_some_and(|word| DEFINITION_VERBS.contains(&word))
+            {
+                out.insert(family);
+            }
+        }
+        cursor = close + 1;
+    }
+    out
+}
+
+const DEFINITION_VERBS: [&[u8]; 21] = [
+    b"is",
+    b"are",
+    b"has",
+    b"contains",
+    b"maps",
+    b"uses",
+    b"adds",
+    b"becomes",
+    b"remains",
+    b"means",
+    b"binds",
+    b"names",
+    b"carries",
+    b"defines",
+    b"commits",
+    b"records",
+    b"stores",
+    b"holds",
+    b"encodes",
+    b"owns",
+    b"selects",
+];
+
+fn definition_family_prefix(bytes: &[u8]) -> Option<(String, usize)> {
+    let first = *bytes.first()?;
+    if !first.is_ascii_uppercase() {
+        return None;
+    }
+    let mut cursor = 1usize;
+    while bytes.get(cursor).is_some_and(|byte| identifier_byte(*byte)) {
+        cursor += 1;
+    }
+    let family = std::str::from_utf8(&bytes[..cursor]).ok()?.to_owned();
+    if bytes.get(cursor) == Some(&b'<') {
+        let close = bytes[cursor + 1..].iter().position(|byte| *byte == b'>')? + cursor + 1;
+        if bytes[cursor + 1..close].contains(&b'>') {
+            return None;
+        }
+        cursor = close + 1;
+    }
+    Some((family, cursor))
+}
+
+fn following_word(bytes: &[u8]) -> Option<&[u8]> {
+    let start = bytes.iter().position(|byte| !byte.is_ascii_whitespace())?;
+    let end = bytes[start..]
+        .iter()
+        .position(|byte| !byte.is_ascii_alphabetic())
+        .map_or(bytes.len(), |offset| start + offset);
+    (end > start).then_some(&bytes[start..end])
+}
+
+fn fenced_definition_candidate(line: &[u8]) -> Option<String> {
+    let (family, consumed) = definition_family_prefix(line)?;
+    line[consumed..]
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| byte == b'{')
+        .then_some(family)
+}
+
 fn verify_source_census(
     catalog: &Catalog,
     source: &[u8],
@@ -1252,6 +1962,22 @@ fn verify_source_census(
             format!(
                 "expected {EXPECTED_SOURCE_LOCATION_PAIR_COUNT} family/location pairs with sha256 {EXPECTED_SOURCE_LOCATION_SHA256}; found {} with sha256 {}",
                 census.location_pair_count, census.location_sha256
+            ),
+        ));
+    }
+    let definitions = definition_census(source, &census);
+    if definitions.first_locations.len() != EXPECTED_DEFINED_SOURCE_FAMILY_COUNT
+        || definitions.family_sha256 != EXPECTED_DEFINED_SOURCE_FAMILY_SHA256
+        || definitions.location_sha256 != EXPECTED_DEFINITION_LOCATION_SHA256
+    {
+        out.push(Violation::new(
+            "source_definition_census_drift",
+            "source_manifest",
+            format!(
+                "expected {EXPECTED_DEFINED_SOURCE_FAMILY_COUNT} defined families with family sha256 {EXPECTED_DEFINED_SOURCE_FAMILY_SHA256} and location sha256 {EXPECTED_DEFINITION_LOCATION_SHA256}; found {} with family sha256 {} and location sha256 {}",
+                definitions.first_locations.len(),
+                definitions.family_sha256,
+                definitions.location_sha256
             ),
         ));
     }
@@ -1303,8 +2029,9 @@ fn strong_ref_families_on_line(line: &[u8]) -> BTreeSet<String> {
             token_start -= 1;
         }
         let wrapper = &line[token_start..open];
-        if wrapper != b"StrongRef" && wrapper != b"CertifiedRemoteStrongRef" {
-            continue;
+        match wrapper {
+            b"StrongRef" | b"CertifiedRemoteStrongRef" => {}
+            _ => continue,
         }
         let Some(close) = matching_angle(line, open) else {
             continue;
@@ -1536,24 +2263,60 @@ fn parse_identity_projections(
         return None;
     };
 
-    Some((
-        IdentityRegistries {
-            logical,
-            logical_epoch,
-            physical,
-            physical_epoch,
-            bootstrap,
-            bootstrap_epoch,
-            prebootstrap,
-            prebootstrap_epoch,
-            wire,
-            wire_epoch,
-            fields,
-            fields_epoch,
-            unions,
-        },
-        metadata,
-    ))
+    let mut identity = IdentityRegistries {
+        logical,
+        logical_epoch,
+        physical,
+        physical_epoch,
+        bootstrap,
+        bootstrap_epoch,
+        prebootstrap,
+        prebootstrap_epoch,
+        wire,
+        wire_epoch,
+        fields,
+        fields_epoch,
+        unions,
+    };
+    canonicalize_identity(&mut identity);
+    Some((identity, metadata))
+}
+
+fn canonicalize_identity(identity: &mut IdentityRegistries) {
+    identity.logical.sort_by(|left, right| {
+        (left.object_kind, &left.name).cmp(&(right.object_kind, &right.name))
+    });
+    identity.physical.sort_by(|left, right| {
+        (left.record_kind, &left.name).cmp(&(right.record_kind, &right.name))
+    });
+    identity
+        .bootstrap
+        .sort_by(|left, right| (left.frame_kind, &left.name).cmp(&(right.frame_kind, &right.name)));
+    identity.prebootstrap.sort_by(|left, right| {
+        (left.artifact_kind, &left.name).cmp(&(right.artifact_kind, &right.name))
+    });
+    identity.wire.sort_by(|left, right| {
+        (left.wire_type_id, &left.name).cmp(&(right.wire_type_id, &right.name))
+    });
+    identity.fields.sort_by(|left, right| {
+        (&left.containing_schema, left.field_tag, &left.stable_name).cmp(&(
+            &right.containing_schema,
+            right.field_tag,
+            &right.stable_name,
+        ))
+    });
+    identity.unions.sort_by(|left, right| {
+        (&left.containing_schema, left.field_tag, &left.union_name).cmp(&(
+            &right.containing_schema,
+            right.field_tag,
+            &right.union_name,
+        ))
+    });
+    for union in &mut identity.unions {
+        union.arms.sort_by(|left, right| {
+            (left.arm_tag, &left.stable_name).cmp(&(right.arm_tag, &right.stable_name))
+        });
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1725,6 +2488,31 @@ fn lower_kebab(value: &str) -> String {
     out
 }
 
+fn top_level_candidate_row_id(
+    slice_id: &str,
+    symbol: &str,
+    generic_signature: &str,
+    source_key: &str,
+) -> String {
+    let digest = sha256_hex(source_key.as_bytes());
+    format!(
+        "{slice_id}:top-level-candidate:{}-{}",
+        lower_kebab(&format!("{symbol}{generic_signature}")),
+        &digest[..16]
+    )
+}
+
+fn projection_identity_class(row_kind: &str) -> Option<&'static str> {
+    match row_kind {
+        "logical-kind" => Some("logical"),
+        "physical-kind" => Some("physical"),
+        "bootstrap-frame" => Some("bootstrap"),
+        "prebootstrap-kind" => Some("prebootstrap"),
+        "wire-type" => Some("wire"),
+        _ => None,
+    }
+}
+
 fn projection_epoch(
     epochs: &BTreeMap<String, i64>,
     registry_name: &str,
@@ -1782,6 +2570,47 @@ fn parse_identity_result<T>(
     }
 }
 
+fn parse_maintenance_proof(
+    table: &Table,
+    violations: &mut Vec<Violation>,
+) -> Option<MaintenanceProof> {
+    let values = (
+        read_string(table, "row_id", "maintenance_proof", violations),
+        read_string(table, "owner_bead_id", "maintenance_proof", violations),
+        read_string(table, "owner_crate", "maintenance_proof", violations),
+        read_string_array(table, "covered_artifacts", "maintenance_proof", violations),
+        read_string_array(table, "checker_ids", "maintenance_proof", violations),
+        read_string_array(table, "scenario_ids", "maintenance_proof", violations),
+        read_string_array(table, "event_ids", "maintenance_proof", violations),
+        read_string_array(table, "gate_ids", "maintenance_proof", violations),
+        read_string(table, "evidence_status", "maintenance_proof", violations),
+    );
+    match values {
+        (
+            Some(row_id),
+            Some(owner_bead_id),
+            Some(owner_crate),
+            Some(covered_artifacts),
+            Some(checker_ids),
+            Some(scenario_ids),
+            Some(event_ids),
+            Some(gate_ids),
+            Some(evidence_status),
+        ) => Some(MaintenanceProof {
+            row_id,
+            owner_bead_id,
+            owner_crate,
+            covered_artifacts,
+            checker_ids,
+            scenario_ids,
+            event_ids,
+            gate_ids,
+            evidence_status,
+        }),
+        _ => None,
+    }
+}
+
 fn parse_reservations(root: &Table, violations: &mut Vec<Violation>) -> Option<Vec<Reservation>> {
     let tables = read_table_array(root, "reservation", "catalog", violations)?;
     let mut rows = Vec::new();
@@ -1821,6 +2650,87 @@ fn parse_reservations(root: &Table, violations: &mut Vec<Violation>) -> Option<V
     Some(rows)
 }
 
+fn parse_top_level_candidates(
+    root: &Table,
+    violations: &mut Vec<Violation>,
+) -> Option<Vec<TopLevelCandidate>> {
+    let tables = read_table_array(root, "top_level_candidate", "catalog", violations)?;
+    let mut rows = Vec::new();
+    for (index, table) in tables.iter().enumerate() {
+        let context = format!("top_level_candidate[{index}]");
+        exact_keys(table, &TOP_LEVEL_CANDIDATE_KEYS, &context, violations);
+        let values = (
+            read_string(table, "row_id", &context, violations),
+            read_string(table, "slice_id", &context, violations),
+            read_string(table, "symbol", &context, violations),
+            read_string(table, "generic_signature", &context, violations),
+            read_string(table, "source_key", &context, violations),
+            read_string(table, "source_kind", &context, violations),
+            read_string(table, "identity_class", &context, violations),
+            read_string_array(table, "source_locations", &context, violations),
+        );
+        if let (
+            Some(row_id),
+            Some(slice_id),
+            Some(symbol),
+            Some(generic_signature),
+            Some(source_key),
+            Some(source_kind),
+            Some(identity_class),
+            Some(source_locations),
+        ) = values
+        {
+            rows.push(TopLevelCandidate {
+                row_id,
+                slice_id,
+                symbol,
+                generic_signature,
+                source_key,
+                source_kind,
+                identity_class,
+                source_locations,
+            });
+        }
+    }
+    Some(rows)
+}
+
+fn parse_targets(root: &Table, violations: &mut Vec<Violation>) -> Option<Vec<Target>> {
+    let tables = read_table_array(root, "target", "catalog", violations)?;
+    let mut rows = Vec::new();
+    for (index, table) in tables.iter().enumerate() {
+        let context = format!("target[{index}]");
+        exact_keys(table, &TARGET_KEYS, &context, violations);
+        let values = (
+            read_string(table, "row_id", &context, violations),
+            read_string(table, "target_row_id", &context, violations),
+            read_string(table, "slice_id", &context, violations),
+            read_string(table, "source_key", &context, violations),
+            read_string(table, "target_kind", &context, violations),
+            read_string(table, "definition_status", &context, violations),
+        );
+        if let (
+            Some(row_id),
+            Some(target_row_id),
+            Some(slice_id),
+            Some(source_key),
+            Some(target_kind),
+            Some(definition_status),
+        ) = values
+        {
+            rows.push(Target {
+                row_id,
+                target_row_id,
+                slice_id,
+                source_key,
+                target_kind,
+                definition_status,
+            });
+        }
+    }
+    Some(rows)
+}
+
 fn parse_annotations(root: &Table, violations: &mut Vec<Violation>) -> Option<Vec<Annotation>> {
     let tables = read_table_array(root, "annotation", "catalog", violations)?;
     let mut rows = Vec::new();
@@ -1839,6 +2749,13 @@ fn parse_annotations(root: &Table, violations: &mut Vec<Violation>) -> Option<Ve
             read_string(table, "locality", &context, violations),
             read_string_array(table, "generic_expansions", &context, violations),
             read_string_array(table, "role_expansions", &context, violations),
+            read_string(table, "reference_semantics", &context, violations),
+            read_string_array(table, "target_schema_ids", &context, violations),
+            read_string(table, "construction_order", &context, violations),
+            read_string(table, "retention_and_cut_rule", &context, violations),
+            read_string(table, "digest_recipe", &context, violations),
+            read_string(table, "redaction_class", &context, violations),
+            read_string(table, "resource_bounds", &context, violations),
             read_string(table, "compatibility", &context, violations),
         );
         if let (
@@ -1853,6 +2770,13 @@ fn parse_annotations(root: &Table, violations: &mut Vec<Violation>) -> Option<Ve
             Some(locality),
             Some(generic_expansions),
             Some(role_expansions),
+            Some(reference_semantics),
+            Some(target_schema_ids),
+            Some(construction_order),
+            Some(retention_and_cut_rule),
+            Some(digest_recipe),
+            Some(redaction_class),
+            Some(resource_bounds),
             Some(compatibility),
         ) = values
         {
@@ -1868,6 +2792,13 @@ fn parse_annotations(root: &Table, violations: &mut Vec<Violation>) -> Option<Ve
                 locality,
                 generic_expansions,
                 role_expansions,
+                reference_semantics,
+                target_schema_ids,
+                construction_order,
+                retention_and_cut_rule,
+                digest_recipe,
+                redaction_class,
+                resource_bounds,
                 compatibility,
             });
         }
@@ -1875,71 +2806,84 @@ fn parse_annotations(root: &Table, violations: &mut Vec<Violation>) -> Option<Ve
     Some(rows)
 }
 
-fn parse_bindings(root: &Table, violations: &mut Vec<Violation>) -> Option<Vec<Binding>> {
-    let tables = read_table_array(root, "binding", "catalog", violations)?;
+fn parse_semantic_bindings(
+    root: &Table,
+    violations: &mut Vec<Violation>,
+) -> Option<Vec<SemanticBinding>> {
+    let tables = read_table_array(root, "semantic_binding", "catalog", violations)?;
     let mut rows = Vec::new();
     for (index, table) in tables.iter().enumerate() {
-        let context = format!("binding[{index}]");
-        exact_keys(table, &BINDING_KEYS, &context, violations);
+        let context = format!("semantic_binding[{index}]");
+        exact_keys(table, &SEMANTIC_BINDING_KEYS, &context, violations);
         let values = (
             read_string(table, "row_id", &context, violations),
             read_string(table, "target_row_id", &context, violations),
             read_string(table, "owner_bead_id", &context, violations),
             read_string(table, "owner_crate", &context, violations),
-            read_string_array(table, "consumers", &context, violations),
-            read_string_array(table, "checker_ids", &context, violations),
-            read_string_array(table, "scenario_ids", &context, violations),
-            read_string_array(table, "gate_ids", &context, violations),
-            read_string(table, "evidence_status", &context, violations),
+            read_string_array(table, "consumer_crates", &context, violations),
         );
         if let (
             Some(row_id),
             Some(target_row_id),
             Some(owner_bead_id),
             Some(owner_crate),
-            Some(consumers),
-            Some(checker_ids),
-            Some(scenario_ids),
-            Some(gate_ids),
-            Some(evidence_status),
+            Some(consumer_crates),
         ) = values
         {
-            rows.push(Binding {
+            rows.push(SemanticBinding {
                 row_id,
                 target_row_id,
                 owner_bead_id,
                 owner_crate,
-                consumers,
-                checker_ids,
-                scenario_ids,
-                gate_ids,
-                evidence_status,
+                consumer_crates,
             });
         }
     }
     Some(rows)
 }
 
-fn parse_statuses(root: &Table, violations: &mut Vec<Violation>) -> Option<Vec<Status>> {
-    let tables = read_table_array(root, "status", "catalog", violations)?;
+fn parse_evidence(root: &Table, violations: &mut Vec<Violation>) -> Option<Vec<EvidenceBinding>> {
+    let tables = read_table_array(root, "evidence", "catalog", violations)?;
     let mut rows = Vec::new();
     for (index, table) in tables.iter().enumerate() {
-        let context = format!("status[{index}]");
-        exact_keys(table, &STATUS_KEYS, &context, violations);
+        let context = format!("evidence[{index}]");
+        exact_keys(table, &EVIDENCE_KEYS, &context, violations);
         let values = (
             read_string(table, "row_id", &context, violations),
             read_string(table, "target_row_id", &context, violations),
-            read_string(table, "definition_status", &context, violations),
-            read_string(table, "evidence_status", &context, violations),
+            read_string(table, "evidence_id", &context, violations),
+            read_string(table, "phase", &context, violations),
+            read_string(table, "status", &context, violations),
+            read_string(table, "owner_bead_id", &context, violations),
+            read_string_array(table, "checker_ids", &context, violations),
+            read_string_array(table, "scenario_ids", &context, violations),
+            read_string_array(table, "event_ids", &context, violations),
+            read_string_array(table, "gate_ids", &context, violations),
         );
-        if let (Some(row_id), Some(target_row_id), Some(definition_status), Some(evidence_status)) =
-            values
+        if let (
+            Some(row_id),
+            Some(target_row_id),
+            Some(evidence_id),
+            Some(phase),
+            Some(status),
+            Some(owner_bead_id),
+            Some(checker_ids),
+            Some(scenario_ids),
+            Some(event_ids),
+            Some(gate_ids),
+        ) = values
         {
-            rows.push(Status {
+            rows.push(EvidenceBinding {
                 row_id,
                 target_row_id,
-                definition_status,
-                evidence_status,
+                evidence_id,
+                phase,
+                status,
+                owner_bead_id,
+                checker_ids,
+                scenario_ids,
+                event_ids,
+                gate_ids,
             });
         }
     }
@@ -2024,6 +2968,41 @@ fn parse_source_manifest(table: &Table, violations: &mut Vec<Violation>) -> Opti
     }
 }
 
+fn parse_reference_manifest(
+    table: &Table,
+    violations: &mut Vec<Violation>,
+) -> Option<ReferenceManifest> {
+    let target_count = read_int(table, "target_count", "reference_manifest", violations);
+    let target_ids_sha256 =
+        read_string(table, "target_ids_sha256", "reference_manifest", violations);
+    let occurrence_count = read_int(table, "occurrence_count", "reference_manifest", violations);
+    let occurrence_transcript_sha256 = read_string(
+        table,
+        "occurrence_transcript_sha256",
+        "reference_manifest",
+        violations,
+    );
+    match (
+        target_count,
+        target_ids_sha256,
+        occurrence_count,
+        occurrence_transcript_sha256,
+    ) {
+        (
+            Some(target_count),
+            Some(target_ids_sha256),
+            Some(occurrence_count),
+            Some(occurrence_transcript_sha256),
+        ) => Some(ReferenceManifest {
+            target_count,
+            target_ids_sha256,
+            occurrence_count,
+            occurrence_transcript_sha256,
+        }),
+        _ => None,
+    }
+}
+
 fn parse_slice(table: &Table, row_id: &str, violations: &mut Vec<Violation>) -> Option<Slice> {
     let ordinal = read_int(table, "ordinal", row_id, violations);
     let id = read_string(table, "id", row_id, violations);
@@ -2039,6 +3018,21 @@ fn parse_slice(table: &Table, row_id: &str, violations: &mut Vec<Violation>) -> 
     let expected_projection_classes =
         read_string_array(table, "expected_projection_classes", row_id, violations);
     let definition_status = read_string(table, "definition_status", row_id, violations);
+    let top_level_candidate_count =
+        read_int(table, "top_level_candidate_count", row_id, violations);
+    let top_level_candidate_ids_sha256 =
+        read_string(table, "top_level_candidate_ids_sha256", row_id, violations);
+    let field_candidate_count = read_int(table, "field_candidate_count", row_id, violations);
+    let field_candidate_ids_sha256 =
+        read_string(table, "field_candidate_ids_sha256", row_id, violations);
+    let union_candidate_count = read_int(table, "union_candidate_count", row_id, violations);
+    let union_candidate_ids_sha256 =
+        read_string(table, "union_candidate_ids_sha256", row_id, violations);
+    let arm_candidate_count = read_int(table, "arm_candidate_count", row_id, violations);
+    let arm_candidate_ids_sha256 =
+        read_string(table, "arm_candidate_ids_sha256", row_id, violations);
+    let ambiguity_count = read_int(table, "ambiguity_count", row_id, violations);
+    let ambiguity_ids_sha256 = read_string(table, "ambiguity_ids_sha256", row_id, violations);
     match (
         ordinal,
         id,
@@ -2053,6 +3047,16 @@ fn parse_slice(table: &Table, row_id: &str, violations: &mut Vec<Violation>) -> 
         successor,
         expected_projection_classes,
         definition_status,
+        top_level_candidate_count,
+        top_level_candidate_ids_sha256,
+        field_candidate_count,
+        field_candidate_ids_sha256,
+        union_candidate_count,
+        union_candidate_ids_sha256,
+        arm_candidate_count,
+        arm_candidate_ids_sha256,
+        ambiguity_count,
+        ambiguity_ids_sha256,
     ) {
         (
             Some(ordinal),
@@ -2068,6 +3072,16 @@ fn parse_slice(table: &Table, row_id: &str, violations: &mut Vec<Violation>) -> 
             Some(successor),
             Some(expected_projection_classes),
             Some(definition_status),
+            Some(top_level_candidate_count),
+            Some(top_level_candidate_ids_sha256),
+            Some(field_candidate_count),
+            Some(field_candidate_ids_sha256),
+            Some(union_candidate_count),
+            Some(union_candidate_ids_sha256),
+            Some(arm_candidate_count),
+            Some(arm_candidate_ids_sha256),
+            Some(ambiguity_count),
+            Some(ambiguity_ids_sha256),
         ) => Some(Slice {
             ordinal,
             id,
@@ -2082,8 +3096,49 @@ fn parse_slice(table: &Table, row_id: &str, violations: &mut Vec<Violation>) -> 
             successor,
             expected_projection_classes,
             definition_status,
+            top_level_candidate_count,
+            top_level_candidate_ids_sha256,
+            field_candidate_count,
+            field_candidate_ids_sha256,
+            union_candidate_count,
+            union_candidate_ids_sha256,
+            arm_candidate_count,
+            arm_candidate_ids_sha256,
+            ambiguity_count,
+            ambiguity_ids_sha256,
         }),
         _ => None,
+    }
+}
+
+fn validate_reference_manifest(catalog: &Catalog, out: &mut Vec<Violation>) {
+    let manifest = &catalog.reference_manifest;
+    let mut symbols: Vec<&str> = catalog
+        .reservations
+        .iter()
+        .map(|row| row.symbol.as_str())
+        .collect();
+    symbols.sort_unstable();
+    let mut transcript = symbols.join("\n");
+    if !transcript.is_empty() {
+        transcript.push('\n');
+    }
+    let target_count = i64::try_from(symbols.len()).unwrap_or(i64::MAX);
+    let target_ids_sha256 = sha256_hex(transcript.as_bytes());
+    if manifest.target_count != target_count
+        || manifest.target_ids_sha256 != target_ids_sha256
+        || manifest.target_count <= 0
+        || manifest.occurrence_count <= 0
+        || !valid_sha256_hex(&manifest.target_ids_sha256)
+        || !valid_sha256_hex(&manifest.occurrence_transcript_sha256)
+    {
+        out.push(Violation::new(
+            "reference_manifest_mismatch",
+            "reference_manifest",
+            format!(
+                "reference manifest must match {target_count} sorted reservation targets/{target_ids_sha256} and carry a positive, lowercase-SHA-256 occurrence pin"
+            ),
+        ));
     }
 }
 
@@ -2270,6 +3325,22 @@ fn validate_projection_catalog(catalog: &Catalog, out: &mut Vec<Violation>) {
     let mut row_ids = BTreeSet::new();
     for row in &catalog.projection_rows {
         validate_row_identity(&row.row_id, &row.slice_id, &row.row_kind, out);
+        let expected_row_id = format!(
+            "{}:{}:{}",
+            row.slice_id,
+            row.row_kind,
+            lower_kebab(&row.canonical_symbol)
+        );
+        if row.canonical_symbol.trim().is_empty() || row.row_id != expected_row_id {
+            out.push(Violation::new(
+                "catalog_row_id_derived_mismatch",
+                &row.row_id,
+                format!(
+                    "projection row_id must derive from canonical symbol {:?}; expected {expected_row_id:?}",
+                    row.canonical_symbol
+                ),
+            ));
+        }
         if !row_ids.insert(row.row_id.as_str()) {
             out.push(Violation::new(
                 "catalog_row_duplicate",
@@ -2371,7 +3442,8 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
         .collect();
     let known_slices: BTreeSet<&str> = slice_map.keys().copied().collect();
     let mut all_row_ids = BTreeSet::new();
-    let mut primary_targets: BTreeMap<String, String> = BTreeMap::new();
+    let mut projection_targets: BTreeMap<String, String> = BTreeMap::new();
+    let mut projection_by_row_id: BTreeMap<&str, &ProjectionRowMeta> = BTreeMap::new();
     for row in &catalog.projection_rows {
         if !all_row_ids.insert(row.row_id.clone()) {
             out.push(Violation::new(
@@ -2380,16 +3452,277 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
                 "duplicate primary projection row_id",
             ));
         }
-        primary_targets.insert(row.row_id.clone(), row.row_kind.clone());
+        projection_targets.insert(row.row_id.clone(), row.row_kind.clone());
+        projection_by_row_id.insert(row.row_id.as_str(), row);
     }
 
-    validate_reservations(
-        catalog,
-        &known_slices,
-        &mut all_row_ids,
-        &mut primary_targets,
-        out,
-    );
+    validate_maintenance_proof(&catalog.maintenance_proof, out);
+    validate_reservations(catalog, &known_slices, &mut all_row_ids, out);
+    let reservation_symbols: BTreeSet<&str> = catalog
+        .reservations
+        .iter()
+        .map(|row| row.symbol.as_str())
+        .collect();
+
+    let mut projected_classes_by_symbol: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for projection in &catalog.projection_rows {
+        if let Some(identity_class) = projection_identity_class(&projection.row_kind) {
+            projected_classes_by_symbol
+                .entry(projection.canonical_symbol.as_str())
+                .or_default()
+                .insert(identity_class);
+        }
+    }
+
+    let mut candidate_by_key = BTreeMap::new();
+    let mut candidate_keys_by_slice: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for row in &catalog.top_level_candidates {
+        validate_row_identity(&row.row_id, &row.slice_id, "top-level-candidate", out);
+        validate_slice_id(&row.row_id, &row.slice_id, &known_slices, out);
+        insert_owned_row_id(&mut all_row_ids, &row.row_id, out);
+        let expected_row_id = top_level_candidate_row_id(
+            &row.slice_id,
+            &row.symbol,
+            &row.generic_signature,
+            &row.source_key,
+        );
+        if row.row_id != expected_row_id {
+            out.push(Violation::new(
+                "catalog_row_id_derived_mismatch",
+                &row.row_id,
+                format!("top-level candidate row_id must be {expected_row_id:?}"),
+            ));
+        }
+        if !matches!(
+            row.source_kind.as_str(),
+            "confirmed" | "ambiguous" | "name-only"
+        ) {
+            out.push(Violation::new(
+                "catalog_candidate_kind_invalid",
+                &row.row_id,
+                "source_kind must be confirmed|ambiguous|name-only",
+            ));
+        }
+        if !valid_type_family(&row.symbol) || !valid_generic_signature(&row.generic_signature) {
+            out.push(Violation::new(
+                "catalog_candidate_symbol_invalid",
+                &row.row_id,
+                "symbol must be one concrete type family and generic_signature must be empty or one balanced angle-bracket suffix",
+            ));
+        }
+        if !matches!(
+            row.identity_class.as_str(),
+            "logical" | "physical" | "bootstrap" | "prebootstrap" | "wire" | "unclassified"
+        ) {
+            out.push(Violation::new(
+                "catalog_candidate_class_invalid",
+                &row.row_id,
+                "identity_class must be one of the five durable classes or unclassified while declared",
+            ));
+        }
+        match projected_classes_by_symbol.get(row.symbol.as_str()) {
+            Some(classes) if classes.len() == 1 => {
+                let expected = classes.iter().next().copied().unwrap_or("unclassified");
+                if row.identity_class != expected {
+                    out.push(Violation::new(
+                        "catalog_candidate_class_mismatch",
+                        &row.row_id,
+                        format!(
+                            "identity_class must match the checked-in {expected} projection for this symbol"
+                        ),
+                    ));
+                }
+            }
+            Some(_) => out.push(Violation::new(
+                "catalog_candidate_class_conflict",
+                &row.row_id,
+                "one top-level symbol is projected into more than one disjoint identity class",
+            )),
+            None if row.identity_class != "unclassified" => out.push(Violation::new(
+                "catalog_candidate_class_unproved",
+                &row.row_id,
+                "an unprojected source candidate must remain unclassified",
+            )),
+            None => {}
+        }
+        // Source identity is deliberately independent of the catalog's
+        // semantic classification.  Feeding `identity_class` into this key
+        // would let a manual catalog decision rewrite the supposedly
+        // source-derived census transcript.
+        let expected_source_key = format!("top|{}{}", row.symbol, row.generic_signature);
+        if row.source_key != expected_source_key {
+            out.push(Violation::new(
+                "catalog_candidate_source_key_invalid",
+                &row.row_id,
+                format!("source_key must be {expected_source_key:?}"),
+            ));
+        }
+        validate_sorted_nonempty(&row.row_id, "source_locations", &row.source_locations, out);
+        for location in &row.source_locations {
+            validate_appendix_location(&row.row_id, location, &slice_map, out);
+        }
+        if candidate_by_key
+            .insert(row.source_key.as_str(), row)
+            .is_some()
+        {
+            out.push(Violation::new(
+                "catalog_candidate_duplicate",
+                &row.row_id,
+                "duplicate top-level source_key",
+            ));
+        }
+        candidate_keys_by_slice
+            .entry(row.slice_id.as_str())
+            .or_default()
+            .push(row.source_key.as_str());
+    }
+
+    for slice in &catalog.slices {
+        let keys = candidate_keys_by_slice
+            .get(slice.id.as_str())
+            .cloned()
+            .unwrap_or_default();
+        validate_census_pin(
+            &slice.id,
+            "top_level_candidate",
+            slice.top_level_candidate_count,
+            &slice.top_level_candidate_ids_sha256,
+            keys,
+            out,
+        );
+        for (kind, count, digest) in [
+            (
+                "field_candidate",
+                slice.field_candidate_count,
+                slice.field_candidate_ids_sha256.as_str(),
+            ),
+            (
+                "union_candidate",
+                slice.union_candidate_count,
+                slice.union_candidate_ids_sha256.as_str(),
+            ),
+            (
+                "arm_candidate",
+                slice.arm_candidate_count,
+                slice.arm_candidate_ids_sha256.as_str(),
+            ),
+            (
+                "ambiguity",
+                slice.ambiguity_count,
+                slice.ambiguity_ids_sha256.as_str(),
+            ),
+        ] {
+            if count < 0 || !valid_sha256_hex(digest) {
+                out.push(Violation::new(
+                    "slice_census_pin_invalid",
+                    &slice.id,
+                    format!(
+                        "{kind} count must be nonnegative and digest must be lowercase SHA-256"
+                    ),
+                ));
+            }
+        }
+    }
+
+    let mut target_by_projection = BTreeMap::new();
+    for row in &catalog.targets {
+        validate_metadata_row_id(&row.row_id, "target", out);
+        insert_owned_row_id(&mut all_row_ids, &row.row_id, out);
+        validate_metadata_target(
+            &row.row_id,
+            &row.target_row_id,
+            "target",
+            &projection_targets,
+            out,
+        );
+        let Some((target_scope, target_kind, _)) = split_catalog_row_id(&row.target_row_id) else {
+            continue;
+        };
+        if row.slice_id != target_scope || row.target_kind != target_kind {
+            out.push(Violation::new(
+                "catalog_target_identity_mismatch",
+                &row.row_id,
+                "slice_id and target_kind must byte-match the target projection row",
+            ));
+        }
+        if !matches!(row.definition_status.as_str(), "declared" | "complete") {
+            out.push(Violation::new(
+                "catalog_definition_status_invalid",
+                &row.row_id,
+                "definition_status must be declared|complete",
+            ));
+        }
+        let declared_reference_symbol = reference_source_symbol(&row.source_key)
+            .filter(|symbol| reservation_symbols.contains(symbol));
+        if row.slice_id != "g0"
+            && !row.source_key.starts_with("field|")
+            && !row.source_key.starts_with("union|")
+            && !row.source_key.starts_with("arm|")
+            && !candidate_by_key.contains_key(row.source_key.as_str())
+            && declared_reference_symbol.is_none()
+        {
+            out.push(Violation::new(
+                "catalog_target_source_unresolved",
+                &row.row_id,
+                "target source_key is not a top-level, field, union, arm, or declared reference target",
+            ));
+        }
+        if declared_reference_symbol.is_some() && row.definition_status != "declared" {
+            out.push(Violation::new(
+                "catalog_target_reference_incomplete",
+                &row.row_id,
+                "a reservation-only reference source cannot back a complete target",
+            ));
+        }
+        if let Some(projection) = projection_by_row_id.get(row.target_row_id.as_str()) {
+            validate_target_source_identity(
+                row,
+                projection,
+                candidate_by_key.get(row.source_key.as_str()).copied(),
+                out,
+            );
+        }
+        if let Some(candidate) = candidate_by_key.get(row.source_key.as_str()) {
+            if row.definition_status == "complete" && candidate.slice_id != row.slice_id {
+                out.push(Violation::new(
+                    "catalog_target_source_owner_mismatch",
+                    &row.row_id,
+                    "complete top-level projection target must be owned by the candidate's canonical source slice",
+                ));
+            }
+            if let Some(expected_class) = projection_identity_class(&row.target_kind)
+                && candidate.identity_class != expected_class
+            {
+                out.push(Violation::new(
+                    "catalog_target_class_mismatch",
+                    &row.row_id,
+                    format!(
+                        "top-level source candidate class {:?} does not match target class {expected_class:?}",
+                        candidate.identity_class
+                    ),
+                ));
+            }
+        }
+        if target_by_projection
+            .insert(row.target_row_id.as_str(), row)
+            .is_some()
+        {
+            out.push(Violation::new(
+                "catalog_target_duplicate",
+                &row.row_id,
+                "projection row has more than one target row",
+            ));
+        }
+    }
+    for projection in &catalog.projection_rows {
+        if !target_by_projection.contains_key(projection.row_id.as_str()) {
+            out.push(Violation::new(
+                "catalog_projection_target_missing",
+                &projection.row_id,
+                "every checked-in projection row requires exactly one declared or complete target row",
+            ));
+        }
+    }
 
     let mut annotation_counts: BTreeMap<&str, usize> = BTreeMap::new();
     for row in &catalog.annotations {
@@ -2399,7 +3732,7 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
             &row.row_id,
             &row.target_row_id,
             "annotation",
-            &primary_targets,
+            &projection_targets,
             out,
         );
         *annotation_counts
@@ -2413,6 +3746,12 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
             &row.posture,
             &row.authority,
             &row.locality,
+            &row.reference_semantics,
+            &row.construction_order,
+            &row.retention_and_cut_rule,
+            &row.digest_recipe,
+            &row.redaction_class,
+            &row.resource_bounds,
             &row.compatibility,
         ]
         .iter()
@@ -2426,74 +3765,78 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
         }
         validate_concrete_expansions(&row.row_id, &row.generic_expansions, out);
         validate_concrete_expansions(&row.row_id, &row.role_expansions, out);
+        validate_concrete_expansions(&row.row_id, &row.target_schema_ids, out);
+        if row.exact_type.contains(['<', '>'])
+            && row.generic_expansions.is_empty()
+            && row.role_expansions.is_empty()
+        {
+            out.push(Violation::new(
+                "catalog_expansion_missing",
+                &row.row_id,
+                "generic exact_type requires at least one concrete generic or role expansion",
+            ));
+        }
     }
-    for (target, count) in annotation_counts {
-        if count > 1 {
+    for (target, count) in &annotation_counts {
+        if *count > 1 {
             out.push(Violation::new(
                 "catalog_annotation_duplicate",
-                target,
+                *target,
                 format!("primary target has {count} annotation rows; at most one is legal"),
             ));
         }
     }
 
     let mut binding_counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for row in &catalog.bindings {
-        validate_metadata_row_id(&row.row_id, "binding", out);
+    for row in &catalog.semantic_bindings {
+        validate_metadata_row_id(&row.row_id, "semantic-binding", out);
         insert_owned_row_id(&mut all_row_ids, &row.row_id, out);
         validate_metadata_target(
             &row.row_id,
             &row.target_row_id,
-            "binding",
-            &primary_targets,
+            "semantic-binding",
+            &projection_targets,
             out,
         );
         *binding_counts
             .entry(row.target_row_id.as_str())
             .or_default() += 1;
-        validate_binding(row, &slice_map, out);
+        validate_semantic_binding(row, &slice_map, out);
     }
 
-    let mut status_counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for row in &catalog.statuses {
-        validate_metadata_row_id(&row.row_id, "status", out);
+    let mut static_live_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut runtime_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut evidence_keys = BTreeSet::new();
+    for row in &catalog.evidence {
+        validate_metadata_row_id(&row.row_id, "evidence", out);
         insert_owned_row_id(&mut all_row_ids, &row.row_id, out);
         validate_metadata_target(
             &row.row_id,
             &row.target_row_id,
-            "status",
-            &primary_targets,
+            "",
+            &projection_targets,
             out,
         );
-        *status_counts.entry(row.target_row_id.as_str()).or_default() += 1;
-        validate_status(row, &primary_targets, out);
+        validate_evidence(row, out);
+        if !evidence_keys.insert((row.target_row_id.as_str(), row.evidence_id.as_str())) {
+            out.push(Violation::new(
+                "catalog_evidence_duplicate",
+                &row.row_id,
+                "duplicate target/evidence_id pair",
+            ));
+        }
+        if row.phase == "static" && row.status == "live" && row.gate_ids.iter().any(|id| id == "G0")
+        {
+            *static_live_counts
+                .entry(row.target_row_id.as_str())
+                .or_default() += 1;
+        }
+        if row.phase == "runtime" {
+            *runtime_counts
+                .entry(row.target_row_id.as_str())
+                .or_default() += 1;
+        }
     }
-
-    let expected_primary_count = EXPECTED_PROJECTION_ROW_COUNT + EXPECTED_TYPE_RESERVATION_COUNT;
-    if primary_targets.len() != expected_primary_count {
-        out.push(Violation::new(
-            "catalog_primary_target_count",
-            "catalog_rows",
-            format!(
-                "expected exactly {expected_primary_count} projection/reservation targets, found {}",
-                primary_targets.len()
-            ),
-        ));
-    }
-    validate_exact_one_metadata(
-        "binding",
-        &primary_targets,
-        &binding_counts,
-        catalog.bindings.len(),
-        out,
-    );
-    validate_exact_one_metadata(
-        "status",
-        &primary_targets,
-        &status_counts,
-        catalog.statuses.len(),
-        out,
-    );
 
     validate_source_dispositions(catalog, &slice_map, &known_slices, &mut all_row_ids, out);
 
@@ -2502,16 +3845,129 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
         .iter()
         .filter(|slice| slice.definition_status == "complete")
     {
-        for row in catalog
-            .reservations
+        let slice_targets: Vec<_> = catalog
+            .targets
             .iter()
             .filter(|row| row.slice_id == slice.id)
-        {
-            if row.disposition != "existing" || row.symbol.contains(['<', '>']) {
+            .collect();
+        if slice_targets.is_empty() {
+            out.push(Violation::new(
+                "complete_slice_target_missing",
+                &slice.id,
+                "complete slice has no source-backed targets",
+            ));
+        }
+        let top_keys: Vec<&str> = slice_targets
+            .iter()
+            .filter(|row| row.source_key.starts_with("top|"))
+            .map(|row| row.source_key.as_str())
+            .collect();
+        let field_keys: Vec<&str> = slice_targets
+            .iter()
+            .filter(|row| row.source_key.starts_with("field|"))
+            .map(|row| row.source_key.as_str())
+            .collect();
+        let union_keys: Vec<&str> = slice_targets
+            .iter()
+            .filter(|row| row.source_key.starts_with("union|"))
+            .map(|row| row.source_key.as_str())
+            .collect();
+        let arm_keys: Vec<&str> = slice_targets
+            .iter()
+            .filter(|row| row.source_key.starts_with("arm|"))
+            .map(|row| row.source_key.as_str())
+            .collect();
+        validate_census_pin(
+            &slice.id,
+            "complete_top_level",
+            slice.top_level_candidate_count,
+            &slice.top_level_candidate_ids_sha256,
+            top_keys,
+            out,
+        );
+        validate_census_pin(
+            &slice.id,
+            "complete_field",
+            slice.field_candidate_count,
+            &slice.field_candidate_ids_sha256,
+            field_keys,
+            out,
+        );
+        validate_census_pin(
+            &slice.id,
+            "complete_union",
+            slice.union_candidate_count,
+            &slice.union_candidate_ids_sha256,
+            union_keys,
+            out,
+        );
+        validate_census_pin(
+            &slice.id,
+            "complete_arm",
+            slice.arm_candidate_count,
+            &slice.arm_candidate_ids_sha256,
+            arm_keys,
+            out,
+        );
+        if slice.ambiguity_count != 0 {
+            out.push(Violation::new(
+                "complete_slice_ambiguity",
+                &slice.id,
+                "complete slice must resolve every source-census ambiguity",
+            ));
+        }
+        for row in &slice_targets {
+            if row.definition_status != "complete" {
                 out.push(Violation::new(
-                    "complete_slice_unresolved",
+                    "complete_slice_target_declared",
                     &row.row_id,
-                    "complete slice retains a reserved, unresolved, or generic type",
+                    "complete slice contains a target that is still declared",
+                ));
+            }
+            let annotation_count = annotation_counts
+                .get(row.target_row_id.as_str())
+                .copied()
+                .unwrap_or_default();
+            if annotation_count != 1 {
+                out.push(Violation::new(
+                    "complete_slice_annotation_missing",
+                    &row.target_row_id,
+                    format!(
+                        "complete projection target requires exactly one annotation, found {annotation_count}"
+                    ),
+                ));
+            }
+            let binding_count = binding_counts
+                .get(row.target_row_id.as_str())
+                .copied()
+                .unwrap_or_default();
+            if binding_count != 1 {
+                out.push(Violation::new(
+                    "complete_slice_semantic_binding_missing",
+                    &row.target_row_id,
+                    format!("complete target requires exactly one semantic binding, found {binding_count}"),
+                ));
+            }
+            let static_count = static_live_counts
+                .get(row.target_row_id.as_str())
+                .copied()
+                .unwrap_or_default();
+            if static_count == 0 {
+                out.push(Violation::new(
+                    "complete_slice_static_evidence_missing",
+                    &row.target_row_id,
+                    "complete target requires static live evidence covering G0",
+                ));
+            }
+            let runtime_count = runtime_counts
+                .get(row.target_row_id.as_str())
+                .copied()
+                .unwrap_or_default();
+            if runtime_count == 0 {
+                out.push(Violation::new(
+                    "complete_slice_runtime_evidence_missing",
+                    &row.target_row_id,
+                    "complete target requires explicit runtime planned or live evidence",
                 ));
             }
         }
@@ -2522,7 +3978,6 @@ fn validate_reservations(
     catalog: &Catalog,
     known_slices: &BTreeSet<&str>,
     all_row_ids: &mut BTreeSet<String>,
-    primary_targets: &mut BTreeMap<String, String>,
     out: &mut Vec<Violation>,
 ) {
     if catalog.reservations.len() != EXPECTED_TYPE_RESERVATION_COUNT {
@@ -2550,22 +4005,14 @@ fn validate_reservations(
         .collect();
     let mut symbols = BTreeSet::new();
     let mut codes = BTreeMap::new();
-    let mut allocated = Vec::new();
+    let mut existing_count = 0usize;
+    let mut reserved_count = 0usize;
+    let mut reserved_high_water = None;
 
     for row in &catalog.reservations {
         validate_row_identity(&row.row_id, &row.slice_id, "reservation", out);
         validate_slice_id(&row.row_id, &row.slice_id, known_slices, out);
         insert_owned_row_id(all_row_ids, &row.row_id, out);
-        if primary_targets
-            .insert(row.row_id.clone(), "reservation".to_owned())
-            .is_some()
-        {
-            out.push(Violation::new(
-                "catalog_row_duplicate",
-                &row.row_id,
-                "duplicate primary reservation target",
-            ));
-        }
 
         let expected_row_id = format!("{}:reservation:{}", row.slice_id, lower_kebab(&row.symbol));
         if row.row_id != expected_row_id {
@@ -2615,6 +4062,7 @@ fn validate_reservations(
 
         match logical_by_name.get(row.symbol.as_str()).copied() {
             Some(existing_code) => {
+                existing_count += 1;
                 if row.disposition != "existing" || i64::from(code) != existing_code {
                     out.push(Violation::new(
                         "catalog_reservation_existing_mismatch",
@@ -2627,6 +4075,9 @@ fn validate_reservations(
                 }
             }
             None => {
+                reserved_count += 1;
+                reserved_high_water =
+                    Some(reserved_high_water.map_or(code, |prior: u16| prior.max(code)));
                 if row.disposition != "reserved" {
                     out.push(Violation::new(
                         "catalog_reservation_disposition_invalid",
@@ -2643,24 +4094,32 @@ fn validate_reservations(
                         ),
                     ));
                 }
-                allocated.push((row.symbol.as_str(), code, row.row_id.as_str()));
             }
         }
     }
 
-    allocated.sort_by_key(|(symbol, _, _)| *symbol);
-    for (offset, (symbol, actual, row_id)) in allocated.iter().enumerate() {
-        let expected = 0x0200_u16.checked_add(u16::try_from(offset).unwrap_or(u16::MAX));
-        if expected != Some(*actual) {
-            out.push(Violation::new(
-                "catalog_reservation_sequence_drift",
-                *row_id,
-                format!(
-                    "new reservation {symbol:?} must receive deterministic code {}, found {actual:#06x}",
-                    expected.map_or_else(|| "<overflow>".to_owned(), |code| format!("{code:#06x}"))
-                ),
-            ));
-        }
+    if existing_count != EXPECTED_EXISTING_TYPE_RESERVATION_COUNT
+        || reserved_count != EXPECTED_RESERVED_TYPE_RESERVATION_COUNT
+        || reserved_high_water != Some(EXPECTED_RESERVATION_HIGH_WATER)
+    {
+        out.push(Violation::new(
+            "catalog_reservation_epoch_drift",
+            "reservation",
+            format!(
+                "epoch-1 reservation partition/high-water must be {EXPECTED_EXISTING_TYPE_RESERVATION_COUNT} existing, {EXPECTED_RESERVED_TYPE_RESERVATION_COUNT} reserved, 0x{EXPECTED_RESERVATION_HIGH_WATER:04x}; found {existing_count}, {reserved_count}, {reserved_high_water:?}"
+            ),
+        ));
+    }
+
+    let assignment_sha256 = reservation_assignment_sha256(&catalog.reservations);
+    if assignment_sha256 != EXPECTED_RESERVATION_ASSIGNMENT_SHA256 {
+        out.push(Violation::new(
+            "catalog_reservation_assignment_drift",
+            "reservation",
+            format!(
+                "released reservation assignment transcript must have sha256 {EXPECTED_RESERVATION_ASSIGNMENT_SHA256}, found {assignment_sha256}"
+            ),
+        ));
     }
 }
 
@@ -2682,11 +4141,12 @@ fn validate_metadata_target(
         out.push(Violation::new(
             "catalog_target_unresolved",
             row_id,
-            format!("target_row_id {target_row_id:?} is not a primary projection/reservation row"),
+            format!("target_row_id {target_row_id:?} is not a primary projection row"),
         ));
         return;
     }
-    if let Some(expected) = derived_metadata_row_id(metadata_kind, target_row_id)
+    if !metadata_kind.is_empty()
+        && let Some(expected) = derived_metadata_row_id(metadata_kind, target_row_id)
         && row_id != expected
     {
         out.push(Violation::new(
@@ -2697,88 +4157,267 @@ fn validate_metadata_target(
     }
 }
 
-fn validate_binding(row: &Binding, slice_map: &BTreeMap<&str, &Slice>, out: &mut Vec<Violation>) {
-    let target_scope = split_catalog_row_id(&row.target_row_id).map(|parts| parts.0);
-    let expected_owner = match target_scope {
-        Some("g0") => Some(G0_IDENTITY_OWNER_BEAD),
-        Some(scope) => slice_map.get(scope).map(|slice| slice.bead_id.as_str()),
-        None => None,
-    };
-    if expected_owner != Some(row.owner_bead_id.as_str()) {
-        out.push(Violation::new(
-            "catalog_owner_mismatch",
-            &row.row_id,
-            format!(
-                "owner_bead_id {:?} does not match target scope owner {:?}",
-                row.owner_bead_id, expected_owner
-            ),
-        ));
+fn validate_target_source_identity(
+    row: &Target,
+    projection: &ProjectionRowMeta,
+    top_candidate: Option<&TopLevelCandidate>,
+    out: &mut Vec<Violation>,
+) {
+    if row.slice_id == "g0" {
+        let expected = format!(
+            "projection|{}|{}",
+            projection.projection, projection.canonical_symbol
+        );
+        if row.source_key != expected {
+            out.push(Violation::new(
+                "catalog_target_source_identity_mismatch",
+                &row.row_id,
+                format!("g0 source_key must be {expected:?}"),
+            ));
+        }
+        return;
     }
-    if row.owner_crate != CATALOG_OWNER_CRATE
-        || !exact_single(&row.consumers, CATALOG_CONSUMER)
-        || !exact_single(&row.checker_ids, CATALOG_CHECKER_ID)
-        || !exact_single(&row.scenario_ids, CATALOG_SCENARIO_ID)
-        || !exact_single(&row.gate_ids, CATALOG_GATE_ID)
+
+    if let Some(candidate) = top_candidate {
+        if candidate.symbol != projection.canonical_symbol {
+            out.push(Violation::new(
+                "catalog_target_source_identity_mismatch",
+                &row.row_id,
+                "top-level projection symbol does not match its source candidate",
+            ));
+        }
+        return;
+    }
+
+    if let Some(symbol) = reference_source_symbol(&row.source_key) {
+        if projection_identity_class(&projection.row_kind).is_none()
+            || symbol != projection.canonical_symbol
+        {
+            out.push(Violation::new(
+                "catalog_target_source_identity_mismatch",
+                &row.row_id,
+                "reservation-only source must name the same top-level projection symbol",
+            ));
+        }
+        return;
+    }
+
+    match projection.row_kind.as_str() {
+        "logical-kind" | "physical-kind" | "bootstrap-frame" | "prebootstrap-kind"
+        | "wire-type" => out.push(Violation::new(
+            "catalog_target_source_identity_mismatch",
+            &row.row_id,
+            "top-level projection must map to a matching top-level candidate or reservation-only reference",
+        )),
+        "field" => {
+            let mut parts = row.source_key.split('|');
+            let source_matches = parts.next() == Some("field")
+                && parts.next().zip(parts.next()).is_some_and(|(schema, _path)| {
+                    parts.next().is_some_and(|stable_name| {
+                        parts.next().is_none()
+                            && projection.canonical_symbol == format!("{schema}.{stable_name}")
+                    })
+                });
+            if !source_matches {
+                out.push(Violation::new(
+                    "catalog_target_source_identity_mismatch",
+                    &row.row_id,
+                    "durable-field projection must map to the same source schema and stable field name",
+                ));
+            }
+        }
+        "reference-union" if !row.source_key.starts_with("union|") => {
+            out.push(Violation::new(
+                "catalog_target_source_identity_mismatch",
+                &row.row_id,
+                "reference-union projection must map to a union source candidate",
+            ));
+        }
+        "reference-union-arm" if !row.source_key.starts_with("arm|") => {
+            out.push(Violation::new(
+                "catalog_target_source_identity_mismatch",
+                &row.row_id,
+                "reference-union-arm projection must map to an arm source candidate",
+            ));
+        }
+        _ => {}
+    }
+}
+
+fn reference_source_symbol(source_key: &str) -> Option<&str> {
+    let mut parts = source_key.split('|');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("reference"), Some(symbol), None) if valid_type_family(symbol) => Some(symbol),
+        _ => None,
+    }
+}
+
+fn validate_maintenance_proof(row: &MaintenanceProof, out: &mut Vec<Violation>) {
+    const ARTIFACTS: [&str; 7] = [
+        "registries/appendix_a_catalog.toml",
+        "registries/bootstrap_frames.toml",
+        "registries/durable_fields.toml",
+        "registries/logical_object_kinds.toml",
+        "registries/physical_record_kinds.toml",
+        "registries/prebootstrap_artifact_kinds.toml",
+        "registries/wire_types.toml",
+    ];
+    const CHECKERS: [&str; 3] = [
+        "appendix_a_catalog_closure",
+        "appendix_a_catalog_projection_diff",
+        "appendix_a_catalog_source",
+    ];
+    const EVENTS: [&str; 3] = [
+        "appendix_closure_checked",
+        "appendix_projection_checked",
+        "appendix_source_manifest",
+    ];
+    if row.row_id != MAINTENANCE_PROOF_ROW_ID
+        || row.owner_bead_id != MAINTENANCE_OWNER_BEAD
+        || row.owner_crate != MAINTENANCE_OWNER_CRATE
+        || row
+            .covered_artifacts
+            .iter()
+            .map(String::as_str)
+            .ne(ARTIFACTS)
+        || row.checker_ids.iter().map(String::as_str).ne(CHECKERS)
+        || !exact_single(&row.scenario_ids, "g0_identity_e2e")
+        || row.event_ids.iter().map(String::as_str).ne(EVENTS)
+        || !exact_single(&row.gate_ids, "G0")
         || row.evidence_status != "live"
     {
         out.push(Violation::new(
-            "catalog_binding_contract_mismatch",
+            "catalog_maintenance_proof_mismatch",
             &row.row_id,
-            format!(
-                "binding must pin owner_crate={CATALOG_OWNER_CRATE:?}, consumer={CATALOG_CONSUMER:?}, checker={CATALOG_CHECKER_ID:?}, scenario={CATALOG_SCENARIO_ID:?}, gate={CATALOG_GATE_ID:?}, evidence=live"
-            ),
+            "maintenance proof must exactly bind the scaffold owner, seven checked-in artifacts, three live checkers, G0 scenario/events, and G0",
         ));
     }
 }
 
-fn validate_status(
-    row: &Status,
-    primary_targets: &BTreeMap<String, String>,
+fn validate_semantic_binding(
+    row: &SemanticBinding,
+    slice_map: &BTreeMap<&str, &Slice>,
     out: &mut Vec<Violation>,
 ) {
-    let expected_definition = match primary_targets.get(&row.target_row_id).map(String::as_str) {
-        Some("reservation") => Some("declared"),
-        Some(_) => Some("complete"),
-        None => None,
-    };
-    if expected_definition != Some(row.definition_status.as_str()) || row.evidence_status != "live"
+    let forbidden_slice_owner = slice_map
+        .values()
+        .any(|slice| slice.bead_id == row.owner_bead_id);
+    if row.owner_bead_id.trim().is_empty()
+        || !row.owner_bead_id.starts_with("fgdb-")
+        || row.owner_bead_id == MAINTENANCE_OWNER_BEAD
+        || forbidden_slice_owner
+        || row.owner_crate.trim().is_empty()
+        || !(row.owner_crate == "fgdb" || row.owner_crate.starts_with("fgdb-"))
+        || row.owner_crate == MAINTENANCE_OWNER_CRATE
+        || row.owner_crate == "appendix-a-catalog"
     {
         out.push(Violation::new(
-            "catalog_status_contract_mismatch",
+            "catalog_semantic_owner_invalid",
             &row.row_id,
-            format!(
-                "status must use definition_status={expected_definition:?} and evidence_status=live"
-            ),
+            "semantic owner must be a non-maintenance implementation Bead and crate",
+        ));
+    }
+    validate_sorted_nonempty(&row.row_id, "consumer_crates", &row.consumer_crates, out);
+    if row.consumer_crates.iter().any(|consumer| {
+        !(consumer == "fgdb" || consumer.starts_with("fgdb-"))
+            || consumer == "appendix-a-catalog"
+            || consumer == MAINTENANCE_OWNER_CRATE
+    }) {
+        out.push(Violation::new(
+            "catalog_semantic_consumer_invalid",
+            &row.row_id,
+            "catalog-maintenance components are not semantic consumer crates",
         ));
     }
 }
 
-fn validate_exact_one_metadata(
-    metadata_kind: &str,
-    primary_targets: &BTreeMap<String, String>,
-    counts: &BTreeMap<&str, usize>,
-    actual_rows: usize,
-    out: &mut Vec<Violation>,
-) {
-    if actual_rows != primary_targets.len() {
+fn validate_evidence(row: &EvidenceBinding, out: &mut Vec<Violation>) {
+    if !matches!(row.phase.as_str(), "static" | "runtime")
+        || !matches!(row.status.as_str(), "planned" | "live")
+        || row.evidence_id.trim().is_empty()
+        || row.owner_bead_id.trim().is_empty()
+    {
         out.push(Violation::new(
-            "catalog_metadata_count",
-            metadata_kind,
-            format!(
-                "expected exactly {} {metadata_kind} rows, found {actual_rows}",
-                primary_targets.len()
-            ),
+            "catalog_evidence_contract_invalid",
+            &row.row_id,
+            "evidence requires a stable ID, owner Bead, phase static|runtime, and status planned|live",
         ));
     }
-    for target in primary_targets.keys() {
-        let count = counts.get(target.as_str()).copied().unwrap_or_default();
-        if count != 1 {
+    for (name, values) in [
+        ("checker_ids", &row.checker_ids),
+        ("scenario_ids", &row.scenario_ids),
+        ("event_ids", &row.event_ids),
+        ("gate_ids", &row.gate_ids),
+    ] {
+        validate_sorted_nonempty(&row.row_id, name, values, out);
+    }
+    if let Some((scope, target_kind, suffix)) = split_catalog_row_id(&row.target_row_id) {
+        let expected = format!(
+            "{scope}:evidence:{target_kind}-{suffix}-{}",
+            lower_kebab(&row.evidence_id)
+        );
+        if row.row_id != expected {
             out.push(Violation::new(
-                "catalog_metadata_target_cardinality",
-                target,
-                format!("primary target requires exactly one {metadata_kind} row, found {count}"),
+                "catalog_row_id_derived_mismatch",
+                &row.row_id,
+                format!("evidence row_id must be {expected:?}"),
             ));
         }
+    }
+}
+
+fn validate_sorted_nonempty(
+    row_id: &str,
+    field: &str,
+    values: &[String],
+    out: &mut Vec<Violation>,
+) {
+    if values.is_empty() || values.iter().any(|value| value.trim().is_empty()) {
+        out.push(Violation::new(
+            "catalog_metadata_blank",
+            row_id,
+            format!("{field} must be nonempty and contain no blank item"),
+        ));
+    }
+    if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+        out.push(Violation::new(
+            "catalog_metadata_order",
+            row_id,
+            format!("{field} must be strictly sorted and duplicate-free"),
+        ));
+    }
+}
+
+fn validate_census_pin(
+    row_id: &str,
+    kind: &str,
+    expected_count: i64,
+    expected_sha256: &str,
+    mut keys: Vec<&str>,
+    out: &mut Vec<Violation>,
+) {
+    keys.sort_unstable();
+    if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+        out.push(Violation::new(
+            "slice_census_duplicate",
+            row_id,
+            format!("{kind} source keys must be unique"),
+        ));
+    }
+    let mut transcript = keys.join("\n");
+    if !transcript.is_empty() {
+        transcript.push('\n');
+    }
+    let actual_sha256 = sha256_hex(transcript.as_bytes());
+    let actual_count = i64::try_from(keys.len()).unwrap_or(i64::MAX);
+    if expected_count != actual_count || expected_sha256 != actual_sha256 {
+        out.push(Violation::new(
+            "slice_census_pin_mismatch",
+            row_id,
+            format!(
+                "{kind} expected {expected_count} rows/{expected_sha256}, found {actual_count}/{actual_sha256}"
+            ),
+        ));
     }
 }
 
@@ -2789,7 +4428,7 @@ fn validate_source_dispositions(
     all_row_ids: &mut BTreeSet<String>,
     out: &mut Vec<Violation>,
 ) {
-    let expected_total = EXPECTED_TYPE_RESERVATION_COUNT + EXPECTED_G0_PROJECTION_ROW_COUNT;
+    let expected_total = catalog.reservations.len() + EXPECTED_G0_PROJECTION_ROW_COUNT;
     if catalog.source_symbol_dispositions.len() != expected_total {
         out.push(Violation::new(
             "catalog_source_disposition_count",
@@ -2803,7 +4442,6 @@ fn validate_source_dispositions(
 
     let mut census_by_symbol: BTreeMap<&str, &SourceSymbolDisposition> = BTreeMap::new();
     let mut g0_by_row_id: BTreeMap<&str, &SourceSymbolDisposition> = BTreeMap::new();
-    let mut disposition_counts: BTreeMap<&str, usize> = BTreeMap::new();
     for row in &catalog.source_symbol_dispositions {
         validate_row_identity(&row.row_id, &row.slice_id, "source-symbol-disposition", out);
         validate_slice_id(&row.row_id, &row.slice_id, known_slices, out);
@@ -2828,11 +4466,11 @@ fn validate_source_dispositions(
         }
 
         if row.slice_id == "g0" {
-            if row.disposition != "external-definition" {
+            if row.disposition != "projection-source" {
                 out.push(Violation::new(
                     "catalog_disposition_invalid",
                     &row.row_id,
-                    "g0 projection disposition must be external-definition",
+                    "g0 projection disposition must be projection-source",
                 ));
             }
             if g0_by_row_id.insert(row.row_id.as_str(), row).is_some() {
@@ -2859,17 +4497,20 @@ fn validate_source_dispositions(
         }
         if !matches!(
             row.disposition.as_str(),
-            "logical" | "external-definition" | "unresolved"
+            "appendix-structural-definition"
+                | "appendix-ambiguous-structure"
+                | "appendix-name-only"
+                | "outside-structural-definition"
+                | "outside-ambiguous-structure"
+                | "outside-name-only"
+                | "reference-only"
         ) {
             out.push(Violation::new(
                 "catalog_disposition_invalid",
                 &row.row_id,
-                "type census disposition must be logical|external-definition|unresolved",
+                "reference target requires one truthful structural/name/reference-only disposition",
             ));
         }
-        *disposition_counts
-            .entry(row.disposition.as_str())
-            .or_default() += 1;
         if census_by_symbol.insert(row.symbol.as_str(), row).is_some() {
             out.push(Violation::new(
                 "catalog_source_disposition_duplicate",
@@ -2880,99 +4521,6 @@ fn validate_source_dispositions(
         for location in &row.source_locations {
             validate_appendix_location(&row.row_id, location, slice_map, out);
         }
-    }
-
-    for (disposition, expected) in [
-        ("logical", EXPECTED_DEFINED_SOURCE_FAMILY_COUNT),
-        (
-            "external-definition",
-            EXPECTED_EXTERNAL_SOURCE_FAMILY_COUNT,
-        ),
-        ("unresolved", 1),
-    ] {
-        let actual = disposition_counts
-            .get(disposition)
-            .copied()
-            .unwrap_or_default();
-        if actual != expected {
-            out.push(Violation::new(
-                "catalog_source_disposition_partition",
-                disposition,
-                format!("expected {expected} {disposition} rows, found {actual}"),
-            ));
-        }
-    }
-    let mut defined_transcript = String::new();
-    let mut external_transcript = String::new();
-    let mut reference_only_transcript = String::new();
-    let mut census_transcript = String::new();
-    for (symbol, row) in &census_by_symbol {
-        match row.disposition.as_str() {
-            "logical" => {
-                writeln!(&mut defined_transcript, "{symbol}")
-                    .expect("writing to String cannot fail");
-            }
-            "external-definition" => {
-                writeln!(&mut external_transcript, "{symbol}")
-                    .expect("writing to String cannot fail");
-                writeln!(&mut reference_only_transcript, "{symbol}")
-                    .expect("writing to String cannot fail");
-            }
-            "unresolved" => {
-                writeln!(&mut reference_only_transcript, "{symbol}")
-                    .expect("writing to String cannot fail");
-            }
-            _ => {}
-        }
-        writeln!(
-            &mut census_transcript,
-            "{symbol}|{}|{}|{}",
-            row.slice_id,
-            row.disposition,
-            row.source_locations.join(",")
-        )
-        .expect("writing to String cannot fail");
-    }
-    for (row_id, actual, expected) in [
-        (
-            "logical",
-            sha256_hex(defined_transcript.as_bytes()),
-            EXPECTED_DEFINED_SOURCE_FAMILY_SHA256,
-        ),
-        (
-            "external-definition",
-            sha256_hex(external_transcript.as_bytes()),
-            EXPECTED_EXTERNAL_SOURCE_FAMILY_SHA256,
-        ),
-        (
-            "reference-only",
-            sha256_hex(reference_only_transcript.as_bytes()),
-            EXPECTED_REFERENCE_ONLY_SOURCE_FAMILY_SHA256,
-        ),
-        (
-            "census",
-            sha256_hex(census_transcript.as_bytes()),
-            EXPECTED_SOURCE_CENSUS_TRANSCRIPT_SHA256,
-        ),
-    ] {
-        if actual != expected {
-            out.push(Violation::new(
-                "catalog_source_census_assignment_drift",
-                row_id,
-                format!("expected assignment sha256 {expected}, found {actual}"),
-            ));
-        }
-    }
-    let unresolved: Vec<_> = census_by_symbol
-        .values()
-        .filter(|row| row.disposition == "unresolved")
-        .collect();
-    if unresolved.len() != 1 || unresolved[0].symbol != UNRESOLVED_SOURCE_SYMBOL {
-        out.push(Violation::new(
-            "catalog_unresolved_symbol_mismatch",
-            "source_symbol_disposition",
-            format!("sole unresolved family must be {UNRESOLVED_SOURCE_SYMBOL:?}"),
-        ));
     }
 
     let reservation_by_symbol: BTreeMap<&str, &Reservation> = catalog
@@ -3070,19 +4618,29 @@ fn validate_appendix_location(
         ));
         return;
     };
-    let Some(slice) = slice_map.get(slice_id) else {
-        out.push(Violation::new(
-            "catalog_source_location_invalid",
-            row_id,
-            format!("source location {location:?} names an unknown slice"),
-        ));
-        return;
-    };
     let Ok(line) = line_text.parse::<i64>() else {
         out.push(Violation::new(
             "catalog_source_location_invalid",
             row_id,
             format!("source location {location:?} has a nonnumeric line"),
+        ));
+        return;
+    };
+    if slice_id == "plan" {
+        if line <= 0 {
+            out.push(Violation::new(
+                "catalog_source_location_invalid",
+                row_id,
+                format!("source location {location:?} must use a positive plan line"),
+            ));
+        }
+        return;
+    }
+    let Some(slice) = slice_map.get(slice_id) else {
+        out.push(Violation::new(
+            "catalog_source_location_invalid",
+            row_id,
+            format!("source location {location:?} names an unknown slice"),
         ));
         return;
     };
@@ -3157,6 +4715,13 @@ fn valid_type_family(symbol: &str) -> bool {
         && symbol.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
+fn valid_generic_signature(signature: &str) -> bool {
+    signature.is_empty()
+        || (!signature.contains(['\r', '\n'])
+            && signature.as_bytes().first() == Some(&b'<')
+            && matching_angle(signature.as_bytes(), 0) == signature.len().checked_sub(1))
+}
+
 fn validate_row_identity(row_id: &str, slice_id: &str, row_kind: &str, out: &mut Vec<Violation>) {
     let expected_prefix = format!("{slice_id}:{row_kind}:");
     if !row_id.starts_with(&expected_prefix) || !valid_row_id(row_id) {
@@ -3200,7 +4765,7 @@ fn validate_slice_id(
     known_slices: &BTreeSet<&str>,
     out: &mut Vec<Violation>,
 ) {
-    if slice_id != "g0" && !known_slices.contains(slice_id) {
+    if !matches!(slice_id, "g0" | "plan") && !known_slices.contains(slice_id) {
         out.push(Violation::new(
             "catalog_slice_unknown",
             row_id,
@@ -3738,4 +5303,57 @@ fn sort_violations(violations: &mut [Violation]) {
     violations.sort_by(|left, right| {
         (&left.row_id, &left.code, &left.msg).cmp(&(&right.row_id, &right.code, &right.msg))
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reservation(symbol: &str, code: &str) -> Reservation {
+        Reservation {
+            row_id: format!("a01:reservation:{}", lower_kebab(symbol)),
+            slice_id: "a01".to_owned(),
+            symbol: symbol.to_owned(),
+            row_kind: "logical-kind".to_owned(),
+            identity_class: "logical".to_owned(),
+            code_reservation: code.to_owned(),
+            disposition: "reserved".to_owned(),
+        }
+    }
+
+    #[test]
+    fn appendix_a_released_reservations_survive_lexically_earlier_insertions_and_promotion() {
+        let reservations = [
+            reservation("AlphaFamily", "0x0200"),
+            reservation("BetaFamily", "0x0201"),
+        ];
+        let families = BTreeMap::from([
+            ("AardvarkFamily".to_owned(), Vec::new()),
+            ("AlphaFamily".to_owned(), Vec::new()),
+            ("BetaFamily".to_owned(), Vec::new()),
+        ]);
+
+        let empty_logical = BTreeMap::new();
+        let assigned = stable_reservation_codes(&reservations, &families, &empty_logical)
+            .expect("stable allocation succeeds");
+        assert_eq!(assigned["AlphaFamily"], 0x0200);
+        assert_eq!(assigned["BetaFamily"], 0x0201);
+        assert_eq!(assigned["AardvarkFamily"], 0x0202);
+
+        let promoted = BTreeMap::from([("AlphaFamily", 0x0200)]);
+        let assigned = stable_reservation_codes(&reservations, &families, &promoted)
+            .expect("promotion retaining the released code succeeds");
+        assert!(!assigned.contains_key("AlphaFamily"));
+        assert_eq!(assigned["BetaFamily"], 0x0201);
+        assert_eq!(assigned["AardvarkFamily"], 0x0202);
+
+        let drifted = BTreeMap::from([("AlphaFamily", 0x0300)]);
+        let violations = stable_reservation_codes(&reservations, &families, &drifted)
+            .expect_err("promotion with a different code must fail");
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.code == "catalog_reservation_promotion_drift")
+        );
+    }
 }

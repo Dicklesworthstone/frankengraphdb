@@ -109,19 +109,19 @@ status = "live"
 [[checker]]
 symbol = "appendix_a_catalog_source"
 kind = "binary"
-artifact = "tools/registry-check/src/main.rs"
+artifact = "tools/registry-check/src/appendix_a.rs"
 status = "live"
 
 [[checker]]
 symbol = "appendix_a_catalog_projection_diff"
 kind = "binary"
-artifact = "tools/registry-check/src/main.rs"
+artifact = "tools/registry-check/src/appendix_a.rs"
 status = "live"
 
 [[checker]]
 symbol = "appendix_a_catalog_closure"
 kind = "binary"
-artifact = "tools/registry-check/src/main.rs"
+artifact = "tools/registry-check/src/appendix_a.rs"
 status = "live"
 
 # --- Frozen architecture-decision record and reciprocal provenance closure.
