@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 1
+registry_epoch = 2
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -598,6 +598,457 @@ max_size_bytes = 32
 digest_class = "weak_identity"
 
 [[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0001
+stable_name = "root_encoding_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "reproduces the root EncodingDescriptorWithoutId byte-for-byte with the sibling fields"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0002
+stable_name = "root_placement_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "recomputed from the declared span before decode (a01:1443)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0003
+stable_name = "root_placement_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "placement epoch of the root span"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0004
+stable_name = "failure_domain_policy_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "failure-domain policy under which the root span was placed"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0005
+stable_name = "root_failure_domain_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "ContiguousSpan failure domain of the root"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0006
+stable_name = "segment_id"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "locator"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "ContiguousSpan segment locator; nonretaining"
+version_status = "active"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0007
+stable_name = "offset"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "ContiguousSpan byte offset"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0008
+stable_name = "encoded_len"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "ContiguousSpan encoded length; length-before-allocation bound"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0009
+stable_name = "root_symbol_inventory_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "weak_digest"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "sorted symbol inventory commitment verified before decode"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x000a
+stable_name = "object_kind"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "registered logical kind of the root object"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x000b
+stable_name = "canonical_plaintext_len"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "plaintext length; length-before-allocation bound"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x000c
+stable_name = "codec_profile"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "registered codec profile; profile registries fix bounds"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x000d
+stable_name = "compressed_len"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "compressed length; length-before-allocation bound"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x000e
+stable_name = "data_crypto_profile"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "registered AEAD profile; profile registries fix tag lengths"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x000f
+stable_name = "dek_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "root DEK identity recovered via the opener bundle"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0010
+stable_name = "nonce_len"
+exact_wire_type = "u8"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "live nonce length; unused nonce bytes are zero"
+version_status = "active"
+max_size_bytes = 1
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0011
+stable_name = "nonce_or_siv"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "nonce or SIV bytes; unused bytes are zero"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0012
+stable_name = "object_tag_len"
+exact_wire_type = "u8"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "AEAD tag length under data_crypto_profile"
+version_status = "active"
+max_size_bytes = 1
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0013
+stable_name = "fec_profile"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "registered RaptorQ profile"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0014
+stable_name = "transfer_length"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "RFC 6330 transfer length"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0015
+stable_name = "oti_common"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "RFC 6330 Common FTI (64-bit)"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0016
+stable_name = "oti_scheme"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "RFC 6330 scheme-specific FTI (32-bit)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0017
+stable_name = "symbol_size"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "RaptorQ symbol size"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0018
+stable_name = "source_block_count"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "RaptorQ source block count"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0019
+stable_name = "symbol_auth_profile"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "symbol MAC profile (K_symbol KDF domain, a02)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x001a
+stable_name = "ciphertext_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "root CiphertextId; recomputed from embedded bytes (a01:1443)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x001b
+stable_name = "ciphertext_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "weak_digest"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "ciphertext digest verified before decode"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x001c
+stable_name = "opener_kind"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "selects the opener-bundle arm (inline wrap or authenticated KMS/HSM locator)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x001d
+stable_name = "oid_key_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "identity of the immutable K_oid recovered via the opener bundle"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x001e
+stable_name = "opener_payload_len"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "live opener-bundle length; length-before-allocation bound over the 1024-byte field"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x001f
+stable_name = "opener_payload"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "versioned opener bundle sufficient to recover the root DEK and K_oid without the object index; unused bytes are zero"
+version_status = "active"
+max_size_bytes = 1024
+
+[[field]]
+containing_schema = "RootBootstrap"
+field_tag = 0x0020
+stable_name = "opener_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "weak_digest"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "covers opener kind, key IDs, locators/wraps, and namespace/incarnation (a01:1443)"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
 containing_schema = "RootManifest"
 field_tag = 0x0001
 stable_name = "logical_state_root_ref"
@@ -616,33 +1067,47 @@ max_size_bytes = 40
 containing_schema = "RootSlot"
 field_tag = 0x0001
 stable_name = "magic"
-exact_wire_type = "u32"
+exact_wire_type = "bytes"
 cardinality = "one"
 identity_class = "bootstrap_local"
 reference_semantics = "none"
 construction_order = 50
 role_predicate = "true"
-retention_and_cut_rule = "fixed frame field"
+retention_and_cut_rule = "fixed frame literal FGRT at offset 0"
 version_status = "active"
 max_size_bytes = 4
 
 [[field]]
 containing_schema = "RootSlot"
 field_tag = 0x0002
-stable_name = "format"
-exact_wire_type = "u32"
+stable_name = "format_major"
+exact_wire_type = "u16"
 cardinality = "one"
 identity_class = "bootstrap_local"
 reference_semantics = "none"
 construction_order = 50
 role_predicate = "true"
-retention_and_cut_rule = "fixed frame field; gated by FormatCompatibilityState (FG-INV-10)"
+retention_and_cut_rule = "fixed frame field; breaking-major axis; gated by FormatCompatibilityState (FG-INV-10)"
 version_status = "active"
-max_size_bytes = 4
+max_size_bytes = 2
 
 [[field]]
 containing_schema = "RootSlot"
 field_tag = 0x0003
+stable_name = "format_minor"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "fixed frame field; additive-minor axis; gated by FormatCompatibilityState (FG-INV-10)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "RootSlot"
+field_tag = 0x0004
 stable_name = "slot_generation"
 exact_wire_type = "u64"
 cardinality = "one"
@@ -656,7 +1121,7 @@ max_size_bytes = 8
 
 [[field]]
 containing_schema = "RootSlot"
-field_tag = 0x0004
+field_tag = 0x0005
 stable_name = "local_writer_fence_epoch"
 exact_wire_type = "u64"
 cardinality = "one"
@@ -670,7 +1135,7 @@ max_size_bytes = 8
 
 [[field]]
 containing_schema = "RootSlot"
-field_tag = 0x0005
+field_tag = 0x0006
 stable_name = "database_id"
 exact_wire_type = "bytes"
 cardinality = "one"
@@ -678,13 +1143,13 @@ identity_class = "bootstrap_local"
 reference_semantics = "none"
 construction_order = 50
 role_predicate = "true"
-retention_and_cut_rule = "human/catalog identity; distinct from the security namespace"
+retention_and_cut_rule = "128-bit database identity; recovery rejects disagreement with the authenticated root (a01:1443)"
 version_status = "active"
-max_size_bytes = 32
+max_size_bytes = 16
 
 [[field]]
 containing_schema = "RootSlot"
-field_tag = 0x0006
+field_tag = 0x0007
 stable_name = "database_security_namespace_id"
 exact_wire_type = "id256"
 cardinality = "one"
@@ -692,13 +1157,13 @@ identity_class = "bootstrap_local"
 reference_semantics = "none"
 construction_order = 50
 role_predicate = "true"
-retention_and_cut_rule = "immutable random 256-bit creation identity; same-identity restore preserves it, clone restore mints anew"
+retention_and_cut_rule = "security namespace binding; recovery rejects disagreement with the authenticated root (a01:1443)"
 version_status = "active"
 max_size_bytes = 32
 
 [[field]]
 containing_schema = "RootSlot"
-field_tag = 0x0007
+field_tag = 0x0008
 stable_name = "cluster_incarnation"
 exact_wire_type = "u64"
 cardinality = "one"
@@ -706,13 +1171,13 @@ identity_class = "bootstrap_local"
 reference_semantics = "none"
 construction_order = 50
 role_predicate = "true"
-retention_and_cut_rule = "incarnation continuity component"
+retention_and_cut_rule = "incarnation binding; recovery rejects disagreement with the authenticated root (a01:1443)"
 version_status = "active"
 max_size_bytes = 8
 
 [[field]]
 containing_schema = "RootSlot"
-field_tag = 0x0008
+field_tag = 0x0009
 stable_name = "incarnation_continuity_profile_id"
 exact_wire_type = "u16"
 cardinality = "one"
@@ -720,28 +1185,28 @@ identity_class = "bootstrap_local"
 reference_semantics = "none"
 construction_order = 50
 role_predicate = "true"
-retention_and_cut_rule = "DirectoryBound | ExternalCas (W12 requires ExternalCas)"
+retention_and_cut_rule = "selects the AllocationContinuityProfile family arm (a09 IdentityContinuityRecord)"
 version_status = "active"
 max_size_bytes = 2
 
 [[field]]
 containing_schema = "RootSlot"
-field_tag = 0x0009
+field_tag = 0x000a
 stable_name = "cluster_incarnation_continuity_digest"
 exact_wire_type = "digest256"
 cardinality = "one"
 identity_class = "bootstrap_local"
-reference_semantics = "none"
+reference_semantics = "weak_digest"
 construction_order = 50
 role_predicate = "true"
-retention_and_cut_rule = "digest of the Appendix A continuity record"
+retention_and_cut_rule = "continuity chain commitment; comparison only"
 version_status = "active"
 max_size_bytes = 32
-digest_class = "target"
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "RootSlot"
-field_tag = 0x000a
+field_tag = 0x000b
 stable_name = "continuity_cas_version"
 exact_wire_type = "u64"
 cardinality = "one"
@@ -749,13 +1214,13 @@ identity_class = "bootstrap_local"
 reference_semantics = "none"
 construction_order = 50
 role_predicate = "true"
-retention_and_cut_rule = "ExternalCas head version"
+retention_and_cut_rule = "external continuity CAS version"
 version_status = "active"
 max_size_bytes = 8
 
 [[field]]
 containing_schema = "RootSlot"
-field_tag = 0x000b
+field_tag = 0x000c
 stable_name = "service_visibility_epoch"
 exact_wire_type = "u64"
 cardinality = "one"
@@ -763,55 +1228,66 @@ identity_class = "bootstrap_local"
 reference_semantics = "none"
 construction_order = 50
 role_predicate = "true"
-retention_and_cut_rule = "epoch every request/cursor/capability must match (FG-INV-04)"
+retention_and_cut_rule = "service visibility epoch carried through role transitions (a05)"
 version_status = "active"
 max_size_bytes = 8
 
 [[field]]
 containing_schema = "RootSlot"
-field_tag = 0x000c
+field_tag = 0x000d
 stable_name = "root_manifest_oid"
-exact_wire_type = "digest256"
+exact_wire_type = "oid256"
 cardinality = "one"
 identity_class = "logical"
-reference_semantics = "locator"
+reference_semantics = "external_root"
 target_schema_id = "RootManifest"
 construction_order = 50
 role_predicate = "true"
-retention_and_cut_rule = "locator to the published RootManifest; the frame is not a graph node and this is not a reachability edge — reachability roots from the manifest under FG-INV-14"
+retention_and_cut_rule = "bootstrap-slot root identity: an EXTERNAL GC ROOT followed as strong (a01:1435); the frame is not a graph node - traversal enters the object graph here and reachability roots from the manifest under FG-INV-14"
 version_status = "active"
 max_size_bytes = 32
-digest_class = "target"
-
-[[field]]
-containing_schema = "RootSlot"
-field_tag = 0x000d
-stable_name = "root_bootstrap"
-exact_wire_type = "RootBootstrap"
-cardinality = "one"
-identity_class = "inline"
-reference_semantics = "none"
-construction_order = 50
-role_predicate = "true"
-retention_and_cut_rule = "self-sufficient opener; no field comes from the object being opened"
-version_status = "active"
-max_size_bytes = 3584
 
 [[field]]
 containing_schema = "RootSlot"
 field_tag = 0x000e
-stable_name = "tear_checksum"
-exact_wire_type = "u64"
+stable_name = "bootstrap"
+exact_wire_type = "RootBootstrap"
 cardinality = "one"
 identity_class = "bootstrap_local"
 reference_semantics = "none"
 construction_order = 50
 role_predicate = "true"
-retention_and_cut_rule = "tear validation"
+retention_and_cut_rule = "inline RootBootstrap frame (exactly 1482 bytes at offset 162); self-sufficient recovery without the object index"
 version_status = "active"
-max_size_bytes = 8
-digest_class = "transcript"
-transcript_recipe = "checksum over the complete 4 KiB slot bytes excluding exactly the tear_checksum field itself; a mismatch makes the slot structurally incredible"
+max_size_bytes = 1482
+
+[[field]]
+containing_schema = "RootSlot"
+field_tag = 0x000f
+stable_name = "reserved_zeroes"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "zero padding to offset 4064; readers reject nonzero bytes"
+version_status = "active"
+max_size_bytes = 2420
+
+[[field]]
+containing_schema = "RootSlot"
+field_tag = 0x0010
+stable_name = "tear_checksum"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "bootstrap_local"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "torn-write detector over bytes 0..4064 at offset 4064; slot total exactly 4096 bytes"
+version_status = "active"
+max_size_bytes = 32
 
 [[field]]
 containing_schema = "ShardHistoryInventory"

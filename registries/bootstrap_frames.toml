@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "bootstrap_frames"
-registry_epoch = 1
+registry_epoch = 2
 
 [[frame]]
 frame_kind = 0x0001
@@ -31,3 +31,15 @@ tear_validation = "reserved"
 opener_fields = "reserved"
 compatibility_gate = "reserved"
 recovery_vectors = "corpus/bootstrap/raft_hard_frame/"
+
+[[frame]]
+frame_kind = 0x0003
+name = "RootBootstrap"
+status = "active"
+byte_size = 1482
+location = "inline in RootSlot at offset 162 (never a free-standing file)"
+update_protocol = "written only as part of a complete RootSlot slot write; never updated independently"
+tear_validation = "covered by the enclosing RootSlot tear_checksum; opener_digest covers kind, key IDs, locators/wraps, and namespace/incarnation (a01:1443)"
+opener_fields = "32 exact fields at pinned offsets: encoding/placement/failure-domain identities, ContiguousSpan (segment_id, offset, encoded_len, symbol inventory digest), object kind and lengths, codec/crypto/fec profiles, dek_id, nonce_or_siv, OTI tuple, symbol_auth_profile, ciphertext identity/digest, opener kind/key id/payload_len/payload[1024]/digest"
+compatibility_gate = "profile registries fix bounds and tag lengths; readers authenticate and validate headers and resource bounds before allocating or decompressing (a01:1392)"
+recovery_vectors = "corpus/bootstrap/root_bootstrap/"

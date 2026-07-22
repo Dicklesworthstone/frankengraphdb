@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 1
+registry_epoch = 2
 
 [[type]]
 wire_type_id = 0x0001
@@ -83,15 +83,6 @@ wire_tag = 0x0002
 encoding_context = "{bridge_spec_ref: StrongRef<RecoveryBridgeSpec>, source_manifest_identity: WeakDigest, transform_and_projection_digest}"
 allowed_containing_schemas = ["LocalCommandOrigin"]
 max_size_bytes = 128
-
-[[type]]
-wire_type_id = 0x0009
-name = "RootBootstrap"
-kind = "record"
-status = "active"
-encoding_context = "everything needed before the object-location index exists: complete cipher/encoding descriptors, CiphertextId/EncodingId/ciphertext digest, specialized ContiguousSpan placement, noncircular opener bundle for root DEK and K_oid; no descriptor or identity-key field comes from the object being opened"
-allowed_containing_schemas = ["RootSlot"]
-max_size_bytes = 3584
 
 [[type]]
 wire_type_id = 0x000a
