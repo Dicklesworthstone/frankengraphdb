@@ -33,7 +33,7 @@
 #                        construction-DAG checker enforces this)
 #   role_predicate       activation-predicate over roles/postures/features
 #   max_size_bytes       resource bound on the canonical encoding
-#   golden_corpus        reserved corpus path (populated by w1-generated-parsers)
+#   golden_corpus        reserved corpus path (populated by w1-format-test-corpora)
 #
 # Reference fields and digest recipes live ONLY in durable_fields.toml (the
 # single cross-index — no second source of truth); a kind's field set is the
@@ -55,7 +55,7 @@ registry_epoch = 1
 object_kind = 0x0001
 name = "LogicalStatePayload"
 status = "active"
-construction_order = 30
+construction_order = 20
 role_predicate = "true"
 max_size_bytes = 1073741824
 golden_corpus = "corpus/logical/logical_state_payload/"
@@ -64,7 +64,7 @@ golden_corpus = "corpus/logical/logical_state_payload/"
 object_kind = 0x0002
 name = "LogicalCommandRecord"
 status = "active"
-construction_order = 20
+construction_order = 30
 role_predicate = "true"
 max_size_bytes = 1048576
 golden_corpus = "corpus/logical/logical_command_record/"

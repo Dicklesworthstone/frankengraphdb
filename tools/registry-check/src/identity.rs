@@ -152,8 +152,24 @@ pub struct ReferenceUnion {
     pub containing_schema: String,
     pub field_tag: i64,
     pub role: String,
-    /// (arm_tag, target_schema)
-    pub arms: Vec<(i64, String)>,
+    pub arms: Vec<ReferenceUnionArm>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferenceUnionArm {
+    pub union_name: String,
+    pub containing_schema: String,
+    pub field_tag: i64,
+    pub arm_tag: i64,
+    pub stable_name: String,
+    pub target_schema_id: String,
+    pub role: String,
+    pub identity_class: String,
+    pub reference_semantics: String,
+    pub role_predicate: String,
+    pub retention_and_cut_rule: String,
+    pub version_status: String,
+    pub max_size_bytes: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -171,6 +187,15 @@ pub struct IdentityRegistries {
     pub fields: Vec<FieldRow>,
     pub fields_epoch: i64,
     pub unions: Vec<ReferenceUnion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignmentPin {
+    pub registry: &'static str,
+    pub expected_epoch: i64,
+    pub actual_epoch: i64,
+    pub expected_pin: &'static str,
+    pub actual_pin: String,
 }
 
 fn get_int_array(table: &Table, key: &str, ctx: &str) -> Result<Option<Vec<i64>>, ReadError> {
@@ -209,16 +234,51 @@ fn get_opt_int(table: &Table, key: &str, ctx: &str) -> Result<Option<i64>, ReadE
     }
 }
 
-fn registry_header(root: &Table, expected: &str, file: &str) -> Result<i64, ReadError> {
+/// Require that a table contains no keys outside its versioned schema.
+///
+/// `Table` is a `BTreeMap`, so when several unknown keys are present the
+/// lexicographically first one is reported.  This keeps the error path stable
+/// across runs while naming the exact rejected key.
+fn exact_keys(table: &Table, allowed: &[&str], ctx: &str) -> Result<(), ReadError> {
+    if let Some(key) = table.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(ReadError {
+            path: format!("{ctx}.{key}"),
+            msg: "unknown key in closed schema".into(),
+        });
+    }
+    Ok(())
+}
+
+fn registry_header(
+    root: &Table,
+    expected: &str,
+    file: &str,
+    row_keys: &[&str],
+) -> Result<i64, ReadError> {
+    let mut allowed_root_keys = Vec::with_capacity(2 + row_keys.len());
+    allowed_root_keys.extend_from_slice(&["schema_version", "registry"]);
+    allowed_root_keys.extend_from_slice(row_keys);
+    exact_keys(root, &allowed_root_keys, file)?;
+
+    let schema_version = get_int(root, "schema_version", file)?;
+    if schema_version != 1 {
+        return Err(ReadError {
+            path: format!("{file}.schema_version"),
+            msg: format!("expected schema version 1, found {schema_version}"),
+        });
+    }
+
     let registry = get_table(root, "registry", file)?;
-    let name = get_str(registry, "name", &format!("{file}.registry"))?;
+    let registry_ctx = format!("{file}.registry");
+    exact_keys(registry, &["name", "registry_epoch"], &registry_ctx)?;
+    let name = get_str(registry, "name", &registry_ctx)?;
     if name != expected {
         return Err(ReadError {
             path: format!("{file}.registry.name"),
             msg: format!("expected {expected:?}, found {name:?}"),
         });
     }
-    get_int(registry, "registry_epoch", &format!("{file}.registry"))
+    get_int(registry, "registry_epoch", &registry_ctx)
 }
 
 fn load_table(dir: &Path, file: &str) -> Result<Table, LoadError> {
@@ -241,13 +301,31 @@ fn wrap(dir: &Path, file: &str, e: ReadError) -> LoadError {
 }
 
 pub fn logical_from(root: &Table) -> Result<(i64, Vec<LogicalKind>), ReadError> {
-    let epoch = registry_header(root, "logical_object_kinds", "logical_object_kinds.toml")?;
+    let epoch = registry_header(
+        root,
+        "logical_object_kinds",
+        "logical_object_kinds.toml",
+        &["kind"],
+    )?;
     let mut rows = Vec::new();
     for (i, t) in get_table_array(root, "kind", "logical_object_kinds.toml")?
         .iter()
         .enumerate()
     {
         let ctx = format!("logical_object_kinds.toml.kind[{i}]");
+        exact_keys(
+            t,
+            &[
+                "object_kind",
+                "name",
+                "status",
+                "construction_order",
+                "role_predicate",
+                "max_size_bytes",
+                "golden_corpus",
+            ],
+            &ctx,
+        )?;
         rows.push(LogicalKind {
             object_kind: get_int(t, "object_kind", &ctx)?,
             name: get_str(t, "name", &ctx)?,
@@ -262,13 +340,31 @@ pub fn logical_from(root: &Table) -> Result<(i64, Vec<LogicalKind>), ReadError> 
 }
 
 pub fn physical_from(root: &Table) -> Result<(i64, Vec<PhysicalKind>), ReadError> {
-    let epoch = registry_header(root, "physical_record_kinds", "physical_record_kinds.toml")?;
+    let epoch = registry_header(
+        root,
+        "physical_record_kinds",
+        "physical_record_kinds.toml",
+        &["kind"],
+    )?;
     let mut rows = Vec::new();
     for (i, t) in get_table_array(root, "kind", "physical_record_kinds.toml")?
         .iter()
         .enumerate()
     {
         let ctx = format!("physical_record_kinds.toml.kind[{i}]");
+        exact_keys(
+            t,
+            &[
+                "record_kind",
+                "name",
+                "identity_law",
+                "status",
+                "transcript",
+                "owning_identity",
+                "max_size_bytes",
+            ],
+            &ctx,
+        )?;
         rows.push(PhysicalKind {
             record_kind: get_int(t, "record_kind", &ctx)?,
             name: get_str(t, "name", &ctx)?,
@@ -283,13 +379,34 @@ pub fn physical_from(root: &Table) -> Result<(i64, Vec<PhysicalKind>), ReadError
 }
 
 pub fn bootstrap_from(root: &Table) -> Result<(i64, Vec<BootstrapFrame>), ReadError> {
-    let epoch = registry_header(root, "bootstrap_frames", "bootstrap_frames.toml")?;
+    let epoch = registry_header(
+        root,
+        "bootstrap_frames",
+        "bootstrap_frames.toml",
+        &["frame"],
+    )?;
     let mut rows = Vec::new();
     for (i, t) in get_table_array(root, "frame", "bootstrap_frames.toml")?
         .iter()
         .enumerate()
     {
         let ctx = format!("bootstrap_frames.toml.frame[{i}]");
+        exact_keys(
+            t,
+            &[
+                "frame_kind",
+                "name",
+                "status",
+                "byte_size",
+                "location",
+                "update_protocol",
+                "tear_validation",
+                "opener_fields",
+                "compatibility_gate",
+                "recovery_vectors",
+            ],
+            &ctx,
+        )?;
         rows.push(BootstrapFrame {
             frame_kind: get_int(t, "frame_kind", &ctx)?,
             name: get_str(t, "name", &ctx)?,
@@ -311,6 +428,7 @@ pub fn prebootstrap_from(root: &Table) -> Result<(i64, Vec<PrebootstrapKind>), R
         root,
         "prebootstrap_artifact_kinds",
         "prebootstrap_artifact_kinds.toml",
+        &["kind"],
     )?;
     let mut rows = Vec::new();
     for (i, t) in get_table_array(root, "kind", "prebootstrap_artifact_kinds.toml")?
@@ -318,6 +436,19 @@ pub fn prebootstrap_from(root: &Table) -> Result<(i64, Vec<PrebootstrapKind>), R
         .enumerate()
     {
         let ctx = format!("prebootstrap_artifact_kinds.toml.kind[{i}]");
+        exact_keys(
+            t,
+            &[
+                "artifact_kind",
+                "name",
+                "status",
+                "target_claim_domain",
+                "allowed_containers",
+                "import_target",
+                "max_size_bytes",
+            ],
+            &ctx,
+        )?;
         rows.push(PrebootstrapKind {
             artifact_kind: get_int(t, "artifact_kind", &ctx)?,
             name: get_str(t, "name", &ctx)?,
@@ -332,13 +463,28 @@ pub fn prebootstrap_from(root: &Table) -> Result<(i64, Vec<PrebootstrapKind>), R
 }
 
 pub fn wire_from(root: &Table) -> Result<(i64, Vec<WireType>), ReadError> {
-    let epoch = registry_header(root, "wire_types", "wire_types.toml")?;
+    let epoch = registry_header(root, "wire_types", "wire_types.toml", &["type"])?;
     let mut rows = Vec::new();
     for (i, t) in get_table_array(root, "type", "wire_types.toml")?
         .iter()
         .enumerate()
     {
         let ctx = format!("wire_types.toml.type[{i}]");
+        exact_keys(
+            t,
+            &[
+                "wire_type_id",
+                "name",
+                "kind",
+                "status",
+                "containing_union",
+                "wire_tag",
+                "encoding_context",
+                "allowed_containing_schemas",
+                "max_size_bytes",
+            ],
+            &ctx,
+        )?;
         rows.push(WireType {
             wire_type_id: get_int(t, "wire_type_id", &ctx)?,
             name: get_str(t, "name", &ctx)?,
@@ -355,13 +501,44 @@ pub fn wire_from(root: &Table) -> Result<(i64, Vec<WireType>), ReadError> {
 }
 
 pub fn fields_from(root: &Table) -> Result<(i64, Vec<FieldRow>, Vec<ReferenceUnion>), ReadError> {
-    let epoch = registry_header(root, "durable_fields", "durable_fields.toml")?;
+    let epoch = registry_header(
+        root,
+        "durable_fields",
+        "durable_fields.toml",
+        &["field", "reference_union", "reference_union_arm"],
+    )?;
     let mut fields = Vec::new();
     for (i, t) in get_table_array(root, "field", "durable_fields.toml")?
         .iter()
         .enumerate()
     {
         let ctx = format!("durable_fields.toml.field[{i}]");
+        exact_keys(
+            t,
+            &[
+                "containing_schema",
+                "field_tag",
+                "stable_name",
+                "exact_wire_type",
+                "cardinality",
+                "identity_class",
+                "reference_semantics",
+                "target_schema_id",
+                "construction_order",
+                "role_predicate",
+                "retention_and_cut_rule",
+                "version_status",
+                "max_size_bytes",
+                "digest_class",
+                "transcript_recipe",
+                "bd_domain_separator",
+                "bd_schema_major",
+                "bd_included_field_tags",
+                "bd_excluded_field_tags",
+                "recipe_pin",
+            ],
+            &ctx,
+        )?;
         fields.push(FieldRow {
             containing_schema: get_str(t, "containing_schema", &ctx)?,
             field_tag: get_int(t, "field_tag", &ctx)?,
@@ -391,25 +568,73 @@ pub fn fields_from(root: &Table) -> Result<(i64, Vec<FieldRow>, Vec<ReferenceUni
         .enumerate()
     {
         let ctx = format!("durable_fields.toml.reference_union[{i}]");
-        let mut arms = Vec::new();
-        for (j, arm) in get_str_array(t, "arms", &ctx)?.iter().enumerate() {
-            let (tag, target) = arm.split_once(':').ok_or_else(|| ReadError {
-                path: format!("{ctx}.arms[{j}]"),
-                msg: format!("expected \"tag:Target\", found {arm:?}"),
-            })?;
-            let tag: i64 = tag.parse().map_err(|_| ReadError {
-                path: format!("{ctx}.arms[{j}]"),
-                msg: format!("invalid arm tag in {arm:?}"),
-            })?;
-            arms.push((tag, target.to_string()));
-        }
+        exact_keys(
+            t,
+            &["union_name", "containing_schema", "field_tag", "role"],
+            &ctx,
+        )?;
         unions.push(ReferenceUnion {
             union_name: get_str(t, "union_name", &ctx)?,
             containing_schema: get_str(t, "containing_schema", &ctx)?,
             field_tag: get_int(t, "field_tag", &ctx)?,
             role: get_str(t, "role", &ctx)?,
-            arms,
+            arms: Vec::new(),
         });
+    }
+
+    let mut union_index = BTreeMap::new();
+    for (index, union) in unions.iter().enumerate() {
+        union_index.insert(union.union_name.clone(), index);
+    }
+    for (i, t) in get_table_array(root, "reference_union_arm", "durable_fields.toml")?
+        .iter()
+        .enumerate()
+    {
+        let ctx = format!("durable_fields.toml.reference_union_arm[{i}]");
+        exact_keys(
+            t,
+            &[
+                "union_name",
+                "containing_schema",
+                "field_tag",
+                "arm_tag",
+                "stable_name",
+                "target_schema_id",
+                "role",
+                "identity_class",
+                "reference_semantics",
+                "role_predicate",
+                "retention_and_cut_rule",
+                "version_status",
+                "max_size_bytes",
+            ],
+            &ctx,
+        )?;
+        let arm = ReferenceUnionArm {
+            union_name: get_str(t, "union_name", &ctx)?,
+            containing_schema: get_str(t, "containing_schema", &ctx)?,
+            field_tag: get_int(t, "field_tag", &ctx)?,
+            arm_tag: get_int(t, "arm_tag", &ctx)?,
+            stable_name: get_str(t, "stable_name", &ctx)?,
+            target_schema_id: get_str(t, "target_schema_id", &ctx)?,
+            role: get_str(t, "role", &ctx)?,
+            identity_class: get_str(t, "identity_class", &ctx)?,
+            reference_semantics: get_str(t, "reference_semantics", &ctx)?,
+            role_predicate: get_str(t, "role_predicate", &ctx)?,
+            retention_and_cut_rule: get_str(t, "retention_and_cut_rule", &ctx)?,
+            version_status: get_str(t, "version_status", &ctx)?,
+            max_size_bytes: get_int(t, "max_size_bytes", &ctx)?,
+        };
+        let Some(index) = union_index.get(&arm.union_name).copied() else {
+            return Err(ReadError {
+                path: format!("{ctx}.union_name"),
+                msg: format!(
+                    "reference-union arm names undeclared union {:?}",
+                    arm.union_name
+                ),
+            });
+        };
+        unions[index].arms.push(arm);
     }
     Ok((epoch, fields, unions))
 }
@@ -591,6 +816,164 @@ pub fn check_encodable(
         .collect()
 }
 
+fn rows_pin(mut rows: Vec<String>) -> String {
+    rows.sort();
+    let transcript = rows.join("\n");
+    format!("fnv1a64:{:016x}", fnv1a64(transcript.as_bytes()))
+}
+
+fn predicate_allows_role(predicate: &str, role: &str) -> bool {
+    predicate == "true"
+        || predicate
+            .split("||")
+            .map(str::trim)
+            .any(|term| term == format!("role-{role}"))
+}
+
+/// Independent, review-updated pins for the released identity assignments.
+///
+/// Registry rows are the canonical descriptions; these constants are compact
+/// historical witnesses, not a second allowlist.  Adding or retiring a row
+/// requires an epoch bump and an intentional pin update.  Deleting a released
+/// row, reassigning its code/tag, or silently changing a union arm therefore
+/// fails even when the resulting current snapshot is internally consistent.
+pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
+    const LOGICAL: &str = "fnv1a64:1455c06e68eeebb1";
+    const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
+    const BOOTSTRAP: &str = "fnv1a64:cd78e3afad681953";
+    const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
+    const WIRE: &str = "fnv1a64:4e1bb00445c8159e";
+    const FIELDS: &str = "fnv1a64:8030df467fea65b8";
+
+    let logical = rows_pin(
+        r.logical
+            .iter()
+            .map(|row| format!("kind|{:04x}|{}|{}", row.object_kind, row.name, row.status))
+            .collect(),
+    );
+    let physical = rows_pin(
+        r.physical
+            .iter()
+            .map(|row| format!("kind|{:04x}|{}|{}", row.record_kind, row.name, row.status))
+            .collect(),
+    );
+    let bootstrap = rows_pin(
+        r.bootstrap
+            .iter()
+            .map(|row| format!("frame|{:04x}|{}|{}", row.frame_kind, row.name, row.status))
+            .collect(),
+    );
+    let prebootstrap = rows_pin(
+        r.prebootstrap
+            .iter()
+            .map(|row| format!("kind|{:04x}|{}|{}", row.artifact_kind, row.name, row.status))
+            .collect(),
+    );
+    let wire = rows_pin(
+        r.wire
+            .iter()
+            .map(|row| {
+                format!(
+                    "type|{:04x}|{}|{}|{}|{}|{}",
+                    row.wire_type_id,
+                    row.name,
+                    row.kind,
+                    row.status,
+                    row.containing_union.as_deref().unwrap_or("-"),
+                    row.wire_tag
+                        .map(|tag| format!("{tag:04x}"))
+                        .unwrap_or_else(|| "-".into())
+                )
+            })
+            .collect(),
+    );
+    let mut field_rows: Vec<String> = r
+        .fields
+        .iter()
+        .map(|row| {
+            format!(
+                "field|{}|{:04x}|{}|{}|{}|{}|{}|{}|{}",
+                row.containing_schema,
+                row.field_tag,
+                row.stable_name,
+                row.exact_wire_type,
+                row.cardinality,
+                row.identity_class,
+                row.reference_semantics,
+                row.target_schema_id.as_deref().unwrap_or("-"),
+                row.version_status
+            )
+        })
+        .collect();
+    for union in &r.unions {
+        field_rows.push(format!(
+            "union|{}|{}|{:04x}|{}",
+            union.union_name, union.containing_schema, union.field_tag, union.role
+        ));
+        field_rows.extend(union.arms.iter().map(|arm| {
+            format!(
+                "arm|{}|{}|{:04x}|{:04x}|{}|{}|{}|{}|{}|{}",
+                arm.union_name,
+                arm.containing_schema,
+                arm.field_tag,
+                arm.arm_tag,
+                arm.stable_name,
+                arm.target_schema_id,
+                arm.role,
+                arm.identity_class,
+                arm.reference_semantics,
+                arm.version_status
+            )
+        }));
+    }
+    let fields = rows_pin(field_rows);
+
+    vec![
+        AssignmentPin {
+            registry: "logical_object_kinds",
+            expected_epoch: 1,
+            actual_epoch: r.logical_epoch,
+            expected_pin: LOGICAL,
+            actual_pin: logical,
+        },
+        AssignmentPin {
+            registry: "physical_record_kinds",
+            expected_epoch: 1,
+            actual_epoch: r.physical_epoch,
+            expected_pin: PHYSICAL,
+            actual_pin: physical,
+        },
+        AssignmentPin {
+            registry: "bootstrap_frames",
+            expected_epoch: 1,
+            actual_epoch: r.bootstrap_epoch,
+            expected_pin: BOOTSTRAP,
+            actual_pin: bootstrap,
+        },
+        AssignmentPin {
+            registry: "prebootstrap_artifact_kinds",
+            expected_epoch: 1,
+            actual_epoch: r.prebootstrap_epoch,
+            expected_pin: PREBOOTSTRAP,
+            actual_pin: prebootstrap,
+        },
+        AssignmentPin {
+            registry: "wire_types",
+            expected_epoch: 1,
+            actual_epoch: r.wire_epoch,
+            expected_pin: WIRE,
+            actual_pin: wire,
+        },
+        AssignmentPin {
+            registry: "durable_fields",
+            expected_epoch: 1,
+            actual_epoch: r.fields_epoch,
+            expected_pin: FIELDS,
+            actual_pin: fields,
+        },
+    ]
+}
+
 pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
     let mut out = Vec::new();
 
@@ -635,20 +1018,27 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             .collect::<Vec<_>>(),
         &mut out,
     );
-    for (epoch, reg) in [
-        (r.logical_epoch, "logical_object_kinds"),
-        (r.physical_epoch, "physical_record_kinds"),
-        (r.bootstrap_epoch, "bootstrap_frames"),
-        (r.prebootstrap_epoch, "prebootstrap_artifact_kinds"),
-        (r.wire_epoch, "wire_types"),
-        (r.fields_epoch, "durable_fields"),
-    ] {
-        if epoch < 1 {
+    for pin in assignment_pins(r) {
+        if pin.actual_epoch != pin.expected_epoch {
             out.push(v(
-                "bad_field",
-                reg,
+                "registry_epoch_mismatch",
+                pin.registry,
                 "registry",
-                "registry_epoch must be >= 1",
+                format!(
+                    "released assignment epoch is {}, found {}; an epoch changes only with an intentional row add/retire and pin update",
+                    pin.expected_epoch, pin.actual_epoch
+                ),
+            ));
+        }
+        if pin.actual_pin != pin.expected_pin {
+            out.push(v(
+                "registry_assignment_drift",
+                pin.registry,
+                "registry",
+                format!(
+                    "released assignment pin {:?} != recomputed {:?}; released codes, tags, names, lifecycle states, and union arms are append-only",
+                    pin.expected_pin, pin.actual_pin
+                ),
             ));
         }
     }
@@ -671,10 +1061,67 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 format!("unknown identity_law {:?}", k.identity_law),
             ));
         }
+        if k.transcript.trim().is_empty()
+            || k.owning_identity.trim().is_empty()
+            || k.max_size_bytes <= 0
+        {
+            out.push(v(
+                "bad_field",
+                "physical_record_kinds",
+                &k.name,
+                "identity transcript, owning identity, and positive resource bound are required",
+            ));
+        }
+    }
+    for k in &r.logical {
+        if k.role_predicate.trim().is_empty()
+            || k.golden_corpus.trim().is_empty()
+            || k.max_size_bytes <= 0
+        {
+            out.push(v(
+                "bad_field",
+                "logical_object_kinds",
+                &k.name,
+                "role predicate, reserved corpus path, and positive resource bound are required",
+            ));
+        }
+    }
+    for frame in &r.bootstrap {
+        if frame.byte_size <= 0
+            || frame.location.trim().is_empty()
+            || frame.update_protocol.trim().is_empty()
+            || frame.tear_validation.trim().is_empty()
+            || frame.opener_fields.trim().is_empty()
+            || frame.compatibility_gate.trim().is_empty()
+            || frame.recovery_vectors.trim().is_empty()
+        {
+            out.push(v(
+                "bad_field",
+                "bootstrap_frames",
+                &frame.name,
+                "fixed size, location, update/tear/open/compatibility contracts, and recovery vectors are required",
+            ));
+        }
+    }
+    for artifact in &r.prebootstrap {
+        if artifact.target_claim_domain.trim().is_empty()
+            || artifact.allowed_containers.trim().is_empty()
+            || artifact.import_target.trim().is_empty()
+            || artifact.max_size_bytes <= 0
+        {
+            out.push(v(
+                "bad_field",
+                "prebootstrap_artifact_kinds",
+                &artifact.name,
+                "claim domain, legal container closure, import target, and positive resource bound are required",
+            ));
+        }
     }
 
     // --- wire-type shape ----------------------------------------------------
     let wire_names: BTreeSet<&str> = r.wire.iter().map(|w| w.name.as_str()).collect();
+    let wire_by_name: BTreeMap<&str, &WireType> =
+        r.wire.iter().map(|w| (w.name.as_str(), w)).collect();
     for w in &r.wire {
         if !matches!(
             w.kind.as_str(),
@@ -687,15 +1134,49 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 format!("unknown kind {:?}", w.kind),
             ));
         }
+        if w.encoding_context.trim().is_empty()
+            || w.allowed_containing_schemas.is_empty()
+            || w.max_size_bytes <= 0
+        {
+            out.push(v(
+                "bad_field",
+                "wire_types",
+                &w.name,
+                "encoding context, containing-schema closure, and positive resource bound are required",
+            ));
+        }
         match (w.kind.as_str(), &w.containing_union, w.wire_tag) {
             ("union_variant", Some(union), Some(tag)) => {
-                if !wire_names.contains(union.as_str()) {
-                    out.push(v(
+                match wire_by_name.get(union.as_str()) {
+                    None => out.push(v(
                         "bad_field",
                         "wire_types",
                         &w.name,
                         format!("containing_union {union:?} is not a registered wire type"),
-                    ));
+                    )),
+                    Some(parent) if !matches!(parent.kind.as_str(), "union" | "discriminant") => out.push(v(
+                        "bad_field",
+                        "wire_types",
+                        &w.name,
+                        format!(
+                            "containing_union {union:?} is neither kind=union nor kind=discriminant"
+                        ),
+                    )),
+                    Some(parent)
+                        if matches!(parent.status.as_str(), "retired" | "experimental")
+                            && w.status != parent.status =>
+                    {
+                        out.push(v(
+                            "bad_field",
+                            "wire_types",
+                            &w.name,
+                            format!(
+                                "variant lifecycle {:?} is incompatible with containing union lifecycle {:?}",
+                                w.status, parent.status
+                            ),
+                        ));
+                    }
+                    Some(_) => {}
                 }
                 if tag <= 0 || tag >= 0xffff {
                     out.push(v(
@@ -873,6 +1354,30 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 "bad version_status",
             ));
         }
+        if f.version_status == "experimental" {
+            out.push(v(
+                "experimental_in_production",
+                "durable_fields",
+                &row_id,
+                "experimental field rows may not ship in the production registry",
+            ));
+        }
+        if f.max_size_bytes <= 0 {
+            out.push(v(
+                "bad_field",
+                "durable_fields",
+                &row_id,
+                "max_size_bytes must be positive",
+            ));
+        }
+        if f.role_predicate.trim().is_empty() || f.retention_and_cut_rule.trim().is_empty() {
+            out.push(v(
+                "bad_field",
+                "durable_fields",
+                &row_id,
+                "role_predicate and retention_and_cut_rule must be nonblank",
+            ));
+        }
         // Wire-type resolution: builtin -> wire_types -> reference_union.
         let is_builtin = BUILTIN_WIRE_TYPES.contains(&f.exact_wire_type.as_str());
         let is_wire = wire_names.contains(f.exact_wire_type.as_str());
@@ -883,6 +1388,22 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 "durable_fields",
                 &row_id,
                 format!("exact_wire_type {:?} resolves nowhere", f.exact_wire_type),
+            ));
+        }
+        if let Some(wire_type) = wire_by_name.get(f.exact_wire_type.as_str())
+            && !wire_type
+                .allowed_containing_schemas
+                .iter()
+                .any(|schema| schema == "*" || schema == &f.containing_schema)
+        {
+            out.push(v(
+                "wire_context_mismatch",
+                "durable_fields",
+                &row_id,
+                format!(
+                    "wire type {:?} is not permitted in containing schema {:?}",
+                    f.exact_wire_type, f.containing_schema
+                ),
             ));
         }
         // Construction-order consistency with the containing logical kind.
@@ -973,7 +1494,7 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         }
         // Digest discipline: digest-typed fields declare exactly one class;
         // never by naming convention.
-        let digest_typed = f.exact_wire_type == "digest256" || f.exact_wire_type == "WeakDigest";
+        let digest_typed = matches!(f.exact_wire_type.as_str(), "digest256" | "WeakDigest");
         match &f.digest_class {
             None if digest_typed => out.push(v(
                 "digest_missing_class",
@@ -984,8 +1505,39 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             None => {}
             Some(class) => {
                 match class.as_str() {
-                    "target" | "weak_identity" => {}
+                    "target" | "weak_identity" => {
+                        if !digest_typed {
+                            out.push(v(
+                                "bad_field",
+                                "durable_fields",
+                                &row_id,
+                                "target/weak-identity digest classes require digest256 or WeakDigest wire types",
+                            ));
+                        }
+                        if f.transcript_recipe.is_some()
+                            || f.bd_domain_separator.is_some()
+                            || f.bd_schema_major.is_some()
+                            || f.bd_included_field_tags.is_some()
+                            || f.bd_excluded_field_tags.is_some()
+                            || f.recipe_pin.is_some()
+                        {
+                            out.push(v(
+                                "bad_field",
+                                "durable_fields",
+                                &row_id,
+                                "target/weak-identity digests may not carry transcript or BodyDigest recipe metadata",
+                            ));
+                        }
+                    }
                     "transcript" => {
+                        if !digest_typed && f.exact_wire_type != "u64" {
+                            out.push(v(
+                                "bad_field",
+                                "durable_fields",
+                                &row_id,
+                                "transcript digest/checksum class requires digest256, WeakDigest, or an explicit u64 checksum wire type",
+                            ));
+                        }
                         if f.transcript_recipe.as_deref().is_none_or(|t| t.trim().is_empty()) {
                             out.push(v(
                                 "digest_missing_recipe",
@@ -994,8 +1546,29 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                                 "transcript digest without a registered recipe",
                             ));
                         }
+                        if f.bd_domain_separator.is_some()
+                            || f.bd_schema_major.is_some()
+                            || f.bd_included_field_tags.is_some()
+                            || f.bd_excluded_field_tags.is_some()
+                            || f.recipe_pin.is_some()
+                        {
+                            out.push(v(
+                                "bad_field",
+                                "durable_fields",
+                                &row_id,
+                                "transcript digest may not carry BodyDigest recipe metadata",
+                            ));
+                        }
                     }
                     "body" => {
+                        if f.exact_wire_type != "digest256" || f.transcript_recipe.is_some() {
+                            out.push(v(
+                                "bad_field",
+                                "durable_fields",
+                                &row_id,
+                                "BodyDigest must use digest256 and its generated BodyDigest metadata, not a transcript_recipe",
+                            ));
+                        }
                         body_rows_per_schema
                             .entry(f.containing_schema.as_str())
                             .or_default()
@@ -1064,6 +1637,26 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                     "the BodyDigest field's own tag must be excluded from its recipe",
                 ));
             }
+            let included_set: BTreeSet<i64> = included.iter().copied().collect();
+            let excluded_set: BTreeSet<i64> = excluded.iter().copied().collect();
+            if included_set.len() != included.len()
+                || excluded_set.len() != excluded.len()
+                || !included_set.is_disjoint(&excluded_set)
+                || excluded_set != BTreeSet::from([f.field_tag])
+                || (!included_set.is_empty()
+                    && included_set
+                        .union(&excluded_set)
+                        .copied()
+                        .collect::<BTreeSet<_>>()
+                        != known_tags)
+            {
+                out.push(v(
+                    "bodydigest_incomplete_partition",
+                    "durable_fields",
+                    &row_id,
+                    "BodyDigest include/exclude tags must be unique and disjoint; exclusions contain exactly the BodyDigest field, and an explicit include list must complete the schema partition",
+                ));
+            }
             let transcript = bodydigest_transcript(schema, domain, major, included, excluded);
             let recomputed = bodydigest_pin(&transcript);
             if recomputed != *pin {
@@ -1091,12 +1684,12 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             ));
         }
         // Anchor: the declaring field row must exist and use this union.
-        let anchored = r.fields.iter().any(|f| {
+        let anchor = r.fields.iter().find(|f| {
             f.containing_schema == u.containing_schema
                 && f.field_tag == u.field_tag
                 && f.exact_wire_type == u.union_name
         });
-        if !anchored {
+        if anchor.is_none() {
             out.push(v(
                 "union_field_mismatch",
                 "durable_fields",
@@ -1107,24 +1700,175 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 ),
             ));
         }
+        if !matches!(u.role.as_str(), "local" | "meta" | "shard") {
+            out.push(v(
+                "union_role_invalid",
+                "durable_fields",
+                &u.union_name,
+                format!("role {:?} is not one of local|meta|shard", u.role),
+            ));
+        }
+        if u.arms.is_empty() {
+            out.push(v(
+                "union_arm_missing",
+                "durable_fields",
+                &u.union_name,
+                "closed reference union has no registered arms",
+            ));
+        }
+        if let Some(containing) = logical_by_name.get(u.containing_schema.as_str())
+            && !predicate_allows_role(&containing.role_predicate, &u.role)
+        {
+            out.push(v(
+                "union_role_mismatch",
+                "durable_fields",
+                &u.union_name,
+                format!(
+                    "union role {:?} is excluded by containing schema predicate {:?}",
+                    u.role, containing.role_predicate
+                ),
+            ));
+        }
+        if let Some(field) = anchor {
+            if !matches!(field.reference_semantics.as_str(), "strong" | "conditional")
+                || field.target_schema_id.is_some()
+                || field.identity_class != "logical"
+            {
+                out.push(v(
+                    "union_field_mismatch",
+                    "durable_fields",
+                    &u.union_name,
+                    "union anchor must be a polymorphic logical strong/conditional reference",
+                ));
+            }
+            if !predicate_allows_role(&field.role_predicate, &u.role) {
+                out.push(v(
+                    "union_role_mismatch",
+                    "durable_fields",
+                    &u.union_name,
+                    format!(
+                        "union role {:?} is excluded by anchor predicate {:?}",
+                        u.role, field.role_predicate
+                    ),
+                ));
+            }
+        }
         let mut arm_tags = BTreeSet::new();
-        for (tag, target) in &u.arms {
-            if !arm_tags.insert(*tag) {
+        let mut arm_targets = BTreeSet::new();
+        for arm in &u.arms {
+            let row_id = format!("{}#{}", u.union_name, arm.stable_name);
+            if arm.union_name != u.union_name
+                || arm.containing_schema != u.containing_schema
+                || arm.field_tag != u.field_tag
+                || arm.role != u.role
+            {
+                out.push(v(
+                    "union_arm_metadata_mismatch",
+                    "durable_fields",
+                    &row_id,
+                    "arm union/anchor/role metadata does not exactly match its reference_union",
+                ));
+            }
+            if arm.stable_name != arm.target_schema_id {
+                out.push(v(
+                    "union_arm_metadata_mismatch",
+                    "durable_fields",
+                    &row_id,
+                    "arm stable_name must equal its canonical target_schema_id",
+                ));
+            }
+            if arm.identity_class != "logical"
+                || !matches!(arm.reference_semantics.as_str(), "strong" | "conditional")
+            {
+                out.push(v(
+                    "union_arm_identity_mismatch",
+                    "durable_fields",
+                    &row_id,
+                    "reference-union arms must be retaining logical references",
+                ));
+            }
+            if let Some(field) = anchor
+                && (arm.reference_semantics != field.reference_semantics
+                    || arm.version_status != field.version_status)
+            {
+                out.push(v(
+                    "union_arm_lifecycle_mismatch",
+                    "durable_fields",
+                    &row_id,
+                    "arm reference semantics and lifecycle must match the anchored field",
+                ));
+            }
+            if !predicate_allows_role(&arm.role_predicate, &u.role)
+                || arm.retention_and_cut_rule.trim().is_empty()
+                || arm.max_size_bytes <= 0
+            {
+                out.push(v(
+                    "union_arm_policy_mismatch",
+                    "durable_fields",
+                    &row_id,
+                    "arm role predicate, retention rule, and resource bound must authorize its union role",
+                ));
+            }
+            if arm.arm_tag <= 0 || arm.arm_tag >= 0xc000 {
+                out.push(v(
+                    "code_invalid",
+                    "durable_fields",
+                    &row_id,
+                    format!(
+                        "reference-union arm tag {:#06x} is not a production tag",
+                        arm.arm_tag
+                    ),
+                ));
+            }
+            if !arm_tags.insert(arm.arm_tag) {
                 out.push(v(
                     "union_arm_duplicate_tag",
                     "durable_fields",
-                    &u.union_name,
-                    format!("duplicate arm tag {tag}"),
+                    &row_id,
+                    format!("duplicate arm tag {}", arm.arm_tag),
                 ));
             }
-            match logical_by_name.get(target.as_str()) {
+            if !arm_targets.insert(arm.target_schema_id.as_str()) {
+                out.push(v(
+                    "union_arm_duplicate_target",
+                    "durable_fields",
+                    &row_id,
+                    format!("duplicate target {:?}", arm.target_schema_id),
+                ));
+            }
+            match logical_by_name.get(arm.target_schema_id.as_str()) {
                 None => out.push(v(
                     "union_arm_unresolved",
                     "durable_fields",
-                    &u.union_name,
-                    format!("arm {tag} target {target:?} is not a registered logical object"),
+                    &row_id,
+                    format!(
+                        "arm {} target {:?} is not a registered logical object",
+                        arm.arm_tag, arm.target_schema_id
+                    ),
                 )),
                 Some(target_kind) => {
+                    if matches!(target_kind.status.as_str(), "retired" | "experimental") {
+                        out.push(v(
+                            "union_arm_lifecycle_mismatch",
+                            "durable_fields",
+                            &row_id,
+                            format!(
+                                "arm target {:?} has non-referenceable lifecycle {:?}",
+                                arm.target_schema_id, target_kind.status
+                            ),
+                        ));
+                    }
+                    if !predicate_allows_role(&target_kind.role_predicate, &u.role) {
+                        out.push(v(
+                            "union_role_mismatch",
+                            "durable_fields",
+                            &row_id,
+                            format!(
+                                "union role {:?} is excluded by target {:?} predicate {:?}",
+                                u.role, arm.target_schema_id, target_kind.role_predicate
+                            ),
+                        ));
+                    }
                     if let Some(containing) = logical_by_name.get(u.containing_schema.as_str())
                         && target_kind.construction_order > containing.construction_order
                     {
@@ -1133,7 +1877,8 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                             "durable_fields",
                             &u.union_name,
                             format!(
-                                "arm target {target:?} (order {}) is constructed after containing {:?} (order {}): a future result is never referenceable",
+                                "arm target {:?} (order {}) is constructed after containing {:?} (order {}): a future result is never referenceable",
+                                arm.target_schema_id,
                                 target_kind.construction_order,
                                 u.containing_schema,
                                 containing.construction_order
@@ -1148,7 +1893,10 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
     // --- construction DAG over logical kinds --------------------------------
     let mut edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for f in &r.fields {
-        if !matches!(f.reference_semantics.as_str(), "strong" | "conditional") {
+        if !matches!(
+            f.reference_semantics.as_str(),
+            "strong" | "conditional" | "weak_digest"
+        ) {
             continue;
         }
         let Some(containing) = logical_by_name.get(f.containing_schema.as_str()) else {
@@ -1158,7 +1906,7 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         if let Some(t) = &f.target_schema_id {
             targets.push(t.as_str());
         } else if let Some(u) = union_by_name.get(f.exact_wire_type.as_str()) {
-            targets.extend(u.arms.iter().map(|(_, t)| t.as_str()));
+            targets.extend(u.arms.iter().map(|arm| arm.target_schema_id.as_str()));
         }
         for target in targets {
             let Some(target_kind) = logical_by_name.get(target) else {

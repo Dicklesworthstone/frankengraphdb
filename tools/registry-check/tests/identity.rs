@@ -112,6 +112,40 @@ fn idr_schema_valid_all_six() {
     }
 }
 
+#[test]
+fn idr_schema_rejects_unknown_keys_and_versions() {
+    let source = std::fs::read_to_string(repo_root().join("registries/logical_object_kinds.toml"))
+        .expect("read logical registry");
+
+    let wrong_version = source.replacen("schema_version = 1", "schema_version = 2", 1);
+    let table = registry_check::toml::parse(&wrong_version).expect("fixture parses");
+    let err = identity::logical_from(&table).expect_err("unknown schema version must fail");
+    assert_eq!(err.path, "logical_object_kinds.toml.schema_version");
+    assert!(err.msg.contains("expected schema version 1"));
+
+    let unknown_root = source.replacen("[registry]", "unknown_top_level = true\n\n[registry]", 1);
+    let table = registry_check::toml::parse(&unknown_root).expect("fixture parses");
+    let err = identity::logical_from(&table).expect_err("unknown root key must fail");
+    assert_eq!(err.path, "logical_object_kinds.toml.unknown_top_level");
+
+    let unknown_registry =
+        source.replacen("[registry]", "[registry]\nunknown_registry_key = true", 1);
+    let table = registry_check::toml::parse(&unknown_registry).expect("fixture parses");
+    let err = identity::logical_from(&table).expect_err("unknown registry key must fail");
+    assert_eq!(
+        err.path,
+        "logical_object_kinds.toml.registry.unknown_registry_key"
+    );
+
+    let unknown_row = source.replacen("[[kind]]", "[[kind]]\nunknown_row_key = true", 1);
+    let table = registry_check::toml::parse(&unknown_row).expect("fixture parses");
+    let err = identity::logical_from(&table).expect_err("unknown row key must fail");
+    assert_eq!(
+        err.path,
+        "logical_object_kinds.toml.kind[0].unknown_row_key"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Disjointness.
 // ---------------------------------------------------------------------------
@@ -153,6 +187,50 @@ fn idr_code_space_retired_reuse_fails() {
         .logical
         .push(kind(0xffff, "InvalidCode", "active", 10));
     assert!(codes_of(&boundary).contains(&"code_invalid".to_string()));
+}
+
+#[test]
+fn idr_assignment_history_and_epoch_are_frozen() {
+    let r = real_identity();
+    for pin in identity::assignment_pins(&r) {
+        assert_eq!(
+            pin.actual_epoch, pin.expected_epoch,
+            "{} epoch drift",
+            pin.registry
+        );
+        assert_eq!(
+            pin.actual_pin, pin.expected_pin,
+            "{} pin drift",
+            pin.registry
+        );
+    }
+
+    // A delete-and-reuse mutation can be internally duplicate-free; the
+    // independent released-assignment witness must still reject it.
+    let mut reassigned = r.clone();
+    let released_code = reassigned.logical[0].object_kind;
+    reassigned.logical.remove(0);
+    reassigned
+        .logical
+        .push(kind(released_code, "ReuseAfterDeletion", "active", 30));
+    assert!(
+        codes(&reassigned).contains(&"registry_assignment_drift".to_string()),
+        "delete-and-reuse must fail against released history"
+    );
+
+    let mut epoch_only = r.clone();
+    epoch_only.logical_epoch += 1;
+    assert!(
+        codes(&epoch_only).contains(&"registry_epoch_mismatch".to_string()),
+        "epoch may not change without a reviewed assignment update"
+    );
+
+    let mut missing_arm = r.clone();
+    missing_arm.unions[0].arms.pop();
+    assert!(
+        codes(&missing_arm).contains(&"registry_assignment_drift".to_string()),
+        "missing closed-union arm must fail the released manifest"
+    );
 }
 
 fn codes_of(r: &IdentityRegistries) -> Vec<String> {
@@ -200,7 +278,7 @@ fn idr_construction_dag_acyclic() {
 #[test]
 fn idr_neg_self_edge() {
     let mut r = real_identity();
-    let mut f = field("LogicalStatePayload", 90, "self_ref", 30);
+    let mut f = field("LogicalStatePayload", 90, "self_ref", 20);
     f.target_schema_id = Some("LogicalStatePayload".into());
     r.fields.push(f);
     let codes = codes(&r);
@@ -256,7 +334,7 @@ fn idr_bodydigest_recipe_roundtrip() {
     for f in r
         .fields
         .iter()
-        .filter(|f| f.digest_class.as_deref() == Some("body"))
+        .filter(|f| matches!(f.digest_class.as_deref(), Some("body")))
     {
         body_rows += 1;
         let transcript = bodydigest_transcript(
@@ -383,9 +461,7 @@ fn idr_reserved_w12_coverage() {
         "ShardHistoryInventory",
         "GlobalKeyEnvelopeManifest",
     ] {
-        let k = by_name
-            .get(name)
-            .unwrap_or_else(|| panic!("missing reserved kind {name}"));
+        let k = by_name.get(name).expect("reserved kind must be present");
         assert_eq!(k.status, "reserved", "{name} must be status reserved");
     }
     // The reserved bootstrap frame and the restore artifact classes.
@@ -420,8 +496,8 @@ fn idr_reference_targets_resolve() {
     }
     for u in &r.unions {
         load_bearing.insert(u.containing_schema.as_str());
-        for (_, t) in &u.arms {
-            load_bearing.insert(t.as_str());
+        for arm in &u.arms {
+            load_bearing.insert(arm.target_schema_id.as_str());
         }
     }
     // Exhaustive single-removal property over every logical kind.
@@ -442,11 +518,58 @@ fn idr_reference_targets_resolve() {
             );
         } else {
             assert!(
-                violations.is_empty(),
-                "removing leaf kind {victim:?} must stay clean; got {violations:?}"
+                violations
+                    .iter()
+                    .all(|violation| violation.code == "registry_assignment_drift"),
+                "removing a leaf kind may only trip the immutable assignment witness; got {violations:?}"
             );
         }
     }
+}
+
+#[test]
+fn idr_reference_union_role_and_arm_closure() {
+    let r = real_identity();
+    assert!(
+        !identity::validate_identity(&r)
+            .iter()
+            .any(|v| v.code.starts_with("union_")),
+        "shipped reference unions must be role- and lifecycle-closed"
+    );
+
+    let mut invalid_role = r.clone();
+    invalid_role.unions[0].role = "global".into();
+    assert!(
+        codes(&invalid_role).contains(&"union_role_invalid".to_string()),
+        "unknown union role must fail"
+    );
+
+    let mut mismatched_arm = r.clone();
+    mismatched_arm.unions[0].arms[0].role = "meta".into();
+    assert!(
+        codes(&mismatched_arm).contains(&"union_arm_metadata_mismatch".to_string()),
+        "arm metadata must exactly close over its union"
+    );
+
+    let mut empty = r.clone();
+    empty.unions[0].arms.clear();
+    assert!(
+        codes(&empty).contains(&"union_arm_missing".to_string()),
+        "closed union with a missing inventory must fail"
+    );
+
+    let mut retired_target = r.clone();
+    let target = retired_target.unions[0].arms[0].target_schema_id.clone();
+    retired_target
+        .logical
+        .iter_mut()
+        .find(|row| row.name == target)
+        .expect("arm target exists")
+        .status = "retired".into();
+    assert!(
+        codes(&retired_target).contains(&"union_arm_lifecycle_mismatch".to_string()),
+        "retired targets are not live reference-union arms"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -454,23 +577,21 @@ fn idr_reference_targets_resolve() {
 // naming the exact failing recipe.
 // ---------------------------------------------------------------------------
 
-struct XorShift64(u64);
-
-impl XorShift64 {
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
+fn replace_first_assignment(source: &str, key: &str, replacement: &str) -> String {
+    let needle = format!("{key} = ");
+    let start = source.find(&needle).expect("assignment exists") + needle.len();
+    let end = source[start..]
+        .find('\n')
+        .map(|offset| start + offset)
+        .unwrap_or(source.len());
+    let mut mutated = source.to_string();
+    mutated.replace_range(start..end, replacement);
+    mutated
 }
 
 #[test]
 fn idr_golden_vector_mutation() {
     let root = repo_root();
-    let mut rng = XorShift64(0x1DE_17171_71DE);
 
     // (a) Bit-flipped recipe "golden vectors": flipping any bit of a pinned
     // recipe pin must be caught, and the violation names the exact row.
@@ -478,17 +599,17 @@ fn idr_golden_vector_mutation() {
     let body_rows: Vec<(String, String)> = r
         .fields
         .iter()
-        .filter(|f| f.digest_class.as_deref() == Some("body"))
+        .filter(|f| matches!(f.digest_class.as_deref(), Some("body")))
         .map(|f| (f.containing_schema.clone(), f.stable_name.clone()))
         .collect();
-    for (schema, name) in &body_rows {
+    for (row_index, (schema, name)) in body_rows.iter().enumerate() {
         let mut mutated = r.clone();
         for f in &mut mutated.fields {
             if &f.containing_schema == schema && &f.stable_name == name {
                 let pin = f.recipe_pin.clone().expect("pin");
                 // Flip one hex nibble deterministically.
                 let mut bytes = pin.into_bytes();
-                let idx = bytes.len() - 1 - (rng.next() as usize % 8);
+                let idx = bytes.len() - 1 - (row_index % 8);
                 bytes[idx] = if bytes[idx] == b'0' { b'1' } else { b'0' };
                 f.recipe_pin = Some(String::from_utf8(bytes).expect("ascii pin"));
             }
@@ -497,7 +618,7 @@ fn idr_golden_vector_mutation() {
         let hit = violations
             .iter()
             .find(|v| v.code == "bodydigest_pin_mismatch");
-        let hit = hit.unwrap_or_else(|| panic!("pin flip on {schema}#{name} not caught"));
+        let hit = hit.expect("pin flip must be caught");
         assert_eq!(
             hit.row_id,
             format!("{schema}#{name}"),
@@ -505,38 +626,63 @@ fn idr_golden_vector_mutation() {
         );
     }
 
-    // (b) Byte-level mutation of the registry TOMLs fails closed: typed
-    // parse/read error or violations — never a panic, never silent success
-    // on structural damage.
-    let bases = [
-        std::fs::read(root.join("registries/durable_fields.toml")).expect("read fields"),
-        std::fs::read(root.join("registries/logical_object_kinds.toml")).expect("read logical"),
-        std::fs::read(root.join("registries/wire_types.toml")).expect("read wire"),
-    ];
-    for round in 0..300 {
-        let base = &bases[round % bases.len()];
-        let mut bytes = base.clone();
-        let mutations = 1 + (rng.next() as usize % 3);
-        for _ in 0..mutations {
-            if bytes.is_empty() {
-                break;
-            }
-            let pos = rng.next() as usize % bytes.len();
-            match rng.next() % 3 {
-                0 => bytes[pos] = (rng.next() & 0xFF) as u8,
-                1 => bytes.insert(pos, (rng.next() & 0xFF) as u8),
-                _ => {
-                    bytes.truncate(pos);
-                }
-            }
-        }
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        if let Ok(table) = registry_check::toml::parse(&text) {
-            // Parsed: model construction must fail closed or produce a
-            // model the validator can process without panicking.
-            let _ = identity::fields_from(&table);
-            let _ = identity::logical_from(&table);
-            let _ = identity::wire_from(&table);
-        }
-    }
+    // (b) Semantically targeted byte mutations in every identity registry
+    // must parse into a rejected model. This avoids the old false-positive
+    // loop that silently accepted mutations landing in comments/whitespace.
+    let read = |name: &str| {
+        std::fs::read_to_string(root.join("registries").join(name)).expect("registry readable")
+    };
+
+    let source = replace_first_assignment(&read("logical_object_kinds.toml"), "object_kind", "0");
+    let table = registry_check::toml::parse(&source).expect("mutated logical parses");
+    let (epoch, rows) = identity::logical_from(&table).expect("mutated logical models");
+    let mut mutated = r.clone();
+    mutated.logical_epoch = epoch;
+    mutated.logical = rows;
+    assert!(!identity::validate_identity(&mutated).is_empty());
+
+    let source = replace_first_assignment(&read("physical_record_kinds.toml"), "record_kind", "0");
+    let table = registry_check::toml::parse(&source).expect("mutated physical parses");
+    let (epoch, rows) = identity::physical_from(&table).expect("mutated physical models");
+    let mut mutated = r.clone();
+    mutated.physical_epoch = epoch;
+    mutated.physical = rows;
+    assert!(!identity::validate_identity(&mutated).is_empty());
+
+    let source = replace_first_assignment(&read("bootstrap_frames.toml"), "frame_kind", "0");
+    let table = registry_check::toml::parse(&source).expect("mutated bootstrap parses");
+    let (epoch, rows) = identity::bootstrap_from(&table).expect("mutated bootstrap models");
+    let mut mutated = r.clone();
+    mutated.bootstrap_epoch = epoch;
+    mutated.bootstrap = rows;
+    assert!(!identity::validate_identity(&mutated).is_empty());
+
+    let source = replace_first_assignment(
+        &read("prebootstrap_artifact_kinds.toml"),
+        "artifact_kind",
+        "0",
+    );
+    let table = registry_check::toml::parse(&source).expect("mutated prebootstrap parses");
+    let (epoch, rows) = identity::prebootstrap_from(&table).expect("mutated prebootstrap models");
+    let mut mutated = r.clone();
+    mutated.prebootstrap_epoch = epoch;
+    mutated.prebootstrap = rows;
+    assert!(!identity::validate_identity(&mutated).is_empty());
+
+    let source = replace_first_assignment(&read("wire_types.toml"), "wire_type_id", "0");
+    let table = registry_check::toml::parse(&source).expect("mutated wire parses");
+    let (epoch, rows) = identity::wire_from(&table).expect("mutated wire models");
+    let mut mutated = r.clone();
+    mutated.wire_epoch = epoch;
+    mutated.wire = rows;
+    assert!(!identity::validate_identity(&mutated).is_empty());
+
+    let source = replace_first_assignment(&read("durable_fields.toml"), "field_tag", "0");
+    let table = registry_check::toml::parse(&source).expect("mutated fields parse");
+    let (epoch, fields, unions) = identity::fields_from(&table).expect("mutated fields model");
+    let mut mutated = r.clone();
+    mutated.fields_epoch = epoch;
+    mutated.fields = fields;
+    mutated.unions = unions;
+    assert!(!identity::validate_identity(&mutated).is_empty());
 }

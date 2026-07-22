@@ -62,7 +62,7 @@ name = "durable_fields"
 registry_epoch = 1
 
 # ---------------------------------------------------------------------------
-# LogicalStatePayload (order 30) — complete semantic state at
+# LogicalStatePayload (order 20) — complete semantic state at
 # {applied_logical_command_seq, applied_commit_seq}; no command-head wrapper.
 # ---------------------------------------------------------------------------
 
@@ -74,7 +74,7 @@ exact_wire_type = "u64"
 cardinality = "one"
 identity_class = "scalar"
 reference_semantics = "none"
-construction_order = 30
+construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "lives/dies with the payload object"
 version_status = "active"
@@ -88,14 +88,14 @@ exact_wire_type = "u64"
 cardinality = "one"
 identity_class = "scalar"
 reference_semantics = "none"
-construction_order = 30
+construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "lives/dies with the payload object"
 version_status = "active"
 max_size_bytes = 8
 
 # ---------------------------------------------------------------------------
-# LogicalCommandRecord (order 20) — §5.1 layered-state transition record.
+# LogicalCommandRecord (order 30) — constructed after the resulting payload.
 # ---------------------------------------------------------------------------
 
 [[field]]
@@ -106,7 +106,7 @@ exact_wire_type = "u64"
 cardinality = "one"
 identity_class = "scalar"
 reference_semantics = "none"
-construction_order = 20
+construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "contiguity anchor (FG-INV-08); retained until checkpoint cut"
 version_status = "active"
@@ -120,7 +120,7 @@ exact_wire_type = "LocalCommandOrigin"
 cardinality = "one"
 identity_class = "inline"
 reference_semantics = "none"
-construction_order = 20
+construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "Prior's ConditionalCommandRef is cut at checkpoint boundaries; RecoveryBridge only in the first guarded restore command"
 version_status = "active"
@@ -134,7 +134,7 @@ exact_wire_type = "CommandRef"
 cardinality = "one"
 identity_class = "logical"
 reference_semantics = "strong"
-construction_order = 20
+construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "strong until checkpoint suffix retirement (FG-INV-14)"
 version_status = "active"
@@ -149,7 +149,7 @@ cardinality = "optional"
 identity_class = "logical"
 reference_semantics = "strong"
 target_schema_id = "CommitMarker"
-construction_order = 20
+construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "marker subsequence is independently addressable (FG-INV-08)"
 version_status = "active"
@@ -163,7 +163,7 @@ exact_wire_type = "HlcTimestamp"
 cardinality = "one"
 identity_class = "inline"
 reference_semantics = "none"
-construction_order = 20
+construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "lives/dies with the record"
 version_status = "active"
@@ -178,7 +178,7 @@ cardinality = "one"
 identity_class = "logical"
 reference_semantics = "weak_digest"
 target_schema_id = "LogicalStatePayload"
-construction_order = 20
+construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "cross-checks the sibling object; NOT a reachability edge"
 version_status = "active"
@@ -970,32 +970,147 @@ union_name = "CommandRef"
 containing_schema = "LogicalCommandRecord"
 field_tag = 3
 role = "local"
-arms = ["1:CommitCommand", "2:ControlCommand"]
 
 [[reference_union]]
 union_name = "LocalCommandInputRef"
 containing_schema = "CommitCapsule"
 field_tag = 1
 role = "local"
-arms = ["1:CommitCommand", "2:ControlCommand"]
 
 [[reference_union]]
 union_name = "MetaAppliedResultRef"
 containing_schema = "RaftSnapshotMeta"
 field_tag = 2
 role = "meta"
-arms = ["1:MetaAppliedResult"]
 
 [[reference_union]]
 union_name = "ShardProtocolEvidenceRef"
 containing_schema = "RaftSnapshotShard"
 field_tag = 2
 role = "shard"
-arms = ["1:ShardProtocolEvidence"]
 
 [[reference_union]]
 union_name = "MandatoryInventoryRef"
 containing_schema = "CheckpointStateVector"
 field_tag = 1
 role = "local"
-arms = ["1:PreparedCommitRecord", "2:CommitCapsule"]
+
+[[reference_union_arm]]
+union_name = "CommandRef"
+containing_schema = "LogicalCommandRecord"
+field_tag = 3
+arm_tag = 1
+stable_name = "CommitCommand"
+target_schema_id = "CommitCommand"
+role = "local"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicate = "role-local"
+retention_and_cut_rule = "strong until checkpoint suffix retirement (FG-INV-14)"
+version_status = "active"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "CommandRef"
+containing_schema = "LogicalCommandRecord"
+field_tag = 3
+arm_tag = 2
+stable_name = "ControlCommand"
+target_schema_id = "ControlCommand"
+role = "local"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicate = "role-local"
+retention_and_cut_rule = "strong until checkpoint suffix retirement (FG-INV-14)"
+version_status = "active"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "LocalCommandInputRef"
+containing_schema = "CommitCapsule"
+field_tag = 1
+arm_tag = 1
+stable_name = "CommitCommand"
+target_schema_id = "CommitCommand"
+role = "local"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicate = "role-local"
+retention_and_cut_rule = "strong within the capsule's retention tier"
+version_status = "active"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "LocalCommandInputRef"
+containing_schema = "CommitCapsule"
+field_tag = 1
+arm_tag = 2
+stable_name = "ControlCommand"
+target_schema_id = "ControlCommand"
+role = "local"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicate = "role-local"
+retention_and_cut_rule = "strong within the capsule's retention tier"
+version_status = "active"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "MetaAppliedResultRef"
+containing_schema = "RaftSnapshotMeta"
+field_tag = 2
+arm_tag = 1
+stable_name = "MetaAppliedResult"
+target_schema_id = "MetaAppliedResult"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong within the snapshot cut"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "ShardProtocolEvidenceRef"
+containing_schema = "RaftSnapshotShard"
+field_tag = 2
+arm_tag = 1
+stable_name = "ShardProtocolEvidence"
+target_schema_id = "ShardProtocolEvidence"
+role = "shard"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicate = "role-shard"
+retention_and_cut_rule = "shard rows are projections or shard-owned protocol state only; never a second Meta semantic authority"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "MandatoryInventoryRef"
+containing_schema = "CheckpointStateVector"
+field_tag = 1
+arm_tag = 1
+stable_name = "PreparedCommitRecord"
+target_schema_id = "PreparedCommitRecord"
+role = "local"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicate = "role-local"
+retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "MandatoryInventoryRef"
+containing_schema = "CheckpointStateVector"
+field_tag = 1
+arm_tag = 2
+stable_name = "CommitCapsule"
+target_schema_id = "CommitCapsule"
+role = "local"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicate = "role-local"
+retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
+version_status = "reserved"
+max_size_bytes = 40

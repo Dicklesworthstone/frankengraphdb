@@ -142,26 +142,28 @@ kind = "script"
 artifact = "scripts/g0_architecture_decisions_e2e.sh"
 status = "live"
 
-# --- Identity-constitution byte-level walkers (stub-registered; made live by
-# --- w1-generated-parsers, which generates encoders/decoders/golden vectors
-# --- from the identity registries and implements the BLAKE3 identity laws).
+# --- Identity-constitution byte-level walkers (stub-registered; each becomes
+# --- live with its phase-correct downstream owner and planned test artifact).
 
+# Owner: fgdb-w1-generated-parsers-i3k.
 [[checker]]
 symbol = "idr_generated_encoder_decoder_roundtrip"
 kind = "stub"
-artifact = "crates/fgdb-formats/src/generated_codecs.rs"
+artifact = "crates/fgdb-codec/tests/generated_durable_roundtrip.rs"
 status = "stub"
 
+# Owner: fgdb-w1-format-test-corpora-lyf.
 [[checker]]
 symbol = "idr_golden_corpus_replay"
 kind = "stub"
-artifact = "crates/fgdb-formats/src/golden_corpus.rs"
+artifact = "crates/fgdb-fuzz/tests/durable_golden_corpus.rs"
 status = "stub"
 
+# Owner: fgdb-w2-object-identity-t0f.
 [[checker]]
 symbol = "idr_blake3_identity_recompute"
 kind = "stub"
-artifact = "crates/fgdb-ecs/src/object_identity.rs"
+artifact = "crates/fgdb-ecs/tests/object_identity_recompute.rs"
 status = "stub"
 
 # --- Invariant-spine checker/negative-test stubs (fgdb-g0-invariant-spine).

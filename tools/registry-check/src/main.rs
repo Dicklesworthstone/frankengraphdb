@@ -14,7 +14,7 @@
 use registry_check::closure;
 use registry_check::hash::id_table_hash;
 use registry_check::identity;
-use registry_check::jsonl::{arr, event, n, s};
+use registry_check::jsonl::{JsonValue, arr, b, event, n, s};
 use registry_check::lint;
 use registry_check::model::{self, Registries};
 use registry_check::validate::{self, Violation, expected_invariant_ids};
@@ -57,12 +57,44 @@ fn usage() -> String {
         .to_string()
 }
 
+fn identity_row_faults(violations: &[Violation], row_id: &str) -> usize {
+    violations
+        .iter()
+        .filter(|violation| violation.row_id == row_id)
+        .count()
+}
+
+fn numeric_array(values: &[i64]) -> JsonValue {
+    JsonValue::Array(values.iter().copied().map(JsonValue::Int).collect())
+}
+
+fn identity_violation_diff(
+    violation: &Violation,
+    assignment_pins: &[identity::AssignmentPin],
+) -> String {
+    let pin = assignment_pins
+        .iter()
+        .find(|pin| pin.registry == violation.registry);
+    match (violation.code.as_str(), pin) {
+        ("registry_epoch_mismatch", Some(pin)) => format!(
+            "expected_epoch={} actual_epoch={}",
+            pin.expected_epoch, pin.actual_epoch
+        ),
+        ("registry_assignment_drift", Some(pin)) => format!(
+            "expected_pin={} actual_pin={}",
+            pin.expected_pin, pin.actual_pin
+        ),
+        _ => violation.msg.clone(),
+    }
+}
+
 /// Validate the identity constitution (the five class registries plus
-/// durable_fields.toml); emit registry_generated / dag_checked /
-/// digest_verified events; return the violation count.
+/// durable_fields.toml); emit complete deterministic row, assignment,
+/// construction-DAG, and digest-recipe evidence; return the violation count.
 fn run_identity(root: &Path) -> Result<usize, String> {
     let ir = identity::load_identity(&root.join("registries")).map_err(|e| e.to_string())?;
     let violations = identity::validate_identity(&ir);
+    let assignment_pins = identity::assignment_pins(&ir);
     let registry_rows: [(&str, i64, i64); 6] = [
         (
             "logical_object_kinds",
@@ -101,20 +133,47 @@ fn run_identity(root: &Path) -> Result<usize, String> {
             ])
         );
     }
+
+    for pin in &assignment_pins {
+        let ok = pin.actual_epoch == pin.expected_epoch && pin.actual_pin == pin.expected_pin;
+        let mut fields = vec![
+            ("event", s("assignment_pin_checked")),
+            ("registry", s(pin.registry)),
+            ("expected_registry_epoch", n(pin.expected_epoch)),
+            ("actual_registry_epoch", n(pin.actual_epoch)),
+            ("expected_assignment_pin", s(pin.expected_pin)),
+            ("actual_assignment_pin", s(&pin.actual_pin)),
+        ];
+        if !ok {
+            fields.push((
+                "diff",
+                s(format!(
+                    "expected_epoch={} actual_epoch={} expected_pin={} actual_pin={}",
+                    pin.expected_epoch, pin.actual_epoch, pin.expected_pin, pin.actual_pin
+                )),
+            ));
+        }
+        fields.push(("outcome", s(if ok { "pass" } else { "fail" })));
+        println!("{}", event(&fields));
+    }
+
     for kind in &ir.logical {
-        let row_violations = violations
-            .iter()
-            .filter(|v| v.row_id == kind.name || v.row_id.starts_with(&format!("{}#", kind.name)))
-            .count();
+        let row_violations = identity_row_faults(&violations, &kind.name);
         println!(
             "{}",
             event(&[
                 ("event", s("row_checked")),
                 ("registry", s("logical_object_kinds")),
+                ("row_kind", s("logical_object_kind")),
+                ("identity_class", s("logical")),
                 ("object_kind", s(format!("{:#06x}", kind.object_kind))),
                 ("row_id", s(&kind.name)),
                 ("status", s(&kind.status)),
                 ("construction_order", n(kind.construction_order)),
+                ("role_predicate", s(&kind.role_predicate)),
+                ("max_size_bytes", n(kind.max_size_bytes)),
+                ("golden_corpus", s(&kind.golden_corpus)),
+                ("violations", n(row_violations as i64)),
                 (
                     "outcome",
                     s(if row_violations == 0 { "pass" } else { "fail" }),
@@ -122,6 +181,254 @@ fn run_identity(root: &Path) -> Result<usize, String> {
             ])
         );
     }
+
+    for kind in &ir.physical {
+        let row_violations = identity_row_faults(&violations, &kind.name);
+        println!(
+            "{}",
+            event(&[
+                ("event", s("row_checked")),
+                ("registry", s("physical_record_kinds")),
+                ("row_kind", s("physical_record_kind")),
+                ("identity_class", s("physical")),
+                ("record_kind", s(format!("{:#06x}", kind.record_kind))),
+                ("row_id", s(&kind.name)),
+                ("identity_law", s(&kind.identity_law)),
+                ("status", s(&kind.status)),
+                ("transcript", s(&kind.transcript)),
+                ("owning_identity", s(&kind.owning_identity)),
+                ("max_size_bytes", n(kind.max_size_bytes)),
+                ("violations", n(row_violations as i64)),
+                (
+                    "outcome",
+                    s(if row_violations == 0 { "pass" } else { "fail" }),
+                ),
+            ])
+        );
+    }
+
+    for frame in &ir.bootstrap {
+        let row_violations = identity_row_faults(&violations, &frame.name);
+        println!(
+            "{}",
+            event(&[
+                ("event", s("row_checked")),
+                ("registry", s("bootstrap_frames")),
+                ("row_kind", s("bootstrap_frame")),
+                ("identity_class", s("bootstrap")),
+                ("frame_kind", s(format!("{:#06x}", frame.frame_kind))),
+                ("row_id", s(&frame.name)),
+                ("status", s(&frame.status)),
+                ("byte_size", n(frame.byte_size)),
+                ("location", s(&frame.location)),
+                ("update_protocol", s(&frame.update_protocol)),
+                ("tear_validation", s(&frame.tear_validation)),
+                ("opener_fields", s(&frame.opener_fields)),
+                ("compatibility_gate", s(&frame.compatibility_gate)),
+                ("recovery_vectors", s(&frame.recovery_vectors)),
+                ("violations", n(row_violations as i64)),
+                (
+                    "outcome",
+                    s(if row_violations == 0 { "pass" } else { "fail" }),
+                ),
+            ])
+        );
+    }
+
+    for kind in &ir.prebootstrap {
+        let row_violations = identity_row_faults(&violations, &kind.name);
+        println!(
+            "{}",
+            event(&[
+                ("event", s("row_checked")),
+                ("registry", s("prebootstrap_artifact_kinds")),
+                ("row_kind", s("prebootstrap_artifact_kind")),
+                ("identity_class", s("prebootstrap")),
+                ("artifact_kind", s(format!("{:#06x}", kind.artifact_kind)),),
+                ("row_id", s(&kind.name)),
+                ("status", s(&kind.status)),
+                ("target_claim_domain", s(&kind.target_claim_domain)),
+                ("allowed_containers", s(&kind.allowed_containers)),
+                ("import_target", s(&kind.import_target)),
+                ("max_size_bytes", n(kind.max_size_bytes)),
+                ("violations", n(row_violations as i64)),
+                (
+                    "outcome",
+                    s(if row_violations == 0 { "pass" } else { "fail" }),
+                ),
+            ])
+        );
+    }
+
+    for wire_type in &ir.wire {
+        let row_violations = identity_row_faults(&violations, &wire_type.name);
+        let mut fields = vec![
+            ("event", s("row_checked")),
+            ("registry", s("wire_types")),
+            ("row_kind", s("wire_type")),
+            ("identity_class", s("wire")),
+            (
+                "wire_type_id",
+                s(format!("{:#06x}", wire_type.wire_type_id)),
+            ),
+            ("row_id", s(&wire_type.name)),
+            ("kind", s(&wire_type.kind)),
+            ("status", s(&wire_type.status)),
+        ];
+        if let Some(containing_union) = &wire_type.containing_union {
+            fields.push(("containing_union", s(containing_union)));
+        }
+        if let Some(wire_tag) = wire_type.wire_tag {
+            fields.push(("wire_tag", s(format!("{wire_tag:#06x}"))));
+        }
+        fields.extend([
+            ("encoding_context", s(&wire_type.encoding_context)),
+            (
+                "allowed_containing_schemas",
+                arr(wire_type.allowed_containing_schemas.clone()),
+            ),
+            ("max_size_bytes", n(wire_type.max_size_bytes)),
+            ("violations", n(row_violations as i64)),
+            (
+                "outcome",
+                s(if row_violations == 0 { "pass" } else { "fail" }),
+            ),
+        ]);
+        println!("{}", event(&fields));
+    }
+
+    for field in &ir.fields {
+        let row_id = format!("{}#{}", field.containing_schema, field.stable_name);
+        let row_violations = identity_row_faults(&violations, &row_id);
+        let mut fields = vec![
+            ("event", s("row_checked")),
+            ("registry", s("durable_fields")),
+            ("row_kind", s("durable_field")),
+            ("row_id", s(&row_id)),
+            ("containing_schema", s(&field.containing_schema)),
+            ("field_tag", n(field.field_tag)),
+            ("stable_name", s(&field.stable_name)),
+            ("exact_wire_type", s(&field.exact_wire_type)),
+            ("cardinality", s(&field.cardinality)),
+            ("identity_class", s(&field.identity_class)),
+            ("reference_semantics", s(&field.reference_semantics)),
+        ];
+        if let Some(target_schema_id) = &field.target_schema_id {
+            fields.push(("target_schema_id", s(target_schema_id)));
+        }
+        fields.extend([
+            ("construction_order", n(field.construction_order)),
+            ("role_predicate", s(&field.role_predicate)),
+            ("retention_and_cut_rule", s(&field.retention_and_cut_rule)),
+            ("version_status", s(&field.version_status)),
+            ("max_size_bytes", n(field.max_size_bytes)),
+        ]);
+        if let Some(digest_class) = &field.digest_class {
+            fields.push(("digest_class", s(digest_class)));
+        }
+        fields.extend([
+            ("violations", n(row_violations as i64)),
+            (
+                "outcome",
+                s(if row_violations == 0 { "pass" } else { "fail" }),
+            ),
+        ]);
+        println!("{}", event(&fields));
+    }
+
+    for union in &ir.unions {
+        let row_violations = identity_row_faults(&violations, &union.union_name);
+        let anchor = ir.fields.iter().find(|field| {
+            field.containing_schema == union.containing_schema
+                && field.field_tag == union.field_tag
+                && field.exact_wire_type == union.union_name
+        });
+        let anchor_row_id = anchor
+            .map(|field| format!("{}#{}", field.containing_schema, field.stable_name))
+            .unwrap_or_else(|| {
+                format!("{}#field-tag-{}", union.containing_schema, union.field_tag)
+            });
+        let mut fields = vec![
+            ("event", s("row_checked")),
+            ("registry", s("durable_fields")),
+            ("row_kind", s("reference_union")),
+            ("row_id", s(&union.union_name)),
+            ("union_name", s(&union.union_name)),
+            ("containing_schema", s(&union.containing_schema)),
+            ("field_tag", n(union.field_tag)),
+            ("role", s(&union.role)),
+            ("arm_count", n(union.arms.len() as i64)),
+            ("anchor_present", b(anchor.is_some())),
+            ("anchor_row_id", s(&anchor_row_id)),
+        ];
+        if let Some(anchor) = anchor {
+            fields.extend([
+                ("anchor_exact_wire_type", s(&anchor.exact_wire_type)),
+                ("anchor_identity_class", s(&anchor.identity_class)),
+                ("anchor_reference_semantics", s(&anchor.reference_semantics)),
+                ("anchor_role_predicate", s(&anchor.role_predicate)),
+                (
+                    "anchor_retention_and_cut_rule",
+                    s(&anchor.retention_and_cut_rule),
+                ),
+                ("anchor_version_status", s(&anchor.version_status)),
+            ]);
+        }
+        fields.extend([
+            ("violations", n(row_violations as i64)),
+            (
+                "outcome",
+                s(if row_violations == 0 { "pass" } else { "fail" }),
+            ),
+        ]);
+        println!("{}", event(&fields));
+
+        for arm in &union.arms {
+            let arm_row_id = format!("{}#{}", union.union_name, arm.stable_name);
+            let arm_violations = identity_row_faults(&violations, &arm_row_id);
+            let target = ir
+                .logical
+                .iter()
+                .find(|kind| kind.name == arm.target_schema_id);
+            let mut fields = vec![
+                ("event", s("row_checked")),
+                ("registry", s("durable_fields")),
+                ("row_kind", s("reference_union_arm")),
+                ("row_id", s(&arm_row_id)),
+                ("union_name", s(&arm.union_name)),
+                ("containing_schema", s(&arm.containing_schema)),
+                ("field_tag", n(arm.field_tag)),
+                ("arm_tag", n(arm.arm_tag)),
+                ("stable_name", s(&arm.stable_name)),
+                ("target_schema_id", s(&arm.target_schema_id)),
+                ("role", s(&arm.role)),
+                ("identity_class", s(&arm.identity_class)),
+                ("reference_semantics", s(&arm.reference_semantics)),
+                ("role_predicate", s(&arm.role_predicate)),
+                ("retention_and_cut_rule", s(&arm.retention_and_cut_rule)),
+                ("version_status", s(&arm.version_status)),
+                ("max_size_bytes", n(arm.max_size_bytes)),
+                ("anchor_row_id", s(&anchor_row_id)),
+                ("target_present", b(target.is_some())),
+            ];
+            if let Some(target) = target {
+                fields.extend([
+                    ("target_status", s(&target.status)),
+                    ("target_role_predicate", s(&target.role_predicate)),
+                    ("target_construction_order", n(target.construction_order)),
+                ]);
+            }
+            fields.extend([
+                ("violations", n(arm_violations as i64)),
+                (
+                    "outcome",
+                    s(if arm_violations == 0 { "pass" } else { "fail" }),
+                ),
+            ]);
+            println!("{}", event(&fields));
+        }
+    }
+
     let dag_faults = violations
         .iter()
         .filter(|v| v.code.starts_with("dag_"))
@@ -131,32 +438,97 @@ fn run_identity(root: &Path) -> Result<usize, String> {
         event(&[
             ("event", s("dag_checked")),
             ("registry", s("durable_fields")),
+            (
+                "retaining_field_rows",
+                n(ir.fields
+                    .iter()
+                    .filter(|field| matches!(
+                        field.reference_semantics.as_str(),
+                        "strong" | "conditional"
+                    ))
+                    .count() as i64),
+            ),
+            ("reference_unions", n(ir.unions.len() as i64)),
+            (
+                "reference_union_arms",
+                n(ir.unions
+                    .iter()
+                    .map(|union| union.arms.len())
+                    .sum::<usize>() as i64),
+            ),
             ("faults", n(dag_faults as i64)),
             ("outcome", s(if dag_faults == 0 { "pass" } else { "fail" })),
         ])
     );
-    for f in ir.fields.iter().filter(|f| f.digest_class.is_some()) {
-        let row_id = format!("{}#{}", f.containing_schema, f.stable_name);
+    for field in ir
+        .fields
+        .iter()
+        .filter(|field| field.digest_class.is_some())
+    {
+        let row_id = format!("{}#{}", field.containing_schema, field.stable_name);
         let row_violations = violations.iter().filter(|v| v.row_id == row_id).count();
-        println!(
-            "{}",
-            event(&[
-                ("event", s("digest_verified")),
-                ("registry", s("durable_fields")),
-                ("row_id", s(&row_id)),
-                (
-                    "digest_class",
-                    s(f.digest_class.clone().unwrap_or_default()),
-                ),
-                ("recipe_pin", s(f.recipe_pin.clone().unwrap_or_default()),),
-                (
-                    "outcome",
-                    s(if row_violations == 0 { "pass" } else { "fail" }),
-                ),
-            ])
-        );
+        let digest_class = field.digest_class.as_deref().unwrap_or_default();
+        let mut fields = vec![
+            ("event", s("digest_verified")),
+            ("registry", s("durable_fields")),
+            ("row_id", s(&row_id)),
+            ("recipe_id", s(&row_id)),
+            ("digest_class", s(digest_class)),
+            (
+                "transcript_recipe",
+                s(field.transcript_recipe.as_deref().unwrap_or_default()),
+            ),
+            (
+                "recipe_pin",
+                s(field.recipe_pin.as_deref().unwrap_or_default()),
+            ),
+        ];
+        if matches!(digest_class, "body") {
+            if let Some(domain) = &field.bd_domain_separator {
+                fields.push(("bd_domain_separator", s(domain)));
+            }
+            if let Some(schema_major) = field.bd_schema_major {
+                fields.push(("bd_schema_major", n(schema_major)));
+            }
+            if let Some(included) = &field.bd_included_field_tags {
+                fields.push(("bd_included_field_tags", numeric_array(included)));
+            }
+            if let Some(excluded) = &field.bd_excluded_field_tags {
+                fields.push(("bd_excluded_field_tags", numeric_array(excluded)));
+            }
+            if let (Some(domain), Some(schema_major), Some(included), Some(excluded)) = (
+                &field.bd_domain_separator,
+                field.bd_schema_major,
+                &field.bd_included_field_tags,
+                &field.bd_excluded_field_tags,
+            ) {
+                let transcript = identity::bodydigest_transcript(
+                    &field.containing_schema,
+                    domain,
+                    schema_major,
+                    included,
+                    excluded,
+                );
+                fields.extend([
+                    ("bodydigest_transcript", s(&transcript)),
+                    (
+                        "recomputed_recipe_pin",
+                        s(identity::bodydigest_pin(&transcript)),
+                    ),
+                ]);
+            }
+        }
+        fields.extend([
+            ("violations", n(row_violations as i64)),
+            (
+                "outcome",
+                s(if row_violations == 0 { "pass" } else { "fail" }),
+            ),
+        ]);
+        println!("{}", event(&fields));
     }
     for v in &violations {
+        let diff = identity_violation_diff(v, &assignment_pins);
         println!(
             "{}",
             event(&[
@@ -165,6 +537,7 @@ fn run_identity(root: &Path) -> Result<usize, String> {
                 ("registry", s(&v.registry)),
                 ("row_id", s(&v.row_id)),
                 ("msg", s(&v.msg)),
+                ("diff", s(diff)),
             ])
         );
         eprintln!(
