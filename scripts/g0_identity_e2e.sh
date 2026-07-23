@@ -139,9 +139,9 @@ else
 fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
-    '"target_count":172' \
+    '"target_count":178' \
     '"projection_fallback_count":81' \
-    '"target_source_assignment_sha256":"508da1225af0c505144fe7458995751ee8b9b1a12672662af1b4b4710c808cf4"' \
+    '"target_source_assignment_sha256":"d05311237ea0f4da461fdfa63b866d6086d929cf4f211d66a29ea7e53d1414de"' \
     '"outcome":"pass"'; then
   ok "Appendix A target/source assignments are release-pinned"
 else

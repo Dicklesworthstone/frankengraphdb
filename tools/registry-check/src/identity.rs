@@ -1047,8 +1047,8 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:5684d2ff3fb32293";
-    const FIELDS: &str = "fnv1a64:f7066af3be10615f";
+    const WIRE: &str = "fnv1a64:4575487c148d3c69";
+    const FIELDS: &str = "fnv1a64:bbb76433dd5fa1d6";
 
     let logical = rows_pin(
         r.logical
@@ -1198,14 +1198,14 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "wire_types",
-            expected_epoch: 3,
+            expected_epoch: 4,
             actual_epoch: r.wire_epoch,
             expected_pin: WIRE,
             actual_pin: wire,
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 4,
+            expected_epoch: 5,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,
@@ -1993,6 +1993,24 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                     row_id,
                     "a top-level ordinary union requires one same-name union/discriminant wire parent with identical lifecycle, maximum size, and exact containing-schema closure",
                 )),
+            }
+            if let Some(parent) = top_level_wire_parent {
+                let expected_parent_kind = if u.arms.iter().all(|arm| arm.payload_kind == "unit") {
+                    "discriminant"
+                } else {
+                    "union"
+                };
+                if parent.kind != expected_parent_kind {
+                    out.push(v(
+                        "ordinary_union_wire_contract_mismatch",
+                        "durable_fields",
+                        row_id,
+                        format!(
+                            "wire parent kind {:?} does not match arm payload shape; expected {expected_parent_kind:?}",
+                            parent.kind
+                        ),
+                    ));
+                }
             }
 
             let expected_variants: BTreeSet<String> = u

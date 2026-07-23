@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 172
+target_count = 178
 projection_fallback_count = 81
-target_source_assignment_sha256 = "508da1225af0c505144fe7458995751ee8b9b1a12672662af1b4b4710c808cf4"
+target_source_assignment_sha256 = "d05311237ea0f4da461fdfa63b866d6086d929cf4f211d66a29ea7e53d1414de"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -596,11 +596,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 3
+registry_epoch = 4
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 4
+registry_epoch = 5
 
 [[logical_kind]]
 slice_id = "a03"
@@ -1330,6 +1330,43 @@ wire_tag = 0x0004
 encoding_context = "unit discriminant for the external continuity operational-finalization action"
 allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
 max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a19"
+row_id = "a19:wire-type:new-database-identity-target-creation-commitment"
+wire_type_id = 0x002c
+name = "NewDatabaseIdentityTargetCreationCommitment"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union; a19:2483 confirms DirectoryBoundLocal and ExternalCas payloads, while the 65536-byte policy ceiling awaits exact member encodings and bound proof"
+allowed_containing_schemas = ["NewDatabaseIdentityReservation"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a19"
+row_id = "a19:wire-type:new-database-identity-target-creation-commitment-directory-bound-local"
+wire_type_id = 0x002d
+name = "NewDatabaseIdentityTargetCreationCommitment.DirectoryBoundLocal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "NewDatabaseIdentityTargetCreationCommitment"
+wire_tag = 0x0001
+encoding_context = "reserved inline-record payload; exact member encodings and bound proof remain required before activation"
+allowed_containing_schemas = ["NewDatabaseIdentityTargetCreationCommitment"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a19"
+row_id = "a19:wire-type:new-database-identity-target-creation-commitment-external-cas"
+wire_type_id = 0x002e
+name = "NewDatabaseIdentityTargetCreationCommitment.ExternalCas"
+kind = "union_variant"
+status = "reserved"
+containing_union = "NewDatabaseIdentityTargetCreationCommitment"
+wire_tag = 0x0002
+encoding_context = "reserved inline-record payload; nested target_posture Local|Sharded, exact member encodings, and bound proof remain required before activation"
+allowed_containing_schemas = ["NewDatabaseIdentityTargetCreationCommitment"]
+max_size_bytes = 65536
 
 [[field]]
 slice_id = "a03"
@@ -3001,6 +3038,49 @@ role_predicate = "role-local"
 retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[union]]
+slice_id = "a19"
+row_id = "a19:union:new-database-identity-target-creation-commitment-9b01a0d4ac99aa5c"
+union_name = "NewDatabaseIdentityTargetCreationCommitment"
+containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
+union_path = "NewDatabaseIdentityTargetCreationCommitment"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["NewDatabaseIdentityReservation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a19"
+row_id = "a19:union-arm:new-database-identity-target-creation-commitment-directory-bound-local-3542bcdfcbd5a12c"
+union_name = "NewDatabaseIdentityTargetCreationCommitment"
+containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
+union_path = "NewDatabaseIdentityTargetCreationCommitment"
+arm_tag = 0x0001
+source_arm_name = "DirectoryBoundLocal"
+stable_name = "DirectoryBoundLocal"
+payload_kind = "inline-record"
+payload_sha256 = "b2b1faaf0b901827fbe51c3a1e8b6cfb00212a9e64217b30ee1e353e50114b76"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a19"
+row_id = "a19:union-arm:new-database-identity-target-creation-commitment-external-cas-9c2e4540d94939fb"
+union_name = "NewDatabaseIdentityTargetCreationCommitment"
+containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
+union_path = "NewDatabaseIdentityTargetCreationCommitment"
+arm_tag = 0x0002
+source_arm_name = "ExternalCas"
+stable_name = "ExternalCas"
+payload_kind = "inline-record"
+payload_sha256 = "9a2e5500ed37de434f6779b593a266511aea44319fe27cb79cd03b0c819f75c8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[union]]
 slice_id = "a20"
@@ -16335,7 +16415,7 @@ symbol = "NewDatabaseIdentityTargetCreationCommitment"
 generic_signature = ""
 source_key = "top|NewDatabaseIdentityTargetCreationCommitment"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a19:2483"]
 
 [[top_level_candidate]]
@@ -23692,6 +23772,54 @@ target_row_id = "a19:logical-kind:recovery-bridge-spec"
 slice_id = "a19"
 source_key = "top|RecoveryBridgeSpec<Role>"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:union-arm-new-database-identity-target-creation-commitment-directory-bound-local-3542bcdfcbd5a12c"
+target_row_id = "a19:union-arm:new-database-identity-target-creation-commitment-directory-bound-local-3542bcdfcbd5a12c"
+slice_id = "a19"
+source_key = "arm|NewDatabaseIdentityTargetCreationCommitment|NewDatabaseIdentityTargetCreationCommitment|DirectoryBoundLocal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:union-arm-new-database-identity-target-creation-commitment-external-cas-9c2e4540d94939fb"
+target_row_id = "a19:union-arm:new-database-identity-target-creation-commitment-external-cas-9c2e4540d94939fb"
+slice_id = "a19"
+source_key = "arm|NewDatabaseIdentityTargetCreationCommitment|NewDatabaseIdentityTargetCreationCommitment|ExternalCas"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:union-new-database-identity-target-creation-commitment-9b01a0d4ac99aa5c"
+target_row_id = "a19:union:new-database-identity-target-creation-commitment-9b01a0d4ac99aa5c"
+slice_id = "a19"
+source_key = "union|NewDatabaseIdentityTargetCreationCommitment|NewDatabaseIdentityTargetCreationCommitment"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:wire-type-new-database-identity-target-creation-commitment"
+target_row_id = "a19:wire-type:new-database-identity-target-creation-commitment"
+slice_id = "a19"
+source_key = "top|NewDatabaseIdentityTargetCreationCommitment"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:wire-type-new-database-identity-target-creation-commitment-directory-bound-local"
+target_row_id = "a19:wire-type:new-database-identity-target-creation-commitment-directory-bound-local"
+slice_id = "a19"
+source_key = "arm|NewDatabaseIdentityTargetCreationCommitment|NewDatabaseIdentityTargetCreationCommitment|DirectoryBoundLocal"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:wire-type-new-database-identity-target-creation-commitment-external-cas"
+target_row_id = "a19:wire-type:new-database-identity-target-creation-commitment-external-cas"
+slice_id = "a19"
+source_key = "arm|NewDatabaseIdentityTargetCreationCommitment|NewDatabaseIdentityTargetCreationCommitment|ExternalCas"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[target]]

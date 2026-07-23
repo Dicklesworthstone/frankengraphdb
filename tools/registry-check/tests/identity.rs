@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 4
+registry_epoch = 5
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 4);
+    assert_eq!(epoch, 5);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -2011,6 +2011,42 @@ fn appendix_a_wire_backed_union_requires_confirmed_owner_and_exact_arm_set() {
 }
 
 #[test]
+fn appendix_a_inline_record_union_requires_exact_payload_digest() {
+    let source = real_plan_source();
+    let mut wrong_payload = real_appendix_catalog();
+    let arm = wrong_payload
+        .identity
+        .ordinary_unions
+        .iter_mut()
+        .find(|union| union.union_name == "NewDatabaseIdentityTargetCreationCommitment")
+        .expect("new-database target-creation union")
+        .arms
+        .iter_mut()
+        .find(|arm| arm.source_arm_name == "ExternalCas")
+        .expect("ExternalCas arm");
+    let payload_sha256 = arm
+        .payload_sha256
+        .as_mut()
+        .expect("inline-record arm has a payload digest");
+    payload_sha256.replace_range(
+        0..1,
+        if payload_sha256.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        },
+    );
+
+    let violations = appendix_a::verify_source(&wrong_payload, &source);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "source_union_arm_contract_mismatch"),
+        "inline-record payload digest drift escaped source reconciliation: {violations:?}"
+    );
+}
+
+#[test]
 fn appendix_a_full_plan_reference_occurrence_drift_fails_closed() {
     let catalog = real_appendix_catalog();
     let source = real_plan_source();
@@ -2323,6 +2359,19 @@ fn idr_wire_backed_top_level_union_requires_exact_cross_index() {
         codes_without_assignment_drift(&missing_variant)
             .contains(&"ordinary_union_wire_contract_mismatch".to_owned()),
         "a missing wire variant escaped the exact cross-index"
+    );
+
+    let mut discriminant_with_payload = identity.clone();
+    discriminant_with_payload
+        .wire
+        .iter_mut()
+        .find(|wire| wire.name == "FixtureWireBackedUnion")
+        .expect("fixture wire parent")
+        .kind = "discriminant".into();
+    assert!(
+        codes_without_assignment_drift(&discriminant_with_payload)
+            .contains(&"ordinary_union_wire_contract_mismatch".to_owned()),
+        "a discriminant parent accepted an inline-record arm"
     );
 
     let mut wrong_tag = identity;

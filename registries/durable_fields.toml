@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 4
+registry_epoch = 5
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -1324,6 +1324,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "NewDatabaseIdentityTargetCreationCommitment"
+containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
+union_path = "NewDatabaseIdentityTargetCreationCommitment"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["NewDatabaseIdentityReservation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union]]
 union_name = "ServicePromotionExternalOperationKind"
 containing_schema = "ServicePromotionExternalOperationKind"
 union_path = "ServicePromotionExternalOperationKind"
@@ -1333,6 +1344,32 @@ allowed_containing_schemas = ["ServicePromotionExternalOperationRecord<Local>", 
 role_predicate = "role-local || role-meta"
 version_status = "active"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "NewDatabaseIdentityTargetCreationCommitment"
+containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
+union_path = "NewDatabaseIdentityTargetCreationCommitment"
+arm_tag = 0x0001
+source_arm_name = "DirectoryBoundLocal"
+stable_name = "DirectoryBoundLocal"
+payload_kind = "inline-record"
+payload_sha256 = "b2b1faaf0b901827fbe51c3a1e8b6cfb00212a9e64217b30ee1e353e50114b76"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "NewDatabaseIdentityTargetCreationCommitment"
+containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
+union_path = "NewDatabaseIdentityTargetCreationCommitment"
+arm_tag = 0x0002
+source_arm_name = "ExternalCas"
+stable_name = "ExternalCas"
+payload_kind = "inline-record"
+payload_sha256 = "9a2e5500ed37de434f6779b593a266511aea44319fe27cb79cd03b0c819f75c8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[union_arm]]
 union_name = "ServicePromotionExternalOperationKind"

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 3
+registry_epoch = 4
 
 [[type]]
 wire_type_id = 0x0001
@@ -212,3 +212,34 @@ wire_tag = 0x0004
 encoding_context = "unit discriminant for the external continuity operational-finalization action"
 allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
 max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x002c
+name = "NewDatabaseIdentityTargetCreationCommitment"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union; a19:2483 confirms DirectoryBoundLocal and ExternalCas payloads, while the 65536-byte policy ceiling awaits exact member encodings and bound proof"
+allowed_containing_schemas = ["NewDatabaseIdentityReservation"]
+max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x002d
+name = "NewDatabaseIdentityTargetCreationCommitment.DirectoryBoundLocal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "NewDatabaseIdentityTargetCreationCommitment"
+wire_tag = 0x0001
+encoding_context = "reserved inline-record payload; exact member encodings and bound proof remain required before activation"
+allowed_containing_schemas = ["NewDatabaseIdentityTargetCreationCommitment"]
+max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x002e
+name = "NewDatabaseIdentityTargetCreationCommitment.ExternalCas"
+kind = "union_variant"
+status = "reserved"
+containing_union = "NewDatabaseIdentityTargetCreationCommitment"
+wire_tag = 0x0002
+encoding_context = "reserved inline-record payload; nested target_posture Local|Sharded, exact member encodings, and bound proof remain required before activation"
+allowed_containing_schemas = ["NewDatabaseIdentityTargetCreationCommitment"]
+max_size_bytes = 65536
