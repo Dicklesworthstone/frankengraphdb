@@ -634,8 +634,8 @@ fi
 log "phase 2h: registry epoch drift without a reviewed assignment change"
 stage_except neg-registry-epoch logical_object_kinds.toml
 awk '
-  !changed && $0 == "registry_epoch = 1" {
-    print "registry_epoch = 2"
+  !changed && $0 == "registry_epoch = 2" {
+    print "registry_epoch = 3"
     changed = 1
     next
   }

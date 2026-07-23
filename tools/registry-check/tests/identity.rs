@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 5
+registry_epoch = 6
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 5);
+    assert_eq!(epoch, 6);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);

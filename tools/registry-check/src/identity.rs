@@ -1170,7 +1170,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     vec![
         AssignmentPin {
             registry: "logical_object_kinds",
-            expected_epoch: 1,
+            expected_epoch: 2,
             actual_epoch: r.logical_epoch,
             expected_pin: LOGICAL,
             actual_pin: logical,
@@ -1198,14 +1198,14 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "wire_types",
-            expected_epoch: 4,
+            expected_epoch: 5,
             actual_epoch: r.wire_epoch,
             expected_pin: WIRE,
             actual_pin: wire,
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 5,
+            expected_epoch: 6,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,

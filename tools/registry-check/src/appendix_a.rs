@@ -480,7 +480,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.adoption_log_prefix_digest|3f6d1ca92a6b5d63424fa952e288dd1682e1120c21cb7308e4da28cd12a9f801|1|94346efcd01e685e0b97191bd948a7030240485414b08046ab67b6c40d716cf9|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.adoption_log_prefix_digest|adoption_log_prefix_digest"],
+        resolved_source_keys: &[
+            "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.adoption_log_prefix_digest|adoption_log_prefix_digest",
+        ],
         rationale: "a01:1398: `adoption_log_prefix_digest` is a digest-commitment field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -489,7 +491,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.canonical_configuration_bytes|fc68df4a8100b5e2b3b389194ea8ade0b962901978b0ec30dd7f7665d486a622|1|9a2b0f21be3b76f8d76bf6633a711e6d17f8e04c379e0ac44c67920f4a2ad276|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.canonical_configuration_bytes|canonical_configuration_bytes"],
+        resolved_source_keys: &[
+            "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.canonical_configuration_bytes|canonical_configuration_bytes",
+        ],
         rationale: "a01:1398: `canonical_configuration_bytes` is a shorthand-typed field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -498,7 +502,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_adoption_raft_index|a6200217fa40abef3d7b65e7e4f187b24e3bab46d99adab5e8ebf760f742514c|1|ac36053b2b2fa43a5e22eaf635396bf8a31bf1f63d6b6b2ef39553c7b9262ccc|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_adoption_raft_index|configuration_adoption_raft_index"],
+        resolved_source_keys: &[
+            "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_adoption_raft_index|configuration_adoption_raft_index",
+        ],
         rationale: "a01:1398: `configuration_adoption_raft_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -507,7 +513,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_canonical_digest|ffc6a08972e5e120808c77c98e1682e03807c4a921aeeb61b247ced1bf467bf9|1|ab9b1b2d93c3e647152e98bced47888245368afc05d56612da99313881a7b2d2|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_canonical_digest|configuration_canonical_digest"],
+        resolved_source_keys: &[
+            "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_canonical_digest|configuration_canonical_digest",
+        ],
         rationale: "a01:1398: `configuration_canonical_digest` is a digest-commitment field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -516,7 +524,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_oid|b4ba7337b02912dbdb1d2556f0f336781bb08d7b8de119e9e03387741a14bf29|1|2ac62ed0f8d3d87ab310c488ed5a9642a786d3aef57e1db582ce1b3d2fbbe12c|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_oid|configuration_oid"],
+        resolved_source_keys: &[
+            "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_oid|configuration_oid",
+        ],
         rationale: "a01:1398: `configuration_oid` is an object-identifier field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -525,7 +535,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_quorum_signatures|5e039f2728144d7c6c0dbf60909319f1960786dbc0bd4c354b18466938513b83|1|05d20d4e0a20f87e623723a40753b4bd4d77d452a91c0b685e5841f2fcea7e91|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_quorum_signatures|configuration_quorum_signatures"],
+        resolved_source_keys: &[
+            "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_quorum_signatures|configuration_quorum_signatures",
+        ],
         rationale: "a01:1398: `configuration_quorum_signatures` is a canonically-sorted signature-set field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -534,7 +546,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.member_verification_key_set|9228d0f8c89f45c97b207618a9296c8f8b7951c5168aefb3c15dd36a56e91f46|1|7b19c194224119cc46717130957596f006a55ca994850922b1ccf7b15dce5a7b|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.member_verification_key_set|member_verification_key_set"],
+        resolved_source_keys: &[
+            "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.member_verification_key_set|member_verification_key_set",
+        ],
         rationale: "a01:1398: `member_verification_key_set` is a named closed sub-schema field (compact-phrase law) rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -543,7 +557,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.minimum_configuration_retention_floor|e56db1355acc784b116b7aabb64186db0bd720d85cddc92c8bfeb17afdfeb57b|1|02dfe7b844480a841425e8136513334e28c5c12f33cb808dcedea988f1900129|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.minimum_configuration_retention_floor|minimum_configuration_retention_floor"],
+        resolved_source_keys: &[
+            "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.minimum_configuration_retention_floor|minimum_configuration_retention_floor",
+        ],
         rationale: "a01:1398: `minimum_configuration_retention_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -552,7 +568,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.payload_predicate_digest|85b5b766cbd934ab08443a080c8789e6312c4e26e9fb42a97186c25fa3f46956|1|0e6034f8e22f941c5a067a2e7bd992b96d0a89ffb57a8e14b512d1cbbe4e4728|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.payload_predicate_digest|payload_predicate_digest"],
+        resolved_source_keys: &[
+            "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.payload_predicate_digest|payload_predicate_digest",
+        ],
         rationale: "a01:1398: `payload_predicate_digest` is a digest-commitment field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -561,7 +579,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.signer_epoch|8a955431bf60ecd9ee861704046648542da9fb2d078520d940f63ef1398b4765|1|991d203f9334c99be8acd5d8d4b19dc6153578c08d25dab0b1aa4afcb7624c52|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.signer_epoch|signer_epoch"],
+        resolved_source_keys: &[
+            "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.signer_epoch|signer_epoch",
+        ],
         rationale: "a01:1398: `signer_epoch` is an epoch scalar field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -570,7 +590,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.authority_quorum_signatures|56de356f4b1371c3c545ba560a7111f346594c418d015419dcb8fef7601d9a4d|1|facd33fc809fe34a79465328721f5f5274f0ffe9f76debdcd65d455d027cca40|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.authority_quorum_signatures|authority_quorum_signatures"],
+        resolved_source_keys: &[
+            "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.authority_quorum_signatures|authority_quorum_signatures",
+        ],
         rationale: "a01:1400: `authority_quorum_signatures` is a canonically-sorted signature-set field rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -579,7 +601,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.authority_retention_floor|faec9ce81314483ac776624bbef8b05e7ba973f3d5508e9a7f3f44608c236ae4|1|fba644be42a7b8337e44cbbef925fe49c41db010b749500a11365d7e00e76e43|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.authority_retention_floor|authority_retention_floor"],
+        resolved_source_keys: &[
+            "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.authority_retention_floor|authority_retention_floor",
+        ],
         rationale: "a01:1400: `authority_retention_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -588,7 +612,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.encoding_placement_coverage|9b55bcdb27d3c8b9d1c7e27801d59e7f86a64126eca571ae6a0826c753569db5|1|7724f2742410a6affc66d6564aeea475aacec16dce6b21091f2e26d5075016a2|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.encoding_placement_coverage|encoding_placement_coverage"],
+        resolved_source_keys: &[
+            "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.encoding_placement_coverage|encoding_placement_coverage",
+        ],
         rationale: "a01:1400: `encoding_placement_coverage` is a named closed sub-schema field (compact-phrase law) rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -597,7 +623,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.failure_domains|3f3d759ddf7f238e5931f429d410022e227f5d84c9522fae6abf88088d6f1852|1|710e3a0d8f16d56e1e217dc10c0cf628484878501f43c7fb7cb5050871b36ac3|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.failure_domains|failure_domains"],
+        resolved_source_keys: &[
+            "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.failure_domains|failure_domains",
+        ],
         rationale: "a01:1400: `failure_domains` is a named closed sub-schema field (compact-phrase law) rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -606,7 +634,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.payload_predicate_digest|85b5b766cbd934ab08443a080c8789e6312c4e26e9fb42a97186c25fa3f46956|1|ec097a492f696a2d7af40e999272a7c0d2626b3120e7c4c9ece038872b205deb|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.payload_predicate_digest|payload_predicate_digest"],
+        resolved_source_keys: &[
+            "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.payload_predicate_digest|payload_predicate_digest",
+        ],
         rationale: "a01:1400: `payload_predicate_digest` is a digest-commitment field rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -615,7 +645,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.receipt_set_commitment|7a15be9ed109d3d4aec9d9a0345adfbfdfaf033eb7be0343f30980205ed815a6|1|86c1e22cf5e3cf16e7391afe6a3e393983e0ef029b466a8aab3537bf1b9b7359|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.receipt_set_commitment|receipt_set_commitment"],
+        resolved_source_keys: &[
+            "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.receipt_set_commitment|receipt_set_commitment",
+        ],
         rationale: "a01:1400: `receipt_set_commitment` is a named closed sub-schema field (compact-phrase law) rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -624,7 +656,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.signer_epoch|8a955431bf60ecd9ee861704046648542da9fb2d078520d940f63ef1398b4765|1|1a3f2922f3d2e330022c4d733c5f77156fadc78450705f768ad4cd8ba4352b8f|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.signer_epoch|signer_epoch"],
+        resolved_source_keys: &[
+            "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.signer_epoch|signer_epoch",
+        ],
         rationale: "a01:1400: `signer_epoch` is an epoch scalar field rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -633,7 +667,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.target_closure_inventory_digest|e9f4ca6621f4e36a6c7058504702c6ef874721b67a2a9208b46097af61cc285a|1|52a91b1e32cbe3eaa440b93807aa03cd66e334e58e0b237d1378c2c6ef61ea90|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.target_closure_inventory_digest|target_closure_inventory_digest"],
+        resolved_source_keys: &[
+            "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.target_closure_inventory_digest|target_closure_inventory_digest",
+        ],
         rationale: "a01:1400: `target_closure_inventory_digest` is a digest-commitment field rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -642,7 +678,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.ack_digest|26a0c8c280895f2a8a5fa2133a0c5da5e937e9ad91457a2cd1967d9b5dfec1e1|1|314c4125d4749187aa267f0fa56aedb9e5c05c635cd6f797a7ad3e52df5965be|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.ack_digest|ack_digest"],
+        resolved_source_keys: &[
+            "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.ack_digest|ack_digest",
+        ],
         rationale: "a01:1404: `ack_digest` is a digest-commitment field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -651,7 +689,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.ack_leaf_identity|61de905f241e3ee171751c85c755cd05a255c541afcd5327ccf6b4e6e41af001|1|5aab29685cf0b0434adec2c3d5a9ab98ed8ca7c939b8a125daa9a590ee70862f|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.ack_leaf_identity|ack_leaf_identity"],
+        resolved_source_keys: &[
+            "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.ack_leaf_identity|ack_leaf_identity",
+        ],
         rationale: "a01:1404: `ack_leaf_identity` is a shorthand-typed field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -660,7 +700,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.authority_domain|68b123a21ae2a7c14c4ddc2e38626f5942b3f6ce93eeb69ab412c22694303766|1|ee4f77e22d96f2d4992820aff35712b464ef1264b4cb01676101707349f28530|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.authority_domain|authority_domain"],
+        resolved_source_keys: &[
+            "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.authority_domain|authority_domain",
+        ],
         rationale: "a01:1404: `authority_domain` is a shorthand-typed field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -669,7 +711,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.authority_order_index|59013d383aab857a8fbabee16001fe972a1c5e4a6070b69079c2d83bf820ae1a|1|9ef1c20c7848d3d91e50f2d1f6aa39b7dd0a37ad3c68dec2f363931f63d362da|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.authority_order_index|authority_order_index"],
+        resolved_source_keys: &[
+            "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.authority_order_index|authority_order_index",
+        ],
         rationale: "a01:1404: `authority_order_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -678,7 +722,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.consumer_domain|df7455f547e1c8d13dd7f4a1bd780c9d151f3e8c1a2ce5a6b10eccc6c0fd75c3|1|c0b8c50d40d15e1926c2673e57b341268c3fe4e46e26c57da8167c4982b888cd|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.consumer_domain|consumer_domain"],
+        resolved_source_keys: &[
+            "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.consumer_domain|consumer_domain",
+        ],
         rationale: "a01:1404: `consumer_domain` is a shorthand-typed field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -687,7 +733,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.grant_id|27f6bd90fe7bdb302495d31830da1ce66c2fc2efdcae08a90cf59ccd517db115|1|a12f2caed8e900d0337e05eb274562db23bfc99ee8b889511b5bc9577b581ca3|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.grant_id|grant_id"],
+        resolved_source_keys: &[
+            "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.grant_id|grant_id",
+        ],
         rationale: "a01:1404: `grant_id` is an identifier field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -696,7 +744,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.permanent_release_proof_floor|4b71e9856404eedf9a7a222a9e6a34dc571cc71ef32c0e5d931842a06cde1246|1|b577bacbed11011141cd570bbdaa6b2e79943299d607aabe963fc0be7fdb2fba|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.permanent_release_proof_floor|permanent_release_proof_floor"],
+        resolved_source_keys: &[
+            "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.permanent_release_proof_floor|permanent_release_proof_floor",
+        ],
         rationale: "a01:1404: `permanent_release_proof_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -705,7 +755,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.published_at_order_index|365c63a55f77f8b3dc2c90d4a1bbd93ac30870fd79a64e22a618b70ff8a1fb9d|1|355972555c580152bbddc34944d743c3beb62eca3788931b9240d02bab0ac86d|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.published_at_order_index|published_at_order_index"],
+        resolved_source_keys: &[
+            "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.published_at_order_index|published_at_order_index",
+        ],
         rationale: "a01:1404: `published_at_order_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -714,7 +766,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.release_nonce|15caa9e1be8b93b984ccbf175108151d96f095d573084525d7a4d1deacc79b06|1|2789b41382235330a3fdd089594badd72d22c4c2435b7c6d465e6be7f4ed818d|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.release_nonce|release_nonce"],
+        resolved_source_keys: &[
+            "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.release_nonce|release_nonce",
+        ],
         rationale: "a01:1404: `release_nonce` is a nonce scalar field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -723,7 +777,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.target_identity|ac43e82a633b092a515dd15ce3f767c9ab4cfb65bbb0d9ee4866264a2362c2ef|1|3ebb5e7b4bd24f0ec7ab3f29221174b1a9c1d942adbf73be389ffd43b78b63e2|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.target_identity|target_identity"],
+        resolved_source_keys: &[
+            "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.target_identity|target_identity",
+        ],
         rationale: "a01:1404: `target_identity` is a shorthand-typed field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -732,7 +788,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionAckPublishRecord|RemoteRetentionAckPublishRecord.summary_key|358a0abf4235506c63e1eae650b8a4a632095ee98e715c6e52613256d52fffed|1|0c33abc75e8f64d8f44a3d25a9a6535c5618056ddabc557b3d4bbd3d4a516f32|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionAckPublishRecord|RemoteRetentionAckPublishRecord.summary_key|summary_key"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionAckPublishRecord|RemoteRetentionAckPublishRecord.summary_key|summary_key",
+        ],
         rationale: "a01:1404: `summary_key` is a shorthand-typed field rendered shorthand inside the `RemoteRetentionAckPublishRecord` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -741,7 +799,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionConsumeAckRecord|RemoteRetentionConsumeAckRecord.summary_key|358a0abf4235506c63e1eae650b8a4a632095ee98e715c6e52613256d52fffed|1|853b8fbba76f7afb9f08b567f44dbb34e73a91f65c11da08be3360b5fb00820d|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionConsumeAckRecord|RemoteRetentionConsumeAckRecord.summary_key|summary_key"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionConsumeAckRecord|RemoteRetentionConsumeAckRecord.summary_key|summary_key",
+        ],
         rationale: "a01:1404: `summary_key` is a shorthand-typed field rendered shorthand inside the `RemoteRetentionConsumeAckRecord` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -750,7 +810,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.authority_order_index|59013d383aab857a8fbabee16001fe972a1c5e4a6070b69079c2d83bf820ae1a|1|36fbee5324bd9ffa91aa689fbfa2387b5427f339ab0e06a385ea01cda0b0d871|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.authority_order_index|authority_order_index"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.authority_order_index|authority_order_index",
+        ],
         rationale: "a01:1402: `authority_order_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -759,7 +821,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.authority_quorum_signatures|56de356f4b1371c3c545ba560a7111f346594c418d015419dcb8fef7601d9a4d|1|d49df532d66c735518769ecb06a268b3b764730d73666a333095acdc359b81ae|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.authority_quorum_signatures|authority_quorum_signatures"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.authority_quorum_signatures|authority_quorum_signatures",
+        ],
         rationale: "a01:1402: `authority_quorum_signatures` is a canonically-sorted signature-set field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -768,7 +832,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.grant_id|27f6bd90fe7bdb302495d31830da1ce66c2fc2efdcae08a90cf59ccd517db115|1|9f2ac593ad8126a942d92717bcd800ec86c12bb4742342ea8cde22b2be346636|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.grant_id|grant_id"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.grant_id|grant_id",
+        ],
         rationale: "a01:1402: `grant_id` is an identifier field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -777,7 +843,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.grant_nonce|4c576db69271ac2c50a56e9f678811f37464b495c81cce34016ed46c0ac6ad63|1|a8757c44786e19f6a52b62fe9093a6722d24b5a5a546b918b82d827ef8bbb83e|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.grant_nonce|grant_nonce"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.grant_nonce|grant_nonce",
+        ],
         rationale: "a01:1402: `grant_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -786,7 +854,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.minimum_authority_checkpoint_floor|20c3f12d6501ab5be2cb7969a9465f23511a3ea53238521aca406b02971096e2|1|2f9cb650301fb59f33481e2193836b7dc3579c77dae3920136827a04e9908271|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.minimum_authority_checkpoint_floor|minimum_authority_checkpoint_floor"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.minimum_authority_checkpoint_floor|minimum_authority_checkpoint_floor",
+        ],
         rationale: "a01:1402: `minimum_authority_checkpoint_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -795,7 +865,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.signer_epoch|8a955431bf60ecd9ee861704046648542da9fb2d078520d940f63ef1398b4765|1|98a6867f372c0af40b38517ad2f64f3ca89fa28006533aff724a6fd48dade551|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.signer_epoch|signer_epoch"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.signer_epoch|signer_epoch",
+        ],
         rationale: "a01:1402: `signer_epoch` is an epoch scalar field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -804,7 +876,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.target_closure_inventory_digest|e9f4ca6621f4e36a6c7058504702c6ef874721b67a2a9208b46097af61cc285a|1|5b1625801033ae5993e0926054bc1a5a5f4bf62fabeaadfcc4f018ab2eef99d5|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.target_closure_inventory_digest|target_closure_inventory_digest"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.target_closure_inventory_digest|target_closure_inventory_digest",
+        ],
         rationale: "a01:1402: `target_closure_inventory_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -813,7 +887,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.grant_id|27f6bd90fe7bdb302495d31830da1ce66c2fc2efdcae08a90cf59ccd517db115|1|beee8fbb534b5334ebf765f3f348b249413add216fa7875a903745cad81f9e96|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.grant_id|grant_id"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.grant_id|grant_id",
+        ],
         rationale: "a01:1402: `grant_id` is an identifier field rendered shorthand inside the `RemoteRetentionGrantSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -822,7 +898,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.grant_nonce|4c576db69271ac2c50a56e9f678811f37464b495c81cce34016ed46c0ac6ad63|1|15213f89b32da1621b9d5e6325729cf09889ea8d5af5c258a7b320a100882c98|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.grant_nonce|grant_nonce"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.grant_nonce|grant_nonce",
+        ],
         rationale: "a01:1402: `grant_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionGrantSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -831,7 +909,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.minimum_authority_checkpoint_floor|20c3f12d6501ab5be2cb7969a9465f23511a3ea53238521aca406b02971096e2|1|33cde523f3fd93cb4e0b61f96b67f43ed8dfa53715acac0f5dc6daa98a36027e|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.minimum_authority_checkpoint_floor|minimum_authority_checkpoint_floor"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.minimum_authority_checkpoint_floor|minimum_authority_checkpoint_floor",
+        ],
         rationale: "a01:1402: `minimum_authority_checkpoint_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteRetentionGrantSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -840,7 +920,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.target_closure_inventory_digest|e9f4ca6621f4e36a6c7058504702c6ef874721b67a2a9208b46097af61cc285a|1|6527dda0f73fba508c31022d5d9f2351c0441e8470d3f7e59efacc00805b64fe|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.target_closure_inventory_digest|target_closure_inventory_digest"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.target_closure_inventory_digest|target_closure_inventory_digest",
+        ],
         rationale: "a01:1402: `target_closure_inventory_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionGrantSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -849,7 +931,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.authority_order_index|59013d383aab857a8fbabee16001fe972a1c5e4a6070b69079c2d83bf820ae1a|1|174469a7843c6453c2d41b92c182a89b868b5423e400a1e81ba8b77a29588e97|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.authority_order_index|authority_order_index"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.authority_order_index|authority_order_index",
+        ],
         rationale: "a01:1404: `authority_order_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteRetentionReleaseAckCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -858,7 +942,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.authority_state_root_digest|78e75b8b883d40522f329ac6895502ec7ca2cd9141bb0cd4b4cb303141ba6f1d|1|a0ea0bf11753016694ce3fa33b4d7c0e9ff753a6594017aa5b1234f71f6d36ce|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.authority_state_root_digest|authority_state_root_digest"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.authority_state_root_digest|authority_state_root_digest",
+        ],
         rationale: "a01:1404: `authority_state_root_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseAckCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -867,7 +953,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.grant_id|27f6bd90fe7bdb302495d31830da1ce66c2fc2efdcae08a90cf59ccd517db115|1|0b6b5eb92810cd175fd678a707e39f34055f605b3e9156ad51461ea9baedf219|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.grant_id|grant_id"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.grant_id|grant_id",
+        ],
         rationale: "a01:1404: `grant_id` is an identifier field rendered shorthand inside the `RemoteRetentionReleaseAckCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -876,7 +964,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.quorum_signatures|4b7382d93588313ac60e777d7671792202dc4445f17d96d2882ed00971b64a35|1|412be3befdcb424ab5bc6bcef67962b647c8644365372e9cfb45c93c1f9b6615|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.quorum_signatures|quorum_signatures"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.quorum_signatures|quorum_signatures",
+        ],
         rationale: "a01:1404: `quorum_signatures` is a canonically-sorted signature-set field rendered shorthand inside the `RemoteRetentionReleaseAckCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -885,7 +975,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.release_nonce|15caa9e1be8b93b984ccbf175108151d96f095d573084525d7a4d1deacc79b06|1|eba2bea3631e67ba3fbb167d8d27171e26461363879e337724545743a403e777|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.release_nonce|release_nonce"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.release_nonce|release_nonce",
+        ],
         rationale: "a01:1404: `release_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionReleaseAckCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -894,7 +986,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.expected_active_grant_digest|932d8a5a94aa8d19454cefb284ce6ee239b930fd0bf76be1add154de91aa54ff|1|0d61982ca6bd952a2c69dda70e942399093b34267b7c325788017f634c8d7636|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.expected_active_grant_digest|expected_active_grant_digest"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.expected_active_grant_digest|expected_active_grant_digest",
+        ],
         rationale: "a01:1404: `expected_active_grant_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseApplySpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -903,7 +997,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.successor_transfer_proof|1d3ca7a2e079efd5915d2cfddf2174e951cf49856f1bd7209bba195b2ccd117a|1|8d289995242dd40b765139849e92f169f2de0a1cbf4058c623cf66c8d22572a5|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.successor_transfer_proof|successor_transfer_proof"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.successor_transfer_proof|successor_transfer_proof",
+        ],
         rationale: "a01:1404: `successor_transfer_proof` is a shorthand-typed field rendered shorthand inside the `RemoteRetentionReleaseApplySpec` body (the trailing '?' declares registry-checked optional cardinality); per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -912,7 +1008,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.verified_consumer_no_reference_floor|1067a6e6201ee71729b93d84143d7e4e80e91fcd831d1dd6718e14792741c458|1|0255e6bf55508186e7d79d094c363a62af350099d652082c0e70febdf44726bd|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.verified_consumer_no_reference_floor|verified_consumer_no_reference_floor"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.verified_consumer_no_reference_floor|verified_consumer_no_reference_floor",
+        ],
         rationale: "a01:1404: `verified_consumer_no_reference_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteRetentionReleaseApplySpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -921,7 +1019,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.complete_consumer_root_digest|d76cefdc4c84ad41fa28af991a009ff6b7c12a96fa2d7b7e94bf9afe426ce014|1|6589f24162651b31d5d30e3c6f40a245693595cf8ffd27e738acd76f03c04342|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.complete_consumer_root_digest|complete_consumer_root_digest"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.complete_consumer_root_digest|complete_consumer_root_digest",
+        ],
         rationale: "a01:1404: `complete_consumer_root_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseRequestCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -930,7 +1030,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.consumer_no_reference_floor_digest|7c7e6486114525898ec198a0f5957a9c584b2bb75acecf76bec19012a493401e|1|f34090437a8669307664a600f72358824566f0bdd4c29e70c61e5db88d6e5486|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.consumer_no_reference_floor_digest|consumer_no_reference_floor_digest"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.consumer_no_reference_floor_digest|consumer_no_reference_floor_digest",
+        ],
         rationale: "a01:1404: `consumer_no_reference_floor_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseRequestCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -939,7 +1041,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.quorum_signatures|4b7382d93588313ac60e777d7671792202dc4445f17d96d2882ed00971b64a35|1|b3153c51c7cf9aa357701d7c669b7c1c394b427b4b93998c7a6b39b55a043bfb|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.quorum_signatures|quorum_signatures"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.quorum_signatures|quorum_signatures",
+        ],
         rationale: "a01:1404: `quorum_signatures` is a canonically-sorted signature-set field rendered shorthand inside the `RemoteRetentionReleaseRequestCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -948,7 +1052,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.release_nonce|15caa9e1be8b93b984ccbf175108151d96f095d573084525d7a4d1deacc79b06|1|30471b9242da4a6b8657376fd6077c75689154253fe08238ad96a002ec9d03b5|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.release_nonce|release_nonce"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.release_nonce|release_nonce",
+        ],
         rationale: "a01:1404: `release_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionReleaseRequestCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -957,7 +1063,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.successor_grant_identity|e559ba44b5afd503205b24d3c679fdca23610df1575bc64fe7e5f5773118e1f6|1|118e8077069af1876246e3678b616327a8c4056454e3e815e4cacd18c8e23d9c|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.successor_grant_identity|successor_grant_identity"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.successor_grant_identity|successor_grant_identity",
+        ],
         rationale: "a01:1404: `successor_grant_identity` is a shorthand-typed field rendered shorthand inside the `RemoteRetentionReleaseRequestCertificate` body (the trailing '?' declares registry-checked optional cardinality); per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -966,7 +1074,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestRecord|RemoteRetentionReleaseRequestRecord.consumer_no_reference_floor_digest|7c7e6486114525898ec198a0f5957a9c584b2bb75acecf76bec19012a493401e|1|7160448bd81d9eb338dea42663f47cccfbef36cd2a711fcad20995f8c07d33e0|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseRequestRecord|RemoteRetentionReleaseRequestRecord.consumer_no_reference_floor_digest|consumer_no_reference_floor_digest"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseRequestRecord|RemoteRetentionReleaseRequestRecord.consumer_no_reference_floor_digest|consumer_no_reference_floor_digest",
+        ],
         rationale: "a01:1404: `consumer_no_reference_floor_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseRequestRecord` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -975,7 +1085,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.complete_consumer_root_digest|d76cefdc4c84ad41fa28af991a009ff6b7c12a96fa2d7b7e94bf9afe426ce014|1|a782dab5228e38ea5b02deb69bb1adce6d918cb5f1589b90913b8e7533c20d09|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.complete_consumer_root_digest|complete_consumer_root_digest"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.complete_consumer_root_digest|complete_consumer_root_digest",
+        ],
         rationale: "a01:1404: `complete_consumer_root_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseRequestSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -984,7 +1096,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.consumer_checkpoint_floor|20d326c95db5860b56f58c0f4ad4bf8260cb19da3c43fc0a8845ebd041f5f7a1|1|b36a5d704aa591d2fb41f3f0e317a3bdbee04e0a24c1a63e7cee5e08a22c2027|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.consumer_checkpoint_floor|consumer_checkpoint_floor"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.consumer_checkpoint_floor|consumer_checkpoint_floor",
+        ],
         rationale: "a01:1404: `consumer_checkpoint_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteRetentionReleaseRequestSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -993,7 +1107,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.release_nonce|15caa9e1be8b93b984ccbf175108151d96f095d573084525d7a4d1deacc79b06|1|ee09324f4574faaf0e63d84a9fa02e14c5a72906341d42170d91c6ed77da7d83|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.release_nonce|release_nonce"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.release_nonce|release_nonce",
+        ],
         rationale: "a01:1404: `release_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionReleaseRequestSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -1002,7 +1118,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseTombstone|RemoteRetentionReleaseTombstone.authority_order_index|59013d383aab857a8fbabee16001fe972a1c5e4a6070b69079c2d83bf820ae1a|1|61db89f3a0d04a6578a4919aa5d7f08ffab70ded556386537fad94838625325c|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseTombstone|RemoteRetentionReleaseTombstone.authority_order_index|authority_order_index"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseTombstone|RemoteRetentionReleaseTombstone.authority_order_index|authority_order_index",
+        ],
         rationale: "a01:1404: `authority_order_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteRetentionReleaseTombstone` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -1011,7 +1129,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseTombstone|RemoteRetentionReleaseTombstone.release_nonce|15caa9e1be8b93b984ccbf175108151d96f095d573084525d7a4d1deacc79b06|1|11caeb4e5116643b8fa8bf716ade43294f1b42ea169ff786462dd63f3c0c4556|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RemoteRetentionReleaseTombstone|RemoteRetentionReleaseTombstone.release_nonce|release_nonce"],
+        resolved_source_keys: &[
+            "field|RemoteRetentionReleaseTombstone|RemoteRetentionReleaseTombstone.release_nonce|release_nonce",
+        ],
         rationale: "a01:1404: `release_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionReleaseTombstone` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -1020,7 +1140,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustArtifact|RootAuthorityTrustArtifact.canonical_root_authority_signature_set|98656fd6440f1cb7c354f38d4ab363e0b9d6b6f4cc17fdb4ddf4343fd48ba65d|1|4b3c19c2935b07e62452c4a5aa64d334c807143614e5c8724c42b65897d07a14|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RootAuthorityTrustArtifact|RootAuthorityTrustArtifact.canonical_root_authority_signature_set|canonical_root_authority_signature_set"],
+        resolved_source_keys: &[
+            "field|RootAuthorityTrustArtifact|RootAuthorityTrustArtifact.canonical_root_authority_signature_set|canonical_root_authority_signature_set",
+        ],
         rationale: "a01:1398: `canonical_root_authority_signature_set` is a canonically-sorted signature-set field rendered shorthand inside the `RootAuthorityTrustArtifact` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -1029,7 +1151,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.canonical_genesis_or_transition_bytes|2130574491455002d6300d91957a195dc794ab30602dfe7cc22fb1b59e86b92e|1|b30e4155c3a2c5987dee01958c2958939b1d14faf7b20330a952baca2418234d|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RootAuthorityTrustBody|RootAuthorityTrustBody.canonical_genesis_or_transition_bytes|canonical_genesis_or_transition_bytes"],
+        resolved_source_keys: &[
+            "field|RootAuthorityTrustBody|RootAuthorityTrustBody.canonical_genesis_or_transition_bytes|canonical_genesis_or_transition_bytes",
+        ],
         rationale: "a01:1398: `canonical_genesis_or_transition_bytes` is a shorthand-typed field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -1038,7 +1162,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.expected_root_verification_key_set_digest|efdea27d33fb35f504475a8016e2c08830d7d8821a91932d9af0f78ee8d3da97|1|d0d0ce8938ccb50960925f5e72244dc5900ea4c4fec934a1a3f5bb16d6e54f46|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RootAuthorityTrustBody|RootAuthorityTrustBody.expected_root_verification_key_set_digest|expected_root_verification_key_set_digest"],
+        resolved_source_keys: &[
+            "field|RootAuthorityTrustBody|RootAuthorityTrustBody.expected_root_verification_key_set_digest|expected_root_verification_key_set_digest",
+        ],
         rationale: "a01:1398: `expected_root_verification_key_set_digest` is a digest-commitment field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -1047,7 +1173,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.externally_pinned_root_policy_id|e8f6004ed65e68f7aaf9189d8bd6f45231419ffb9374d8243d1e7ca10cd01f85|1|dbe55110c3b038e62b341a3788242a1302eb8677491b832cf53186b4711a99fc|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RootAuthorityTrustBody|RootAuthorityTrustBody.externally_pinned_root_policy_id|externally_pinned_root_policy_id"],
+        resolved_source_keys: &[
+            "field|RootAuthorityTrustBody|RootAuthorityTrustBody.externally_pinned_root_policy_id|externally_pinned_root_policy_id",
+        ],
         rationale: "a01:1398: `externally_pinned_root_policy_id` is an identifier field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -1056,7 +1184,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.source_identity_or_transition_continuity_commitment|07351b0457a3192f79b692fd77f43abf48f011f2011cb671db6a99c0601078d7|1|8a2ea05d7f1acac68a37a0dd3e9383bcf03be5c8aea01cfcd9a1fc358c4f910b|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RootAuthorityTrustBody|RootAuthorityTrustBody.source_identity_or_transition_continuity_commitment|source_identity_or_transition_continuity_commitment"],
+        resolved_source_keys: &[
+            "field|RootAuthorityTrustBody|RootAuthorityTrustBody.source_identity_or_transition_continuity_commitment|source_identity_or_transition_continuity_commitment",
+        ],
         rationale: "a01:1398: `source_identity_or_transition_continuity_commitment` is a named closed sub-schema field (compact-phrase law) rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -1065,7 +1195,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.target_configuration_canonical_digest|9e05bab4fd4b345b34909a5ed5ddc34f57c92871ab6bc29359c797fa7b6ac9b0|1|832303e888adbe3a970adf13e41562404abdae3ae45cf0bb46b11760942b46db|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RootAuthorityTrustBody|RootAuthorityTrustBody.target_configuration_canonical_digest|target_configuration_canonical_digest"],
+        resolved_source_keys: &[
+            "field|RootAuthorityTrustBody|RootAuthorityTrustBody.target_configuration_canonical_digest|target_configuration_canonical_digest",
+        ],
         rationale: "a01:1398: `target_configuration_canonical_digest` is a digest-commitment field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -1074,7 +1206,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.target_configuration_oid|c6b33eecff1094498dea48db10f759d2e16c17fd71abc5105caf65d69d692075|1|72691e6346a8ce2af6a541072f3cb42a777fd24bba45571fcbfa4882e9cf57c0|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RootAuthorityTrustBody|RootAuthorityTrustBody.target_configuration_oid|target_configuration_oid"],
+        resolved_source_keys: &[
+            "field|RootAuthorityTrustBody|RootAuthorityTrustBody.target_configuration_oid|target_configuration_oid",
+        ],
         rationale: "a01:1398: `target_configuration_oid` is an object-identifier field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {
@@ -1083,7 +1217,9 @@ const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 104] =
         ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.threshold|497e22fe854a24bcfb8aa568e454fa262cdb64a109e01dabf5793b46326144da|1|af27d97f9068cd10a2fb16ad91626df62a57de1ec00c2f9b4a5187ad20f12392|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|RootAuthorityTrustBody|RootAuthorityTrustBody.threshold|threshold"],
+        resolved_source_keys: &[
+            "field|RootAuthorityTrustBody|RootAuthorityTrustBody.threshold|threshold",
+        ],
         rationale: "a01:1398: `threshold` is a shorthand-typed field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
     },
     AmbiguityAdjudicationContractPin {

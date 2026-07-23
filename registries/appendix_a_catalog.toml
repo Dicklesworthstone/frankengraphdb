@@ -580,7 +580,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 1
+registry_epoch = 2
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -596,11 +596,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 4
+registry_epoch = 5
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 5
+registry_epoch = 6
 
 [[logical_kind]]
 slice_id = "a03"

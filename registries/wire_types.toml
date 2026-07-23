@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 4
+registry_epoch = 5
 
 [[type]]
 wire_type_id = 0x0001
