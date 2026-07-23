@@ -9,6 +9,8 @@
 pub mod conformal;
 pub mod eprocess;
 pub mod exploration;
+pub mod log;
+pub mod lyapunov;
 pub mod ope;
 pub mod policy_epoch;
 pub mod progress;
