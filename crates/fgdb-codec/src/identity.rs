@@ -267,8 +267,6 @@ pub enum AllocationTarget {
     PrefixIndexes,
     /// Six-byte per-row monotone slots.
     Slots,
-    /// Temporary absolute slots passed to the canonical FOR scalar kernel.
-    ForSlotScratch,
     /// Canonical FOR-packed monotone-slot bytes.
     ForSlotPayload,
     /// Complete registry-independent scalar payload bytes.
@@ -738,14 +736,26 @@ impl<T: ElementIdentity> IdentityColumn<T> {
         index_width: usize,
         plan: ForSlotPlan,
     ) -> Result<Self, IdentityColumnError> {
+        Self::try_shared_for_with_output_reservation(
+            values,
+            prefixes,
+            index_width,
+            plan,
+            bitpack::reserve_encoded_output,
+        )
+    }
+
+    fn try_shared_for_with_output_reservation<Reserve>(
+        values: &[T],
+        prefixes: Vec<IdentityPrefix>,
+        index_width: usize,
+        plan: ForSlotPlan,
+        reserve_output: Reserve,
+    ) -> Result<Self, IdentityColumnError>
+    where
+        Reserve: FnOnce(usize) -> Result<Vec<u8>, bitpack::BitpackError>,
+    {
         let mut indexes = allocate_indexes(index_width, values.len())?;
-        let mut absolute_slots = Vec::new();
-        absolute_slots
-            .try_reserve_exact(values.len())
-            .map_err(|_| IdentityColumnError::AllocationFailed {
-                target: AllocationTarget::ForSlotScratch,
-                requested: values.len(),
-            })?;
 
         for value in values {
             let parts = IdentityParts::unpack(value.identity_bits());
@@ -756,22 +766,26 @@ impl<T: ElementIdentity> IdentityColumn<T> {
                 }
             })?;
             push_index(&mut indexes, index)?;
-            absolute_slots.push(parts.monotone_slot());
         }
 
-        let packed_deltas = bitpack::encode_for(&absolute_slots, plan.base, plan.width).map_err(
-            |error| match error {
-                bitpack::BitpackError::AllocationFailed { requested, .. } => {
-                    IdentityColumnError::AllocationFailed {
-                        target: AllocationTarget::ForSlotPayload,
-                        requested,
-                    }
+        let packed_deltas = bitpack::encode_for_by_index_with_output_reservation(
+            values.len(),
+            plan.base,
+            plan.width,
+            |row| IdentityParts::unpack(values[row].identity_bits()).monotone_slot(),
+            reserve_output,
+        )
+        .map_err(|error| match error {
+            bitpack::BitpackError::AllocationFailed { requested, .. } => {
+                IdentityColumnError::AllocationFailed {
+                    target: AllocationTarget::ForSlotPayload,
+                    requested,
                 }
-                _ => IdentityColumnError::ConstructionInvariantViolation {
-                    invariant: IdentityConstructionInvariant::ForSlotEncoding,
-                },
+            }
+            _ => IdentityColumnError::ConstructionInvariantViolation {
+                invariant: IdentityConstructionInvariant::ForSlotEncoding,
             },
-        )?;
+        })?;
         if packed_deltas.len() != plan.packed_len {
             return Err(IdentityColumnError::ConstructionInvariantViolation {
                 invariant: IdentityConstructionInvariant::EncodedPayloadLength,
@@ -1429,6 +1443,8 @@ const fn slot_from_be_bytes(bytes: [u8; SLOT_BYTES]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use core::cell::Cell;
+
     use super::*;
 
     fn parts(epoch: u64, partition: u32, slot: u64) -> IdentityParts {
@@ -1967,6 +1983,121 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn mapped_for_constructor_reserves_only_exact_final_packed_bytes() {
+        let values = (0_u64..4_097)
+            .map(|offset| vid(17, 29, 10_000 + offset))
+            .collect::<Vec<_>>();
+        let prefixes = vec![IdentityPrefix::from_parts(IdentityParts::unpack(
+            values[0].identity_bits(),
+        ))];
+        let plan = for_slot_plan(&values, prefixes.len(), 0)
+            .expect("bounded identity fixture must admit size accounting")
+            .expect("nonempty bounded identity fixture must admit FOR");
+        let reservation_calls = Cell::new(0_usize);
+        let requested_bytes = Cell::new(None);
+
+        let column = IdentityColumn::<VId>::try_shared_for_with_output_reservation(
+            &values,
+            prefixes,
+            0,
+            plan,
+            |expected| {
+                reservation_calls.set(reservation_calls.get() + 1);
+                requested_bytes.set(Some(expected));
+                bitpack::reserve_encoded_output(expected)
+            },
+        )
+        .expect("valid projected identity slots must encode");
+
+        assert_eq!(reservation_calls.get(), 1);
+        assert_eq!(requested_bytes.get(), Some(plan.packed_len));
+        assert_eq!(
+            column.representation(),
+            IdentityRepresentation::SharedPrefixFor
+        );
+        assert_eq!(column.iter().collect::<Vec<_>>(), values);
+        assert_eq!(column.get(values.len()), None);
+        assert!(
+            (0..column.len())
+                .map(|row| column.canonical_key_at(row).unwrap())
+                .collect::<Vec<_>>()
+                .windows(2)
+                .all(|pair| pair[0] <= pair[1])
+        );
+
+        let payload = column
+            .try_scalar_payload(column.encoded_payload_len())
+            .expect("bounded payload must materialize");
+        let packed = &payload[PREFIX_BYTES + FOR_SLOT_METADATA_BYTES..];
+        let absolute_slots = values
+            .iter()
+            .map(|value| IdentityParts::unpack(value.identity_bits()).monotone_slot())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            packed,
+            bitpack::encode_for(&absolute_slots, plan.base, plan.width)
+                .expect("public slice encoder must accept the same slots")
+        );
+    }
+
+    #[test]
+    fn mapped_for_constructor_validates_before_output_reservation() {
+        let values = [vid(17, 29, 10_000), vid(17, 29, 10_001)];
+        let prefixes = vec![IdentityPrefix::from_parts(IdentityParts::unpack(
+            values[0].identity_bits(),
+        ))];
+        let invalid_plan = ForSlotPlan {
+            base: 10_000,
+            width: 0,
+            packed_len: 0,
+            payload_len: PREFIX_BYTES + FOR_SLOT_METADATA_BYTES,
+        };
+        let reservation_calls = Cell::new(0_usize);
+
+        assert_eq!(
+            IdentityColumn::<VId>::try_shared_for_with_output_reservation(
+                &values,
+                prefixes,
+                0,
+                invalid_plan,
+                |expected| {
+                    reservation_calls.set(reservation_calls.get() + 1);
+                    bitpack::reserve_encoded_output(expected)
+                },
+            ),
+            Err(IdentityColumnError::ConstructionInvariantViolation {
+                invariant: IdentityConstructionInvariant::ForSlotEncoding,
+            })
+        );
+        assert_eq!(reservation_calls.get(), 0);
+
+        let prefixes = vec![IdentityPrefix::from_parts(IdentityParts::unpack(
+            values[0].identity_bits(),
+        ))];
+        let valid_plan = for_slot_plan(&values, prefixes.len(), 0)
+            .expect("bounded identity fixture must admit size accounting")
+            .expect("nonempty bounded identity fixture must admit FOR");
+        assert_eq!(
+            IdentityColumn::<VId>::try_shared_for_with_output_reservation(
+                &values,
+                prefixes,
+                0,
+                valid_plan,
+                |requested| {
+                    Err(bitpack::BitpackError::AllocationFailed {
+                        target: bitpack::AllocationTarget::EncodedBytes,
+                        requested,
+                    })
+                },
+            ),
+            Err(IdentityColumnError::AllocationFailed {
+                target: AllocationTarget::ForSlotPayload,
+                requested: valid_plan.packed_len,
+            })
+        );
     }
 
     #[test]

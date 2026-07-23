@@ -289,7 +289,7 @@ pub fn decode(input: &[u8], count: usize, width: u8) -> Result<Vec<u64>, Bitpack
 /// canonical base/width selector. The registered enclosing format or codec
 /// profile owns that choice and records it in its frame.
 pub fn encode_for(values: &[u64], base: u64, width: u8) -> Result<Vec<u8>, BitpackError> {
-    encode_for_with_output_reservation(values, base, width, reserve_encoded_output)
+    encode_for_by_index(values.len(), base, width, |index| values[index])
 }
 
 /// Decodes exactly `count` FOR deltas and checked-adds `base` to each one.
@@ -350,11 +350,20 @@ fn validate_values(values: &[u64], width: u8) -> Result<(), BitpackError> {
     Ok(())
 }
 
-fn validate_for_values(values: &[u64], base: u64, width: u8) -> Result<(), BitpackError> {
+fn validate_for_values_by_index<ValueAt>(
+    count: usize,
+    base: u64,
+    width: u8,
+    value_at: &ValueAt,
+) -> Result<(), BitpackError>
+where
+    ValueAt: Fn(usize) -> u64,
+{
     debug_assert!(width <= MAX_BIT_WIDTH);
     let exclusive_limit = (width != MAX_BIT_WIDTH).then(|| 1_u64 << width);
 
-    for (index, &value) in values.iter().enumerate() {
+    for index in 0..count {
+        let value = value_at(index);
         let delta = value
             .checked_sub(base)
             .ok_or(BitpackError::ValueBelowBase { index, value, base })?;
@@ -369,7 +378,7 @@ fn validate_for_values(values: &[u64], base: u64, width: u8) -> Result<(), Bitpa
     Ok(())
 }
 
-fn reserve_encoded_output(expected: usize) -> Result<Vec<u8>, BitpackError> {
+pub(crate) fn reserve_encoded_output(expected: usize) -> Result<Vec<u8>, BitpackError> {
     let mut output = Vec::new();
     output
         .try_reserve_exact(expected)
@@ -380,25 +389,51 @@ fn reserve_encoded_output(expected: usize) -> Result<Vec<u8>, BitpackError> {
     Ok(output)
 }
 
-fn encode_for_with_output_reservation<Reserve>(
-    values: &[u64],
+/// FOR-encodes a deterministic exact-size random-access value source.
+///
+/// The accessor is evaluated in ascending index order during validation and
+/// again during packing. Internal callers must return the same value for an
+/// index in both passes. This lets projected fields be packed without a
+/// `count`-sized staging allocation.
+pub(crate) fn encode_for_by_index<ValueAt>(
+    count: usize,
     base: u64,
     width: u8,
+    value_at: ValueAt,
+) -> Result<Vec<u8>, BitpackError>
+where
+    ValueAt: Fn(usize) -> u64,
+{
+    encode_for_by_index_with_output_reservation(
+        count,
+        base,
+        width,
+        value_at,
+        reserve_encoded_output,
+    )
+}
+
+pub(crate) fn encode_for_by_index_with_output_reservation<ValueAt, Reserve>(
+    count: usize,
+    base: u64,
+    width: u8,
+    value_at: ValueAt,
     reserve_output: Reserve,
 ) -> Result<Vec<u8>, BitpackError>
 where
+    ValueAt: Fn(usize) -> u64,
     Reserve: FnOnce(usize) -> Result<Vec<u8>, BitpackError>,
 {
     // Pass one fixes error precedence and proves every subtraction and
     // selected-width constraint before the sole output reservation.
-    let expected = bounded_expected_byte_len(values.len(), width)?;
-    validate_for_values(values, base, width)?;
+    let expected = bounded_expected_byte_len(count, width)?;
+    validate_for_values_by_index(count, base, width, &value_at)?;
 
     // Pass two subtracts and packs directly into the exact bounded output.
-    // No `values.len()`-sized delta staging allocation is materialized.
+    // No `count`-sized delta staging allocation is materialized.
     let mut output = reserve_output(expected)?;
     output.resize(expected, 0);
-    pack_for_validated(values, base, width, &mut output)?;
+    pack_for_validated_by_index(count, base, width, &value_at, &mut output)?;
     Ok(output)
 }
 
@@ -453,22 +488,27 @@ fn pack_validated(values: &[u64], width: u8, output: &mut [u8]) -> Result<(), Bi
     Ok(())
 }
 
-fn pack_for_validated(
-    values: &[u64],
+fn pack_for_validated_by_index<ValueAt>(
+    count: usize,
     base: u64,
     width: u8,
+    value_at: &ValueAt,
     output: &mut [u8],
-) -> Result<(), BitpackError> {
+) -> Result<(), BitpackError>
+where
+    ValueAt: Fn(usize) -> u64,
+{
     if width == 0 {
         return Ok(());
     }
 
     let mut bit_cursor = 0_usize;
-    for (index, &value) in values.iter().enumerate() {
+    for index in 0..count {
+        let value = value_at(index);
         let delta = value
             .checked_sub(base)
             .ok_or(BitpackError::ValueBelowBase { index, value, base })?;
-        pack_value(delta, values.len(), width, output, &mut bit_cursor)?;
+        pack_value(delta, count, width, output, &mut bit_cursor)?;
     }
     Ok(())
 }
@@ -722,11 +762,17 @@ mod tests {
         let reservation_calls = Cell::new(0_usize);
         let requested_bytes = Cell::new(None);
 
-        let encoded = encode_for_with_output_reservation(&values, 10_000, 5, |expected| {
-            reservation_calls.set(reservation_calls.get() + 1);
-            requested_bytes.set(Some(expected));
-            reserve_encoded_output(expected)
-        })
+        let encoded = encode_for_by_index_with_output_reservation(
+            values.len(),
+            10_000,
+            5,
+            |index| values[index],
+            |expected| {
+                reservation_calls.set(reservation_calls.get() + 1);
+                requested_bytes.set(Some(expected));
+                reserve_encoded_output(expected)
+            },
+        )
         .expect("valid FOR input must encode");
 
         let expected = expected_byte_len(values.len(), 5).expect("bounded fixture length");
@@ -739,10 +785,16 @@ mod tests {
         reservation_calls.set(0);
         let invalid = [10_000, 9_999, 10_001];
         assert_eq!(
-            encode_for_with_output_reservation(&invalid, 10_000, 5, |expected| {
-                reservation_calls.set(reservation_calls.get() + 1);
-                reserve_encoded_output(expected)
-            }),
+            encode_for_by_index_with_output_reservation(
+                invalid.len(),
+                10_000,
+                5,
+                |index| invalid[index],
+                |expected| {
+                    reservation_calls.set(reservation_calls.get() + 1);
+                    reserve_encoded_output(expected)
+                },
+            ),
             Err(BitpackError::ValueBelowBase {
                 index: 1,
                 value: 9_999,
@@ -754,12 +806,18 @@ mod tests {
         // The single fallible allocation remains named as encoded output; no
         // per-entry FOR-delta allocation participates in the error surface.
         assert_eq!(
-            encode_for_with_output_reservation(&values, 10_000, 5, |expected| {
-                Err(BitpackError::AllocationFailed {
-                    target: AllocationTarget::EncodedBytes,
-                    requested: expected,
-                })
-            }),
+            encode_for_by_index_with_output_reservation(
+                values.len(),
+                10_000,
+                5,
+                |index| values[index],
+                |expected| {
+                    Err(BitpackError::AllocationFailed {
+                        target: AllocationTarget::EncodedBytes,
+                        requested: expected,
+                    })
+                },
+            ),
             Err(BitpackError::AllocationFailed {
                 target: AllocationTarget::EncodedBytes,
                 requested: expected,
