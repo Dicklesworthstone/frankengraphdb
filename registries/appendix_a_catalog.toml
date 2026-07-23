@@ -40,7 +40,7 @@ occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0
 [target_manifest]
 target_count = 335
 projection_fallback_count = 83
-target_source_assignment_sha256 = "3eb72d9a08d395b0aa0d458b7c2cc571c1845f080f889ba210df14a5fd73add5"
+target_source_assignment_sha256 = "d1f4e7044b85663c9c4cd3d91f8ebf71b3ceeaa47d343af9d4e260e93d83688a"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -915,7 +915,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:export-leaf"
 object_kind = 0x0295
 name = "ExportLeaf"
-status = "active"
+status = "reserved"
 construction_order = 16
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -926,7 +926,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-authority-configuration-evidence"
 object_kind = 0x03ad
 name = "RemoteAuthorityConfigurationEvidence"
-status = "active"
+status = "reserved"
 construction_order = 14
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -937,7 +937,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-payload-availability-evidence"
 object_kind = 0x03b2
 name = "RemotePayloadAvailabilityEvidence"
-status = "active"
+status = "reserved"
 construction_order = 18
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -948,7 +948,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-release-summary-entry"
 object_kind = 0x03b3
 name = "RemoteReleaseSummaryEntry"
-status = "active"
+status = "reserved"
 construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -959,7 +959,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-retention-ack-publish-record"
 object_kind = 0x03b4
 name = "RemoteRetentionAckPublishRecord"
-status = "active"
+status = "reserved"
 construction_order = 38
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -970,7 +970,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-retention-consume-ack-record"
 object_kind = 0x03b5
 name = "RemoteRetentionConsumeAckRecord"
-status = "active"
+status = "reserved"
 construction_order = 42
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -981,7 +981,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-retention-grant-evidence"
 object_kind = 0x03b7
 name = "RemoteRetentionGrantEvidence"
-status = "active"
+status = "reserved"
 construction_order = 24
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -992,7 +992,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-retention-grant-record"
 object_kind = 0x03b8
 name = "RemoteRetentionGrantRecord"
-status = "active"
+status = "reserved"
 construction_order = 22
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -1003,7 +1003,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-retention-grant-spec"
 object_kind = 0x03b9
 name = "RemoteRetentionGrantSpec"
-status = "active"
+status = "reserved"
 construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -1014,7 +1014,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-retention-release-ack-certificate"
 object_kind = 0x03bc
 name = "RemoteRetentionReleaseAckCertificate"
-status = "active"
+status = "reserved"
 construction_order = 36
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -1025,7 +1025,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-retention-release-apply-spec"
 object_kind = 0x03bd
 name = "RemoteRetentionReleaseApplySpec"
-status = "active"
+status = "reserved"
 construction_order = 32
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -1036,7 +1036,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-retention-release-request-certificate"
 object_kind = 0x03be
 name = "RemoteRetentionReleaseRequestCertificate"
-status = "active"
+status = "reserved"
 construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -1047,7 +1047,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-retention-release-request-record"
 object_kind = 0x03bf
 name = "RemoteRetentionReleaseRequestRecord"
-status = "active"
+status = "reserved"
 construction_order = 28
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -1058,7 +1058,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-retention-release-request-spec"
 object_kind = 0x03c0
 name = "RemoteRetentionReleaseRequestSpec"
-status = "active"
+status = "reserved"
 construction_order = 26
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -1069,7 +1069,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:remote-retention-release-tombstone"
 object_kind = 0x03c1
 name = "RemoteRetentionReleaseTombstone"
-status = "active"
+status = "reserved"
 construction_order = 34
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -1080,7 +1080,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:role-transition-activation-state"
 object_kind = 0x041e
 name = "RoleTransitionActivationState"
-status = "active"
+status = "reserved"
 construction_order = 44
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -1091,7 +1091,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:root-authority-trust-artifact"
 object_kind = 0x042b
 name = "RootAuthorityTrustArtifact"
-status = "active"
+status = "reserved"
 construction_order = 12
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -1102,7 +1102,7 @@ slice_id = "a01"
 row_id = "a01:logical-kind:root-authority-trust-body"
 object_kind = 0x042c
 name = "RootAuthorityTrustBody"
-status = "active"
+status = "reserved"
 construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
@@ -1593,7 +1593,7 @@ row_id = "a01:wire-type:applied-abort-ref"
 wire_type_id = 0x0012
 name = "AppliedAbortRef"
 kind = "union"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family AppliedAbortRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1604,7 +1604,7 @@ row_id = "a01:wire-type:applied-control-ref"
 wire_type_id = 0x0013
 name = "AppliedControlRef"
 kind = "union"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family AppliedControlRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1615,7 +1615,7 @@ row_id = "a01:wire-type:audit-candidate-ref"
 wire_type_id = 0x0014
 name = "AuditCandidateRef"
 kind = "union"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family AuditCandidateRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1626,7 +1626,7 @@ row_id = "a01:wire-type:authority-applied-ref"
 wire_type_id = 0x0015
 name = "AuthorityAppliedRef"
 kind = "union"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family AuthorityAppliedRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1637,7 +1637,7 @@ row_id = "a01:wire-type:certified-remote-strong-ref"
 wire_type_id = 0x0016
 name = "CertifiedRemoteStrongRef"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family CertifiedRemoteStrongRef<T> (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1648,7 +1648,7 @@ row_id = "a01:wire-type:command-ref"
 wire_type_id = 0x0017
 name = "CommandRef"
 kind = "record"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family CommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1659,7 +1659,7 @@ row_id = "a01:wire-type:conditional-coordinate-ref"
 wire_type_id = 0x0018
 name = "ConditionalCoordinateRef"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConditionalCoordinateRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1670,7 +1670,7 @@ row_id = "a01:wire-type:conditional-global-command-ref"
 wire_type_id = 0x0019
 name = "ConditionalGlobalCommandRef"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConditionalGlobalCommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1681,7 +1681,7 @@ row_id = "a01:wire-type:conditional-global-txn-input-ref"
 wire_type_id = 0x001a
 name = "ConditionalGlobalTxnInputRef"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConditionalGlobalTxnInputRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1692,7 +1692,7 @@ row_id = "a01:wire-type:conditional-marker-ref"
 wire_type_id = 0x001b
 name = "ConditionalMarkerRef"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConditionalMarkerRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1703,7 +1703,7 @@ row_id = "a01:wire-type:conditional-shard-command-ref"
 wire_type_id = 0x001c
 name = "ConditionalShardCommandRef"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConditionalShardCommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1714,7 +1714,7 @@ row_id = "a01:wire-type:consensus-domain"
 wire_type_id = 0x001d
 name = "ConsensusDomain"
 kind = "record"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConsensusDomain (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1725,7 +1725,7 @@ row_id = "a01:wire-type:placement-descriptor-without-id"
 wire_type_id = 0x001e
 name = "PlacementDescriptorWithoutId"
 kind = "record"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family PlacementDescriptorWithoutId (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1736,7 +1736,7 @@ row_id = "a01:wire-type:remote-object-identity"
 wire_type_id = 0x001f
 name = "RemoteObjectIdentity"
 kind = "record"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family RemoteObjectIdentity (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1747,7 +1747,7 @@ row_id = "a01:wire-type:strong-ciphertext-ref"
 wire_type_id = 0x0020
 name = "StrongCiphertextRef"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family StrongCiphertextRef<T> (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1758,7 +1758,7 @@ row_id = "a01:wire-type:strong-command-ref"
 wire_type_id = 0x0021
 name = "StrongCommandRef"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family StrongCommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1769,7 +1769,7 @@ row_id = "a01:wire-type:strong-global-command-ref"
 wire_type_id = 0x0022
 name = "StrongGlobalCommandRef"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family StrongGlobalCommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1780,7 +1780,7 @@ row_id = "a01:wire-type:strong-shard-command-ref"
 wire_type_id = 0x0023
 name = "StrongShardCommandRef"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family StrongShardCommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1791,7 +1791,7 @@ row_id = "a01:wire-type:weak-global-command-identity"
 wire_type_id = 0x0024
 name = "WeakGlobalCommandIdentity"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family WeakGlobalCommandIdentity (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1802,7 +1802,7 @@ row_id = "a01:wire-type:weak-marker-identity"
 wire_type_id = 0x0025
 name = "WeakMarkerIdentity"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family WeakMarkerIdentity (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1813,7 +1813,7 @@ row_id = "a01:wire-type:weak-shard-command-identity"
 wire_type_id = 0x0026
 name = "WeakShardCommandIdentity"
 kind = "reference_wrapper"
-status = "active"
+status = "reserved"
 encoding_context = "Appendix A reference-semantics family WeakShardCommandIdentity (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 4096
@@ -1887,7 +1887,7 @@ row_id = "a10:field:logical-command-record-command"
 containing_schema = "LogicalCommandRecord"
 field_tag = 0x0003
 stable_name = "command"
-exact_wire_type = "CommandRef"
+exact_wire_type = "LogicalCommandInputRef"
 cardinality = "one"
 identity_class = "logical"
 reference_semantics = "strong"
@@ -2899,7 +2899,7 @@ reference_semantics = "none"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "embedded canonical configuration bytes self-bind the complete domain; import byte-matches it before use (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 96
 
 [[field]]
@@ -2915,7 +2915,7 @@ reference_semantics = "weak_digest"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "recomputed from the embedded canonical configuration bytes on import; identity of an authority-group object, never a local reachability edge (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -2931,7 +2931,7 @@ reference_semantics = "weak_digest"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "recomputed from the embedded canonical configuration bytes on import; comparison only (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -2948,7 +2948,7 @@ reference_semantics = "none"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "embedded canonical bytes recompute the OID/digest and self-bind the complete domain; retained for the life of the evidence leaf (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
@@ -2964,7 +2964,7 @@ reference_semantics = "none"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "authority-log position at which the configuration was adopted; comparison/audit scalar (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -2980,7 +2980,7 @@ reference_semantics = "weak_digest"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "commitment to the authority-log prefix at adoption; comparison only, never retains authority history (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
 
@@ -2997,7 +2997,7 @@ reference_semantics = "none"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "current-member verification keys; current-member signatures alone are never a trust root — validity flows only from the trust_transition chain (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 65536
 
 [[field]]
@@ -3013,7 +3013,7 @@ reference_semantics = "weak_digest"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "digest of the registered payload predicate this configuration commits to; comparison only (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
 
@@ -3030,7 +3030,7 @@ reference_semantics = "none"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "closed union Genesis|Successor|ValidatedCheckpointSuccessor; the transition proves adoption from an already trusted root artifact, predecessor, or anchor — current-member signatures alone are never a trust root (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
@@ -3046,7 +3046,7 @@ reference_semantics = "none"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "declared minimum retention floor for this configuration evidence; the imported leaf is the consumer's trust basis and is not cut below this floor (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3062,7 +3062,7 @@ reference_semantics = "none"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "signer-set epoch under which configuration_quorum_signatures were produced (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3078,7 +3078,7 @@ reference_semantics = "none"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "current-member quorum over the evidence; current-member signatures alone are never a trust root — they bind, the transition chain authorizes (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 65536
 
 [[field]]
@@ -3095,7 +3095,7 @@ target_schema_id = "RemoteAuthorityConfigurationEvidence"
 construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "consumer-local strong; configuration evidence leaf retained while this evidence is reachable (a01:1400)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3112,7 +3112,7 @@ target_schema_id = "ExportLeaf"
 construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "consumer-local strong to the imported certificate leaf; the authority ledger separately roots the real certificate/receipts (a01:1400)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3128,7 +3128,7 @@ reference_semantics = "none"
 construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "typed remote identity commitment; never decoded as a local StrongRef (a01:1400)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 128
 
 [[field]]
@@ -3144,7 +3144,7 @@ reference_semantics = "weak_digest"
 construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "closure commitment; cross-checks the remote closure, NOT a local reachability edge (a01:1400)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -3161,7 +3161,7 @@ reference_semantics = "weak_digest"
 construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "commitment to the availability predicate the certificate proves; cross-check only (a01:1400)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -3178,7 +3178,7 @@ reference_semantics = "weak_digest"
 construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "commitment to the authority-rooted receipt set; the authority ledger roots the real receipts (a01:1400)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -3195,7 +3195,7 @@ reference_semantics = "none"
 construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "verifier-relevant coverage summary scalar bundle; lives/dies with the evidence leaf (a01:1400)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 4096
 
 [[field]]
@@ -3211,7 +3211,7 @@ reference_semantics = "none"
 construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "verifier-relevant failure-domain set summary; lives/dies with the evidence leaf (a01:1400)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 4096
 
 [[field]]
@@ -3227,7 +3227,7 @@ reference_semantics = "none"
 construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "authority-side retention floor scalar carried for consumer verification (a01:1400)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3243,7 +3243,7 @@ reference_semantics = "none"
 construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "epoch under which the authority quorum signed; validated against configuration evidence (a01:1400)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3259,7 +3259,7 @@ reference_semantics = "none"
 construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "authority quorum signature set; authenticated before the wrapper may publish (a01:1400, a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 65536
 
 [[field]]
@@ -3275,7 +3275,7 @@ reference_semantics = "none"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "full ConsensusDomain per the shorthand law: cross-group schemas never serialize the scalar alone (a01:1396); retained under the permanent release-proof floor (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 128
 
 [[field]]
@@ -3291,7 +3291,7 @@ reference_semantics = "none"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "full ConsensusDomain per the shorthand law (a01:1396); retained under the permanent release-proof floor (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 128
 
 [[field]]
@@ -3307,7 +3307,7 @@ reference_semantics = "none"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "derived grant identity (a01:1402); summary map component key; collision with nonidentical bytes fails closed"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -3323,7 +3323,7 @@ reference_semantics = "none"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the released target (a01:1396); proves release without retaining anything"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 256
 
 [[field]]
@@ -3339,7 +3339,7 @@ reference_semantics = "none"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "release-handshake nonce byte-matched across transitions 1-6 (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -3355,7 +3355,7 @@ reference_semantics = "none"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the archive-backed ack leaf (a01:1396); the leaf itself is pinned by the publish record's ack_leaf_ref, not by this entry (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 256
 
 [[field]]
@@ -3371,7 +3371,7 @@ reference_semantics = "weak_digest"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only commitment to the ack certificate/leaf bytes (a01:1404); never a reachability edge (a01:1394)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -3388,7 +3388,7 @@ reference_semantics = "none"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "authority apply order of the release; matches tombstone and ack certificate (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3404,7 +3404,7 @@ reference_semantics = "none"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "authority order of the later publish control that installed this entry (a01:1404); strictly after authority_order_index"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3420,7 +3420,7 @@ reference_semantics = "none"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "capability-safe permanent floor below which summary and ack leaf stay provable; proving release requires no new releasable grant (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3437,7 +3437,7 @@ target_schema_id = "RemoteRetentionReleaseAckCertificate"
 construction_order = 38
 role_predicate = "true"
 retention_and_cut_rule = "retained under the permanent release-proof floor; proving the old grant released requires no new releasable grant (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3454,7 +3454,7 @@ target_schema_id = "ExportLeaf"
 construction_order = 38
 role_predicate = "true"
 retention_and_cut_rule = "nonrecursive archive-backed ack leaf stays available through the capability-safe permanent release-proof floor (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3470,7 +3470,7 @@ reference_semantics = "none"
 construction_order = 38
 role_predicate = "true"
 retention_and_cut_rule = "key of the atomically installed RemoteReleaseSummaryEntry in RemoteReleaseSummaryRoot (a01:1404); release maps are keyed by (authority_domain, grant_id) and collide fail-closed (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -3487,7 +3487,7 @@ target_schema_id = "ExportLeaf"
 construction_order = 42
 role_predicate = "true"
 retention_and_cut_rule = "consumer-local strong ref to the imported nonrecursive ack leaf (imported without a CRSR, a01:1404); the leaf contains no ordinary strong edge into its source group (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3504,7 +3504,7 @@ target_schema_id = "RemoteRetentionNoOldGrantProof"
 construction_order = 42
 role_predicate = "true"
 retention_and_cut_rule = "strong edge to the recheck proof that the current complete consumer root contains no old-grant ref (a01:1404); gates retiring request/grant evidence after the consumer checkpoint floor"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3520,7 +3520,7 @@ reference_semantics = "none"
 construction_order = 42
 role_predicate = "true"
 retention_and_cut_rule = "correlates the consumer's consume-ack with the authority's RemoteReleaseSummaryEntry key (a01:1404); comparison only, no cross-group edge"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -3537,7 +3537,7 @@ target_schema_id = "RemoteAuthorityConfigurationEvidence"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "RemoteConfigurationRef means a consumer-local StrongRef<RemoteAuthorityConfigurationEvidence> (a01:1398); retains the trust evidence while the grant evidence is retained"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3553,7 +3553,7 @@ reference_semantics = "none"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "comparison identity of the authority-side grant record; the authority ledger, not the evidence, owns the remote target (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3569,7 +3569,7 @@ reference_semantics = "none"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "consumer map key component (authority_domain,grant_id); nonidentical-byte collision fails closed (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -3586,7 +3586,7 @@ reference_semantics = "none"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "byte-matched against the grant_id derivation tuple on import (a01:1402); lives/dies with the evidence leaf"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 64
 
 [[field]]
@@ -3602,7 +3602,7 @@ reference_semantics = "none"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "comparison identity of the granted remote target; never a local reachability edge (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3618,7 +3618,7 @@ reference_semantics = "none"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "must byte-match the authority-side closure commitment; consumer publishes the wrapper only after byte-matching both complete domains (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -3636,7 +3636,7 @@ target_schema_id = "RemotePayloadAvailabilityEvidence"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "consumer-local leaf ref (a01:1400,1402); every StrongRef inside the evidence targets a complete consumer-local leaf, never the authority group (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3652,7 +3652,7 @@ reference_semantics = "none"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "authority ordering scalar preserved for verification; lives/dies with the evidence leaf (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3668,7 +3668,7 @@ reference_semantics = "none"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "authority floor scalar copied from the grant spec; lives/dies with the evidence leaf (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3684,7 +3684,7 @@ reference_semantics = "none"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "lets the consumer recompute grant_id from the derivation tuple (a01:1402); lives/dies with the evidence leaf"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -3700,7 +3700,7 @@ reference_semantics = "none"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "binds signatures to the authority configuration epoch evidenced by authority_configuration_evidence_ref (a01:1398,1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3716,7 +3716,7 @@ reference_semantics = "none"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "authority quorum signature set over the evidence transcript; consumer authenticates all leaves before publishing the wrapper (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 65536
 
 [[field]]
@@ -3733,7 +3733,7 @@ target_schema_id = "RemoteRetentionGrantSpec"
 construction_order = 22
 role_predicate = "true"
 retention_and_cut_rule = "record roots the spec (and via it the exact target closure) in RemoteRetentionObligationRoot until release apply removes the active grant; tombstone carries no strong edge to it (a01:1402,1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3749,7 +3749,7 @@ reference_semantics = "none"
 construction_order = 22
 role_predicate = "true"
 retention_and_cut_rule = "created Active by authority apply (a01:1402); the active grant record is removed (not transitioned in place) by release apply step 3 (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 1
 
 [[field]]
@@ -3765,7 +3765,7 @@ reference_semantics = "none"
 construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "derived H(\"fgdb:remote-grant:v1\", authority_domain, consumer_domain, target_identity, grant_nonce); maps keyed by (authority_domain,grant_id); nonidentical-byte collision fails closed (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -3782,7 +3782,7 @@ reference_semantics = "none"
 construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "grant_id derivation input and map-key component (a01:1402); lives/dies with the spec object"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 64
 
 [[field]]
@@ -3798,7 +3798,7 @@ reference_semantics = "none"
 construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "grant_id derivation input (a01:1402); lives/dies with the spec object"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 64
 
 [[field]]
@@ -3814,7 +3814,7 @@ reference_semantics = "none"
 construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "comparison identity paired exactly with target_ref (a01:1402); grant_id derivation input; never a reachability edge"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3830,7 +3830,7 @@ reference_semantics = "none"
 construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "commitment to the exact target closure rooted by the grant record (a01:1402); byte-matched across grant/evidence copies"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -3848,7 +3848,7 @@ target_schema_id = "PayloadAvailabilityCertificate"
 construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "authority-local availability certificate pinned by the grant input; the authority ledger separately roots the real certificate/receipts (a01:1400,1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3864,7 +3864,7 @@ reference_semantics = "none"
 construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "floor scalar copied into the exported evidence; lives/dies with the spec object (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3880,7 +3880,7 @@ reference_semantics = "none"
 construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "grant_id derivation input; distinguishes otherwise-identical grants on the same target (a01:1402)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -3897,7 +3897,7 @@ target_schema_id = "RemoteRetentionReleaseTombstone"
 construction_order = 36
 role_predicate = "true"
 retention_and_cut_rule = "strong edge to the durable release fact; certificate created only after that applied root (a01:1404); export projection replaces it with a remote identity (a01:1400)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -3913,7 +3913,7 @@ reference_semantics = "none"
 construction_order = 36
 role_predicate = "true"
 retention_and_cut_rule = "derived grant identity H(\"fgdb:remote-grant:v1\", authority_domain, consumer_domain, target_identity, grant_nonce) (a01:1402); collision with nonidentical bytes fails closed"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -3929,7 +3929,7 @@ reference_semantics = "none"
 construction_order = 36
 role_predicate = "true"
 retention_and_cut_rule = "indivisible consumer identity in a signed cross-group transcript; never serialized as a bare scalar (a01:1396)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 128
 
 [[field]]
@@ -3945,7 +3945,7 @@ reference_semantics = "none"
 construction_order = 36
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the released target; never a local reachability edge (a01:1396)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 256
 
 [[field]]
@@ -3961,7 +3961,7 @@ reference_semantics = "none"
 construction_order = 36
 role_predicate = "true"
 retention_and_cut_rule = "release-handshake nonce byte-matched against the tombstone and request (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -3977,7 +3977,7 @@ reference_semantics = "none"
 construction_order = 36
 role_predicate = "true"
 retention_and_cut_rule = "authority apply order of the release fact the quorum attests; matches the tombstone's index (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -3993,7 +3993,7 @@ reference_semantics = "weak_digest"
 construction_order = 36
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only commitment to the authority state root under which the release applied (a01:1404); never a reachability edge (a01:1394)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -4010,7 +4010,7 @@ reference_semantics = "none"
 construction_order = 36
 role_predicate = "true"
 retention_and_cut_rule = "quorum signature set over the certificate transcript; current-member signatures alone are never a trust root (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 65536
 
 [[field]]
@@ -4027,7 +4027,7 @@ target_schema_id = "RemoteRetentionGrantRecord"
 construction_order = 32
 role_predicate = "true"
 retention_and_cut_rule = "release command input; retained only until the release command/log's verified cut (a01:1404); apply removes the active grant it names"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -4044,7 +4044,7 @@ target_schema_id = "ExportLeaf"
 construction_order = 32
 role_predicate = "true"
 retention_and_cut_rule = "strong ref to the imported nonrecursive request leaf (a01:1404); leaf contains no ordinary strong edge into its source group (a01:1404); input retained only until the release command/log's verified cut"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -4061,7 +4061,7 @@ target_schema_id = "RemoteRetentionGrantRecord"
 construction_order = 32
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only guard: apply fails closed unless the active grant record's canonical digest matches (a01:1404); never a reachability edge (a01:1394)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -4078,7 +4078,7 @@ reference_semantics = "none"
 construction_order = 32
 role_predicate = "true"
 retention_and_cut_rule = "authority-verified floor carried from the certified consumer no-reference state (a01:1404); input retained only until the release command/log's verified cut"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -4094,7 +4094,7 @@ reference_semantics = "none"
 construction_order = 32
 role_predicate = "true"
 retention_and_cut_rule = "optional proof that a distinct successor grant took over the target (a01:1404 transitions 1-3 successor path); input retained only until the release command/log's verified cut"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 4096
 
 [[field]]
@@ -4111,7 +4111,7 @@ target_schema_id = "RemoteRetentionReleaseRequestRecord"
 construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "consumer-quorum-local strong edge; the generated ExportLeaf replaces it with a remote identity so no imported leaf carries a strong edge into its source group (a01:1404 step 2)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -4127,7 +4127,7 @@ reference_semantics = "none"
 construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "restated after the step-2 root recheck; certified copy of the spec's commitment (a01:1404 step 2)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -4144,7 +4144,7 @@ reference_semantics = "none"
 construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "certified no-reference floor the authority later verifies as verified_consumer_no_reference_floor in step 3 (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -4161,7 +4161,7 @@ reference_semantics = "none"
 construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "digest-only successor naming (deliberately NOT a strong ref: the exportable certificate must not root the successor grant); present only when the spec carried successor_grant_evidence_ref (a01:1404 steps 1-2)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
 
@@ -4178,7 +4178,7 @@ reference_semantics = "none"
 construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "byte-matches the spec's release_nonce; binds the certificate to exactly one release attempt across the six-transition handshake (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -4194,7 +4194,7 @@ reference_semantics = "none"
 construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "consumer quorum signature set over the certificate transcript; preserved as a verifier-relevant scalar in the ExportLeaf projection (a01:1400,1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 65536
 
 [[field]]
@@ -4211,7 +4211,7 @@ target_schema_id = "RemoteRetentionReleaseRequestSpec"
 construction_order = 28
 role_predicate = "true"
 retention_and_cut_rule = "record roots its spec while the release is in flight; request evidence retirable only after ConsumeReleaseAck and its checkpoint floor (a01:1404 steps 1,6)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -4227,7 +4227,7 @@ reference_semantics = "none"
 construction_order = 28
 role_predicate = "true"
 retention_and_cut_rule = "commitment that no consumer reference to the old grant remains below the floor; ReleaseRequested typestate cannot acquire or create another local ref under the old grant (a01:1404 step 1)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -4245,7 +4245,7 @@ target_schema_id = "RemoteRetentionGrantEvidence"
 construction_order = 26
 role_predicate = "true"
 retention_and_cut_rule = "the grant leaf is retained through the release request (a01:1404 step 1); evidence retirable only after ConsumeReleaseAck and its checkpoint floor (a01:1404 step 6)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -4261,7 +4261,7 @@ reference_semantics = "weak_digest"
 construction_order = 26
 role_predicate = "true"
 retention_and_cut_rule = "weak identity of the consumer release state; never a reachability edge, never retains it (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
 
@@ -4278,7 +4278,7 @@ reference_semantics = "none"
 construction_order = 26
 role_predicate = "true"
 retention_and_cut_rule = "apply rechecks the complete consumer root against this commitment before installing ReleaseRequested (a01:1404 step 1)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -4295,7 +4295,7 @@ reference_semantics = "none"
 construction_order = 26
 role_predicate = "true"
 retention_and_cut_rule = "consumer floor under which the release request is stated; lives/dies with the spec object (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -4312,7 +4312,7 @@ target_schema_id = "RemoteRetentionGrantEvidence"
 construction_order = 26
 role_predicate = "true"
 retention_and_cut_rule = "optional handover: any concurrent/new use must first acquire and publish a distinct successor grant before release of the old one (a01:1404 step 1)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -4328,7 +4328,7 @@ reference_semantics = "none"
 construction_order = 26
 role_predicate = "true"
 retention_and_cut_rule = "release-instance nonce carried unchanged through certificate, tombstone, and ack (a01:1404); binds all six transitions to one release attempt"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -4344,7 +4344,7 @@ reference_semantics = "none"
 construction_order = 34
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the removed grant record; never a local reachability edge (a01:1396); no strong edge by design (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 256
 
 [[field]]
@@ -4361,7 +4361,7 @@ target_schema_id = "RemoteRetentionGrantSpec"
 construction_order = 34
 role_predicate = "true"
 retention_and_cut_rule = "comparison only (a01:1394); pins the released grant's spec without retaining it; no strong edge to the spec by design (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
 
@@ -4378,7 +4378,7 @@ reference_semantics = "none"
 construction_order = 34
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the released target; never a local reachability edge (a01:1396); no strong edge to the target by design (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 256
 
 [[field]]
@@ -4394,7 +4394,7 @@ reference_semantics = "none"
 construction_order = 34
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the consumer's release-request certificate (a01:1396); the imported leaf itself is retained only by the release command/log until its verified cut (a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 256
 
 [[field]]
@@ -4410,7 +4410,7 @@ reference_semantics = "none"
 construction_order = 34
 role_predicate = "true"
 retention_and_cut_rule = "release-handshake nonce carried unchanged from the consumer's request (a01:1404); byte-matched across transitions 1-6"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -4427,7 +4427,7 @@ target_schema_id = "RemoteRetentionReleaseApplySpec"
 construction_order = 34
 role_predicate = "true"
 retention_and_cut_rule = "comparison only (a01:1394); pins the apply command input WITHOUT a strong edge to the apply command (a01:1404); the command/log retains the input only until its verified cut"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
 
@@ -4444,7 +4444,7 @@ reference_semantics = "none"
 construction_order = 34
 role_predicate = "true"
 retention_and_cut_rule = "authority-assigned apply order of the release; identity/provenance scalar, cites assigned order without retaining the command (a01:1394, a01:1404)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
@@ -4461,7 +4461,7 @@ target_schema_id = "RootAuthorityTrustBody"
 construction_order = 12
 role_predicate = "true"
 retention_and_cut_rule = "strong; the signature-free body exists before the referring artifact (child-before-parent, a01:1412)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -4477,7 +4477,7 @@ reference_semantics = "weak_digest"
 construction_order = 12
 role_predicate = "true"
 retention_and_cut_rule = "BodyDigest<RootAuthorityTrustBody> copy; each root signature signs the domain-separated tuple {schema/tag,authority_domain,artifact_kind,body_digest,externally_pinned_root_policy_id} (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -4494,7 +4494,7 @@ reference_semantics = "none"
 construction_order = 12
 role_predicate = "true"
 retention_and_cut_rule = "canonically sorted root-authority signatures; verified only under the externally resolved pinned policy/key set/threshold, never under keys embedded in the object (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 65536
 
 [[field]]
@@ -4510,7 +4510,7 @@ reference_semantics = "none"
 construction_order = 12
 role_predicate = "true"
 retention_and_cut_rule = "TranscriptDigest<RootAuthorityTrustArtifact>; artifact transcript includes the body digest and canonically sorted signatures and excludes exactly signed_transcript_digest (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "transcript"
 transcript_recipe = "domain-separated artifact transcript over {preceding artifact fields incl. body_digest and canonically sorted signature set}, excluding exactly signed_transcript_digest (a01:1398)"
@@ -4528,7 +4528,7 @@ reference_semantics = "none"
 construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "complete domain the trust root vouches for; each root signature signs a tuple that includes it (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 96
 
 [[field]]
@@ -4544,7 +4544,7 @@ reference_semantics = "none"
 construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "closed payload-free kind union FreshShardedGenesis|CertifiedLocalRoleTransition; included in every root signature tuple (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
@@ -4560,7 +4560,7 @@ reference_semantics = "none"
 construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "canonical genesis/transition bytes remain strongly retained and independently reverified (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
@@ -4576,7 +4576,7 @@ reference_semantics = "weak_digest"
 construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "identity of the configuration the trust root endorses; byte-matched against the evidence's recomputed OID, never followed locally (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -4592,7 +4592,7 @@ reference_semantics = "weak_digest"
 construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "canonical digest of the endorsed configuration; comparison only (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -4609,7 +4609,7 @@ reference_semantics = "none"
 construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "validation resolves the deployment's externally pinned policy FIRST and byte-matches this id; keys embedded in the object can never select their own trust root (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 
 [[field]]
@@ -4625,7 +4625,7 @@ reference_semantics = "weak_digest"
 construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "byte-matched against the externally resolved key set digest before any signature verification; policy evidence stays strongly retained and independently reverified (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
 
@@ -4642,7 +4642,7 @@ reference_semantics = "none"
 construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "signature threshold; byte-matched against the externally resolved policy threshold before verification (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 2
 
 [[field]]
@@ -4658,7 +4658,7 @@ reference_semantics = "none"
 construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "continuity commitment binding the source identity (genesis) or the certified transition lineage; comparison input, not reachability (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
 
@@ -4675,7 +4675,7 @@ reference_semantics = "none"
 construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "BodyDigest<RootAuthorityTrustBody>; registered body transcript includes every preceding field and excludes exactly body_digest (a01:1398)"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 32
 digest_class = "body"
 bd_domain_separator = "fgdb:body:root-authority-trust-body:v1"
@@ -5120,7 +5120,7 @@ tag_wire_type = "u16"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RemoteAuthorityConfigurationEvidence"]
 role_predicate = "true"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
@@ -5134,7 +5134,7 @@ tag_wire_type = "u16"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RootAuthorityTrustBody"]
 role_predicate = "true"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
@@ -5149,7 +5149,7 @@ stable_name = "genesis"
 payload_kind = "inline-record"
 payload_sha256 = "7aface9d4d3f6e04d01529994ec08c221c7b909ed468c5e268fefda3d856c063"
 role_predicate = "true"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
@@ -5164,7 +5164,7 @@ stable_name = "successor"
 payload_kind = "inline-record"
 payload_sha256 = "160d187b6b8852d0adfc861629795e136d326a46dc5ee22281fa61d39fb1b392"
 role_predicate = "true"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
@@ -5179,7 +5179,7 @@ stable_name = "validated_checkpoint_successor"
 payload_kind = "inline-record"
 payload_sha256 = "3a2d87d0f381667522afda570d38ae9c32537aede9bb42bee73ef3dbb8d5a749"
 role_predicate = "true"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
@@ -5193,7 +5193,7 @@ source_arm_name = "FreshShardedGenesis"
 stable_name = "fresh_sharded_genesis"
 payload_kind = "unit"
 role_predicate = "true"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
@@ -5207,12 +5207,12 @@ source_arm_name = "CertifiedLocalRoleTransition"
 stable_name = "certified_local_role_transition"
 payload_kind = "unit"
 role_predicate = "true"
-version_status = "active"
+version_status = "reserved"
 max_size_bytes = 16777216
 [[reference_union]]
 slice_id = "a10"
-row_id = "a10:reference-union:logical-command-record-command-ref"
-union_name = "CommandRef"
+row_id = "a10:reference-union:logical-command-record-logical-command-input-ref"
+union_name = "LogicalCommandInputRef"
 containing_schema = "LogicalCommandRecord"
 field_tag = 0x0003
 role = "local"
@@ -5251,8 +5251,8 @@ role = "local"
 
 [[reference_union_arm]]
 slice_id = "a10"
-row_id = "a10:reference-union-arm:command-ref-commit-command"
-union_name = "CommandRef"
+row_id = "a10:reference-union-arm:logical-command-input-ref-commit-command"
+union_name = "LogicalCommandInputRef"
 containing_schema = "LogicalCommandRecord"
 field_tag = 0x0003
 arm_tag = 0x0001
@@ -5268,8 +5268,8 @@ max_size_bytes = 40
 
 [[reference_union_arm]]
 slice_id = "a10"
-row_id = "a10:reference-union-arm:command-ref-control-command"
-union_name = "CommandRef"
+row_id = "a10:reference-union-arm:logical-command-input-ref-control-command"
+union_name = "LogicalCommandInputRef"
 containing_schema = "LogicalCommandRecord"
 field_tag = 0x0003
 arm_tag = 0x0002
@@ -25961,26 +25961,26 @@ target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
-row_id = "a10:target:reference-union-arm-command-ref-commit-command"
-target_row_id = "a10:reference-union-arm:command-ref-commit-command"
+row_id = "a10:target:reference-union-arm-logical-command-input-ref-commit-command"
+target_row_id = "a10:reference-union-arm:logical-command-input-ref-commit-command"
 slice_id = "a10"
-source_key = "projection|durable_fields|CommandRef.CommitCommand"
+source_key = "projection|durable_fields|LogicalCommandInputRef.CommitCommand"
 target_kind = "reference-union-arm"
 definition_status = "declared"
 
 [[target]]
-row_id = "a10:target:reference-union-arm-command-ref-control-command"
-target_row_id = "a10:reference-union-arm:command-ref-control-command"
+row_id = "a10:target:reference-union-arm-logical-command-input-ref-control-command"
+target_row_id = "a10:reference-union-arm:logical-command-input-ref-control-command"
 slice_id = "a10"
-source_key = "projection|durable_fields|CommandRef.ControlCommand"
+source_key = "projection|durable_fields|LogicalCommandInputRef.ControlCommand"
 target_kind = "reference-union-arm"
 definition_status = "declared"
 
 [[target]]
-row_id = "a10:target:reference-union-logical-command-record-command-ref"
-target_row_id = "a10:reference-union:logical-command-record-command-ref"
+row_id = "a10:target:reference-union-logical-command-record-logical-command-input-ref"
+target_row_id = "a10:reference-union:logical-command-record-logical-command-input-ref"
 slice_id = "a10"
-source_key = "projection|durable_fields|LogicalCommandRecord.CommandRef"
+source_key = "projection|durable_fields|LogicalCommandRecord.LogicalCommandInputRef"
 target_kind = "reference-union"
 definition_status = "declared"
 

@@ -141,7 +141,7 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
     '"target_count":335' \
     '"projection_fallback_count":83' \
-    '"target_source_assignment_sha256":"3eb72d9a08d395b0aa0d458b7c2cc571c1845f080f889ba210df14a5fd73add5"' \
+    '"target_source_assignment_sha256":"d1f4e7044b85663c9c4cd3d91f8ebf71b3ceeaa47d343af9d4e260e93d83688a"' \
     '"outcome":"pass"'; then
   ok "Appendix A target/source assignments are release-pinned"
 else
@@ -687,7 +687,7 @@ awk '
   END {
     print ""
     print "[[reference_union_arm]]"
-    print "union_name = \"CommandRef\""
+    print "union_name = \"LogicalCommandInputRef\""
     print "containing_schema = \"LogicalCommandRecord\""
     print "field_tag = 3"
     print "arm_tag = 3"
@@ -706,6 +706,26 @@ awk '
 expect_identity_violation \
   neg-extra-union-arm registry_assignment_drift durable_fields registry
 assert_only_violation_code neg-extra-union-arm registry_assignment_drift
+
+log "phase 2k1: reference-union name colliding with a reserved wire identity"
+stage_except neg-reference-union-name-collision durable_fields.toml
+awk '
+  $0 == "exact_wire_type = \"LogicalCommandInputRef\"" {
+    print "exact_wire_type = \"CommandRef\""
+    changed++
+    next
+  }
+  $0 == "union_name = \"LogicalCommandInputRef\"" {
+    print "union_name = \"CommandRef\""
+    changed++
+    next
+  }
+  { print }
+  END { if (changed != 4) exit 42 }
+' "$ROOT/registries/durable_fields.toml" \
+  > "$WORK/neg-reference-union-name-collision/registries/durable_fields.toml"
+expect_identity_violation \
+  neg-reference-union-name-collision reference_union_name_collision durable_fields CommandRef
 
 log "phase 2l: reference-union role excluded by its anchor and container"
 stage_except neg-union-role durable_fields.toml
@@ -1437,7 +1457,7 @@ expect_appendix_structural_error \
   neg-appendix-projection-schema catalog_projection_schema logical_object_kinds
 
 # --- Verdict -----------------------------------------------------------------
-log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second,appendix-regenerate-first,appendix-regenerate-second,appendix-regenerate-third}.jsonl"
+log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-reference-union-name-collision,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second,appendix-regenerate-first,appendix-regenerate-second,appendix-regenerate-third}.jsonl"
 log "result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 log "G0 identity e2e: ALL GREEN"

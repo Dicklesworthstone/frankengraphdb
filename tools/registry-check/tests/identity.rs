@@ -248,6 +248,29 @@ fn codes_without_assignment_drift(r: &IdentityRegistries) -> Vec<String> {
         .collect()
 }
 
+fn rename_logical_command_input_union(identity: &mut IdentityRegistries, name: &str) {
+    let (containing_schema, field_tag) = {
+        let union = identity
+            .unions
+            .iter_mut()
+            .find(|union| {
+                union.containing_schema == "LogicalCommandRecord" && union.field_tag == 0x0003
+            })
+            .expect("LogicalCommandRecord.command reference union exists");
+        union.union_name = name.to_owned();
+        for arm in &mut union.arms {
+            arm.union_name = name.to_owned();
+        }
+        (union.containing_schema.clone(), union.field_tag)
+    };
+    identity
+        .fields
+        .iter_mut()
+        .find(|field| field.containing_schema == containing_schema && field.field_tag == field_tag)
+        .expect("LogicalCommandRecord.command anchor exists")
+        .exact_wire_type = name.to_owned();
+}
+
 // ---------------------------------------------------------------------------
 // Baseline.
 // ---------------------------------------------------------------------------
@@ -2229,9 +2252,10 @@ fn idr_schema_valid_all_six() {
         "prebootstrap artifact classes seeded"
     );
     assert!(r.fields.len() >= 40, "durable_fields cross-index seeded");
-    // The four §5.1-required generated-union exemplars are present.
+    // The five §5.1-required generated-union exemplars are present.
     let unions: BTreeSet<&str> = r.unions.iter().map(|u| u.union_name.as_str()).collect();
     for required in [
+        "LogicalCommandInputRef",
         "LocalCommandInputRef",
         "MetaAppliedResultRef",
         "ShardProtocolEvidenceRef",
@@ -2242,6 +2266,22 @@ fn idr_schema_valid_all_six() {
             "missing required union exemplar {required}"
         );
     }
+    assert!(
+        r.wire.iter().any(|wire| wire.name == "CommandRef"),
+        "A01's bare CommandRef identity must remain a registered wire type"
+    );
+    assert!(
+        !unions.contains("CommandRef"),
+        "CommandRef must not also resolve as a generated reference union"
+    );
+    let command_field = r
+        .fields
+        .iter()
+        .find(|field| {
+            field.containing_schema == "LogicalCommandRecord" && field.field_tag == 0x0003
+        })
+        .expect("LogicalCommandRecord.command field exists");
+    assert_eq!(command_field.exact_wire_type, "LogicalCommandInputRef");
 }
 
 #[test]
@@ -2678,6 +2718,70 @@ fn idr_ordinary_union_rejects_wire_type_name_collision() {
 }
 
 #[test]
+fn idr_reference_union_rejects_registered_wire_name_collision_at_every_lifecycle() {
+    for (offset, lifecycle) in ["active", "reserved", "retired"].into_iter().enumerate() {
+        let name = format!("FixtureWireCollision{offset}");
+        let mut identity = real_identity();
+        rename_logical_command_input_union(&mut identity, &name);
+        identity.wire.push(WireType {
+            wire_type_id: 0x7f00 + i64::try_from(offset).expect("fixture offset fits i64"),
+            name,
+            kind: "reference_wrapper".into(),
+            status: lifecycle.into(),
+            containing_union: None,
+            wire_tag: None,
+            encoding_context: "fixture wire/reference namespace collision".into(),
+            allowed_containing_schemas: vec!["*".into()],
+            max_size_bytes: 48,
+        });
+
+        assert_eq!(
+            codes_without_assignment_drift(&identity),
+            vec!["reference_union_name_collision".to_owned()],
+            "{lifecycle} wire assignment did not permanently own its type name"
+        );
+    }
+}
+
+#[test]
+fn idr_reference_union_rejects_builtin_wire_name_collision() {
+    let mut identity = real_identity();
+    rename_logical_command_input_union(&mut identity, "u64");
+
+    assert_eq!(
+        codes_without_assignment_drift(&identity),
+        vec!["reference_union_name_collision".to_owned()],
+    );
+}
+
+#[test]
+fn idr_reference_union_rejects_ordinary_union_name_collision() {
+    let mut identity = ordinary_top_level_union_fixture();
+    let name = identity.ordinary_unions[0].union_name.clone();
+    rename_logical_command_input_union(&mut identity, &name);
+
+    assert_eq!(
+        codes_without_assignment_drift(&identity),
+        vec!["ordinary_union_name_collision".to_owned()],
+    );
+}
+
+#[test]
+fn appendix_a_catalog_propagates_reference_union_name_collision() {
+    let mut catalog = real_appendix_catalog();
+    rename_logical_command_input_union(&mut catalog.identity, "CommandRef");
+
+    let violations = appendix_a::validate_catalog(&catalog);
+    assert!(
+        violations.iter().any(|violation| {
+            violation.code == "projection_reference_union_name_collision"
+                && violation.row_id == "durable_fields::CommandRef"
+        }),
+        "catalog validation did not propagate the identity collision: {violations:?}"
+    );
+}
+
+#[test]
 fn idr_ordinary_union_embedded_field_requires_exact_anchor() {
     let mut identity = ordinary_top_level_union_fixture();
     let field_tag = 0x7ffe;
@@ -2826,6 +2930,23 @@ fn idr_code_space_retired_reuse_fails() {
 #[test]
 fn idr_assignment_history_and_epoch_are_frozen() {
     let r = real_identity();
+    assert_eq!(
+        identity::A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN,
+        "fnv1a64:bdbcdc27ccd92518",
+        "the pre-codec A10 CommandRef erratum witness must remain explicit"
+    );
+    let mut pre_erratum = r.clone();
+    rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
+    let reconstructed_previous_fields_pin = identity::assignment_pins(&pre_erratum)
+        .into_iter()
+        .find(|pin| pin.registry == "durable_fields")
+        .expect("durable-fields assignment pin exists")
+        .actual_pin;
+    assert_eq!(
+        reconstructed_previous_fields_pin,
+        identity::A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN,
+        "the historical witness must reconstruct from the exact pre-erratum namespace"
+    );
     for pin in identity::assignment_pins(&r) {
         assert_eq!(
             pin.actual_epoch, pin.expected_epoch,
@@ -2865,6 +2986,117 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         codes(&missing_arm).contains(&"registry_assignment_drift".to_string()),
         "missing closed-union arm must fail the released manifest"
     );
+}
+
+#[test]
+fn idr_a01_incomplete_activation_cohort_is_reserved() {
+    const INCOMPLETE_LOGICAL_KINDS: [&str; 18] = [
+        "ExportLeaf",
+        "RemoteAuthorityConfigurationEvidence",
+        "RemotePayloadAvailabilityEvidence",
+        "RemoteReleaseSummaryEntry",
+        "RemoteRetentionAckPublishRecord",
+        "RemoteRetentionConsumeAckRecord",
+        "RemoteRetentionGrantEvidence",
+        "RemoteRetentionGrantRecord",
+        "RemoteRetentionGrantSpec",
+        "RemoteRetentionReleaseAckCertificate",
+        "RemoteRetentionReleaseApplySpec",
+        "RemoteRetentionReleaseRequestCertificate",
+        "RemoteRetentionReleaseRequestRecord",
+        "RemoteRetentionReleaseRequestSpec",
+        "RemoteRetentionReleaseTombstone",
+        "RoleTransitionActivationState",
+        "RootAuthorityTrustArtifact",
+        "RootAuthorityTrustBody",
+    ];
+    const INCOMPLETE_FIELD_SCHEMAS: [&str; 16] = [
+        "RemoteAuthorityConfigurationEvidence",
+        "RemotePayloadAvailabilityEvidence",
+        "RemoteReleaseSummaryEntry",
+        "RemoteRetentionAckPublishRecord",
+        "RemoteRetentionConsumeAckRecord",
+        "RemoteRetentionGrantEvidence",
+        "RemoteRetentionGrantRecord",
+        "RemoteRetentionGrantSpec",
+        "RemoteRetentionReleaseAckCertificate",
+        "RemoteRetentionReleaseApplySpec",
+        "RemoteRetentionReleaseRequestCertificate",
+        "RemoteRetentionReleaseRequestRecord",
+        "RemoteRetentionReleaseRequestSpec",
+        "RemoteRetentionReleaseTombstone",
+        "RootAuthorityTrustArtifact",
+        "RootAuthorityTrustBody",
+    ];
+
+    let r = real_identity();
+    let logical_names: BTreeSet<_> = INCOMPLETE_LOGICAL_KINDS.into_iter().collect();
+    let logical: Vec<_> = r
+        .logical
+        .iter()
+        .filter(|row| logical_names.contains(row.name.as_str()))
+        .collect();
+    assert_eq!(logical.len(), 18);
+    assert!(
+        logical.iter().all(|row| row.status == "reserved"),
+        "incomplete A01 logical kinds must not be consumable"
+    );
+
+    let wire: Vec<_> = r
+        .wire
+        .iter()
+        .filter(|row| (0x0012..=0x0026).contains(&row.wire_type_id))
+        .collect();
+    assert_eq!(wire.len(), 21);
+    assert!(
+        wire.iter().all(|row| row.status == "reserved"),
+        "incomplete A01 wire rows must not be consumable"
+    );
+
+    let incomplete_schemas: BTreeSet<_> = INCOMPLETE_FIELD_SCHEMAS.into_iter().collect();
+    let fields: Vec<_> = r
+        .fields
+        .iter()
+        .filter(|row| incomplete_schemas.contains(row.containing_schema.as_str()))
+        .collect();
+    assert_eq!(fields.len(), 109);
+    assert!(
+        fields.iter().all(|row| row.version_status == "reserved"),
+        "incomplete A01 durable fields must not be consumable"
+    );
+
+    let bootstrap_fields: Vec<_> = r
+        .fields
+        .iter()
+        .filter(|row| matches!(row.containing_schema.as_str(), "RootSlot" | "RootBootstrap"))
+        .collect();
+    assert_eq!(bootstrap_fields.len(), 48);
+    assert!(
+        bootstrap_fields
+            .iter()
+            .all(|row| row.version_status == "active"),
+        "source-exact RootSlot and RootBootstrap fields stay active"
+    );
+
+    let unions: Vec<_> = r
+        .ordinary_unions
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.union_name.as_str(),
+                "TrustTransition" | "RootAuthorityTrustArtifactKind"
+            )
+        })
+        .collect();
+    assert_eq!(unions.len(), 2);
+    assert!(
+        unions.iter().all(|row| {
+            row.version_status == "reserved"
+                && row.arms.iter().all(|arm| arm.version_status == "reserved")
+        }),
+        "incomplete A01 ordinary-union closure must stay reserved"
+    );
+    assert_eq!(unions.iter().map(|row| row.arms.len()).sum::<usize>(), 5);
 }
 
 fn codes_of(r: &IdentityRegistries) -> Vec<String> {

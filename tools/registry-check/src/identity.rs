@@ -28,6 +28,7 @@
 //!   union_arm_unresolved    arm target is not a live logical row
 //!   ordinary_union_duplicate_path  two ordinary unions claim one schema path
 //!   ordinary_union_name_collision ordinary/reference union name collision
+//!   reference_union_name_collision reference union shadows another wire type
 //!   ordinary_union_unresolved_schema containing schema has no unique identity class
 //!   ordinary_union_wire_contract_mismatch top-level union/wire cross-index drift
 //!   ordinary_union_container_contract_mismatch open or inconsistent consumer closure
@@ -71,6 +72,15 @@ pub const BUILTIN_WIRE_TYPES: [&str; 11] = [
     "digest256",
     "oid256",
 ];
+
+/// Historical assignment witness before the reviewed A10 `CommandRef`
+/// namespace erratum (fgdb-a01-reference-roots-2k0q.1).
+///
+/// That pin named both A01's bare wire identity and A10's generated strong
+/// reference union `CommandRef`. No codec or user data existed; the erratum
+/// renamed only the generated union to `LogicalCommandInputRef`, without
+/// changing tags, targets, reachability, lifecycle, or encoded representation.
+pub const A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN: &str = "fnv1a64:bdbcdc27ccd92518";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogicalKind {
@@ -1043,12 +1053,12 @@ pub fn ordinary_union_has_top_level_shape(union: &OrdinaryUnion) -> bool {
 /// row, reassigning its code/tag, or silently changing a union arm therefore
 /// fails even when the resulting current snapshot is internally consistent.
 pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
-    const LOGICAL: &str = "fnv1a64:caa2ee7efa13d790";
+    const LOGICAL: &str = "fnv1a64:44afb0196e95f5e4";
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:ca0205ebaac16355";
-    const FIELDS: &str = "fnv1a64:e2a126742dbad980";
+    const WIRE: &str = "fnv1a64:61bc2d4e789894d7";
+    const FIELDS: &str = "fnv1a64:00e2012b688dece0";
 
     let logical = rows_pin(
         r.logical
@@ -2389,6 +2399,16 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 "durable_fields",
                 &u.union_name,
                 "duplicate reference_union name",
+            ));
+        }
+        if BUILTIN_WIRE_TYPES.contains(&u.union_name.as_str())
+            || wire_names.contains(u.union_name.as_str())
+        {
+            out.push(v(
+                "reference_union_name_collision",
+                "durable_fields",
+                &u.union_name,
+                "reference-union name collides with a builtin or registered wire type",
             ));
         }
         // Anchor: the declaring field row must exist and use this union.

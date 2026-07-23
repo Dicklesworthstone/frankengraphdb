@@ -40,10 +40,10 @@ pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (no
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
 pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 335;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "908126ba6a462f7f58d4e0127cdd0e8f63e70f42a63a3dbcadcf8f52e77b7b20";
+    "43d6aee358d18aa517daeb3c7aebc35e63b3b5b1d91b3d338140db60b34a6e4f";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 83;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "3eb72d9a08d395b0aa0d458b7c2cc571c1845f080f889ba210df14a5fd73add5";
+    "d1f4e7044b85663c9c4cd3d91f8ebf71b3ceeaa47d343af9d4e260e93d83688a";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
