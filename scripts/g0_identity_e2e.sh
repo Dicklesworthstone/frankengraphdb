@@ -139,9 +139,9 @@ else
 fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
-    '"target_count":178' \
-    '"projection_fallback_count":81' \
-    '"target_source_assignment_sha256":"d05311237ea0f4da461fdfa63b866d6086d929cf4f211d66a29ea7e53d1414de"' \
+    '"target_count":335' \
+    '"projection_fallback_count":83' \
+    '"target_source_assignment_sha256":"3eb72d9a08d395b0aa0d458b7c2cc571c1845f080f889ba210df14a5fd73add5"' \
     '"outcome":"pass"'; then
   ok "Appendix A target/source assignments are release-pinned"
 else
@@ -166,11 +166,11 @@ APPENDIX_PROJECTION_PASSES=$(awk '
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_closure_checked"' \
     '"reservations":813' \
-    '"existing_reservations":15' \
-    '"reserved_reservations":798' \
+    '"existing_reservations":35' \
+    '"reserved_reservations":778' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":172' \
+    '"targets":335' \
     '"semantic_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \
@@ -186,12 +186,12 @@ fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_completed"' \
     '"slices":21' \
-    '"projection_rows":172' \
+    '"projection_rows":335' \
     '"projection_files":6' \
     '"reservations":813' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":172' \
+    '"targets":335' \
     '"semantic_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \
@@ -230,11 +230,12 @@ else
   die "construction DAG check missing or failed"
 fi
 
-# Freeze the six §5.1 BodyDigest recipe identities.  Counting every
+# Freeze the §5.1 BodyDigest recipe identities.  Counting every
 # digest_verified event is unsound because target, transcript, and
 # weak-identity digests are different identity laws.
 BODY_RECIPES=(
   'AuthorityBindingRecord#body_digest|fnv1a64:2be6808e91bd9d0d'
+  'RootAuthorityTrustBody#body_digest|fnv1a64:1a58c8b267ed37c9'
   'RaftSnapshotLocal#body_digest|fnv1a64:3dedb18b0ac32f0c'
   'RaftSnapshotMeta#body_digest|fnv1a64:59702ceb4c836ec2'
   'RaftSnapshotShard#body_digest|fnv1a64:69bb104a85eb6128'

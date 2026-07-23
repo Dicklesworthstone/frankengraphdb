@@ -1043,12 +1043,12 @@ pub fn ordinary_union_has_top_level_shape(union: &OrdinaryUnion) -> bool {
 /// row, reassigning its code/tag, or silently changing a union arm therefore
 /// fails even when the resulting current snapshot is internally consistent.
 pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
-    const LOGICAL: &str = "fnv1a64:1455c06e68eeebb1";
+    const LOGICAL: &str = "fnv1a64:caa2ee7efa13d790";
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:4575487c148d3c69";
-    const FIELDS: &str = "fnv1a64:bbb76433dd5fa1d6";
+    const WIRE: &str = "fnv1a64:ca0205ebaac16355";
+    const FIELDS: &str = "fnv1a64:e2a126742dbad980";
 
     let logical = rows_pin(
         r.logical

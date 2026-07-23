@@ -161,6 +161,195 @@ allowed_containing_schemas = ["*"]
 max_size_bytes = 16
 
 [[type]]
+wire_type_id = 0x0012
+name = "AppliedAbortRef"
+kind = "union"
+status = "active"
+encoding_context = "Appendix A reference-semantics family AppliedAbortRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0013
+name = "AppliedControlRef"
+kind = "union"
+status = "active"
+encoding_context = "Appendix A reference-semantics family AppliedControlRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0014
+name = "AuditCandidateRef"
+kind = "union"
+status = "active"
+encoding_context = "Appendix A reference-semantics family AuditCandidateRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0015
+name = "AuthorityAppliedRef"
+kind = "union"
+status = "active"
+encoding_context = "Appendix A reference-semantics family AuthorityAppliedRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0016
+name = "CertifiedRemoteStrongRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family CertifiedRemoteStrongRef<T> (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0017
+name = "CommandRef"
+kind = "record"
+status = "active"
+encoding_context = "Appendix A reference-semantics family CommandRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0018
+name = "ConditionalCoordinateRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family ConditionalCoordinateRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0019
+name = "ConditionalGlobalCommandRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family ConditionalGlobalCommandRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x001a
+name = "ConditionalGlobalTxnInputRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family ConditionalGlobalTxnInputRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x001b
+name = "ConditionalMarkerRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family ConditionalMarkerRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x001c
+name = "ConditionalShardCommandRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family ConditionalShardCommandRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x001d
+name = "ConsensusDomain"
+kind = "record"
+status = "active"
+encoding_context = "Appendix A reference-semantics family ConsensusDomain (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x001e
+name = "PlacementDescriptorWithoutId"
+kind = "record"
+status = "active"
+encoding_context = "Appendix A reference-semantics family PlacementDescriptorWithoutId (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x001f
+name = "RemoteObjectIdentity"
+kind = "record"
+status = "active"
+encoding_context = "Appendix A reference-semantics family RemoteObjectIdentity (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0020
+name = "StrongCiphertextRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family StrongCiphertextRef<T> (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0021
+name = "StrongCommandRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family StrongCommandRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0022
+name = "StrongGlobalCommandRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family StrongGlobalCommandRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0023
+name = "StrongShardCommandRef"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family StrongShardCommandRef (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0024
+name = "WeakGlobalCommandIdentity"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family WeakGlobalCommandIdentity (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0025
+name = "WeakMarkerIdentity"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family WeakMarkerIdentity (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
+wire_type_id = 0x0026
+name = "WeakShardCommandIdentity"
+kind = "reference_wrapper"
+status = "active"
+encoding_context = "Appendix A reference-semantics family WeakShardCommandIdentity (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 4096
+
+[[type]]
 wire_type_id = 0x0027
 name = "ServicePromotionExternalOperationKind"
 kind = "discriminant"

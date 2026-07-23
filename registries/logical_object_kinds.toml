@@ -259,3 +259,183 @@ construction_order = 37
 role_predicate = "true"
 max_size_bytes = 1048576
 golden_corpus = "corpus/logical/backup_manifest/"
+
+[[kind]]
+object_kind = 0x0295
+name = "ExportLeaf"
+status = "active"
+construction_order = 16
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/export_leaf/"
+
+[[kind]]
+object_kind = 0x037c
+name = "PayloadAvailabilityCertificate"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/payload_availability_certificate/"
+
+[[kind]]
+object_kind = 0x03ad
+name = "RemoteAuthorityConfigurationEvidence"
+status = "active"
+construction_order = 14
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_authority_configuration_evidence/"
+
+[[kind]]
+object_kind = 0x03b2
+name = "RemotePayloadAvailabilityEvidence"
+status = "active"
+construction_order = 18
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_payload_availability_evidence/"
+
+[[kind]]
+object_kind = 0x03b3
+name = "RemoteReleaseSummaryEntry"
+status = "active"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_release_summary_entry/"
+
+[[kind]]
+object_kind = 0x03b4
+name = "RemoteRetentionAckPublishRecord"
+status = "active"
+construction_order = 38
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_ack_publish_record/"
+
+[[kind]]
+object_kind = 0x03b5
+name = "RemoteRetentionConsumeAckRecord"
+status = "active"
+construction_order = 42
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_consume_ack_record/"
+
+[[kind]]
+object_kind = 0x03b7
+name = "RemoteRetentionGrantEvidence"
+status = "active"
+construction_order = 24
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_grant_evidence/"
+
+[[kind]]
+object_kind = 0x03b8
+name = "RemoteRetentionGrantRecord"
+status = "active"
+construction_order = 22
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_grant_record/"
+
+[[kind]]
+object_kind = 0x03b9
+name = "RemoteRetentionGrantSpec"
+status = "active"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_grant_spec/"
+
+[[kind]]
+object_kind = 0x03ba
+name = "RemoteRetentionNoOldGrantProof"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_no_old_grant_proof/"
+
+[[kind]]
+object_kind = 0x03bc
+name = "RemoteRetentionReleaseAckCertificate"
+status = "active"
+construction_order = 36
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_release_ack_certificate/"
+
+[[kind]]
+object_kind = 0x03bd
+name = "RemoteRetentionReleaseApplySpec"
+status = "active"
+construction_order = 32
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_release_apply_spec/"
+
+[[kind]]
+object_kind = 0x03be
+name = "RemoteRetentionReleaseRequestCertificate"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_release_request_certificate/"
+
+[[kind]]
+object_kind = 0x03bf
+name = "RemoteRetentionReleaseRequestRecord"
+status = "active"
+construction_order = 28
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_release_request_record/"
+
+[[kind]]
+object_kind = 0x03c0
+name = "RemoteRetentionReleaseRequestSpec"
+status = "active"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_release_request_spec/"
+
+[[kind]]
+object_kind = 0x03c1
+name = "RemoteRetentionReleaseTombstone"
+status = "active"
+construction_order = 34
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_release_tombstone/"
+
+[[kind]]
+object_kind = 0x041e
+name = "RoleTransitionActivationState"
+status = "active"
+construction_order = 44
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_transition_activation_state/"
+
+[[kind]]
+object_kind = 0x042b
+name = "RootAuthorityTrustArtifact"
+status = "active"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/root_authority_trust_artifact/"
+
+[[kind]]
+object_kind = 0x042c
+name = "RootAuthorityTrustBody"
+status = "active"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/root_authority_trust_body/"

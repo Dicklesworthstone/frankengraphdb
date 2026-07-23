@@ -232,7 +232,11 @@ max_size_bytes = 127
 
     let mut identity = real_identity();
     identity.fields_epoch = epoch;
-    identity.ordinary_unions = ordinary_unions;
+    // Keep the real ordinary unions so their anchor fields still resolve; the
+    // synthetic fixture union stays at index 0 for the mutation tests.
+    let mut all_unions = ordinary_unions;
+    all_unions.append(&mut identity.ordinary_unions);
+    identity.ordinary_unions = all_unions;
     identity
 }
 
@@ -1455,7 +1459,7 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
             .iter()
             .filter(|row| row.disposition == "existing")
             .count(),
-        15
+        appendix_a::EXPECTED_EXISTING_TYPE_RESERVATION_COUNT
     );
     assert_eq!(
         baseline
@@ -1463,11 +1467,14 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
             .iter()
             .filter(|row| row.disposition == "reserved")
             .count(),
-        798
+        appendix_a::EXPECTED_RESERVED_TYPE_RESERVATION_COUNT
     );
     assert_eq!(baseline.source_symbol_dispositions.len(), 848);
     assert_eq!(baseline.top_level_candidates.len(), 1_229);
-    assert_eq!(baseline.targets.len(), 172);
+    assert_eq!(
+        baseline.targets.len(),
+        appendix_a::EXPECTED_PROJECTION_ROW_COUNT
+    );
     assert_eq!(
         baseline
             .targets
@@ -1476,8 +1483,16 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
             .count(),
         appendix_a::EXPECTED_PROJECTION_FALLBACK_COUNT
     );
-    assert_eq!(baseline.target_manifest.target_count, 172);
-    assert_eq!(baseline.target_manifest.projection_fallback_count, 81);
+    assert_eq!(
+        baseline.target_manifest.target_count,
+        i64::try_from(appendix_a::EXPECTED_PROJECTION_ROW_COUNT)
+            .expect("projection row count fits i64")
+    );
+    assert_eq!(
+        baseline.target_manifest.projection_fallback_count,
+        i64::try_from(appendix_a::EXPECTED_PROJECTION_FALLBACK_COUNT)
+            .expect("projection fallback count fits i64")
+    );
     assert_eq!(
         appendix_a::target_source_assignment_sha256(&baseline.targets),
         appendix_a::EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256
