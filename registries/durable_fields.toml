@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 6
+registry_epoch = 7
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -2904,6 +2904,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "KeyDestroyFloorRef"
+containing_schema = "KeyDestroyFloorRef"
+union_path = "KeyDestroyFloorRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyDestroyProposal"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union]]
 union_name = "NewDatabaseIdentityTargetCreationCommitment"
 containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
 union_path = "NewDatabaseIdentityTargetCreationCommitment"
@@ -2948,6 +2959,32 @@ allowed_containing_schemas = ["ServicePromotionExternalOperationRecord<Local>", 
 role_predicate = "role-local || role-meta"
 version_status = "active"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "KeyDestroyFloorRef"
+containing_schema = "KeyDestroyFloorRef"
+union_path = "KeyDestroyFloorRef"
+arm_tag = 0x0001
+source_arm_name = "Checkpoint"
+stable_name = "Checkpoint"
+payload_kind = "inline-record"
+payload_sha256 = "1ef2f8ee8dcdbbbcd5fd9fb956d1e59d2d8f6302c11c9641ac17aaf5f52e8316"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "KeyDestroyFloorRef"
+containing_schema = "KeyDestroyFloorRef"
+union_path = "KeyDestroyFloorRef"
+arm_tag = 0x0002
+source_arm_name = "Configuration"
+stable_name = "Configuration"
+payload_kind = "inline-record"
+payload_sha256 = "dd6892393874a249fd01e86d8722760a8a2ec9ac1b27d6ce1b8dc610769404fa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[union_arm]]
 union_name = "NewDatabaseIdentityTargetCreationCommitment"

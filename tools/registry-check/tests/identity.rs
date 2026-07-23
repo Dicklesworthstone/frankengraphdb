@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 6
+registry_epoch = 7
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 6);
+    assert_eq!(epoch, 7);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -1950,21 +1950,26 @@ fn appendix_a_wire_backed_union_requires_confirmed_owner_and_exact_arm_set() {
         "an unconfirmed top-level candidate acquired wire-backed ordinary-union authority: {violations:?}"
     );
 
-    let mut missing_arm = real_appendix_catalog();
-    let union = missing_arm
-        .identity
-        .ordinary_unions
-        .iter_mut()
-        .find(|union| union.union_name == "ServicePromotionExternalOperationKind")
-        .expect("Service promotion ordinary union");
-    union.arms.pop().expect("fixture has four source arms");
-    let violations = appendix_a::verify_source(&missing_arm, &source);
-    assert!(
-        violations
-            .iter()
-            .any(|violation| violation.code == "source_union_arm_set_mismatch"),
-        "a missing ordinary-union arm escaped the source bijection: {violations:?}"
-    );
+    for union_name in [
+        "ServicePromotionExternalOperationKind",
+        "KeyDestroyFloorRef",
+    ] {
+        let mut missing_arm = real_appendix_catalog();
+        let union = missing_arm
+            .identity
+            .ordinary_unions
+            .iter_mut()
+            .find(|union| union.union_name == union_name)
+            .expect("source-backed ordinary union fixture exists");
+        union.arms.pop().expect("source-backed union has arms");
+        let violations = appendix_a::verify_source(&missing_arm, &source);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.code == "source_union_arm_set_mismatch"),
+            "a missing {union_name} arm escaped the source bijection: {violations:?}"
+        );
+    }
 
     let mut wrong_wire_source = real_appendix_catalog();
     wrong_wire_source
@@ -2049,39 +2054,45 @@ fn appendix_a_wire_backed_union_requires_confirmed_owner_and_exact_arm_set() {
 }
 
 #[test]
-fn appendix_a_inline_record_union_requires_exact_payload_digest() {
+fn appendix_a_inline_record_unions_require_exact_payload_digests() {
     let source = real_plan_source();
-    let mut wrong_payload = real_appendix_catalog();
-    let arm = wrong_payload
-        .identity
-        .ordinary_unions
-        .iter_mut()
-        .find(|union| union.union_name == "NewDatabaseIdentityTargetCreationCommitment")
-        .expect("new-database target-creation union")
-        .arms
-        .iter_mut()
-        .find(|arm| arm.source_arm_name == "ExternalCas")
-        .expect("ExternalCas arm");
-    let payload_sha256 = arm
-        .payload_sha256
-        .as_mut()
-        .expect("inline-record arm has a payload digest");
-    payload_sha256.replace_range(
-        0..1,
-        if payload_sha256.starts_with('0') {
-            "1"
-        } else {
-            "0"
-        },
-    );
+    for (union_name, arm_name) in [
+        ("NewDatabaseIdentityTargetCreationCommitment", "ExternalCas"),
+        ("KeyDestroyFloorRef", "Checkpoint"),
+        ("KeyDestroyFloorRef", "Configuration"),
+    ] {
+        let mut wrong_payload = real_appendix_catalog();
+        let arm = wrong_payload
+            .identity
+            .ordinary_unions
+            .iter_mut()
+            .find(|union| union.union_name == union_name)
+            .expect("source-backed ordinary union fixture exists")
+            .arms
+            .iter_mut()
+            .find(|arm| arm.source_arm_name == arm_name)
+            .expect("source-backed ordinary union arm fixture exists");
+        let payload_sha256 = arm
+            .payload_sha256
+            .as_mut()
+            .expect("inline-record arm has a payload digest");
+        payload_sha256.replace_range(
+            0..1,
+            if payload_sha256.starts_with('0') {
+                "1"
+            } else {
+                "0"
+            },
+        );
 
-    let violations = appendix_a::verify_source(&wrong_payload, &source);
-    assert!(
-        violations
-            .iter()
-            .any(|violation| violation.code == "source_union_arm_contract_mismatch"),
-        "inline-record payload digest drift escaped source reconciliation: {violations:?}"
-    );
+        let violations = appendix_a::verify_source(&wrong_payload, &source);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.code == "source_union_arm_contract_mismatch"),
+            "{union_name}.{arm_name} payload digest drift escaped source reconciliation: {violations:?}"
+        );
+    }
 }
 
 #[test]
@@ -2936,6 +2947,15 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the pre-codec A10 CommandRef erratum witness must remain explicit"
     );
     let mut pre_erratum = r.clone();
+    let current_union_count = pre_erratum.ordinary_unions.len();
+    pre_erratum
+        .ordinary_unions
+        .retain(|union| union.union_name != "KeyDestroyFloorRef");
+    assert_eq!(
+        pre_erratum.ordinary_unions.len() + 1,
+        current_union_count,
+        "the historical witness must remove exactly the post-erratum A15 union"
+    );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     let reconstructed_previous_fields_pin = identity::assignment_pins(&pre_erratum)
         .into_iter()

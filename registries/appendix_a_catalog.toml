@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 335
+target_count = 341
 projection_fallback_count = 83
-target_source_assignment_sha256 = "d1f4e7044b85663c9c4cd3d91f8ebf71b3ceeaa47d343af9d4e260e93d83688a"
+target_source_assignment_sha256 = "e8694d2cc205ed2d69e53c6a31c1f015628f947dcf6266e89b3785e2ec9e8169"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -596,11 +596,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 5
+registry_epoch = 6
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 6
+registry_epoch = 7
 
 [[logical_kind]]
 slice_id = "a03"
@@ -1585,6 +1585,43 @@ containing_union = "NewDatabaseIdentityTargetCreationCommitment"
 wire_tag = 0x0002
 encoding_context = "reserved inline-record payload; nested target_posture Local|Sharded, exact member encodings, and bound proof remain required before activation"
 allowed_containing_schemas = ["NewDatabaseIdentityTargetCreationCommitment"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destroy-floor-ref"
+wire_type_id = 0x002f
+name = "KeyDestroyFloorRef"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union; a15:2057 confirms Checkpoint and Configuration inline-record arms, while exact arm field rows and a source-derived bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyProposal"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destroy-floor-ref-checkpoint"
+wire_type_id = 0x0030
+name = "KeyDestroyFloorRef.Checkpoint"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestroyFloorRef"
+wire_tag = 0x0001
+encoding_context = "reserved inline-record payload; exact checkpoint_ref field registration and bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyFloorRef"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destroy-floor-ref-configuration"
+wire_type_id = 0x0031
+name = "KeyDestroyFloorRef.Configuration"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestroyFloorRef"
+wire_tag = 0x0002
+encoding_context = "reserved inline-record payload; exact floor_ref field registration and bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyFloorRef"]
 max_size_bytes = 65536
 
 [[wire_type]]
@@ -5384,6 +5421,49 @@ role_predicate = "role-local"
 retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[union]]
+slice_id = "a15"
+row_id = "a15:union:key-destroy-floor-ref-0bbf0c80048e4525"
+union_name = "KeyDestroyFloorRef"
+containing_schema = "KeyDestroyFloorRef"
+union_path = "KeyDestroyFloorRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyDestroyProposal"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a15"
+row_id = "a15:union-arm:key-destroy-floor-ref-checkpoint-7e81e4e286f0a753"
+union_name = "KeyDestroyFloorRef"
+containing_schema = "KeyDestroyFloorRef"
+union_path = "KeyDestroyFloorRef"
+arm_tag = 0x0001
+source_arm_name = "Checkpoint"
+stable_name = "Checkpoint"
+payload_kind = "inline-record"
+payload_sha256 = "1ef2f8ee8dcdbbbcd5fd9fb956d1e59d2d8f6302c11c9641ac17aaf5f52e8316"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a15"
+row_id = "a15:union-arm:key-destroy-floor-ref-configuration-b46c71ce691a9983"
+union_name = "KeyDestroyFloorRef"
+containing_schema = "KeyDestroyFloorRef"
+union_path = "KeyDestroyFloorRef"
+arm_tag = 0x0002
+source_arm_name = "Configuration"
+stable_name = "Configuration"
+payload_kind = "inline-record"
+payload_sha256 = "dd6892393874a249fd01e86d8722760a8a2ec9ac1b27d6ce1b8dc610769404fa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[union]]
 slice_id = "a19"
@@ -17151,7 +17231,7 @@ symbol = "KeyDestroyFloorRef"
 generic_signature = ""
 source_key = "top|KeyDestroyFloorRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a15:2057"]
 
 [[top_level_candidate]]
@@ -26070,6 +26150,54 @@ target_row_id = "a15:prebootstrap-kind:wrapped-key-artifact"
 slice_id = "a15"
 source_key = "projection|prebootstrap_artifact_kinds|WrappedKeyArtifact"
 target_kind = "prebootstrap-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-arm-key-destroy-floor-ref-checkpoint-7e81e4e286f0a753"
+target_row_id = "a15:union-arm:key-destroy-floor-ref-checkpoint-7e81e4e286f0a753"
+slice_id = "a15"
+source_key = "arm|KeyDestroyFloorRef|KeyDestroyFloorRef|Checkpoint"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-arm-key-destroy-floor-ref-configuration-b46c71ce691a9983"
+target_row_id = "a15:union-arm:key-destroy-floor-ref-configuration-b46c71ce691a9983"
+slice_id = "a15"
+source_key = "arm|KeyDestroyFloorRef|KeyDestroyFloorRef|Configuration"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-key-destroy-floor-ref-0bbf0c80048e4525"
+target_row_id = "a15:union:key-destroy-floor-ref-0bbf0c80048e4525"
+slice_id = "a15"
+source_key = "union|KeyDestroyFloorRef|KeyDestroyFloorRef"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destroy-floor-ref"
+target_row_id = "a15:wire-type:key-destroy-floor-ref"
+slice_id = "a15"
+source_key = "top|KeyDestroyFloorRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destroy-floor-ref-checkpoint"
+target_row_id = "a15:wire-type:key-destroy-floor-ref-checkpoint"
+slice_id = "a15"
+source_key = "arm|KeyDestroyFloorRef|KeyDestroyFloorRef|Checkpoint"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destroy-floor-ref-configuration"
+target_row_id = "a15:wire-type:key-destroy-floor-ref-configuration"
+slice_id = "a15"
+source_key = "arm|KeyDestroyFloorRef|KeyDestroyFloorRef|Configuration"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[target]]
