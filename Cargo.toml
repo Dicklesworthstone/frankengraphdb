@@ -15,6 +15,7 @@ resolver = "3"
 members = [
     "crates/fgdb-bigint",
     "crates/fgdb-claim",
+    "crates/fgdb-codec",
     "crates/fgdb-delta-types",
     "crates/fgdb-evidence",
     "crates/fgdb-resource",

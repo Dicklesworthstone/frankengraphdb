@@ -1,0 +1,9 @@
+[package]
+name = "fgdb-codec"
+version = "0.0.1"
+edition = "2024"
+description = "Safe scalar compression kernels for FrankenGraphDB's registered durable codec layer."
+publish = false
+
+[lints]
+workspace = true
