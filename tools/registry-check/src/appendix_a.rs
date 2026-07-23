@@ -19,9 +19,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub const CATALOG_SCHEMA_VERSION: i64 = 3;
+pub const CATALOG_SCHEMA_VERSION: i64 = 4;
 pub const CATALOG_NAME: &str = "appendix_a_catalog";
-pub const CATALOG_EPOCH: i64 = 3;
+pub const CATALOG_EPOCH: i64 = 4;
 pub const ROW_ID_GRAMMAR_VERSION: i64 = 3;
 pub const DIAGNOSTIC_VERSION: i64 = 1;
 pub const CANONICAL_ORDER: &str = "source-key,projection-registry,assigned-code,containing-schema,union-path,field-tag,arm-tag,row-id";
@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 162;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 172;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "df757bffcc05b0704b2296ad2725f35b2a016f79e380f6b67e809ed1ace1185b";
+    "7c84936cbf502594f87a753b1515ae9a7b83de7b637ce73a86104af166ebb414";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 81;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "fb328272b624b4f15339e8291feb2dfb22d6ecf6300df06d5173816c65115325";
+    "508da1225af0c505144fe7458995751ee8b9b1a12672662af1b4b4710c808cf4";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -2496,6 +2496,11 @@ fn verify_ordinary_union_source_contracts(
         .iter()
         .map(|row| (row.target_row_id.as_str(), row))
         .collect();
+    let top_level_by_key: BTreeMap<&str, &TopLevelCandidate> = catalog
+        .top_level_candidates
+        .iter()
+        .map(|row| (row.source_key.as_str(), row))
+        .collect();
     let projection_by_symbol: BTreeMap<(&str, &str), &ProjectionRowMeta> = catalog
         .projection_rows
         .iter()
@@ -2519,6 +2524,22 @@ fn verify_ordinary_union_source_contracts(
         let Some(source) = union_by_key.get(&target.source_key).copied() else {
             continue;
         };
+        let top_level_shape = identity::ordinary_union_has_top_level_shape(union);
+        if top_level_shape {
+            let top_level_source_key = format!("top|{}", union.union_name);
+            match top_level_by_key.get(top_level_source_key.as_str()).copied() {
+                Some(candidate)
+                    if candidate.slice_id == target.slice_id
+                        && candidate.symbol == union.union_name
+                        && candidate.generic_signature.is_empty()
+                        && candidate.source_kind == "confirmed" => {}
+                _ => out.push(Violation::new(
+                    "source_union_top_level_owner_mismatch",
+                    &target.row_id,
+                    "a wire-backed top-level ordinary union requires one same-slice confirmed top-level source candidate with the exact union name",
+                )),
+            }
+        }
         if source.key.schema_owner != union.containing_schema
             || source.key.union_path != union.union_path
             || source.arm_set_conflict
@@ -5914,10 +5935,12 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
             ));
         }
         if let Some(projection) = projection_by_row_id.get(row.target_row_id.as_str()) {
+            let ordinary_union_wire_source = ordinary_union_wire_source_key(catalog, projection);
             validate_target_source_identity(
                 row,
                 projection,
                 candidate_by_key.get(row.source_key.as_str()).copied(),
+                ordinary_union_wire_source.as_deref(),
                 out,
             );
         }
@@ -6202,7 +6225,7 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
             .collect();
         let mut arm_keys: Vec<&str> = slice_targets
             .iter()
-            .filter(|row| row.source_key.starts_with("arm|"))
+            .filter(|row| row.target_kind == "union-arm" && row.source_key.starts_with("arm|"))
             .map(|row| row.source_key.as_str())
             .collect();
         for source_key in catalog
@@ -6281,10 +6304,16 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
                     "complete slice contains a target that is still declared",
                 ));
             }
+            let ordinary_union_wire_source_supported = projection_by_row_id
+                .get(row.target_row_id.as_str())
+                .and_then(|projection| ordinary_union_wire_source_key(catalog, projection))
+                .as_deref()
+                == Some(row.source_key.as_str());
             let source_contract_supported = row.source_key.starts_with("top|")
                 || row.source_key.starts_with("field|")
                 || (row.target_kind == "union" && row.source_key.starts_with("union|"))
-                || (row.target_kind == "union-arm" && row.source_key.starts_with("arm|"));
+                || (row.target_kind == "union-arm" && row.source_key.starts_with("arm|"))
+                || ordinary_union_wire_source_supported;
             if !source_contract_supported {
                 out.push(Violation::new(
                     "complete_slice_source_contract_unverified",
@@ -6525,17 +6554,83 @@ fn validate_metadata_target(
     }
 }
 
+fn ordinary_union_wire_source_key(
+    catalog: &Catalog,
+    projection: &ProjectionRowMeta,
+) -> Option<String> {
+    if projection.row_kind != "wire-type" {
+        return None;
+    }
+    let mut wire_rows = catalog
+        .identity
+        .wire
+        .iter()
+        .filter(|wire| wire.name == projection.canonical_symbol);
+    let wire = wire_rows.next()?;
+    if wire_rows.next().is_some() {
+        return None;
+    }
+    let containing_union = match wire.kind.as_str() {
+        "union" | "discriminant" => wire.name.as_str(),
+        "union_variant" => wire.containing_union.as_deref()?,
+        _ => return None,
+    };
+    let mut unions = catalog.identity.ordinary_unions.iter().filter(|union| {
+        identity::ordinary_union_has_top_level_shape(union) && union.union_name == containing_union
+    });
+    let union = unions.next()?;
+    if unions.next().is_some() {
+        return None;
+    }
+    if matches!(wire.kind.as_str(), "union" | "discriminant") {
+        return Some(format!("top|{}", union.union_name));
+    }
+    let wire_tag = wire.wire_tag?;
+    let mut arms = union.arms.iter().filter(|arm| {
+        arm.arm_tag == wire_tag && wire.name == format!("{}.{}", union.union_name, arm.stable_name)
+    });
+    let arm = arms.next()?;
+    if arms.next().is_some() {
+        return None;
+    }
+    Some(format!(
+        "arm|{}|{}|{}",
+        union.containing_schema, union.union_path, arm.source_arm_name
+    ))
+}
+
 fn validate_target_source_identity(
     row: &Target,
     projection: &ProjectionRowMeta,
     top_candidate: Option<&TopLevelCandidate>,
+    ordinary_union_wire_source: Option<&str>,
     out: &mut Vec<Violation>,
 ) {
     let projection_source_key = format!(
         "projection|{}|{}",
         projection.projection, projection.canonical_symbol
     );
+    if let Some(expected_source) = ordinary_union_wire_source {
+        if row.source_key != expected_source {
+            out.push(Violation::new(
+                "catalog_target_source_identity_mismatch",
+                &row.row_id,
+                format!(
+                    "ordinary-union wire row must map to exact union or arm source {expected_source:?}"
+                ),
+            ));
+        }
+        return;
+    }
     if row.source_key == projection_source_key {
+        if matches!(projection.row_kind.as_str(), "union" | "union-arm") {
+            out.push(Violation::new(
+                "catalog_target_source_identity_mismatch",
+                &row.row_id,
+                "ordinary union and arm projections require their exact structural source; projection fallback is forbidden",
+            ));
+            return;
+        }
         if row.definition_status != "declared" {
             out.push(Violation::new(
                 "catalog_target_projection_incomplete",
@@ -8260,6 +8355,11 @@ fn render_fields(identity: &IdentityRegistries) -> String {
         }
         write_string(&mut out, "tag_wire_type", &union.tag_wire_type);
         write_string(&mut out, "encoding_context", &union.encoding_context);
+        write_string_array(
+            &mut out,
+            "allowed_containing_schemas",
+            &union.allowed_containing_schemas,
+        );
         write_string(&mut out, "role_predicate", &union.role_predicate);
         write_string(&mut out, "version_status", &union.version_status);
         writeln!(&mut out, "max_size_bytes = {}", union.max_size_bytes)

@@ -29,9 +29,12 @@
 //!   ordinary_union_duplicate_path  two ordinary unions claim one schema path
 //!   ordinary_union_name_collision ordinary/reference union name collision
 //!   ordinary_union_unresolved_schema containing schema has no unique identity class
+//!   ordinary_union_wire_contract_mismatch top-level union/wire cross-index drift
+//!   ordinary_union_container_contract_mismatch open or inconsistent consumer closure
 //!   ordinary_union_arm_duplicate_tag duplicate ordinary-union arm tag
 //!   ordinary_union_arm_metadata_mismatch arm does not match its union owner
 //!   ordinary_union_arm_lifecycle_mismatch arm outlives its ordinary union
+//!   ordinary_union_arm_role_mismatch arm role scope exceeds its union
 //!   dag_self_edge / dag_cycle / dag_future_result   construction-DAG faults
 //!   digest_missing_class    digest-typed field without a declared class
 //!   digest_missing_recipe   transcript digest without a recipe
@@ -187,6 +190,7 @@ pub struct OrdinaryUnion {
     pub field_tag: Option<i64>,
     pub tag_wire_type: String,
     pub encoding_context: String,
+    pub allowed_containing_schemas: Vec<String>,
     pub role_predicate: String,
     pub version_status: String,
     pub max_size_bytes: i64,
@@ -697,6 +701,7 @@ pub fn fields_from(root: &Table) -> Result<DurableFieldsRows, ReadError> {
                 "field_tag",
                 "tag_wire_type",
                 "encoding_context",
+                "allowed_containing_schemas",
                 "role_predicate",
                 "version_status",
                 "max_size_bytes",
@@ -710,6 +715,7 @@ pub fn fields_from(root: &Table) -> Result<DurableFieldsRows, ReadError> {
             field_tag: get_opt_int(t, "field_tag", &ctx)?,
             tag_wire_type: get_str(t, "tag_wire_type", &ctx)?,
             encoding_context: get_str(t, "encoding_context", &ctx)?,
+            allowed_containing_schemas: get_str_array(t, "allowed_containing_schemas", &ctx)?,
             role_predicate: get_str(t, "role_predicate", &ctx)?,
             version_status: get_str(t, "version_status", &ctx)?,
             max_size_bytes: get_int(t, "max_size_bytes", &ctx)?,
@@ -956,12 +962,45 @@ fn rows_pin(mut rows: Vec<String>) -> String {
     format!("fnv1a64:{:016x}", fnv1a64(transcript.as_bytes()))
 }
 
+fn string_list_pin_transcript(values: &[String]) -> String {
+    let framed_values = values
+        .iter()
+        .map(|value| format!("{}:{value}", value.len()))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("{}|{framed_values}", values.len())
+}
+
 fn predicate_allows_role(predicate: &str, role: &str) -> bool {
     predicate == "true"
         || predicate
             .split("||")
             .map(str::trim)
             .any(|term| term == format!("role-{role}"))
+}
+
+fn role_predicate_roles(predicate: &str) -> Option<BTreeSet<&'static str>> {
+    const ALL_ROLES: [&str; 3] = ["local", "meta", "shard"];
+    if predicate == "true" {
+        return Some(ALL_ROLES.into_iter().collect());
+    }
+    let mut roles = BTreeSet::new();
+    for term in predicate.split("||").map(str::trim) {
+        let role = match term {
+            "role-local" => "local",
+            "role-meta" => "meta",
+            "role-shard" => "shard",
+            _ => return None,
+        };
+        roles.insert(role);
+    }
+    (!roles.is_empty()).then_some(roles)
+}
+
+fn role_predicate_implies(left: &str, right: &str) -> bool {
+    role_predicate_roles(left)
+        .zip(role_predicate_roles(right))
+        .is_some_and(|(left, right)| left.is_subset(&right))
 }
 
 fn is_lowercase_sha256(value: &str) -> bool {
@@ -990,6 +1029,12 @@ fn check_ordinary_union_version_status(status: &str, row_id: &str, out: &mut Vec
     }
 }
 
+pub fn ordinary_union_has_top_level_shape(union: &OrdinaryUnion) -> bool {
+    union.field_tag.is_none()
+        && union.containing_schema == union.union_name
+        && union.union_path == union.union_name
+}
+
 /// Independent, review-updated pins for the released identity assignments.
 ///
 /// Registry rows are the canonical descriptions; these constants are compact
@@ -1002,8 +1047,8 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:3225fb5d17c23088";
-    const FIELDS: &str = "fnv1a64:d63c00f968930c2e";
+    const WIRE: &str = "fnv1a64:5684d2ff3fb32293";
+    const FIELDS: &str = "fnv1a64:f7066af3be10615f";
 
     let logical = rows_pin(
         r.logical
@@ -1088,7 +1133,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     }
     for union in &r.ordinary_unions {
         field_rows.push(format!(
-            "ordinary-union|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "ordinary-union|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             union.union_name,
             union.containing_schema,
             union.union_path,
@@ -1098,6 +1143,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
                 .unwrap_or_else(|| "-".into()),
             union.tag_wire_type,
             union.encoding_context,
+            string_list_pin_transcript(&union.allowed_containing_schemas),
             union.role_predicate,
             union.version_status,
             union.max_size_bytes
@@ -1152,14 +1198,14 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "wire_types",
-            expected_epoch: 2,
+            expected_epoch: 3,
             actual_epoch: r.wire_epoch,
             expected_pin: WIRE,
             actual_pin: wire,
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 3,
+            expected_epoch: 4,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,
@@ -1911,6 +1957,12 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 "ordinary union name, containing schema, and union path must be nonblank",
             ));
         }
+        let top_level_shape = ordinary_union_has_top_level_shape(u);
+        let top_level_wire_parent = top_level_shape
+            .then(|| wire_by_name.get(u.union_name.as_str()).copied())
+            .flatten();
+        let top_level_wire_backed = top_level_wire_parent
+            .is_some_and(|parent| matches!(parent.kind.as_str(), "union" | "discriminant"));
         let containing_schema_classes =
             usize::from(logical_by_name.contains_key(u.containing_schema.as_str()))
                 + usize::from(physical_names.contains(u.containing_schema.as_str()))
@@ -1928,6 +1980,61 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 ),
             ));
         }
+        if top_level_shape {
+            match top_level_wire_parent {
+                Some(parent)
+                    if top_level_wire_backed
+                        && parent.status == u.version_status
+                        && parent.max_size_bytes == u.max_size_bytes
+                        && parent.allowed_containing_schemas == u.allowed_containing_schemas => {}
+                _ => out.push(v(
+                    "ordinary_union_wire_contract_mismatch",
+                    "durable_fields",
+                    row_id,
+                    "a top-level ordinary union requires one same-name union/discriminant wire parent with identical lifecycle, maximum size, and exact containing-schema closure",
+                )),
+            }
+
+            let expected_variants: BTreeSet<String> = u
+                .arms
+                .iter()
+                .map(|arm| format!("{}.{}", u.union_name, arm.stable_name))
+                .collect();
+            let actual_variants: BTreeSet<String> = r
+                .wire
+                .iter()
+                .filter(|wire| wire.containing_union.as_deref() == Some(u.union_name.as_str()))
+                .map(|wire| wire.name.clone())
+                .collect();
+            if actual_variants != expected_variants {
+                out.push(v(
+                    "ordinary_union_wire_contract_mismatch",
+                    "durable_fields",
+                    row_id,
+                    "top-level ordinary-union arms and registered wire variants must form an exact name bijection",
+                ));
+            }
+            for arm in &u.arms {
+                let expected_name = format!("{}.{}", u.union_name, arm.stable_name);
+                match wire_by_name.get(expected_name.as_str()).copied() {
+                    Some(variant)
+                        if variant.kind == "union_variant"
+                            && variant.containing_union.as_deref()
+                                == Some(u.union_name.as_str())
+                            && variant.wire_tag == Some(arm.arm_tag)
+                            && variant.status == arm.version_status
+                            && variant.max_size_bytes == arm.max_size_bytes
+                            && variant.allowed_containing_schemas.as_slice()
+                                == [u.union_name.as_str()] => {}
+                    _ => out.push(v(
+                        "ordinary_union_wire_contract_mismatch",
+                        "durable_fields",
+                        &expected_name,
+                        "ordinary-union arm name, parent, tag, lifecycle, maximum size, and containing-schema closure must exactly match one wire variant",
+                    )),
+                }
+            }
+        }
         if !ordinary_union_names_seen.insert(u.union_name.as_str()) {
             out.push(v(
                 "ordinary_union_name_collision",
@@ -1938,7 +2045,7 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         }
         let collides_with_reference = reference_union_names.contains(u.union_name.as_str());
         let collides_with_wire = BUILTIN_WIRE_TYPES.contains(&u.union_name.as_str())
-            || wire_names.contains(u.union_name.as_str());
+            || (wire_names.contains(u.union_name.as_str()) && !top_level_wire_backed);
         if collides_with_reference {
             out.push(v(
                 "ordinary_union_name_collision",
@@ -1997,6 +2104,26 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 "ordinary union requires a nonblank role predicate and positive resource bound",
             ));
         }
+        let allowed_containing_schemas: BTreeSet<&str> = u
+            .allowed_containing_schemas
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if u.allowed_containing_schemas.is_empty()
+            || allowed_containing_schemas.len() != u.allowed_containing_schemas.len()
+            || u.allowed_containing_schemas
+                .iter()
+                .any(|schema| schema.trim().is_empty() || schema == "*")
+            || (u.field_tag.is_some()
+                && u.allowed_containing_schemas.as_slice() != [u.containing_schema.as_str()])
+        {
+            out.push(v(
+                "ordinary_union_container_contract_mismatch",
+                "durable_fields",
+                row_id,
+                "ordinary unions require a nonempty duplicate-free concrete containing-schema closure; embedded unions admit exactly their containing schema",
+            ));
+        }
         if u.arms.is_empty() {
             out.push(v(
                 "ordinary_union_arm_missing",
@@ -2032,12 +2159,13 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                         || field.target_schema_id.is_some()
                         || field.max_size_bytes < u.max_size_bytes
                         || field.version_status != u.version_status
+                        || !role_predicate_implies(&field.role_predicate, &u.role_predicate)
                     {
                         out.push(v(
                             "ordinary_union_field_mismatch",
                             "durable_fields",
                             row_id,
-                            "an embedded ordinary-union anchor must be inline, non-reference, target-free, large enough for the complete union encoding, and lifecycle-identical to its union",
+                            "an embedded ordinary-union anchor must be inline, non-reference, target-free, large enough for the complete union encoding, lifecycle-identical, and no broader in role scope",
                         ));
                     }
                 }
@@ -2056,6 +2184,24 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                         u.containing_schema, field_tag, u.union_name
                     ),
                 )),
+            }
+        } else if top_level_wire_backed {
+            for field in anchor_fields {
+                if field.identity_class != "inline"
+                    || field.reference_semantics != "none"
+                    || field.target_schema_id.is_some()
+                    || field.max_size_bytes < u.max_size_bytes
+                    || field.version_status != u.version_status
+                    || !role_predicate_implies(&field.role_predicate, &u.role_predicate)
+                    || !allowed_containing_schemas.contains(field.containing_schema.as_str())
+                {
+                    out.push(v(
+                        "ordinary_union_field_mismatch",
+                        "durable_fields",
+                        row_id,
+                        "a top-level ordinary-union consumer must be inline, non-reference, target-free, large enough for the complete union encoding, lifecycle-compatible, and no broader in role scope",
+                    ));
+                }
             }
         } else if !anchor_fields.is_empty() {
             out.push(v(
@@ -2103,6 +2249,14 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                     "durable_fields",
                     &arm_row_id,
                     "ordinary-union arm requires a nonblank role predicate and positive resource bound",
+                ));
+            }
+            if !role_predicate_implies(&arm.role_predicate, &u.role_predicate) {
+                out.push(v(
+                    "ordinary_union_arm_role_mismatch",
+                    "durable_fields",
+                    &arm_row_id,
+                    "ordinary-union arm role scope must be a known nonempty subset of its parent union role scope",
                 ));
             }
             if arm.max_size_bytes > u.max_size_bytes {

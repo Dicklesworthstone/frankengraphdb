@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 3
+registry_epoch = 4
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -1322,6 +1322,65 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "reserved; a05-a08 populate the exact schema"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union]]
+union_name = "ServicePromotionExternalOperationKind"
+containing_schema = "ServicePromotionExternalOperationKind"
+union_path = "ServicePromotionExternalOperationKind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ServicePromotionExternalOperationRecord<Local>", "ServicePromotionExternalOperationRecord<Meta>"]
+role_predicate = "role-local || role-meta"
+version_status = "active"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ServicePromotionExternalOperationKind"
+containing_schema = "ServicePromotionExternalOperationKind"
+union_path = "ServicePromotionExternalOperationKind"
+arm_tag = 0x0001
+source_arm_name = "CatalogReserveHidden"
+stable_name = "CatalogReserveHidden"
+payload_kind = "unit"
+role_predicate = "role-local || role-meta"
+version_status = "active"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ServicePromotionExternalOperationKind"
+containing_schema = "ServicePromotionExternalOperationKind"
+union_path = "ServicePromotionExternalOperationKind"
+arm_tag = 0x0002
+source_arm_name = "ContinuityEnterPromotionPending"
+stable_name = "ContinuityEnterPromotionPending"
+payload_kind = "unit"
+role_predicate = "role-local || role-meta"
+version_status = "active"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ServicePromotionExternalOperationKind"
+containing_schema = "ServicePromotionExternalOperationKind"
+union_path = "ServicePromotionExternalOperationKind"
+arm_tag = 0x0003
+source_arm_name = "CatalogActivateReserved"
+stable_name = "CatalogActivateReserved"
+payload_kind = "unit"
+role_predicate = "role-local || role-meta"
+version_status = "active"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ServicePromotionExternalOperationKind"
+containing_schema = "ServicePromotionExternalOperationKind"
+union_path = "ServicePromotionExternalOperationKind"
+arm_tag = 0x0004
+source_arm_name = "ContinuityFinalizeOperational"
+stable_name = "ContinuityFinalizeOperational"
+payload_kind = "unit"
+role_predicate = "role-local || role-meta"
+version_status = "active"
+max_size_bytes = 1
 
 [[reference_union]]
 union_name = "MandatoryInventoryRef"

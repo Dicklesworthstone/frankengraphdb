@@ -16,7 +16,8 @@
 
 use registry_check::appendix_a::{self, Catalog, Violation};
 use registry_check::identity::{
-    self, FieldRow, IdentityRegistries, LogicalKind, bodydigest_pin, bodydigest_transcript,
+    self, FieldRow, IdentityRegistries, LogicalKind, WireType, bodydigest_pin,
+    bodydigest_transcript,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -172,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 3
+registry_epoch = 4
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -180,6 +181,7 @@ containing_schema = "RootBootstrap"
 union_path = "fixture_top_level_union"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RootBootstrap"]
 role_predicate = "true"
 version_status = "active"
 max_size_bytes = 128
@@ -213,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 3);
+    assert_eq!(epoch, 4);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -302,8 +304,8 @@ fn appendix_a_catalog_parse_is_closed_and_versioned() {
         (
             "unknown root",
             source.replacen(
-                "schema_version = 3",
-                "schema_version = 3\nunknown_root_key = true",
+                "schema_version = 4",
+                "schema_version = 4\nunknown_root_key = true",
                 1,
             ),
             "catalog_unknown_key",
@@ -350,8 +352,14 @@ fn appendix_a_catalog_parse_is_closed_and_versioned() {
             "unknown_slice_key",
         ),
         (
-            "wrong schema version",
-            source.replacen("schema_version = 3", "schema_version = 4", 1),
+            "stale schema version",
+            source.replacen("schema_version = 4", "schema_version = 3", 1),
+            "catalog_pin_mismatch",
+            "schema_version",
+        ),
+        (
+            "future schema version",
+            source.replacen("schema_version = 4", "schema_version = 5", 1),
             "catalog_pin_mismatch",
             "schema_version",
         ),
@@ -554,9 +562,10 @@ unknown_metadata_key = true
 #[test]
 fn appendix_a_catalog_projection_targets_are_exact_and_reservations_are_nonsemantic() {
     let baseline = real_appendix_catalog();
+    let baseline_violations = appendix_a::appendix_a_catalog_closure(&baseline);
     assert!(
-        appendix_a::appendix_a_catalog_closure(&baseline).is_empty(),
-        "baseline metadata closure must be exact"
+        baseline_violations.is_empty(),
+        "baseline metadata closure must be exact: {baseline_violations:?}"
     );
 
     let mut missing_target = baseline.clone();
@@ -1458,7 +1467,7 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     );
     assert_eq!(baseline.source_symbol_dispositions.len(), 848);
     assert_eq!(baseline.top_level_candidates.len(), 1_229);
-    assert_eq!(baseline.targets.len(), 162);
+    assert_eq!(baseline.targets.len(), 172);
     assert_eq!(
         baseline
             .targets
@@ -1467,7 +1476,7 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
             .count(),
         appendix_a::EXPECTED_PROJECTION_FALLBACK_COUNT
     );
-    assert_eq!(baseline.target_manifest.target_count, 162);
+    assert_eq!(baseline.target_manifest.target_count, 172);
     assert_eq!(baseline.target_manifest.projection_fallback_count, 81);
     assert_eq!(
         appendix_a::target_source_assignment_sha256(&baseline.targets),
@@ -1884,6 +1893,124 @@ fn appendix_a_source_derived_catalog_rows_and_slice_census_fail_closed() {
 }
 
 #[test]
+fn appendix_a_wire_backed_union_requires_confirmed_owner_and_exact_arm_set() {
+    let source = real_plan_source();
+    let source_key = "top|ServicePromotionExternalOperationKind";
+
+    let mut unconfirmed_owner = real_appendix_catalog();
+    unconfirmed_owner
+        .top_level_candidates
+        .iter_mut()
+        .find(|candidate| candidate.source_key == source_key)
+        .expect("Service promotion kind candidate")
+        .source_kind = "ambiguous".to_owned();
+    let violations = appendix_a::verify_source(&unconfirmed_owner, &source);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "source_union_top_level_owner_mismatch"),
+        "an unconfirmed top-level candidate acquired wire-backed ordinary-union authority: {violations:?}"
+    );
+
+    let mut missing_arm = real_appendix_catalog();
+    let union = missing_arm
+        .identity
+        .ordinary_unions
+        .iter_mut()
+        .find(|union| union.union_name == "ServicePromotionExternalOperationKind")
+        .expect("Service promotion ordinary union");
+    union.arms.pop().expect("fixture has four source arms");
+    let violations = appendix_a::verify_source(&missing_arm, &source);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "source_union_arm_set_mismatch"),
+        "a missing ordinary-union arm escaped the source bijection: {violations:?}"
+    );
+
+    let mut wrong_wire_source = real_appendix_catalog();
+    wrong_wire_source
+        .targets
+        .iter_mut()
+        .find(|target| {
+            target.target_row_id
+                == "a20:wire-type:service-promotion-external-operation-kind-catalog-reserve-hidden"
+        })
+        .expect("Service promotion wire-variant target")
+        .source_key = "arm|ServicePromotionExternalOperationKind|ServicePromotionExternalOperationKind|CatalogActivateReserved".to_owned();
+    let violations = appendix_a::appendix_a_catalog_closure(&wrong_wire_source);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "catalog_target_source_identity_mismatch"),
+        "a wire variant mapped to the wrong structural arm: {violations:?}"
+    );
+
+    let mut fallback_wire_source = real_appendix_catalog();
+    fallback_wire_source
+        .targets
+        .iter_mut()
+        .find(|target| {
+            target.target_row_id
+                == "a20:wire-type:service-promotion-external-operation-kind-catalog-reserve-hidden"
+        })
+        .expect("Service promotion wire-variant target")
+        .source_key =
+        "projection|wire_types|ServicePromotionExternalOperationKind.CatalogReserveHidden"
+            .to_owned();
+    let violations = appendix_a::appendix_a_catalog_closure(&fallback_wire_source);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "catalog_target_source_identity_mismatch"),
+        "a wire variant downgraded to projection fallback: {violations:?}"
+    );
+
+    let mut fallback_wire_parent_source = real_appendix_catalog();
+    fallback_wire_parent_source
+        .targets
+        .iter_mut()
+        .find(|target| {
+            target.target_row_id == "a20:wire-type:service-promotion-external-operation-kind"
+        })
+        .expect("Service promotion wire-parent target")
+        .source_key = "projection|wire_types|ServicePromotionExternalOperationKind".to_owned();
+    let violations = appendix_a::appendix_a_catalog_closure(&fallback_wire_parent_source);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "catalog_target_source_identity_mismatch"),
+        "a wire parent downgraded to projection fallback: {violations:?}"
+    );
+
+    for (target_row_id, fallback_source) in [
+        (
+            "a20:union:service-promotion-external-operation-kind-cbc46ac1a7231315",
+            "projection|durable_fields|ServicePromotionExternalOperationKind.ServicePromotionExternalOperationKind",
+        ),
+        (
+            "a20:union-arm:service-promotion-external-operation-kind-catalog-reserve-hidden-cb21b33f2418f561",
+            "projection|durable_fields|ServicePromotionExternalOperationKind.ServicePromotionExternalOperationKind.CatalogReserveHidden",
+        ),
+    ] {
+        let mut fallback_structural_source = real_appendix_catalog();
+        fallback_structural_source
+            .targets
+            .iter_mut()
+            .find(|target| target.target_row_id == target_row_id)
+            .expect("Service promotion structural target")
+            .source_key = fallback_source.to_owned();
+        let violations = appendix_a::appendix_a_catalog_closure(&fallback_structural_source);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.code == "catalog_target_source_identity_mismatch"),
+            "an ordinary-union structural target downgraded to projection fallback: {violations:?}"
+        );
+    }
+}
+
+#[test]
 fn appendix_a_full_plan_reference_occurrence_drift_fails_closed() {
     let catalog = real_appendix_catalog();
     let source = real_plan_source();
@@ -2118,6 +2245,303 @@ fn idr_ordinary_top_level_union_parses_and_validates() {
     );
 }
 
+fn wire_backed_top_level_union_fixture() -> IdentityRegistries {
+    let mut identity = ordinary_top_level_union_fixture();
+    let union = &mut identity.ordinary_unions[0];
+    union.union_name = "FixtureWireBackedUnion".into();
+    union.containing_schema = "FixtureWireBackedUnion".into();
+    union.union_path = "FixtureWireBackedUnion".into();
+    union.role_predicate = "role-local || role-meta".into();
+    for arm in &mut union.arms {
+        arm.union_name = "FixtureWireBackedUnion".into();
+        arm.containing_schema = "FixtureWireBackedUnion".into();
+        arm.union_path = "FixtureWireBackedUnion".into();
+        arm.role_predicate = "role-local || role-meta".into();
+    }
+    let variants: Vec<_> = union
+        .arms
+        .iter()
+        .enumerate()
+        .map(|(index, arm)| WireType {
+            wire_type_id: 0x7ff1 + i64::try_from(index).expect("fixture index fits i64"),
+            name: format!("{}.{}", union.union_name, arm.stable_name),
+            kind: "union_variant".into(),
+            status: arm.version_status.clone(),
+            containing_union: Some(union.union_name.clone()),
+            wire_tag: Some(arm.arm_tag),
+            encoding_context: arm.payload_kind.clone(),
+            allowed_containing_schemas: vec![union.union_name.clone()],
+            max_size_bytes: arm.max_size_bytes,
+        })
+        .collect();
+    identity.wire.push(WireType {
+        wire_type_id: 0x7ff0,
+        name: union.union_name.clone(),
+        kind: "union".into(),
+        status: union.version_status.clone(),
+        containing_union: None,
+        wire_tag: None,
+        encoding_context: union.encoding_context.clone(),
+        allowed_containing_schemas: union.allowed_containing_schemas.clone(),
+        max_size_bytes: union.max_size_bytes,
+    });
+    identity.wire.extend(variants);
+    identity
+}
+
+#[test]
+fn idr_wire_backed_top_level_union_requires_exact_cross_index() {
+    let identity = wire_backed_top_level_union_fixture();
+    assert!(
+        codes_without_assignment_drift(&identity).is_empty(),
+        "a top-level ordinary union must cross-index one exact wire parent and variant set"
+    );
+
+    let mut wrong_path = identity.clone();
+    wrong_path.ordinary_unions[0].union_path = "wrong_path".into();
+    for arm in &mut wrong_path.ordinary_unions[0].arms {
+        arm.union_path = "wrong_path".into();
+    }
+    assert!(
+        codes_without_assignment_drift(&wrong_path)
+            .contains(&"ordinary_union_name_collision".to_owned()),
+        "partial name equality must not acquire the top-level wire exception"
+    );
+
+    let mut embedded = identity.clone();
+    embedded.ordinary_unions[0].field_tag = Some(1);
+    let codes = codes_without_assignment_drift(&embedded);
+    assert!(
+        codes.contains(&"ordinary_union_name_collision".to_owned())
+            && codes.contains(&"ordinary_union_field_mismatch".to_owned()),
+        "a field tag removes the top-level wire exception and requires an exact anchor: {codes:?}"
+    );
+
+    let mut missing_variant = identity.clone();
+    missing_variant.wire.pop().expect("fixture wire variant");
+    assert!(
+        codes_without_assignment_drift(&missing_variant)
+            .contains(&"ordinary_union_wire_contract_mismatch".to_owned()),
+        "a missing wire variant escaped the exact cross-index"
+    );
+
+    let mut wrong_tag = identity;
+    wrong_tag
+        .wire
+        .iter_mut()
+        .find(|wire| wire.containing_union.as_deref() == Some("FixtureWireBackedUnion"))
+        .expect("fixture wire variant")
+        .wire_tag = Some(3);
+    assert!(
+        codes_without_assignment_drift(&wrong_tag)
+            .contains(&"ordinary_union_wire_contract_mismatch".to_owned()),
+        "wire/ordinary tag drift escaped the exact cross-index"
+    );
+}
+
+#[test]
+fn idr_wire_backed_top_level_union_rejects_container_scope_drift() {
+    let identity = wire_backed_top_level_union_fixture();
+    let parent_name = identity.ordinary_unions[0].union_name.clone();
+
+    let mut wildcard_parent = identity.clone();
+    wildcard_parent
+        .wire
+        .iter_mut()
+        .find(|wire| wire.name == parent_name)
+        .expect("fixture wire parent")
+        .allowed_containing_schemas = vec!["*".into()];
+    assert!(
+        codes_without_assignment_drift(&wildcard_parent)
+            .contains(&"ordinary_union_wire_contract_mismatch".to_owned()),
+        "a wildcard wire-parent scope escaped the exact ordinary-union cross-index"
+    );
+
+    let mut wildcard_union = identity.clone();
+    wildcard_union.ordinary_unions[0].allowed_containing_schemas = vec!["*".into()];
+    assert!(
+        codes_without_assignment_drift(&wildcard_union)
+            .contains(&"ordinary_union_container_contract_mismatch".to_owned()),
+        "a wildcard ordinary-union scope escaped the concrete-container contract"
+    );
+
+    let mut extra_parent = identity.clone();
+    extra_parent
+        .wire
+        .iter_mut()
+        .find(|wire| wire.name == parent_name)
+        .expect("fixture wire parent")
+        .allowed_containing_schemas
+        .push("RootSlot".into());
+    assert!(
+        codes_without_assignment_drift(&extra_parent)
+            .contains(&"ordinary_union_wire_contract_mismatch".to_owned()),
+        "an extra wire-parent container escaped the exact ordinary-union cross-index"
+    );
+
+    let mut missing_parent = identity;
+    missing_parent
+        .wire
+        .iter_mut()
+        .find(|wire| wire.name == parent_name)
+        .expect("fixture wire parent")
+        .allowed_containing_schemas
+        .clear();
+    let codes = codes_without_assignment_drift(&missing_parent);
+    assert!(
+        codes.contains(&"ordinary_union_wire_contract_mismatch".to_owned())
+            && codes.contains(&"bad_field".to_owned()),
+        "a missing wire-parent container escaped the closed contract: {codes:?}"
+    );
+}
+
+#[test]
+fn idr_ordinary_union_container_pin_is_unambiguously_framed() {
+    let mut split = wire_backed_top_level_union_fixture();
+    split.ordinary_unions[0].allowed_containing_schemas = vec!["A".into(), "B".into()];
+    let split_pin = identity::assignment_pins(&split)
+        .into_iter()
+        .find(|pin| pin.registry == "durable_fields")
+        .expect("durable-fields assignment pin")
+        .actual_pin;
+
+    let mut comma_bearing = split;
+    comma_bearing.ordinary_unions[0].allowed_containing_schemas = vec!["A,B".into()];
+    let comma_bearing_pin = identity::assignment_pins(&comma_bearing)
+        .into_iter()
+        .find(|pin| pin.registry == "durable_fields")
+        .expect("durable-fields assignment pin")
+        .actual_pin;
+
+    assert_ne!(
+        split_pin, comma_bearing_pin,
+        "container-list framing must distinguish two entries from one comma-bearing schema"
+    );
+}
+
+#[test]
+fn idr_wire_backed_top_level_union_rejects_conventional_class_collision() {
+    let identity = wire_backed_top_level_union_fixture();
+    let union_name = identity.ordinary_unions[0].union_name.clone();
+    let assert_unresolved = |identity: &IdentityRegistries, class: &str| {
+        let codes = codes_without_assignment_drift(identity);
+        assert!(
+            codes.contains(&"ordinary_union_unresolved_schema".to_owned()),
+            "wire ownership hid a same-name {class} schema: {codes:?}"
+        );
+    };
+
+    let mut logical_collision = identity.clone();
+    logical_collision
+        .logical
+        .push(kind(0x7ffe, &union_name, "active", 1));
+    assert_unresolved(&logical_collision, "logical");
+
+    let mut physical_collision = identity.clone();
+    let mut physical = physical_collision.physical[0].clone();
+    physical.record_kind = 0x7ffe;
+    physical.name = union_name.clone();
+    physical_collision.physical.push(physical);
+    assert_unresolved(&physical_collision, "physical");
+
+    let mut bootstrap_collision = identity.clone();
+    let mut bootstrap = bootstrap_collision.bootstrap[0].clone();
+    bootstrap.frame_kind = 0x7ffe;
+    bootstrap.name = union_name.clone();
+    bootstrap_collision.bootstrap.push(bootstrap);
+    assert_unresolved(&bootstrap_collision, "bootstrap");
+
+    let mut prebootstrap_collision = identity.clone();
+    let mut prebootstrap = prebootstrap_collision.prebootstrap[0].clone();
+    prebootstrap.artifact_kind = 0x7ffe;
+    prebootstrap.name = union_name.clone();
+    prebootstrap_collision.prebootstrap.push(prebootstrap);
+    assert_unresolved(&prebootstrap_collision, "prebootstrap");
+}
+
+#[test]
+fn idr_wire_backed_top_level_union_validates_every_consumer() {
+    let mut identity = wire_backed_top_level_union_fixture();
+    let union_name = identity.ordinary_unions[0].union_name.clone();
+    let union_bound = identity.ordinary_unions[0].max_size_bytes;
+    let second_container = identity.logical[0].name.clone();
+    identity.ordinary_unions[0]
+        .allowed_containing_schemas
+        .push(second_container.clone());
+    identity
+        .wire
+        .iter_mut()
+        .find(|wire| wire.name == union_name)
+        .expect("fixture wire parent")
+        .allowed_containing_schemas
+        .push(second_container.clone());
+    let mut consumer = FieldRow {
+        containing_schema: "RootBootstrap".into(),
+        field_tag: 0x7ffe,
+        stable_name: "fixture_wire_backed_union".into(),
+        exact_wire_type: union_name.clone(),
+        cardinality: "one".into(),
+        identity_class: "inline".into(),
+        reference_semantics: "none".into(),
+        target_schema_id: None,
+        construction_order: 0,
+        role_predicate: "role-local".into(),
+        retention_and_cut_rule: "fixture consumer".into(),
+        version_status: "active".into(),
+        max_size_bytes: union_bound,
+        digest_class: None,
+        transcript_recipe: None,
+        bd_domain_separator: None,
+        bd_schema_major: None,
+        bd_included_field_tags: None,
+        bd_excluded_field_tags: None,
+        recipe_pin: None,
+    };
+    identity.fields.push(consumer.clone());
+    consumer.containing_schema = second_container;
+    consumer.field_tag = 0x7ffd;
+    consumer.stable_name = "second_fixture_wire_backed_union".into();
+    consumer.construction_order = identity.logical[0].construction_order;
+    consumer.role_predicate = "role-meta".into();
+    identity.fields.push(consumer);
+
+    let valid_violations: Vec<_> = identity::validate_identity(&identity)
+        .into_iter()
+        .filter(|violation| violation.code != "registry_assignment_drift")
+        .collect();
+    assert!(
+        valid_violations.is_empty(),
+        "a named top-level union may be reused by multiple exact inline fields: {valid_violations:?}"
+    );
+
+    identity
+        .fields
+        .last_mut()
+        .expect("second consumer exists")
+        .max_size_bytes = union_bound - 1;
+    assert_eq!(
+        codes_without_assignment_drift(&identity),
+        vec!["ordinary_union_field_mismatch".to_owned()],
+        "every consumer must admit the full top-level union encoding"
+    );
+
+    identity
+        .fields
+        .last_mut()
+        .expect("second consumer exists")
+        .max_size_bytes = union_bound;
+    identity
+        .fields
+        .last_mut()
+        .expect("second consumer exists")
+        .role_predicate = "role-shard".into();
+    assert_eq!(
+        codes_without_assignment_drift(&identity),
+        vec!["ordinary_union_field_mismatch".to_owned()],
+        "a shard-only consumer must not inhabit a Local-or-Meta union"
+    );
+}
+
 #[test]
 fn idr_ordinary_union_rejects_duplicate_arm_tag() {
     let mut identity = ordinary_top_level_union_fixture();
@@ -2267,6 +2691,17 @@ fn idr_ordinary_union_embedded_field_requires_exact_anchor() {
         codes_without_assignment_drift(&lifecycle_mismatched_anchor),
         vec!["ordinary_union_field_mismatch".to_owned()],
         "field and union lifecycle states must move together"
+    );
+
+    let mut role_broadened_anchor = identity;
+    role_broadened_anchor.ordinary_unions[0].role_predicate = "role-local".into();
+    for arm in &mut role_broadened_anchor.ordinary_unions[0].arms {
+        arm.role_predicate = "role-local".into();
+    }
+    assert_eq!(
+        codes_without_assignment_drift(&role_broadened_anchor),
+        vec!["ordinary_union_field_mismatch".to_owned()],
+        "an embedded field must not expose its ordinary union outside the union role scope"
     );
 }
 

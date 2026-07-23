@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 2
+registry_epoch = 3
 
 [[type]]
 wire_type_id = 0x0001
@@ -159,3 +159,56 @@ status = "active"
 encoding_context = "hybrid logical clock instant (asupersync HLC encoding)"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 16
+
+[[type]]
+wire_type_id = 0x0027
+name = "ServicePromotionExternalOperationKind"
+kind = "discriminant"
+status = "active"
+encoding_context = "closed u8 tag: CatalogReserveHidden | ContinuityEnterPromotionPending | CatalogActivateReserved | ContinuityFinalizeOperational; operation_subject is carried by the containing record"
+allowed_containing_schemas = ["ServicePromotionExternalOperationRecord<Local>", "ServicePromotionExternalOperationRecord<Meta>"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0028
+name = "ServicePromotionExternalOperationKind.CatalogReserveHidden"
+kind = "union_variant"
+status = "active"
+containing_union = "ServicePromotionExternalOperationKind"
+wire_tag = 0x0001
+encoding_context = "unit discriminant for the external catalog reservation action"
+allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0029
+name = "ServicePromotionExternalOperationKind.ContinuityEnterPromotionPending"
+kind = "union_variant"
+status = "active"
+containing_union = "ServicePromotionExternalOperationKind"
+wire_tag = 0x0002
+encoding_context = "unit discriminant for the external continuity pending action"
+allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x002a
+name = "ServicePromotionExternalOperationKind.CatalogActivateReserved"
+kind = "union_variant"
+status = "active"
+containing_union = "ServicePromotionExternalOperationKind"
+wire_tag = 0x0003
+encoding_context = "unit discriminant for the external catalog activation action"
+allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x002b
+name = "ServicePromotionExternalOperationKind.ContinuityFinalizeOperational"
+kind = "union_variant"
+status = "active"
+containing_union = "ServicePromotionExternalOperationKind"
+wire_tag = 0x0004
+encoding_context = "unit discriminant for the external continuity operational-finalization action"
+allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
+max_size_bytes = 1

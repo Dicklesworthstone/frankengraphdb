@@ -139,9 +139,9 @@ else
 fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
-    '"target_count":162' \
+    '"target_count":172' \
     '"projection_fallback_count":81' \
-    '"target_source_assignment_sha256":"fb328272b624b4f15339e8291feb2dfb22d6ecf6300df06d5173816c65115325"' \
+    '"target_source_assignment_sha256":"508da1225af0c505144fe7458995751ee8b9b1a12672662af1b4b4710c808cf4"' \
     '"outcome":"pass"'; then
   ok "Appendix A target/source assignments are release-pinned"
 else
@@ -170,7 +170,7 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"reserved_reservations":798' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":162' \
+    '"targets":172' \
     '"semantic_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \
@@ -186,12 +186,12 @@ fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_completed"' \
     '"slices":21' \
-    '"projection_rows":162' \
+    '"projection_rows":172' \
     '"projection_files":6' \
     '"reservations":813' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":162' \
+    '"targets":172' \
     '"semantic_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \
@@ -1406,7 +1406,7 @@ expect_appendix_violation \
 log "phase 3l: unknown catalog keys are structural load failures"
 stage_appendix neg-appendix-unknown-key
 awk '
-  !changed && $0 == "schema_version = 3" {
+  !changed && $0 == "schema_version = 4" {
     print
     print "unknown_catalog_root = true"
     changed = 1

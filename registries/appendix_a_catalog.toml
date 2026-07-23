@@ -3,18 +3,18 @@
 # =============================================================================
 # Bead: fgdb-appendix-a-catalog-scaffold-gvvf
 #
-# Schema v3 separates source-derived candidates from semantic completion and
-# adds ordinary-union, ambiguity-adjudication, expansion, and owner-lifecycle
-# contracts without weakening the retaining-reference union model.
+# Schema v4 adds source-confirmed top-level ordinary-union cross-index rows
+# backed by exact wire parents/variants, preserving the five disjoint identity
+# classes and the schema-v3 source, ambiguity, expansion, and owner contracts.
 # Every slice is deliberately declared: later A01-A21 work must supply exact
 # annotations, real implementation ownership, and static/runtime evidence.
 # =============================================================================
 
-schema_version = 3
+schema_version = 4
 
 [catalog]
 name = "appendix_a_catalog"
-catalog_epoch = 3
+catalog_epoch = 4
 row_id_grammar_version = 3
 canonical_order = "source-key,projection-registry,assigned-code,containing-schema,union-path,field-tag,arm-tag,row-id"
 diagnostic_version = 1
@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 162
+target_count = 172
 projection_fallback_count = 81
-target_source_assignment_sha256 = "fb328272b624b4f15339e8291feb2dfb22d6ecf6300df06d5173816c65115325"
+target_source_assignment_sha256 = "508da1225af0c505144fe7458995751ee8b9b1a12672662af1b4b4710c808cf4"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -596,11 +596,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 2
+registry_epoch = 3
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 3
+registry_epoch = 4
 
 [[logical_kind]]
 slice_id = "a03"
@@ -1267,6 +1267,69 @@ status = "active"
 encoding_context = "hybrid logical clock instant (asupersync HLC encoding)"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 16
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:service-promotion-external-operation-kind"
+wire_type_id = 0x0027
+name = "ServicePromotionExternalOperationKind"
+kind = "discriminant"
+status = "active"
+encoding_context = "closed u8 tag: CatalogReserveHidden | ContinuityEnterPromotionPending | CatalogActivateReserved | ContinuityFinalizeOperational; operation_subject is carried by the containing record"
+allowed_containing_schemas = ["ServicePromotionExternalOperationRecord<Local>", "ServicePromotionExternalOperationRecord<Meta>"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:service-promotion-external-operation-kind-catalog-reserve-hidden"
+wire_type_id = 0x0028
+name = "ServicePromotionExternalOperationKind.CatalogReserveHidden"
+kind = "union_variant"
+status = "active"
+containing_union = "ServicePromotionExternalOperationKind"
+wire_tag = 0x0001
+encoding_context = "unit discriminant for the external catalog reservation action"
+allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:service-promotion-external-operation-kind-continuity-enter-promotion-pending"
+wire_type_id = 0x0029
+name = "ServicePromotionExternalOperationKind.ContinuityEnterPromotionPending"
+kind = "union_variant"
+status = "active"
+containing_union = "ServicePromotionExternalOperationKind"
+wire_tag = 0x0002
+encoding_context = "unit discriminant for the external continuity pending action"
+allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:service-promotion-external-operation-kind-catalog-activate-reserved"
+wire_type_id = 0x002a
+name = "ServicePromotionExternalOperationKind.CatalogActivateReserved"
+kind = "union_variant"
+status = "active"
+containing_union = "ServicePromotionExternalOperationKind"
+wire_tag = 0x0003
+encoding_context = "unit discriminant for the external catalog activation action"
+allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:service-promotion-external-operation-kind-continuity-finalize-operational"
+wire_type_id = 0x002b
+name = "ServicePromotionExternalOperationKind.ContinuityFinalizeOperational"
+kind = "union_variant"
+status = "active"
+containing_union = "ServicePromotionExternalOperationKind"
+wire_tag = 0x0004
+encoding_context = "unit discriminant for the external continuity operational-finalization action"
+allowed_containing_schemas = ["ServicePromotionExternalOperationKind"]
+max_size_bytes = 1
 
 [[field]]
 slice_id = "a03"
@@ -2938,6 +3001,75 @@ role_predicate = "role-local"
 retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[union]]
+slice_id = "a20"
+row_id = "a20:union:service-promotion-external-operation-kind-cbc46ac1a7231315"
+union_name = "ServicePromotionExternalOperationKind"
+containing_schema = "ServicePromotionExternalOperationKind"
+union_path = "ServicePromotionExternalOperationKind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ServicePromotionExternalOperationRecord<Local>", "ServicePromotionExternalOperationRecord<Meta>"]
+role_predicate = "role-local || role-meta"
+version_status = "active"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:service-promotion-external-operation-kind-catalog-reserve-hidden-cb21b33f2418f561"
+union_name = "ServicePromotionExternalOperationKind"
+containing_schema = "ServicePromotionExternalOperationKind"
+union_path = "ServicePromotionExternalOperationKind"
+arm_tag = 0x0001
+source_arm_name = "CatalogReserveHidden"
+stable_name = "CatalogReserveHidden"
+payload_kind = "unit"
+role_predicate = "role-local || role-meta"
+version_status = "active"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:service-promotion-external-operation-kind-continuity-enter-promotion-pending-e17f9df110dc8b1a"
+union_name = "ServicePromotionExternalOperationKind"
+containing_schema = "ServicePromotionExternalOperationKind"
+union_path = "ServicePromotionExternalOperationKind"
+arm_tag = 0x0002
+source_arm_name = "ContinuityEnterPromotionPending"
+stable_name = "ContinuityEnterPromotionPending"
+payload_kind = "unit"
+role_predicate = "role-local || role-meta"
+version_status = "active"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:service-promotion-external-operation-kind-catalog-activate-reserved-023cf1c00273f058"
+union_name = "ServicePromotionExternalOperationKind"
+containing_schema = "ServicePromotionExternalOperationKind"
+union_path = "ServicePromotionExternalOperationKind"
+arm_tag = 0x0003
+source_arm_name = "CatalogActivateReserved"
+stable_name = "CatalogActivateReserved"
+payload_kind = "unit"
+role_predicate = "role-local || role-meta"
+version_status = "active"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:service-promotion-external-operation-kind-continuity-finalize-operational-818c59bfbad80935"
+union_name = "ServicePromotionExternalOperationKind"
+containing_schema = "ServicePromotionExternalOperationKind"
+union_path = "ServicePromotionExternalOperationKind"
+arm_tag = 0x0004
+source_arm_name = "ContinuityFinalizeOperational"
+stable_name = "ContinuityFinalizeOperational"
+payload_kind = "unit"
+role_predicate = "role-local || role-meta"
+version_status = "active"
+max_size_bytes = 1
 
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
@@ -20403,7 +20535,7 @@ symbol = "ServicePromotionExternalOperationKind"
 generic_signature = ""
 source_key = "top|ServicePromotionExternalOperationKind"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a20:2583"]
 
 [[top_level_candidate]]
@@ -23560,6 +23692,86 @@ target_row_id = "a19:logical-kind:recovery-bridge-spec"
 slice_id = "a19"
 source_key = "top|RecoveryBridgeSpec<Role>"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-service-promotion-external-operation-kind-catalog-activate-reserved-023cf1c00273f058"
+target_row_id = "a20:union-arm:service-promotion-external-operation-kind-catalog-activate-reserved-023cf1c00273f058"
+slice_id = "a20"
+source_key = "arm|ServicePromotionExternalOperationKind|ServicePromotionExternalOperationKind|CatalogActivateReserved"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-service-promotion-external-operation-kind-catalog-reserve-hidden-cb21b33f2418f561"
+target_row_id = "a20:union-arm:service-promotion-external-operation-kind-catalog-reserve-hidden-cb21b33f2418f561"
+slice_id = "a20"
+source_key = "arm|ServicePromotionExternalOperationKind|ServicePromotionExternalOperationKind|CatalogReserveHidden"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-service-promotion-external-operation-kind-continuity-enter-promotion-pending-e17f9df110dc8b1a"
+target_row_id = "a20:union-arm:service-promotion-external-operation-kind-continuity-enter-promotion-pending-e17f9df110dc8b1a"
+slice_id = "a20"
+source_key = "arm|ServicePromotionExternalOperationKind|ServicePromotionExternalOperationKind|ContinuityEnterPromotionPending"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-service-promotion-external-operation-kind-continuity-finalize-operational-818c59bfbad80935"
+target_row_id = "a20:union-arm:service-promotion-external-operation-kind-continuity-finalize-operational-818c59bfbad80935"
+slice_id = "a20"
+source_key = "arm|ServicePromotionExternalOperationKind|ServicePromotionExternalOperationKind|ContinuityFinalizeOperational"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-service-promotion-external-operation-kind-cbc46ac1a7231315"
+target_row_id = "a20:union:service-promotion-external-operation-kind-cbc46ac1a7231315"
+slice_id = "a20"
+source_key = "union|ServicePromotionExternalOperationKind|ServicePromotionExternalOperationKind"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-service-promotion-external-operation-kind"
+target_row_id = "a20:wire-type:service-promotion-external-operation-kind"
+slice_id = "a20"
+source_key = "top|ServicePromotionExternalOperationKind"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-service-promotion-external-operation-kind-catalog-activate-reserved"
+target_row_id = "a20:wire-type:service-promotion-external-operation-kind-catalog-activate-reserved"
+slice_id = "a20"
+source_key = "arm|ServicePromotionExternalOperationKind|ServicePromotionExternalOperationKind|CatalogActivateReserved"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-service-promotion-external-operation-kind-catalog-reserve-hidden"
+target_row_id = "a20:wire-type:service-promotion-external-operation-kind-catalog-reserve-hidden"
+slice_id = "a20"
+source_key = "arm|ServicePromotionExternalOperationKind|ServicePromotionExternalOperationKind|CatalogReserveHidden"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-service-promotion-external-operation-kind-continuity-enter-promotion-pending"
+target_row_id = "a20:wire-type:service-promotion-external-operation-kind-continuity-enter-promotion-pending"
+slice_id = "a20"
+source_key = "arm|ServicePromotionExternalOperationKind|ServicePromotionExternalOperationKind|ContinuityEnterPromotionPending"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-service-promotion-external-operation-kind-continuity-finalize-operational"
+target_row_id = "a20:wire-type:service-promotion-external-operation-kind-continuity-finalize-operational"
+slice_id = "a20"
+source_key = "arm|ServicePromotionExternalOperationKind|ServicePromotionExternalOperationKind|ContinuityFinalizeOperational"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[target]]
