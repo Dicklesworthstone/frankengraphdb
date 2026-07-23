@@ -9,9 +9,10 @@
 //! It is **not** evidence for durable framing, registered codec IDs, a logical
 //! digest, SIMD parity, `OriginBirthOrder`, delta/FOR identity slots, or the
 //! production seal/run layout, codec-specific chaos/cancellation behavior, or
-//! the final `codec_pipeline_e2e` gate. Elias-Fano, dense intervals, and
-//! identity columns expose no encoded byte slice, so this proof emits no
-//! invented byte evidence for them.
+//! the final `codec_pipeline_e2e` gate. Elias-Fano and dense intervals expose
+//! no encoded byte slice, so this proof emits no invented byte evidence for
+//! those arms. Identity evidence covers only the explicitly non-durable scalar
+//! payload below its future registered envelope.
 
 #![forbid(unsafe_code)]
 
@@ -26,8 +27,8 @@ use fgdb_codec::{
     block::{CodecProfile, OutputLimit},
     evidence::CodecRunRow,
     identity::{IdentityColumnLimits, IdentityParts, IdentityRepresentation, SortedIdentityColumn},
-    kernel::{BlockKernel, KernelDispatch, ScalarKernels},
-    neighbor::{EncodedNeighbors, EntryLimit, NeighborCodec, StreamVByteNeighbors},
+    kernel::{BlockKernel, IdentityColumnKernel, KernelOutput, NeighborKernel, ScalarKernels},
+    neighbor::{EncodedNeighbors, EntryLimit, NeighborCodec},
 };
 use fgdb_types::{EId, VId};
 use fnx_generators::GraphGenerator;
@@ -40,7 +41,6 @@ const EXPECTED_EDGE_COUNT: usize =
     ATTACHMENT_COUNT + (NODE_COUNT - ATTACHMENT_COUNT - 1) * ATTACHMENT_COUNT;
 const FIXTURE_ID: &str = "barabasi-albert-n64-m3-seed424242";
 const DIAGNOSTIC_TRANSCRIPT_MAGIC: &[u8] = b"FGDB-DIAGNOSTIC-ADJACENCY-V2\0";
-const STREAM_ACCOUNTING_MAGIC: &[u8] = b"FGDB-STREAM-ACCOUNTING-V1\0";
 const MAX_DIAGNOSTIC_TRANSCRIPT_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,6 +77,8 @@ struct StableEdge {
 struct StableFixtureIds {
     vertices: Vec<VId>,
     edges: Vec<StableEdge>,
+    vertex_payload: KernelOutput,
+    edge_payload: KernelOutput,
     vertex_prefixes: usize,
     edge_prefixes: usize,
 }
@@ -143,6 +145,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "\"fixture\":\"{}\",",
             "\"nodes\":{},\"edges\":{},\"adjacency_entries\":{},",
             "\"neighbor_arms_per_list\":3,\"stream_evidence_rows\":{},",
+            "\"identity_payload_evidence_rows\":2,",
             "\"vertex_identity_rows\":{},\"edge_identity_rows\":{},",
             "\"vertex_identity_prefixes\":{},\"edge_identity_prefixes\":{},",
             "\"diagnostic_transcript_decoded_bytes\":{},\"lab_seed\":{},",
@@ -175,17 +178,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_pipeline() -> Result<PipelineOutput, ProofError> {
+    let kernels = ScalarKernels;
     let adjacency = generate_fixture()?;
-    let identities = verify_identity_columns(&adjacency)?;
+    let identities = verify_identity_columns(&adjacency, &kernels)?;
     let transcript = encode_diagnostic_transcript(&adjacency, &identities)?;
     let profile = CodecProfile::try_new(u16::MAX as usize, 4_096, MAX_DIAGNOSTIC_TRANSCRIPT_BYTES)
         .map_err(|error| ProofError::new(format!("invalid scalar block profile: {error}")))?;
-    let kernels = ScalarKernels;
-    let compressed = BlockKernel::compress(&kernels, &transcript, profile)
+    let compressed = BlockKernel::compress_output(&kernels, &transcript, profile)
         .map_err(|error| ProofError::new(format!("diagnostic compression failed: {error}")))?;
     let decompressed = BlockKernel::decompress(
         &kernels,
-        &compressed,
+        compressed.as_bytes(),
         transcript.len(),
         OutputLimit::new(MAX_DIAGNOSTIC_TRANSCRIPT_BYTES),
     )
@@ -212,11 +215,25 @@ fn run_pipeline() -> Result<PipelineOutput, ProofError> {
     // recovered by the transcript scan, preserving the requested cycle order.
     let mut evidence_rows = String::new();
     let encoded = encode_and_verify_neighbors(&scan.adjacency, &mut evidence_rows, &kernels)?;
-    verify_all_intersections(&encoded)?;
+    verify_all_intersections(&encoded, &kernels)?;
 
     append_evidence_row(
         &mut evidence_rows,
-        &kernels,
+        "identity-shared-prefix-fixed-scalar-payload-diagnostic",
+        "ba64-vertex-ids",
+        identities.vertices.len(),
+        &identities.vertex_payload,
+    )?;
+    append_evidence_row(
+        &mut evidence_rows,
+        "identity-shared-prefix-fixed-scalar-payload-diagnostic",
+        "ba64-edge-ids",
+        identities.edges.len(),
+        &identities.edge_payload,
+    )?;
+
+    append_evidence_row(
+        &mut evidence_rows,
         "block-scalar-diagnostic-transcript",
         "ba64-stable-id-adjacency-diagnostic",
         scan.adjacency_entries,
@@ -314,9 +331,9 @@ fn encode_and_verify_neighbors(
     for (node, values) in adjacency.iter().enumerate() {
         let limit = EntryLimit::new(values.len());
         let arms = [
-            EncodedNeighbors::try_elias_fano(values, limit),
-            EncodedNeighbors::try_stream_vbyte(values, limit),
-            EncodedNeighbors::try_dense_intervals(values, limit),
+            NeighborKernel::build_neighbors(kernels, NeighborCodec::EliasFano, values, limit),
+            NeighborKernel::build_neighbors(kernels, NeighborCodec::StreamVByte, values, limit),
+            NeighborKernel::build_neighbors(kernels, NeighborCodec::DenseIntervals, values, limit),
         ]
         .map(|result| {
             result.map_err(|error| {
@@ -337,10 +354,21 @@ fn encode_and_verify_neighbors(
         }
 
         for arm in &arms {
-            verify_select_and_rank(node, values, arm)?;
+            verify_select_and_rank(node, values, arm, kernels)?;
         }
         let stream_accounting = match &arms[1] {
-            EncodedNeighbors::StreamVByte(stream) => stream_accounting_transcript(stream)?,
+            EncodedNeighbors::StreamVByte(stream) => {
+                NeighborKernel::stream_vbyte_accounting_output(
+                    kernels,
+                    stream,
+                    MAX_DIAGNOSTIC_TRANSCRIPT_BYTES,
+                )
+                .map_err(|error| {
+                    ProofError::new(format!(
+                        "node {node} stream accounting output failed: {error}"
+                    ))
+                })?
+            }
             EncodedNeighbors::EliasFano(_) | EncodedNeighbors::DenseIntervals(_) => {
                 return Err(ProofError::new(
                     "explicit StreamVByte constructor returned a different arm",
@@ -350,7 +378,6 @@ fn encode_and_verify_neighbors(
         let corpus_id = format!("{FIXTURE_ID}-node-{node:02}");
         append_evidence_row(
             evidence_rows,
-            kernels,
             "stream-vbyte-payload-fences-scalar-diagnostic",
             &corpus_id,
             values.len(),
@@ -364,63 +391,21 @@ fn encode_and_verify_neighbors(
     Ok(encoded)
 }
 
-fn stream_accounting_transcript(stream: &StreamVByteNeighbors) -> Result<Vec<u8>, ProofError> {
-    const FENCE_FIELD_BYTES: usize = 6 * size_of::<u64>();
-    let fence_bytes = stream
-        .fences()
-        .len()
-        .checked_mul(FENCE_FIELD_BYTES)
-        .ok_or_else(|| ProofError::new("stream fence accounting length overflowed"))?;
-    let capacity = STREAM_ACCOUNTING_MAGIC
-        .len()
-        .checked_add(2 * size_of::<u64>())
-        .and_then(|length| length.checked_add(stream.encoded_bytes().len()))
-        .and_then(|length| length.checked_add(fence_bytes))
-        .ok_or_else(|| ProofError::new("stream accounting transcript length overflowed"))?;
-    if capacity > MAX_DIAGNOSTIC_TRANSCRIPT_BYTES {
-        return Err(ProofError::new(format!(
-            "stream accounting transcript needs {capacity} bytes, limit is {MAX_DIAGNOSTIC_TRANSCRIPT_BYTES}"
-        )));
-    }
-
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(capacity)
-        .map_err(|_| ProofError::new("could not reserve stream accounting transcript"))?;
-    output.extend_from_slice(STREAM_ACCOUNTING_MAGIC);
-    push_usize_le(&mut output, stream.encoded_bytes().len())?;
-    push_usize_le(&mut output, stream.fences().len())?;
-    output.extend_from_slice(stream.encoded_bytes());
-    for fence in stream.fences() {
-        push_usize_le(&mut output, fence.logical_start())?;
-        push_usize_le(&mut output, fence.entry_count())?;
-        push_usize_le(&mut output, fence.byte_offset())?;
-        push_usize_le(&mut output, fence.byte_len())?;
-        output.extend_from_slice(&fence.first().to_le_bytes());
-        output.extend_from_slice(&fence.last().to_le_bytes());
-    }
-    if output.len() != capacity {
-        return Err(ProofError::new(
-            "stream accounting transcript length diverged",
-        ));
-    }
-    Ok(output)
-}
-
 fn verify_select_and_rank(
     node: usize,
     values: &[u64],
     encoded: &EncodedNeighbors,
+    kernels: &ScalarKernels,
 ) -> Result<(), ProofError> {
     for (index, &expected) in values.iter().enumerate() {
-        if encoded.select(index) != Some(expected) {
+        if NeighborKernel::neighbors_select(kernels, encoded, index) != Some(expected) {
             return Err(ProofError::new(format!(
                 "node {node} {:?} select({index}) diverged",
                 encoded.codec()
             )));
         }
     }
-    if encoded.select(values.len()).is_some() {
+    if NeighborKernel::neighbors_select(kernels, encoded, values.len()).is_some() {
         return Err(ProofError::new(format!(
             "node {node} {:?} returned an out-of-range select",
             encoded.codec()
@@ -429,32 +414,40 @@ fn verify_select_and_rank(
 
     for probe in (0..=NODE_COUNT as u64).chain(core::iter::once(u64::MAX)) {
         let expected = values.partition_point(|&candidate| candidate <= probe);
-        if encoded.rank_le(probe) != expected {
+        let actual = NeighborKernel::neighbors_rank_le(kernels, encoded, probe);
+        if actual != expected {
             return Err(ProofError::new(format!(
                 "node {node} {:?} rank_le({probe}) was {}, expected {expected}",
                 encoded.codec(),
-                encoded.rank_le(probe)
+                actual
             )));
         }
     }
     Ok(())
 }
 
-fn verify_all_intersections(encoded: &[EncodedAdjacency]) -> Result<(), ProofError> {
+fn verify_all_intersections(
+    encoded: &[EncodedAdjacency],
+    kernels: &ScalarKernels,
+) -> Result<(), ProofError> {
     for (left_node, left) in encoded.iter().enumerate() {
         for (right_node, right) in encoded.iter().enumerate() {
             let expected = naive_intersection(&left.values, &right.values);
             for left_arm in &left.arms {
                 for right_arm in &right.arms {
-                    let actual = left_arm
-                        .intersection(right_arm, EntryLimit::new(expected.len()))
-                        .map_err(|error| {
-                            ProofError::new(format!(
-                                "intersection {left_node}/{:?} x {right_node}/{:?} failed: {error}",
-                                left_arm.codec(),
-                                right_arm.codec()
-                            ))
-                        })?;
+                    let actual = NeighborKernel::neighbors_intersection(
+                        kernels,
+                        left_arm,
+                        right_arm,
+                        EntryLimit::new(expected.len()),
+                    )
+                    .map_err(|error| {
+                        ProofError::new(format!(
+                            "intersection {left_node}/{:?} x {right_node}/{:?} failed: {error}",
+                            left_arm.codec(),
+                            right_arm.codec()
+                        ))
+                    })?;
                     if actual != expected {
                         return Err(ProofError::new(format!(
                             "intersection {left_node}/{:?} x {right_node}/{:?} diverged",
@@ -487,19 +480,23 @@ fn naive_intersection(left: &[u64], right: &[u64]) -> Vec<u64> {
     result
 }
 
-fn verify_identity_columns(adjacency: &[Vec<u64>]) -> Result<StableFixtureIds, ProofError> {
+fn verify_identity_columns(
+    adjacency: &[Vec<u64>],
+    kernels: &ScalarKernels,
+) -> Result<StableFixtureIds, ProofError> {
     let vertex_ids = make_vertex_ids(adjacency.len())?;
     let stable_edges = make_edge_ids(adjacency)?;
     let edge_ids = stable_edges.iter().map(|edge| edge.id).collect::<Vec<_>>();
     let vertex_limits = IdentityColumnLimits::new(vertex_ids.len(), 8, 4_096);
     let edge_limits = IdentityColumnLimits::new(edge_ids.len(), 8, 4_096);
-    let vertices = SortedIdentityColumn::try_new(&vertex_ids, vertex_limits)
-        .map_err(|error| ProofError::new(format!("VId column failed: {error}")))?;
-    let edges = SortedIdentityColumn::try_new(&edge_ids, edge_limits)
+    let vertices =
+        IdentityColumnKernel::build_sorted_identity_column(kernels, &vertex_ids, vertex_limits)
+            .map_err(|error| ProofError::new(format!("VId column failed: {error}")))?;
+    let edges = IdentityColumnKernel::build_sorted_identity_column(kernels, &edge_ids, edge_limits)
         .map_err(|error| ProofError::new(format!("EId column failed: {error}")))?;
 
-    verify_vertex_lower_bounds(&vertices, &vertex_ids)?;
-    verify_edge_lower_bounds(&edges, &edge_ids)?;
+    verify_vertex_lower_bounds(&vertices, &vertex_ids, kernels)?;
+    verify_edge_lower_bounds(&edges, &edge_ids, kernels)?;
     let vertex_prefixes = verify_shared_identity_column(
         "VId",
         vertices.as_column().representation(),
@@ -516,23 +513,54 @@ fn verify_identity_columns(adjacency: &[Vec<u64>]) -> Result<StableFixtureIds, P
             .prefix_dictionary()
             .map_or(0, <[fgdb_codec::identity::IdentityPrefix]>::len),
     )?;
-    if vertices.iter().collect::<Vec<_>>() != vertex_ids {
-        return Err(ProofError::new(
-            "VId column reconstruction changed row order",
-        ));
+    for (row, &expected) in vertex_ids.iter().enumerate() {
+        if IdentityColumnKernel::sorted_identity_at(kernels, &vertices, row) != Some(expected) {
+            return Err(ProofError::new(format!(
+                "VId column reconstruction changed row {row}"
+            )));
+        }
     }
-    if edges.iter().collect::<Vec<_>>() != edge_ids {
-        return Err(ProofError::new(
-            "EId column reconstruction changed row order",
-        ));
+    for (row, &expected) in edge_ids.iter().enumerate() {
+        if IdentityColumnKernel::sorted_identity_at(kernels, &edges, row) != Some(expected) {
+            return Err(ProofError::new(format!(
+                "EId column reconstruction changed row {row}"
+            )));
+        }
     }
+    let vertex_payload =
+        IdentityColumnKernel::encode_identity_payload(kernels, vertices.as_column(), 4_096)
+            .map_err(|error| ProofError::new(format!("VId payload failed: {error}")))?;
+    let edge_payload =
+        IdentityColumnKernel::encode_identity_payload(kernels, edges.as_column(), 4_096)
+            .map_err(|error| ProofError::new(format!("EId payload failed: {error}")))?;
+    assert_payload_ceiling("VId", vertex_payload.len(), vertex_ids.len(), 16)?;
+    assert_payload_ceiling("EId", edge_payload.len(), edge_ids.len(), 16)?;
 
     Ok(StableFixtureIds {
         vertices: vertex_ids,
         edges: stable_edges,
+        vertex_payload,
+        edge_payload,
         vertex_prefixes,
         edge_prefixes,
     })
+}
+
+fn assert_payload_ceiling(
+    identity_name: &str,
+    encoded_bytes: usize,
+    entry_count: usize,
+    max_bytes_per_entry: usize,
+) -> Result<(), ProofError> {
+    let limit = entry_count
+        .checked_mul(max_bytes_per_entry)
+        .ok_or_else(|| ProofError::new("identity byte-per-entry ceiling overflowed"))?;
+    if encoded_bytes > limit {
+        return Err(ProofError::new(format!(
+            "{identity_name} scalar payload uses {encoded_bytes} bytes for {entry_count} entries, above {max_bytes_per_entry} bytes per entry"
+        )));
+    }
+    Ok(())
 }
 
 fn make_vertex_ids(node_count: usize) -> Result<Vec<VId>, ProofError> {
@@ -608,6 +636,7 @@ fn make_edge_ids(adjacency: &[Vec<u64>]) -> Result<Vec<StableEdge>, ProofError> 
 fn verify_vertex_lower_bounds(
     column: &SortedIdentityColumn<VId>,
     values: &[VId],
+    kernels: &ScalarKernels,
 ) -> Result<(), ProofError> {
     let mut probes = vec![VId(0), VId(u128::MAX)];
     for &value in values {
@@ -617,10 +646,11 @@ fn verify_vertex_lower_bounds(
     }
     for probe in probes {
         let expected = values.partition_point(|&candidate| candidate < probe);
-        if column.lower_bound(probe) != expected {
+        let actual = IdentityColumnKernel::identity_lower_bound(kernels, column, probe);
+        if actual != expected {
             return Err(ProofError::new(format!(
                 "VId lower_bound({probe:?}) was {}, expected {expected}",
-                column.lower_bound(probe)
+                actual
             )));
         }
     }
@@ -630,6 +660,7 @@ fn verify_vertex_lower_bounds(
 fn verify_edge_lower_bounds(
     column: &SortedIdentityColumn<EId>,
     values: &[EId],
+    kernels: &ScalarKernels,
 ) -> Result<(), ProofError> {
     let mut probes = vec![EId(0), EId(u128::MAX)];
     for &value in values {
@@ -639,10 +670,11 @@ fn verify_edge_lower_bounds(
     }
     for probe in probes {
         let expected = values.partition_point(|&candidate| candidate < probe);
-        if column.lower_bound(probe) != expected {
+        let actual = IdentityColumnKernel::identity_lower_bound(kernels, column, probe);
+        if actual != expected {
             return Err(ProofError::new(format!(
                 "EId lower_bound({probe:?}) was {}, expected {expected}",
-                column.lower_bound(probe)
+                actual
             )));
         }
     }
@@ -895,22 +927,15 @@ fn read_bytes<'a>(
     Ok(bytes)
 }
 
-fn append_evidence_row<K: KernelDispatch + ?Sized>(
+fn append_evidence_row(
     output: &mut String,
-    kernels: &K,
     codec_id: &str,
     corpus_id: &str,
     entry_count: usize,
-    encoded_bytes: &[u8],
+    encoded_output: &KernelOutput,
 ) -> Result<(), ProofError> {
-    let row = CodecRunRow::try_from_kernel_output(
-        kernels,
-        codec_id,
-        corpus_id,
-        entry_count,
-        encoded_bytes,
-    )
-    .map_err(|error| ProofError::new(format!("evidence construction failed: {error}")))?;
+    let row = CodecRunRow::try_from_kernel_output(codec_id, corpus_id, entry_count, encoded_output)
+        .map_err(|error| ProofError::new(format!("evidence construction failed: {error}")))?;
     let ndjson = row
         .to_ndjson()
         .map_err(|error| ProofError::new(format!("evidence encoding failed: {error}")))?;

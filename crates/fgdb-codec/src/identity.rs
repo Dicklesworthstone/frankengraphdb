@@ -256,6 +256,8 @@ pub enum AllocationTarget {
     PrefixIndexes,
     /// Six-byte per-row monotone slots.
     Slots,
+    /// Complete registry-independent scalar payload bytes.
+    EncodedPayload,
 }
 
 /// Checked representation-size calculation.
@@ -284,6 +286,8 @@ pub enum IdentityConstructionInvariant {
     PrefixIndexWidth,
     /// A dictionary index did not fit the preflight-selected storage width.
     PrefixIndexRange,
+    /// Materialized payload bytes disagreed with checked chooser accounting.
+    EncodedPayloadLength,
 }
 
 /// Checked identity-column construction failure.
@@ -323,7 +327,7 @@ pub enum IdentityColumnError {
     AllocationFailed {
         /// Component being allocated.
         target: AllocationTarget,
-        /// Requested rows or entries, according to `target`.
+        /// Requested rows, entries, or bytes, according to `target`.
         requested: usize,
     },
     /// A private constructor invariant was violated.
@@ -666,6 +670,73 @@ impl<T: ElementIdentity> IdentityColumn<T> {
     #[must_use]
     pub const fn encoded_payload_len(&self) -> usize {
         self.encoded_payload_len
+    }
+
+    /// Materializes the exact registry-independent scalar payload.
+    ///
+    /// Raw identities and prefix bytes preserve canonical big-endian identity
+    /// order. Multi-byte dictionary indexes use little-endian fixed integers,
+    /// matching the durable-format baseline. This payload deliberately omits
+    /// a representation tag, row/dictionary counts, version, checksum, and
+    /// envelope; callers must not treat it as a registered durable encoding.
+    pub fn try_scalar_payload(
+        &self,
+        max_output_bytes: usize,
+    ) -> Result<Vec<u8>, IdentityColumnError> {
+        if self.encoded_payload_len > max_output_bytes {
+            return Err(IdentityColumnError::PayloadLimitExceeded {
+                representation: self.representation(),
+                required: self.encoded_payload_len,
+                limit: max_output_bytes,
+            });
+        }
+
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(self.encoded_payload_len)
+            .map_err(|_| IdentityColumnError::AllocationFailed {
+                target: AllocationTarget::EncodedPayload,
+                requested: self.encoded_payload_len,
+            })?;
+        match &self.storage {
+            IdentityStorage::Raw128(rows) => {
+                for row in rows {
+                    output.extend_from_slice(&row.to_be_bytes());
+                }
+            }
+            IdentityStorage::SharedPrefixFixed {
+                prefixes,
+                indexes,
+                slots,
+            } => {
+                for prefix in prefixes {
+                    output.extend_from_slice(&prefix.bytes);
+                }
+                match indexes {
+                    PrefixIndexes::Zero => {}
+                    PrefixIndexes::U8(values) => output.extend_from_slice(values),
+                    PrefixIndexes::U16(values) => {
+                        for value in values {
+                            output.extend_from_slice(&value.to_le_bytes());
+                        }
+                    }
+                    PrefixIndexes::U32(values) => {
+                        for value in values {
+                            output.extend_from_slice(&value.to_le_bytes());
+                        }
+                    }
+                }
+                for slot in slots {
+                    output.extend_from_slice(slot);
+                }
+            }
+        }
+        if output.len() != self.encoded_payload_len {
+            return Err(IdentityColumnError::ConstructionInvariantViolation {
+                invariant: IdentityConstructionInvariant::EncodedPayloadLength,
+            });
+        }
+        Ok(output)
     }
 
     /// Returns the sorted unique shared dictionary, or `None` for raw rows.
@@ -1438,6 +1509,48 @@ mod tests {
             Err(IdentityColumnError::SizeOverflow {
                 calculation: SizeCalculation::SlotPayload,
             })
+        );
+    }
+
+    #[test]
+    fn scalar_payload_materializes_exact_accounted_bytes_under_a_bound() {
+        let raw_values = [vid(9, 7, 3), vid(1, 5, 4)];
+        let raw = IdentityColumn::try_new(
+            &raw_values,
+            IdentityColumnLimits::new(raw_values.len(), 0, usize::MAX),
+        )
+        .unwrap();
+        let mut expected_raw = Vec::new();
+        for value in raw_values {
+            expected_raw.extend_from_slice(&value.0.to_be_bytes());
+        }
+        assert_eq!(
+            raw.try_scalar_payload(expected_raw.len()),
+            Ok(expected_raw.clone())
+        );
+        assert_eq!(
+            raw.try_scalar_payload(expected_raw.len() - 1),
+            Err(IdentityColumnError::PayloadLimitExceeded {
+                representation: IdentityRepresentation::Raw128,
+                required: expected_raw.len(),
+                limit: expected_raw.len() - 1,
+            })
+        );
+
+        let shared_values = vids_with_prefix_count(256, 3);
+        let shared =
+            IdentityColumn::try_new(&shared_values, limits(shared_values.len(), 3)).unwrap();
+        let first = shared
+            .try_scalar_payload(shared.encoded_payload_len())
+            .unwrap();
+        let second = shared
+            .try_scalar_payload(shared.encoded_payload_len())
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), shared.encoded_payload_len());
+        assert_eq!(
+            &first[..PREFIX_BYTES],
+            &shared.prefix_dictionary().unwrap()[0].bytes
         );
     }
 

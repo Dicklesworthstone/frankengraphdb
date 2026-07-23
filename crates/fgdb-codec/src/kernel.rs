@@ -10,7 +10,16 @@
 
 #![forbid(unsafe_code)]
 
+use core::fmt;
+
 use crate::{bitpack, block, delta_varint, elias_fano, identity, neighbor, roaring, varint};
+
+const STREAM_ACCOUNTING_MAGIC: &[u8] = b"FGDB-STREAM-ACCOUNTING-V1\0";
+const STREAM_ACCOUNTING_FENCE_FIELDS: usize = 6;
+
+mod private {
+    pub trait Sealed {}
+}
 
 /// Implementation path used by one codec operation.
 ///
@@ -40,7 +49,7 @@ impl DispatchPath {
 /// different codec families with contradictory dispatch paths. Diagnostic
 /// evidence can bind to this trait instead of accepting a caller-supplied
 /// path label.
-pub trait KernelDispatch {
+pub trait KernelDispatch: private::Sealed {
     /// Implementation path selected by this kernel set.
     const DISPATCH_PATH: DispatchPath;
 
@@ -50,6 +59,115 @@ pub trait KernelDispatch {
         Self::DISPATCH_PATH
     }
 }
+
+/// Owned bytes inseparably tagged with the kernel path that produced them.
+///
+/// Construction is private to this module, and the dispatch traits are sealed.
+/// Evidence consumers can therefore read the bytes and path but cannot attach
+/// an arbitrary path label to unrelated bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KernelOutput {
+    bytes: Vec<u8>,
+    dispatch_path: DispatchPath,
+}
+
+impl KernelOutput {
+    fn new<K: KernelDispatch + ?Sized>(kernel: &K, bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            dispatch_path: kernel.dispatch_path(),
+        }
+    }
+
+    /// Exact bytes produced by the selected kernel path.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Exact output byte count.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Whether the selected kernel produced no bytes.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Dispatch path that produced these exact bytes.
+    #[must_use]
+    pub const fn dispatch_path(&self) -> DispatchPath {
+        self.dispatch_path
+    }
+
+    /// Consumes the provenance wrapper and returns the exact bytes.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+/// Checked construction failure for a registry-independent diagnostic output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticOutputError {
+    /// Exact output-size arithmetic overflowed.
+    LengthOverflow,
+    /// A host-sized count could not be represented by the diagnostic grammar.
+    CountNotRepresentable {
+        /// Rejected count.
+        value: usize,
+    },
+    /// The exact output exceeds the caller-selected byte ceiling.
+    OutputLimitExceeded {
+        /// Exact bytes required.
+        required: usize,
+        /// Caller-selected ceiling.
+        limit: usize,
+    },
+    /// Reserving the already-bounded output failed.
+    AllocationFailed {
+        /// Exact bytes requested.
+        requested: usize,
+    },
+    /// Materialized bytes disagreed with checked preflight accounting.
+    LengthInvariant {
+        /// Exact bytes calculated before allocation.
+        expected: usize,
+        /// Bytes actually materialized.
+        actual: usize,
+    },
+}
+
+impl fmt::Display for DiagnosticOutputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::LengthOverflow => {
+                formatter.write_str("diagnostic kernel-output length overflows usize")
+            }
+            Self::CountNotRepresentable { value } => write!(
+                formatter,
+                "diagnostic kernel-output count {value} does not fit u64"
+            ),
+            Self::OutputLimitExceeded { required, limit } => write!(
+                formatter,
+                "diagnostic kernel output needs {required} bytes, limit is {limit}"
+            ),
+            Self::AllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve {requested} bytes for diagnostic kernel output"
+            ),
+            Self::LengthInvariant { expected, actual } => write!(
+                formatter,
+                "diagnostic kernel output materialized {actual} bytes, expected {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DiagnosticOutputError {}
 
 /// Canonical unsigned LEB128 operations for individual `u64` values.
 pub trait VarintKernel: KernelDispatch {
@@ -209,6 +327,17 @@ pub trait NeighborKernel: KernelDispatch {
         right: &neighbor::EncodedNeighbors,
         limit: neighbor::EntryLimit,
     ) -> Result<Vec<u64>, neighbor::NeighborError>;
+
+    /// Encodes complete StreamVByte payload/fence accounting for diagnostics.
+    ///
+    /// This versionless transcript is not a durable codec envelope. The
+    /// returned bytes are provenance-bound to this kernel path so structured
+    /// evidence cannot relabel caller-supplied bytes.
+    fn stream_vbyte_accounting_output(
+        &self,
+        stream: &neighbor::StreamVByteNeighbors,
+        max_output_bytes: usize,
+    ) -> Result<KernelOutput, DiagnosticOutputError>;
 }
 
 /// Checked construction and typed access for scalar identity columns.
@@ -250,6 +379,13 @@ pub trait IdentityColumnKernel: KernelDispatch {
         column: &identity::SortedIdentityColumn<T>,
         probe: T,
     ) -> usize;
+
+    /// Materializes the exact bounded scalar payload without durable framing.
+    fn encode_identity_payload<T: identity::ElementIdentity>(
+        &self,
+        column: &identity::IdentityColumn<T>,
+        max_output_bytes: usize,
+    ) -> Result<KernelOutput, identity::IdentityColumnError>;
 }
 
 /// Checked deterministic block compression and decompression operations.
@@ -260,6 +396,13 @@ pub trait BlockKernel: KernelDispatch {
         input: &[u8],
         profile: block::CodecProfile,
     ) -> Result<Vec<u8>, block::CompressionError>;
+
+    /// Compresses one block and binds the exact bytes to this dispatch path.
+    fn compress_output(
+        &self,
+        input: &[u8],
+        profile: block::CodecProfile,
+    ) -> Result<KernelOutput, block::CompressionError>;
 
     /// Decompresses one token stream to an exact authenticated length.
     fn decompress(
@@ -281,6 +424,8 @@ impl ScalarKernels {
         <Self as KernelDispatch>::DISPATCH_PATH
     }
 }
+
+impl private::Sealed for ScalarKernels {}
 
 impl KernelDispatch for ScalarKernels {
     const DISPATCH_PATH: DispatchPath = DispatchPath::Scalar;
@@ -473,6 +618,15 @@ impl NeighborKernel for ScalarKernels {
     ) -> Result<Vec<u64>, neighbor::NeighborError> {
         left.intersection(right, limit)
     }
+
+    fn stream_vbyte_accounting_output(
+        &self,
+        stream: &neighbor::StreamVByteNeighbors,
+        max_output_bytes: usize,
+    ) -> Result<KernelOutput, DiagnosticOutputError> {
+        let bytes = stream_vbyte_accounting_bytes(stream, max_output_bytes)?;
+        Ok(KernelOutput::new(self, bytes))
+    }
 }
 
 impl IdentityColumnKernel for ScalarKernels {
@@ -515,6 +669,16 @@ impl IdentityColumnKernel for ScalarKernels {
     ) -> usize {
         column.lower_bound(probe)
     }
+
+    fn encode_identity_payload<T: identity::ElementIdentity>(
+        &self,
+        column: &identity::IdentityColumn<T>,
+        max_output_bytes: usize,
+    ) -> Result<KernelOutput, identity::IdentityColumnError> {
+        column
+            .try_scalar_payload(max_output_bytes)
+            .map(|bytes| KernelOutput::new(self, bytes))
+    }
 }
 
 impl BlockKernel for ScalarKernels {
@@ -526,6 +690,14 @@ impl BlockKernel for ScalarKernels {
         block::compress(input, profile)
     }
 
+    fn compress_output(
+        &self,
+        input: &[u8],
+        profile: block::CodecProfile,
+    ) -> Result<KernelOutput, block::CompressionError> {
+        block::compress(input, profile).map(|bytes| KernelOutput::new(self, bytes))
+    }
+
     fn decompress(
         &self,
         input: &[u8],
@@ -534,6 +706,72 @@ impl BlockKernel for ScalarKernels {
     ) -> Result<Vec<u8>, block::DecodeError> {
         block::decompress(input, expected_decoded_len, output_limit)
     }
+}
+
+fn stream_vbyte_accounting_bytes(
+    stream: &neighbor::StreamVByteNeighbors,
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, DiagnosticOutputError> {
+    let fence_bytes = stream
+        .fences()
+        .len()
+        .checked_mul(STREAM_ACCOUNTING_FENCE_FIELDS * core::mem::size_of::<u64>())
+        .ok_or(DiagnosticOutputError::LengthOverflow)?;
+    let capacity = STREAM_ACCOUNTING_MAGIC
+        .len()
+        .checked_add(2 * core::mem::size_of::<u64>())
+        .and_then(|length| length.checked_add(stream.encoded_bytes().len()))
+        .and_then(|length| length.checked_add(fence_bytes))
+        .ok_or(DiagnosticOutputError::LengthOverflow)?;
+    if capacity > max_output_bytes {
+        return Err(DiagnosticOutputError::OutputLimitExceeded {
+            required: capacity,
+            limit: max_output_bytes,
+        });
+    }
+
+    let encoded_len = diagnostic_u64(stream.encoded_bytes().len())?;
+    let fence_count = diagnostic_u64(stream.fences().len())?;
+    for fence in stream.fences() {
+        let _ = diagnostic_u64(fence.logical_start())?;
+        let _ = diagnostic_u64(fence.entry_count())?;
+        let _ = diagnostic_u64(fence.byte_offset())?;
+        let _ = diagnostic_u64(fence.byte_len())?;
+    }
+
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| DiagnosticOutputError::AllocationFailed {
+            requested: capacity,
+        })?;
+    output.extend_from_slice(STREAM_ACCOUNTING_MAGIC);
+    output.extend_from_slice(&encoded_len.to_le_bytes());
+    output.extend_from_slice(&fence_count.to_le_bytes());
+    output.extend_from_slice(stream.encoded_bytes());
+    for fence in stream.fences() {
+        for count in [
+            fence.logical_start(),
+            fence.entry_count(),
+            fence.byte_offset(),
+            fence.byte_len(),
+        ] {
+            output.extend_from_slice(&diagnostic_u64(count)?.to_le_bytes());
+        }
+        output.extend_from_slice(&fence.first().to_le_bytes());
+        output.extend_from_slice(&fence.last().to_le_bytes());
+    }
+    if output.len() != capacity {
+        return Err(DiagnosticOutputError::LengthInvariant {
+            expected: capacity,
+            actual: output.len(),
+        });
+    }
+    Ok(output)
+}
+
+fn diagnostic_u64(value: usize) -> Result<u64, DiagnosticOutputError> {
+    u64::try_from(value).map_err(|_| DiagnosticOutputError::CountNotRepresentable { value })
 }
 
 #[cfg(test)]
@@ -822,6 +1060,31 @@ mod tests {
     }
 
     #[test]
+    fn stream_accounting_output_is_bounded_deterministic_and_path_bound() {
+        let values = [1_u64, 3, 4, 8, 65_536];
+        let stream = neighbor::StreamVByteNeighbors::try_new(
+            &values,
+            neighbor::EntryLimit::new(values.len()),
+        )
+        .expect("valid stream fixture");
+
+        let first = NeighborKernel::stream_vbyte_accounting_output(&KERNELS, &stream, 4_096)
+            .expect("bounded accounting output");
+        let second = NeighborKernel::stream_vbyte_accounting_output(&KERNELS, &stream, 4_096)
+            .expect("bounded accounting output");
+        assert_eq!(first, second);
+        assert_eq!(first.dispatch_path(), DispatchPath::Scalar);
+        assert!(first.as_bytes().starts_with(STREAM_ACCOUNTING_MAGIC));
+        assert_eq!(
+            NeighborKernel::stream_vbyte_accounting_output(&KERNELS, &stream, first.len() - 1),
+            Err(DiagnosticOutputError::OutputLimitExceeded {
+                required: first.len(),
+                limit: first.len() - 1,
+            })
+        );
+    }
+
+    #[test]
     fn neighbor_trait_matches_cross_arm_intersection_and_errors() {
         let left = neighbor::EncodedNeighbors::try_stream_vbyte(
             &[1, 3, 4, 8],
@@ -879,6 +1142,20 @@ mod tests {
                 column.get(row)
             );
         }
+        assert_eq!(
+            IdentityColumnKernel::encode_identity_payload(
+                &KERNELS,
+                &column,
+                column.encoded_payload_len()
+            )
+            .map(KernelOutput::into_bytes),
+            column.try_scalar_payload(column.encoded_payload_len())
+        );
+        assert_eq!(
+            IdentityColumnKernel::encode_identity_payload(&KERNELS, &column, 0)
+                .map(KernelOutput::into_bytes),
+            column.try_scalar_payload(0)
+        );
 
         let sorted = [vid(7, 2, 3), vid(7, 2, 9), vid(8, 1, 0)];
         let direct_sorted = identity::SortedIdentityColumn::try_new(&sorted, limits);
@@ -927,6 +1204,10 @@ mod tests {
         let direct = block::compress(input, profile);
         let dispatched = BlockKernel::compress(&KERNELS, input, profile);
         assert_eq!(dispatched, direct);
+        let provenance =
+            BlockKernel::compress_output(&KERNELS, input, profile).expect("valid block fixture");
+        assert_eq!(provenance.as_bytes(), direct.as_deref().unwrap_or_default());
+        assert_eq!(provenance.dispatch_path(), DispatchPath::Scalar);
 
         let encoded = direct.expect("valid block fixture");
         let limit = block::OutputLimit::new(input.len());

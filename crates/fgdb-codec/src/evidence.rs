@@ -9,7 +9,7 @@
 
 use core::fmt;
 
-use crate::kernel::{DispatchPath, KernelDispatch};
+use crate::kernel::{DispatchPath, KernelOutput};
 
 const NDJSON_CODEC_PREFIX: &str = "{\"codec_id\":\"";
 const NDJSON_CORPUS_SEPARATOR: &str = "\",\"corpus_id\":\"";
@@ -188,7 +188,7 @@ pub struct CodecRunRow {
 
 impl CodecRunRow {
     /// Constructs a row from symbolic IDs and the exact encoded output.
-    pub fn try_new(
+    fn try_new(
         codec_id: &str,
         corpus_id: &str,
         entry_count: usize,
@@ -215,24 +215,23 @@ impl CodecRunRow {
         })
     }
 
-    /// Constructs a row whose dispatch path is bound to the selected kernel.
+    /// Constructs a row from bytes provenance-bound to their selected kernel.
     ///
-    /// The caller still supplies symbolic, non-durable IDs and the exact byte
-    /// output being measured. Unlike [`Self::try_new`], this constructor cannot
-    /// accidentally label a future SIMD kernel as scalar (or vice versa).
-    pub fn try_from_kernel_output<K: KernelDispatch + ?Sized>(
-        kernel: &K,
+    /// The caller supplies only symbolic, non-durable IDs and the logical entry
+    /// count. Both the exact bytes and their dispatch path come from the sealed
+    /// [`KernelOutput`], so an evidence caller cannot relabel arbitrary bytes.
+    pub fn try_from_kernel_output(
         codec_id: &str,
         corpus_id: &str,
         entry_count: usize,
-        encoded_output: &[u8],
+        encoded_output: &KernelOutput,
     ) -> Result<Self, EvidenceError> {
         Self::try_new(
             codec_id,
             corpus_id,
             entry_count,
-            encoded_output,
-            kernel.dispatch_path(),
+            encoded_output.as_bytes(),
+            encoded_output.dispatch_path(),
         )
     }
 
@@ -479,7 +478,10 @@ fn hex_digit(nibble: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::{BitpackKernel, ScalarKernels};
+    use crate::{
+        block::CodecProfile,
+        kernel::{BlockKernel, ScalarKernels},
+    };
 
     #[test]
     fn rational_accounting_is_exact_normalized_and_empty_is_undefined() {
@@ -552,18 +554,14 @@ mod tests {
     #[test]
     fn row_records_the_trait_selected_evidence_path() {
         let kernels = ScalarKernels;
-        let encoded = BitpackKernel::encode(&kernels, &[1_u64, 2, 3], 2)
-            .expect("valid scalar bitpack fixture");
-        let row = CodecRunRow::try_from_kernel_output(
-            &kernels,
-            "bitpack-symbolic",
-            "trait-fixture",
-            3,
-            &encoded,
-        )
-        .expect("small labels fit");
+        let profile = CodecProfile::try_new(1_024, 256, 1_024).expect("valid scalar profile");
+        let encoded = BlockKernel::compress_output(&kernels, b"trait-fixture", profile)
+            .expect("valid scalar block fixture");
+        let row =
+            CodecRunRow::try_from_kernel_output("block-symbolic", "trait-fixture", 3, &encoded)
+                .expect("small labels fit");
 
-        assert_eq!(row.codec_id(), "bitpack-symbolic");
+        assert_eq!(row.codec_id(), "block-symbolic");
         assert_eq!(row.corpus_id(), "trait-fixture");
         assert_eq!(row.dispatch_path(), DispatchPath::Scalar);
         assert_eq!(row.encoded_bytes(), encoded.len());

@@ -28,11 +28,23 @@ grep -Fqx 'asupersync = { git = "https://github.com/Dicklesworthstone/asupersync
 grep -Fqx 'fnx-generators = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "9d710b1c33e99412c94de7fa4de2f7ce4954110f" }' crates/fgdb-codec/Cargo.toml
 grep -Fq 'git+https://github.com/Dicklesworthstone/asupersync?rev=e464a484cb65c1a55be0d9c925e6e9c20318edcb#e464a484cb65c1a55be0d9c925e6e9c20318edcb' Cargo.lock
 grep -Fq 'git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=9d710b1c33e99412c94de7fa4de2f7ce4954110f#9d710b1c33e99412c94de7fa4de2f7ce4954110f' Cargo.lock
-DIRECT_TREE="$(cargo tree --locked --offline -p fgdb-codec --target all --edges normal,dev,build --depth 1 --prefix none)"
-OUTSIDE_DIRECT="$(grep -vE '^(fgdb-|asupersync |fnx-)' <<<"$DIRECT_TREE" || true)"
-if [[ -n "$OUTSIDE_DIRECT" ]]; then
-  echo "ERROR: fgdb-codec has a direct dependency outside fgdb/asupersync/fnx" >&2
-  echo "$OUTSIDE_DIRECT" >&2
+DIRECT_METADATA="$(cargo metadata --locked --offline --no-deps --format-version 1 | jq -r '
+  .packages[]
+  | select(.name == "fgdb-codec")
+  | .dependencies[]
+  | [.name, (.kind // "normal"), (.source // "path"), (.path // "")]
+  | @tsv
+' | LC_ALL=C sort)"
+EXPECTED_DIRECT="$(
+  printf '%s\t%s\t%s\t%s\n' \
+    'asupersync' 'dev' 'git+https://github.com/Dicklesworthstone/asupersync?rev=e464a484cb65c1a55be0d9c925e6e9c20318edcb' '' \
+    'fgdb-types' 'normal' 'path' "$ROOT/crates/fgdb-types" \
+    'fnx-generators' 'dev' 'git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=9d710b1c33e99412c94de7fa4de2f7ce4954110f' '' \
+    | LC_ALL=C sort
+)"
+if [[ "$DIRECT_METADATA" != "$EXPECTED_DIRECT" ]]; then
+  echo "ERROR: fgdb-codec direct dependency identities differ from the exact allowlist" >&2
+  diff -u <(printf '%s\n' "$EXPECTED_DIRECT") <(printf '%s\n' "$DIRECT_METADATA") >&2 || true
   exit 1
 fi
 
@@ -46,8 +58,8 @@ cmp "$FIRST" "$SECOND"
 
 echo "==> validate the exact seven CodecRunRow evidence keys"
 grep '^{"codec_id":' "$FIRST" >"$EVIDENCE_ONLY"
-if [[ "$(wc -l <"$EVIDENCE_ONLY")" -ne 65 ]]; then
-  echo "ERROR: expected 64 StreamVByte rows plus one block row" >&2
+if [[ "$(wc -l <"$EVIDENCE_ONLY")" -ne 67 ]]; then
+  echo "ERROR: expected 64 StreamVByte rows, two identity rows, and one block row" >&2
   exit 1
 fi
 EVIDENCE_PATTERN='^\{"codec_id":"[^"]+","corpus_id":"[^"]+","entry_count":[0-9]+,"encoded_bytes":[0-9]+,"bytes_per_entry":(\{"numerator":[0-9]+,"denominator":[1-9][0-9]*\}|null),"dispatch_path":"scalar","output_checksum":\{"algorithm":"fnv1a64-output-evidence-v1","hex":"[0-9a-f]{16}"\}\}$'
@@ -63,6 +75,12 @@ if [[ "$(grep -c '"codec_id":"block-scalar-diagnostic-transcript"' "$EVIDENCE_ON
   echo "ERROR: the diagnostic adjacency transcript needs one block byte-evidence row" >&2
   exit 1
 fi
+if [[ "$(grep -c '"codec_id":"identity-shared-prefix-fixed-scalar-payload-diagnostic"' "$EVIDENCE_ONLY")" -ne 2 ]]; then
+  echo "ERROR: expected exact scalar-payload evidence for both graph VIds and EIds" >&2
+  exit 1
+fi
+grep -q '"corpus_id":"ba64-vertex-ids","entry_count":64,"encoded_bytes":481,"bytes_per_entry":{"numerator":481,"denominator":64}' "$EVIDENCE_ONLY"
+grep -q '"corpus_id":"ba64-edge-ids","entry_count":183,"encoded_bytes":1314,"bytes_per_entry":{"numerator":438,"denominator":61}' "$EVIDENCE_ONLY"
 
 echo "==> validate the one explicit partial-scope summary and omissions"
 if [[ "$(grep -c '^{"kind":"scope-summary"' "$FIRST")" -ne 1 ]]; then
@@ -74,13 +92,14 @@ grep -q '"scope":"registry-independent-partial-e2e"' "$FIRST"
 grep -q '"fixture":"barabasi-albert-n64-m3-seed424242"' "$FIRST"
 grep -q '"nodes":64,"edges":183,"adjacency_entries":366' "$FIRST"
 grep -q '"neighbor_arms_per_list":3,"stream_evidence_rows":64' "$FIRST"
+grep -q '"identity_payload_evidence_rows":2' "$FIRST"
 grep -q '"vertex_identity_rows":64,"edge_identity_rows":183' "$FIRST"
 grep -q '"vertex_identity_prefixes":3,"edge_identity_prefixes":3' "$FIRST"
 grep -q '"lab_scope":"root-task-lifecycle-only"' "$FIRST"
 grep -q '"lab_quiescent":true,"lab_oracles_passed":true' "$FIRST"
 grep -q '"omissions":\["durable-framing","registered-ids","logical-digest","simd-parity","origin-birth-order","delta-for","production-seal-run","lab-chaos-cancellation","final-codec-pipeline-e2e"\]' "$FIRST"
-if [[ "$(wc -l <"$FIRST")" -ne 66 ]]; then
-  echo "ERROR: transcript must contain only 65 evidence rows and one summary" >&2
+if [[ "$(wc -l <"$FIRST")" -ne 68 ]]; then
+  echo "ERROR: transcript must contain only 67 evidence rows and one summary" >&2
   exit 1
 fi
 
