@@ -49,6 +49,39 @@ jsonl_line_has_all() {
   return 1
 }
 
+# Operational regeneration errors must retain one stable terminal envelope,
+# emitted before the CLI's generic error. Counts are explicit even when the
+# failure occurs before the projection-change census is available.
+assert_regeneration_error_terminal() { # file projection changed unchanged published
+  local file="$1"
+  local projection_files="$2"
+  local changed_files="$3"
+  local unchanged_files="$4"
+  local published_files="$5"
+  jsonl_line_has_all "$file" \
+    '"event":"appendix_regeneration_completed"' \
+    "\"projection_files\":$projection_files" \
+    "\"changed_files\":$changed_files" \
+    "\"unchanged_files\":$unchanged_files" \
+    "\"published_files\":$published_files" \
+    '"violations":' \
+    '"outcome":"error"' &&
+    awk '
+      index($0, "\"event\":\"appendix_regeneration_completed\"") {
+        terminal_count++
+        terminal_line = NR
+      }
+      index($0, "\"event\":\"run_error\"") {
+        run_error_count++
+        run_error_line = NR
+      }
+      END {
+        exit !(terminal_count == 1 && run_error_count == 1 &&
+               terminal_line < run_error_line)
+      }
+    ' "$file"
+}
+
 # A structural identity load failure is currently wrapped by the CLI's
 # run_error event.  The checker is moving to a dedicated load_error event, so
 # accept exactly those two envelopes while requiring the precise typed path.
@@ -106,9 +139,9 @@ else
 fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
-    '"target_count":128' \
-    '"projection_fallback_count":83' \
-    '"target_source_assignment_sha256":"27b3182b3b35da2321982e51816baec66829f9df22b7005d8dbc523ffdd8110d"' \
+    '"target_count":162' \
+    '"projection_fallback_count":81' \
+    '"target_source_assignment_sha256":"fb328272b624b4f15339e8291feb2dfb22d6ecf6300df06d5173816c65115325"' \
     '"outcome":"pass"'; then
   ok "Appendix A target/source assignments are release-pinned"
 else
@@ -137,7 +170,7 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"reserved_reservations":798' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":128' \
+    '"targets":162' \
     '"semantic_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \
@@ -153,12 +186,12 @@ fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_completed"' \
     '"slices":21' \
-    '"projection_rows":128' \
+    '"projection_rows":162' \
     '"projection_files":6' \
     '"reservations":813' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":128' \
+    '"targets":162' \
     '"semantic_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \
@@ -252,10 +285,9 @@ stage_except() { # stage_except <name> <basename> -> leave one output uncreated
   done
 }
 
-stage_appendix() { # stage_appendix <name> -> complete isolated Appendix root
+stage_appendix_support() { # stage_appendix_support <name> -> non-registry proof inputs
   local name="$1"
   local manifest relative
-  stage "$name"
   mkdir -p "$WORK/$name/.beads"
   cp "$ROOT/.beads/issues.jsonl" "$WORK/$name/.beads/"
   cp "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" "$WORK/$name/"
@@ -270,6 +302,42 @@ stage_appendix() { # stage_appendix <name> -> complete isolated Appendix root
   cp "$ROOT/scripts/g0_identity_e2e.sh" "$WORK/$name/scripts/"
   cp "$ROOT/tools/registry-check/src/appendix_a.rs" \
     "$WORK/$name/tools/registry-check/src/"
+}
+
+stage_appendix() { # stage_appendix <name> -> complete isolated Appendix root
+  local name="$1"
+  stage "$name"
+  stage_appendix_support "$name"
+}
+
+stage_appendix_except() { # stage_appendix_except <name> <projection-basename>
+  local name="$1"
+  local excluded="$2"
+  stage_except "$name" "$excluded"
+  stage_appendix_support "$name"
+}
+
+snapshot_nonprojection_tree() { # snapshot_nonprojection_tree <staged-root>
+  local staged_root="$1"
+  (
+    cd "$staged_root"
+    find . \
+      ! -path './registries/logical_object_kinds.toml' \
+      ! -path './registries/physical_record_kinds.toml' \
+      ! -path './registries/bootstrap_frames.toml' \
+      ! -path './registries/prebootstrap_artifact_kinds.toml' \
+      ! -path './registries/wire_types.toml' \
+      ! -path './registries/durable_fields.toml' \
+      -printf '%y|%m|%p|%l\n' | LC_ALL=C sort
+    find . -type f \
+      ! -path './registries/logical_object_kinds.toml' \
+      ! -path './registries/physical_record_kinds.toml' \
+      ! -path './registries/bootstrap_frames.toml' \
+      ! -path './registries/prebootstrap_artifact_kinds.toml' \
+      ! -path './registries/wire_types.toml' \
+      ! -path './registries/durable_fields.toml' \
+      -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+  )
 }
 
 expect_appendix_violation() { # fixture code row_id
@@ -817,6 +885,212 @@ else
   die "Appendix projection verification changed JSONL or checked-in bytes"
 fi
 
+log "phase 3d-regenerate: sanctioned projection writer is scoped and idempotent"
+stage_appendix appendix-regenerate
+APPENDIX_REGENERATE_SENTINEL='APPENDIX_REGENERATE_SECRET_8b5ad169'
+printf '\n# %s\n' "$APPENDIX_REGENERATE_SENTINEL" \
+  >> "$WORK/appendix-regenerate/registries/logical_object_kinds.toml"
+snapshot_nonprojection_tree "$WORK/appendix-regenerate" \
+  > "$WORK/appendix-regenerate-nonprojection-before.sha256"
+if "$BIN" appendix-regenerate --root "$WORK/appendix-regenerate" \
+    >"$WORK/appendix-regenerate-first.jsonl" \
+    2>"$WORK/appendix-regenerate-first.err"; then
+  ok "Appendix regeneration restores a drifted staged projection"
+else
+  die "Appendix regeneration failed to restore a drifted staged projection"
+fi
+APPENDIX_REGENERATE_CHANGED=$(awk '
+  index($0, "\"event\":\"appendix_projection_regenerated\"") &&
+  index($0, "\"changed\":true") &&
+  index($0, "\"outcome\":\"pass\"") { count++ }
+  END { print count + 0 }
+' "$WORK/appendix-regenerate-first.jsonl")
+if [ "$APPENDIX_REGENERATE_CHANGED" -eq 1 ] &&
+   jsonl_line_has_all "$WORK/appendix-regenerate-first.jsonl" \
+    '"event":"appendix_regeneration_completed"' \
+    '"projection_files":6' \
+    '"changed_files":1' \
+    '"unchanged_files":5' \
+    '"published_files":1' \
+    '"violations":0' \
+    '"outcome":"pass"'; then
+  ok "Appendix regeneration reports the exact changed-file set"
+else
+  die "Appendix regeneration emitted incomplete changed-file evidence"
+fi
+if grep -Fq "$APPENDIX_REGENERATE_SENTINEL" \
+    "$WORK/appendix-regenerate-first.jsonl" \
+    "$WORK/appendix-regenerate-first.err"; then
+  die "Appendix regeneration leaked drifted projection contents"
+else
+  ok "Appendix regeneration diagnostics redact drifted projection contents"
+fi
+for projection in logical_object_kinds.toml physical_record_kinds.toml \
+                  bootstrap_frames.toml prebootstrap_artifact_kinds.toml \
+                  wire_types.toml durable_fields.toml; do
+  cmp -s "$ROOT/registries/$projection" \
+    "$WORK/appendix-regenerate/registries/$projection" \
+    || die "Appendix regeneration did not restore $projection exactly"
+done
+sha256sum \
+  "$WORK/appendix-regenerate/registries/logical_object_kinds.toml" \
+  "$WORK/appendix-regenerate/registries/physical_record_kinds.toml" \
+  "$WORK/appendix-regenerate/registries/bootstrap_frames.toml" \
+  "$WORK/appendix-regenerate/registries/prebootstrap_artifact_kinds.toml" \
+  "$WORK/appendix-regenerate/registries/wire_types.toml" \
+  "$WORK/appendix-regenerate/registries/durable_fields.toml" \
+  > "$WORK/appendix-regenerate-after-first.sha256"
+if "$BIN" appendix-regenerate --root "$WORK/appendix-regenerate" \
+    >"$WORK/appendix-regenerate-second.jsonl" \
+    2>"$WORK/appendix-regenerate-second.err"; then
+  ok "second Appendix regeneration succeeds as a no-op"
+else
+  die "second Appendix regeneration failed"
+fi
+sha256sum \
+  "$WORK/appendix-regenerate/registries/logical_object_kinds.toml" \
+  "$WORK/appendix-regenerate/registries/physical_record_kinds.toml" \
+  "$WORK/appendix-regenerate/registries/bootstrap_frames.toml" \
+  "$WORK/appendix-regenerate/registries/prebootstrap_artifact_kinds.toml" \
+  "$WORK/appendix-regenerate/registries/wire_types.toml" \
+  "$WORK/appendix-regenerate/registries/durable_fields.toml" \
+  > "$WORK/appendix-regenerate-after-second.sha256"
+APPENDIX_REGENERATE_UNCHANGED=$(awk '
+  index($0, "\"event\":\"appendix_projection_regenerated\"") &&
+  index($0, "\"changed\":false") &&
+  index($0, "\"outcome\":\"pass\"") { count++ }
+  END { print count + 0 }
+' "$WORK/appendix-regenerate-second.jsonl")
+if [ "$APPENDIX_REGENERATE_UNCHANGED" -eq 6 ] &&
+   cmp -s "$WORK/appendix-regenerate-after-first.sha256" \
+    "$WORK/appendix-regenerate-after-second.sha256" &&
+   jsonl_line_has_all "$WORK/appendix-regenerate-second.jsonl" \
+    '"event":"appendix_regeneration_completed"' \
+    '"projection_files":6' \
+    '"changed_files":0' \
+    '"unchanged_files":6' \
+    '"published_files":0' \
+    '"violations":0' \
+    '"outcome":"pass"'; then
+  ok "second Appendix regeneration is byte-identical and reports a six-file no-op"
+else
+  die "second Appendix regeneration changed bytes or omitted no-op evidence"
+fi
+if "$BIN" appendix-regenerate --root "$WORK/appendix-regenerate" \
+    >"$WORK/appendix-regenerate-third.jsonl" \
+    2>"$WORK/appendix-regenerate-third.err" &&
+   cmp -s "$WORK/appendix-regenerate-second.jsonl" \
+    "$WORK/appendix-regenerate-third.jsonl"; then
+  ok "Appendix regeneration no-op JSONL is deterministic"
+else
+  die "Appendix regeneration no-op JSONL drifted"
+fi
+snapshot_nonprojection_tree "$WORK/appendix-regenerate" \
+  > "$WORK/appendix-regenerate-nonprojection-after.sha256"
+if cmp -s "$WORK/appendix-regenerate-nonprojection-before.sha256" \
+    "$WORK/appendix-regenerate-nonprojection-after.sha256"; then
+  ok "Appendix regeneration changes no files outside the six projections"
+else
+  die "Appendix regeneration changed a file outside the six projections"
+fi
+
+stage_appendix neg-appendix-regenerate-load
+printf '\nbroken = {}\n' \
+  >> "$WORK/neg-appendix-regenerate-load/registries/appendix_a_catalog.toml"
+status=0
+"$BIN" appendix-regenerate --root "$WORK/neg-appendix-regenerate-load" \
+  >"$WORK/neg-appendix-regenerate-load.jsonl" \
+  2>"$WORK/neg-appendix-regenerate-load.err" || status=$?
+if [ "$status" -eq 2 ] &&
+   assert_regeneration_error_terminal \
+    "$WORK/neg-appendix-regenerate-load.jsonl" 0 0 0 0; then
+  ok "Appendix regeneration keeps its completion schema on early load failure"
+else
+  die "Appendix regeneration early failure emitted an unstable completion schema"
+fi
+
+log "phase 3d-regenerate-safety: unsafe projection destinations fail closed"
+stage_appendix_except \
+  neg-appendix-regenerate-symlink logical_object_kinds.toml
+APPENDIX_SYMLINK_SENTINEL='APPENDIX_SYMLINK_TARGET_76e13f0b'
+printf '%s\n' "$APPENDIX_SYMLINK_SENTINEL" \
+  > "$WORK/appendix-regenerate-symlink-external.toml"
+sha256sum "$WORK/appendix-regenerate-symlink-external.toml" \
+  > "$WORK/appendix-regenerate-symlink-before.sha256"
+ln -s "$WORK/appendix-regenerate-symlink-external.toml" \
+  "$WORK/neg-appendix-regenerate-symlink/registries/logical_object_kinds.toml"
+status=0
+"$BIN" appendix-regenerate --root "$WORK/neg-appendix-regenerate-symlink" \
+  >"$WORK/neg-appendix-regenerate-symlink.jsonl" \
+  2>"$WORK/neg-appendix-regenerate-symlink.err" || status=$?
+sha256sum "$WORK/appendix-regenerate-symlink-external.toml" \
+  > "$WORK/appendix-regenerate-symlink-after.sha256"
+if [ "$status" -eq 2 ] &&
+   cmp -s "$WORK/appendix-regenerate-symlink-before.sha256" \
+    "$WORK/appendix-regenerate-symlink-after.sha256" &&
+   assert_regeneration_error_terminal \
+    "$WORK/neg-appendix-regenerate-symlink.jsonl" 6 0 0 0 &&
+   ! grep -Fq "$APPENDIX_SYMLINK_SENTINEL" \
+    "$WORK/neg-appendix-regenerate-symlink.jsonl" \
+    "$WORK/neg-appendix-regenerate-symlink.err"; then
+  ok "Appendix regeneration rejects a projection symlink without touching its target"
+else
+  die "Appendix regeneration followed or leaked a projection symlink"
+fi
+
+stage_appendix_except \
+  neg-appendix-regenerate-hardlink logical_object_kinds.toml
+APPENDIX_HARDLINK_SENTINEL='APPENDIX_HARDLINK_TARGET_c4c5b322'
+printf '%s\n' "$APPENDIX_HARDLINK_SENTINEL" \
+  > "$WORK/appendix-regenerate-hardlink-external.toml"
+sha256sum "$WORK/appendix-regenerate-hardlink-external.toml" \
+  > "$WORK/appendix-regenerate-hardlink-before.sha256"
+ln "$WORK/appendix-regenerate-hardlink-external.toml" \
+  "$WORK/neg-appendix-regenerate-hardlink/registries/logical_object_kinds.toml"
+status=0
+"$BIN" appendix-regenerate --root "$WORK/neg-appendix-regenerate-hardlink" \
+  >"$WORK/neg-appendix-regenerate-hardlink.jsonl" \
+  2>"$WORK/neg-appendix-regenerate-hardlink.err" || status=$?
+sha256sum "$WORK/appendix-regenerate-hardlink-external.toml" \
+  > "$WORK/appendix-regenerate-hardlink-after.sha256"
+if [ "$status" -eq 2 ] &&
+   cmp -s "$WORK/appendix-regenerate-hardlink-before.sha256" \
+    "$WORK/appendix-regenerate-hardlink-after.sha256" &&
+   assert_regeneration_error_terminal \
+    "$WORK/neg-appendix-regenerate-hardlink.jsonl" 6 0 0 0 &&
+   ! grep -Fq "$APPENDIX_HARDLINK_SENTINEL" \
+    "$WORK/neg-appendix-regenerate-hardlink.jsonl" \
+    "$WORK/neg-appendix-regenerate-hardlink.err"; then
+  ok "Appendix regeneration rejects a hard-linked projection without touching its peer"
+else
+  die "Appendix regeneration followed or leaked a projection hard link"
+fi
+
+stage_appendix_except \
+  neg-appendix-regenerate-directory logical_object_kinds.toml
+mkdir -p \
+  "$WORK/neg-appendix-regenerate-directory/registries/logical_object_kinds.toml"
+status=0
+"$BIN" appendix-regenerate --root "$WORK/neg-appendix-regenerate-directory" \
+  >"$WORK/neg-appendix-regenerate-directory.jsonl" \
+  2>"$WORK/neg-appendix-regenerate-directory.err" || status=$?
+if [ "$status" -eq 2 ] &&
+   [ -d "$WORK/neg-appendix-regenerate-directory/registries/logical_object_kinds.toml" ] &&
+   assert_regeneration_error_terminal \
+    "$WORK/neg-appendix-regenerate-directory.jsonl" 6 0 0 0; then
+  ok "Appendix regeneration rejects a directory projection destination"
+else
+  die "Appendix regeneration accepted or replaced a directory projection destination"
+fi
+if find "$WORK/neg-appendix-regenerate-symlink/registries" \
+        "$WORK/neg-appendix-regenerate-hardlink/registries" \
+        "$WORK/neg-appendix-regenerate-directory/registries" \
+        -name '.appendix-regenerate-*.prepared' -print -quit | grep -q .; then
+  die "unsafe Appendix destinations created prepared projection siblings"
+else
+  ok "unsafe Appendix destinations fail before any projection is prepared"
+fi
+
 log "phase 3e: every checked-in projection requires one target"
 stage_appendix neg-appendix-target
 awk '
@@ -839,6 +1113,7 @@ row_id = "a01:semantic-binding:bootstrap-frame-root-slot"
 target_row_id = "a01:bootstrap-frame:root-slot"
 owner_bead_id = "fgdb-appendix-a-catalog-scaffold-gvvf"
 owner_crate = "registry-check"
+owner_status = "planned"
 consumer_crates = ["fgdb"]
 EOF
 expect_appendix_violation \
@@ -897,7 +1172,7 @@ awk '
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-complete/registries/appendix_a_catalog.toml"
 expect_appendix_violation \
-  neg-appendix-complete complete_slice_ambiguity a02
+  neg-appendix-complete slice_census_pin_mismatch a02
 
 log "phase 3j: full-plan reference occurrence drift fails closed"
 stage_appendix neg-appendix-reference-source
@@ -974,6 +1249,7 @@ row_id = "a01:semantic-binding:bootstrap-frame-root-slot"
 target_row_id = "a01:bootstrap-frame:root-slot"
 owner_bead_id = "fgdb-nonexistent-owner-z999"
 owner_crate = "fgdb-nonexistent-owner-crate"
+owner_status = "planned"
 consumer_crates = ["fgdb-nonexistent-consumer-crate"]
 
 [[evidence]]
@@ -1016,6 +1292,7 @@ row_id = "a01:semantic-binding:bootstrap-frame-root-slot"
 target_row_id = "a01:bootstrap-frame:root-slot"
 owner_bead_id = "fgdb-durable-capability-validation-evidence-dqym"
 owner_crate = "fgdb-types"
+owner_status = "live"
 consumer_crates = ["fgdb", "fgdb-server"]
 
 [[evidence]]
@@ -1129,7 +1406,7 @@ expect_appendix_violation \
 log "phase 3l: unknown catalog keys are structural load failures"
 stage_appendix neg-appendix-unknown-key
 awk '
-  !changed && $0 == "schema_version = 2" {
+  !changed && $0 == "schema_version = 3" {
     print
     print "unknown_catalog_root = true"
     changed = 1
@@ -1159,7 +1436,7 @@ expect_appendix_structural_error \
   neg-appendix-projection-schema catalog_projection_schema logical_object_kinds
 
 # --- Verdict -----------------------------------------------------------------
-log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second}.jsonl"
+log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second,appendix-regenerate-first,appendix-regenerate-second,appendix-regenerate-third}.jsonl"
 log "result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 log "G0 identity e2e: ALL GREEN"

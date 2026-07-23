@@ -7,8 +7,8 @@
 
 use crate::appendix_reference::{ReferenceTarget, census_plan_references};
 use crate::appendix_source::{
-    AppendixSourceCensus, FieldCandidate, SchemaCandidate, SchemaOwnerStatus, SourceSliceSpec,
-    census_appendix_source,
+    AmbiguityCandidate, AmbiguityKind, AppendixSourceCensus, ArmCandidate, FieldCandidate,
+    SchemaCandidate, SchemaOwnerStatus, SourceSliceSpec, UnionCandidate, census_appendix_source,
 };
 use crate::hash::sha256_hex;
 use crate::identity::{self, IdentityRegistries};
@@ -17,15 +17,14 @@ use crate::{architecture, model};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
-pub const CATALOG_SCHEMA_VERSION: i64 = 2;
+pub const CATALOG_SCHEMA_VERSION: i64 = 3;
 pub const CATALOG_NAME: &str = "appendix_a_catalog";
-pub const CATALOG_EPOCH: i64 = 2;
-pub const ROW_ID_GRAMMAR_VERSION: i64 = 2;
+pub const CATALOG_EPOCH: i64 = 3;
+pub const ROW_ID_GRAMMAR_VERSION: i64 = 3;
 pub const DIAGNOSTIC_VERSION: i64 = 1;
-pub const CANONICAL_ORDER: &str =
-    "source-key,projection-registry,assigned-code,containing-schema,field-tag,arm-tag,row-id";
+pub const CANONICAL_ORDER: &str = "source-key,projection-registry,assigned-code,containing-schema,union-path,field-tag,arm-tag,row-id";
 pub const CATALOG_PATH: &str = "registries/appendix_a_catalog.toml";
 pub const PLAN_PATH: &str = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md";
 pub const SOURCE_ENCODING: &str = "utf-8-lf";
@@ -51,8 +50,14 @@ pub const EXPECTED_ANNOTATION_SHA256: &str =
 pub const EXPECTED_SEMANTIC_BINDING_COUNT: usize = 0;
 pub const EXPECTED_SEMANTIC_BINDING_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+pub const EXPECTED_EXPANSION_BINDING_COUNT: usize = 0;
+pub const EXPECTED_EXPANSION_BINDING_SHA256: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 pub const EXPECTED_EVIDENCE_BINDING_COUNT: usize = 0;
 pub const EXPECTED_EVIDENCE_BINDING_SHA256: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 0;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 15;
@@ -74,12 +79,14 @@ pub const MAINTENANCE_PROOF_ROW_ID: &str = "catalog:maintenance-proof:appendix-a
 pub const MAINTENANCE_OWNER_BEAD: &str = "fgdb-appendix-a-catalog-scaffold-gvvf";
 pub const MAINTENANCE_OWNER_CRATE: &str = "registry-check";
 
-pub const APPENDIX_EVIDENCE_EVENT_IDS: [&str; 9] = [
+pub const APPENDIX_EVIDENCE_EVENT_IDS: [&str; 11] = [
     "appendix_closure_checked",
     "appendix_completed",
     "appendix_generation_completed",
     "appendix_projection_checked",
     "appendix_projection_generated",
+    "appendix_projection_regenerated",
+    "appendix_regeneration_completed",
     "appendix_reference_manifest",
     "appendix_slice_checked",
     "appendix_source_manifest",
@@ -147,6 +154,7 @@ struct SemanticBindingContractPin {
     target_source_key: &'static str,
     owner_bead_id: &'static str,
     owner_crate: &'static str,
+    owner_status: &'static str,
     consumer_crates: &'static [&'static str],
 }
 
@@ -165,12 +173,37 @@ struct EvidenceBindingContractPin {
     gate_ids: &'static [&'static str],
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ExpansionBindingContractPin {
+    row_id: &'static str,
+    target_row_id: &'static str,
+    target_source_key: &'static str,
+    parameter_ordinal: i64,
+    formal: &'static str,
+    formal_class: &'static str,
+    values: &'static [&'static str],
+    rationale: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AmbiguityAdjudicationContractPin {
+    row_id: &'static str,
+    slice_id: &'static str,
+    ambiguity_source_key: &'static str,
+    source_locations: &'static [&'static str],
+    resolution: &'static str,
+    resolved_source_keys: &'static [&'static str],
+    rationale: &'static str,
+}
+
 // These independent, readable pins are deliberately empty while all A01-A21
 // slices are declared. A slice may add completion metadata only by adding the
 // exact reciprocal target/source/owner/evidence contract here in reviewed
 // code; changing the opaque transcript digest alone is never authorization.
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
+const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
+const AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 0] = [];
 
 pub const PROJECTION_CLASSES: [&str; 6] = [
     "logical_object_kinds",
@@ -193,7 +226,7 @@ pub const PROJECTION_FILES: [(&str, &str); 6] = [
     ("durable_fields", "durable_fields.toml"),
 ];
 
-const ROOT_KEYS: [&str; 23] = [
+const ROOT_KEYS: [&str; 27] = [
     "schema_version",
     "catalog",
     "source_manifest",
@@ -209,13 +242,17 @@ const ROOT_KEYS: [&str; 23] = [
     "prebootstrap_kind",
     "wire_type",
     "field",
+    "union",
+    "union_arm",
     "reference_union",
     "reference_union_arm",
     "top_level_candidate",
     "target",
     "annotation",
     "semantic_binding",
+    "expansion_binding",
     "evidence",
+    "ambiguity_adjudication",
     "source_symbol_disposition",
 ];
 
@@ -340,12 +377,22 @@ const ANNOTATION_KEYS: [&str; 19] = [
     "resource_bounds",
     "compatibility",
 ];
-const SEMANTIC_BINDING_KEYS: [&str; 5] = [
+const SEMANTIC_BINDING_KEYS: [&str; 6] = [
     "row_id",
     "target_row_id",
     "owner_bead_id",
     "owner_crate",
+    "owner_status",
     "consumer_crates",
+];
+const EXPANSION_BINDING_KEYS: [&str; 7] = [
+    "row_id",
+    "target_row_id",
+    "parameter_ordinal",
+    "formal",
+    "formal_class",
+    "values",
+    "rationale",
 ];
 const EVIDENCE_KEYS: [&str; 10] = [
     "row_id",
@@ -365,6 +412,15 @@ const SOURCE_SYMBOL_DISPOSITION_KEYS: [&str; 5] = [
     "symbol",
     "disposition",
     "source_locations",
+];
+const AMBIGUITY_ADJUDICATION_KEYS: [&str; 7] = [
+    "row_id",
+    "slice_id",
+    "ambiguity_source_key",
+    "source_locations",
+    "resolution",
+    "resolved_source_keys",
+    "rationale",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -390,7 +446,9 @@ pub struct Catalog {
     pub targets: Vec<Target>,
     pub annotations: Vec<Annotation>,
     pub semantic_bindings: Vec<SemanticBinding>,
+    pub expansion_bindings: Vec<ExpansionBinding>,
     pub evidence: Vec<EvidenceBinding>,
+    pub ambiguity_adjudications: Vec<AmbiguityAdjudication>,
     pub source_symbol_dispositions: Vec<SourceSymbolDisposition>,
 }
 
@@ -413,6 +471,7 @@ pub struct ProjectionRowMeta {
     pub row_kind: String,
     pub slice_id: String,
     pub row_id: String,
+    pub canonical_suffix: String,
     pub canonical_symbol: String,
 }
 
@@ -478,7 +537,19 @@ pub struct SemanticBinding {
     pub target_row_id: String,
     pub owner_bead_id: String,
     pub owner_crate: String,
+    pub owner_status: String,
     pub consumer_crates: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpansionBinding {
+    pub row_id: String,
+    pub target_row_id: String,
+    pub parameter_ordinal: i64,
+    pub formal: String,
+    pub formal_class: String,
+    pub values: Vec<String>,
+    pub rationale: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -502,6 +573,17 @@ pub struct SourceSymbolDisposition {
     pub symbol: String,
     pub disposition: String,
     pub source_locations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmbiguityAdjudication {
+    pub row_id: String,
+    pub slice_id: String,
+    pub ambiguity_source_key: String,
+    pub source_locations: Vec<String>,
+    pub resolution: String,
+    pub resolved_source_keys: Vec<String>,
+    pub rationale: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -949,7 +1031,9 @@ fn parse_catalog_structural(text: &str) -> Result<Catalog, Vec<Violation>> {
     let targets = parse_targets(&root, &mut violations);
     let annotations = parse_annotations(&root, &mut violations);
     let semantic_bindings = parse_semantic_bindings(&root, &mut violations);
+    let expansion_bindings = parse_expansion_bindings(&root, &mut violations);
     let evidence = parse_evidence(&root, &mut violations);
+    let ambiguity_adjudications = parse_ambiguity_adjudications(&root, &mut violations);
     let source_symbol_dispositions = parse_source_symbol_dispositions(&root, &mut violations);
 
     if !violations.is_empty() {
@@ -1028,7 +1112,9 @@ fn parse_catalog_structural(text: &str) -> Result<Catalog, Vec<Violation>> {
         Some(targets),
         Some(annotations),
         Some(semantic_bindings),
+        Some(expansion_bindings),
         Some(evidence),
+        Some(ambiguity_adjudications),
         Some(source_symbol_dispositions),
     ) = (
         reservations,
@@ -1036,7 +1122,9 @@ fn parse_catalog_structural(text: &str) -> Result<Catalog, Vec<Violation>> {
         targets,
         annotations,
         semantic_bindings,
+        expansion_bindings,
         evidence,
+        ambiguity_adjudications,
         source_symbol_dispositions,
     )
     else {
@@ -1069,7 +1157,9 @@ fn parse_catalog_structural(text: &str) -> Result<Catalog, Vec<Violation>> {
         targets,
         annotations,
         semantic_bindings,
+        expansion_bindings,
         evidence,
+        ambiguity_adjudications,
         source_symbol_dispositions,
     };
     Ok(catalog)
@@ -1162,7 +1252,12 @@ pub fn verify_repository_bindings(repo_root: &Path, catalog: &Catalog) -> Vec<Vi
         .iter()
         .map(|entry| entry.bead_id.as_str())
         .collect();
-    let planned_crates: BTreeSet<&str> = architecture::PLANNED_CRATES.iter().copied().collect();
+    let planned_crates: BTreeSet<&str> = architecture
+        .registry
+        .planned_crates
+        .iter()
+        .map(String::as_str)
+        .collect();
     let workspace_crates = workspace_package_names(repo_root).ok();
 
     let mut out = Vec::new();
@@ -1198,14 +1293,22 @@ pub fn verify_repository_bindings(repo_root: &Path, catalog: &Catalog) -> Vec<Vi
                 "semantic owner_bead_id must resolve in the authoritative Beads index",
             ));
         }
-        if workspace_crates
-            .as_ref()
-            .is_some_and(|crates| !crates.contains(row.owner_crate.as_str()))
-        {
+        if !planned_crates.contains(row.owner_crate.as_str()) {
             out.push(Violation::new(
                 "catalog_semantic_owner_crate_unresolved",
                 &row.row_id,
-                "semantic owner_crate must resolve to an actual Cargo workspace package",
+                "semantic owner_crate must resolve in architecture.registry.planned_crates",
+            ));
+        }
+        if row.owner_status == "live"
+            && workspace_crates
+                .as_ref()
+                .is_some_and(|crates| !crates.contains(row.owner_crate.as_str()))
+        {
+            out.push(Violation::new(
+                "catalog_semantic_live_owner_crate_unresolved",
+                &row.row_id,
+                "live semantic owner_crate must resolve to an actual Cargo workspace package",
             ));
         }
         if row
@@ -1318,13 +1421,56 @@ fn workspace_package_names(repo_root: &Path) -> Result<BTreeSet<String>, String>
         .map_err(|error| error.to_string())?;
     let members = toml::get_str_array(workspace, "members", "Cargo.toml.workspace")
         .map_err(|error| error.to_string())?;
+    let excluded_paths = workspace_exact_excludes(workspace)?;
+    let member_paths = workspace_member_paths(repo_root, &members, &excluded_paths)?;
+
+    let mut packages = BTreeSet::new();
+    for member_path in member_paths {
+        let manifest_path = repo_root.join(&member_path).join("Cargo.toml");
+        let manifest_text = fs::read_to_string(&manifest_path)
+            .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+        let package_name = cargo_package_name(&manifest_text, &manifest_path)?;
+        if !packages.insert(package_name) {
+            return Err("Cargo workspace contains duplicate package names".to_owned());
+        }
+    }
+    Ok(packages)
+}
+
+fn workspace_exact_excludes(workspace: &Table) -> Result<BTreeSet<PathBuf>, String> {
+    let excludes = toml::get_opt_str_array(workspace, "exclude", "Cargo.toml.workspace")
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let mut excluded_paths = BTreeSet::new();
+    for exclude in excludes {
+        if exclude
+            .chars()
+            .any(|character| matches!(character, '*' | '?' | '[' | ']' | '{' | '}'))
+        {
+            return Err(format!(
+                "unsupported non-exact Cargo workspace exclude {exclude:?}"
+            ));
+        }
+        let Some(excluded_path) = normalized_repository_relative(&exclude) else {
+            return Err(format!("unsafe Cargo workspace exclude path {exclude:?}"));
+        };
+        excluded_paths.insert(excluded_path);
+    }
+    Ok(excluded_paths)
+}
+
+fn workspace_member_paths(
+    repo_root: &Path,
+    members: &[String],
+    excluded_paths: &BTreeSet<PathBuf>,
+) -> Result<Vec<PathBuf>, String> {
     let mut member_paths = Vec::new();
     for member in members {
         if let Some(parent) = member.strip_suffix("/*") {
-            if !safe_repository_relative(parent) {
+            let Some(parent_path) = normalized_repository_relative(parent) else {
                 return Err(format!("unsafe Cargo workspace member glob {member:?}"));
-            }
-            let mut children = fs::read_dir(repo_root.join(parent))
+            };
+            let mut children = fs::read_dir(repo_root.join(&parent_path))
                 .map_err(|error| format!("workspace member glob {member:?}: {error}"))?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| format!("workspace member glob {member:?}: {error}"))?;
@@ -1333,33 +1479,69 @@ fn workspace_package_names(repo_root: &Path) -> Result<BTreeSet<String>, String>
                 children
                     .into_iter()
                     .filter(|child| child.path().join("Cargo.toml").is_file())
-                    .map(|child| Path::new(parent).join(child.file_name())),
+                    .map(|child| parent_path.join(child.file_name()))
+                    .filter(|child_path| !excluded_paths.contains(child_path)),
             );
-        } else if safe_repository_relative(&member) {
-            member_paths.push(Path::new(&member).to_owned());
         } else {
-            return Err(format!("unsafe Cargo workspace member path {member:?}"));
+            let Some(member_path) = normalized_repository_relative(member) else {
+                return Err(format!("unsafe Cargo workspace member path {member:?}"));
+            };
+            if !excluded_paths.contains(&member_path) {
+                member_paths.push(member_path);
+            }
         }
     }
     member_paths.sort();
     member_paths.dedup();
+    Ok(member_paths)
+}
 
-    let mut packages = BTreeSet::new();
-    for member_path in member_paths {
-        let manifest_path = repo_root.join(&member_path).join("Cargo.toml");
-        let manifest_text = fs::read_to_string(&manifest_path)
-            .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
-        let manifest = toml::parse(&manifest_text)
-            .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
-        let package = toml::get_table(&manifest, "package", "workspace member Cargo.toml")
-            .map_err(|error| error.to_string())?;
-        let package_name = toml::get_str(package, "name", "workspace member Cargo.toml.package")
-            .map_err(|error| error.to_string())?;
-        if !packages.insert(package_name) {
-            return Err("Cargo workspace contains duplicate package names".to_owned());
+fn cargo_package_name(manifest_text: &str, manifest_path: &Path) -> Result<String, String> {
+    let mut in_package = false;
+    let mut package_name = None;
+
+    for line in manifest_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            let header = trimmed
+                .split_once('#')
+                .map_or(trimmed, |(before_comment, _)| before_comment)
+                .trim();
+            in_package = header == "[package]";
+            continue;
         }
+        if !in_package {
+            continue;
+        }
+        let Some((raw_key, _)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if raw_key.trim() != "name" {
+            continue;
+        }
+        if package_name.is_some() {
+            return Err(format!(
+                "{}: duplicate package.name assignment",
+                manifest_path.display()
+            ));
+        }
+
+        // Cargo manifests use TOML's full surface, while registry-check's
+        // in-house parser intentionally accepts only the registry subset.
+        // Parse the one package identity assignment we own instead of making
+        // unrelated dependency syntax part of the live-owner contract.
+        let identity_document = format!("[package]\n{line}\n");
+        let identity = toml::parse(&identity_document)
+            .map_err(|error| format!("{}: package.name: {error}", manifest_path.display()))?;
+        let package = toml::get_table(&identity, "package", "workspace member Cargo.toml")
+            .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+        package_name = Some(
+            toml::get_str(package, "name", "workspace member Cargo.toml.package")
+                .map_err(|error| format!("{}: {error}", manifest_path.display()))?,
+        );
     }
-    Ok(packages)
+
+    package_name.ok_or_else(|| format!("{}: missing package.name", manifest_path.display()))
 }
 
 fn safe_repository_relative(path: &str) -> bool {
@@ -1369,6 +1551,19 @@ fn safe_repository_relative(path: &str) -> bool {
         && path
             .components()
             .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
+fn normalized_repository_relative(path: &str) -> Option<PathBuf> {
+    if !safe_repository_relative(path) {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in Path::new(path).components() {
+        if let Component::Normal(component) = component {
+            normalized.push(component);
+        }
+    }
+    Some(normalized)
 }
 
 fn live_checker_artifact_exists(repo_root: &Path, checker: &model::Checker) -> bool {
@@ -1767,7 +1962,25 @@ pub fn semantic_binding_contract_sha256(rows: &[SemanticBinding]) -> String {
         append_contract_field(&mut transcript, &row.target_row_id);
         append_contract_field(&mut transcript, &row.owner_bead_id);
         append_contract_field(&mut transcript, &row.owner_crate);
+        append_contract_field(&mut transcript, &row.owner_status);
         append_contract_array(&mut transcript, &row.consumer_crates);
+        transcript.push('\n');
+    }
+    sha256_hex(transcript.as_bytes())
+}
+
+pub fn expansion_binding_contract_sha256(rows: &[ExpansionBinding]) -> String {
+    let mut ordered: Vec<_> = rows.iter().collect();
+    ordered.sort_by(|left, right| left.row_id.cmp(&right.row_id));
+    let mut transcript = String::new();
+    for row in ordered {
+        append_contract_field(&mut transcript, &row.row_id);
+        append_contract_field(&mut transcript, &row.target_row_id);
+        append_contract_field(&mut transcript, &row.parameter_ordinal.to_string());
+        append_contract_field(&mut transcript, &row.formal);
+        append_contract_field(&mut transcript, &row.formal_class);
+        append_contract_array(&mut transcript, &row.values);
+        append_contract_field(&mut transcript, &row.rationale);
         transcript.push('\n');
     }
     sha256_hex(transcript.as_bytes())
@@ -1791,6 +2004,23 @@ pub fn evidence_binding_contract_sha256(rows: &[EvidenceBinding]) -> String {
         append_contract_array(&mut transcript, &row.scenario_ids);
         append_contract_array(&mut transcript, &row.event_ids);
         append_contract_array(&mut transcript, &row.gate_ids);
+        transcript.push('\n');
+    }
+    sha256_hex(transcript.as_bytes())
+}
+
+pub fn ambiguity_adjudication_contract_sha256(rows: &[AmbiguityAdjudication]) -> String {
+    let mut ordered: Vec<_> = rows.iter().collect();
+    ordered.sort_by(|left, right| left.row_id.cmp(&right.row_id));
+    let mut transcript = String::new();
+    for row in ordered {
+        append_contract_field(&mut transcript, &row.row_id);
+        append_contract_field(&mut transcript, &row.slice_id);
+        append_contract_field(&mut transcript, &row.ambiguity_source_key);
+        append_contract_array(&mut transcript, &row.source_locations);
+        append_contract_field(&mut transcript, &row.resolution);
+        append_contract_array(&mut transcript, &row.resolved_source_keys);
+        append_contract_field(&mut transcript, &row.rationale);
         transcript.push('\n');
     }
     sha256_hex(transcript.as_bytes())
@@ -2235,8 +2465,292 @@ fn verify_structural_source_census(
 
     verify_top_level_source_candidates(catalog, &census, out);
     verify_structural_target_source_keys(catalog, &census, out);
+    verify_ordinary_union_source_contracts(catalog, &census, out);
     verify_annotation_source_contracts(catalog, &census, out);
+    verify_ambiguity_adjudications(catalog, &census, out);
     Some(census)
+}
+
+fn verify_ordinary_union_source_contracts(
+    catalog: &Catalog,
+    census: &AppendixSourceCensus,
+    out: &mut Vec<Violation>,
+) {
+    let union_by_key: BTreeMap<String, &UnionCandidate> = census
+        .unions
+        .iter()
+        .map(|row| (row.key.source_key(), row))
+        .collect();
+    let arm_by_key: BTreeMap<String, &ArmCandidate> = census
+        .arms
+        .iter()
+        .map(|row| (row.key.source_key(), row))
+        .collect();
+    let target_by_projection: BTreeMap<&str, &Target> = catalog
+        .targets
+        .iter()
+        .map(|row| (row.target_row_id.as_str(), row))
+        .collect();
+    let annotation_by_target: BTreeMap<&str, &Annotation> = catalog
+        .annotations
+        .iter()
+        .map(|row| (row.target_row_id.as_str(), row))
+        .collect();
+    let projection_by_symbol: BTreeMap<(&str, &str), &ProjectionRowMeta> = catalog
+        .projection_rows
+        .iter()
+        .map(|row| ((row.row_kind.as_str(), row.canonical_symbol.as_str()), row))
+        .collect();
+
+    for union in &catalog.identity.ordinary_unions {
+        let symbol = format!("{}.{}", union.containing_schema, union.union_path);
+        let Some(projection) = projection_by_symbol
+            .get(&("union", symbol.as_str()))
+            .copied()
+        else {
+            continue;
+        };
+        let Some(target) = target_by_projection
+            .get(projection.row_id.as_str())
+            .copied()
+        else {
+            continue;
+        };
+        let Some(source) = union_by_key.get(&target.source_key).copied() else {
+            continue;
+        };
+        if source.key.schema_owner != union.containing_schema
+            || source.key.union_path != union.union_path
+            || source.arm_set_conflict
+            || source.unparsed_arm_count != 0
+            || source.parsed_arm_count != source.arm_names.len()
+        {
+            out.push(Violation::new(
+                "source_union_contract_mismatch",
+                &target.row_id,
+                "ordinary union must exactly match one conflict-free, fully parsed source union owner/path/arm set",
+            ));
+        }
+
+        let mut projected_arm_names = BTreeSet::new();
+        for arm in &union.arms {
+            let arm_symbol = format!(
+                "{}.{}.{}",
+                arm.containing_schema, arm.union_path, arm.source_arm_name
+            );
+            let Some(arm_projection) = projection_by_symbol
+                .get(&("union-arm", arm_symbol.as_str()))
+                .copied()
+            else {
+                continue;
+            };
+            let Some(arm_target) = target_by_projection
+                .get(arm_projection.row_id.as_str())
+                .copied()
+            else {
+                continue;
+            };
+            let Some(source_arm) = arm_by_key.get(&arm_target.source_key).copied() else {
+                continue;
+            };
+            projected_arm_names.insert(arm.source_arm_name.as_str());
+            let payload_matches = match source_arm.payload_sha256s.as_slice() {
+                [] => arm.payload_kind == "unit" && arm.payload_sha256.is_none(),
+                [sha256] => {
+                    arm.payload_kind == "inline-record"
+                        && arm.payload_sha256.as_deref() == Some(sha256.as_str())
+                }
+                _ => false,
+            };
+            if source_arm.key.schema_owner != union.containing_schema
+                || source_arm.key.union_path != union.union_path
+                || source_arm.key.arm_name != arm.source_arm_name
+                || source_arm.payload_conflict
+                || !payload_matches
+            {
+                out.push(Violation::new(
+                    "source_union_arm_contract_mismatch",
+                    &arm_target.row_id,
+                    "ordinary union arm must exactly match its source parent, token, and normalized payload hash",
+                ));
+            }
+            if arm_target.definition_status == "complete" {
+                match annotation_by_target.get(arm_projection.row_id.as_str()).copied() {
+                    Some(annotation)
+                        if annotation.exact_type == arm.source_arm_name
+                            && annotation.cardinality == "one"
+                            && annotation.layout == arm.payload_kind
+                            && annotation.reference_semantics == "none"
+                            && annotation.target_schema_ids.is_empty() => {}
+                    _ => out.push(Violation::new(
+                        "source_union_arm_annotation_mismatch",
+                        &arm_target.row_id,
+                        "complete ordinary arm annotation must exactly describe its source token and non-reference payload layout",
+                    )),
+                }
+            }
+        }
+        let source_arm_names: BTreeSet<&str> =
+            source.arm_names.iter().map(String::as_str).collect();
+        if projected_arm_names != source_arm_names {
+            out.push(Violation::new(
+                "source_union_arm_set_mismatch",
+                &target.row_id,
+                "ordinary union projection arms must be an exact bijection with the source arm set",
+            ));
+        }
+        if target.definition_status == "complete" {
+            match annotation_by_target.get(projection.row_id.as_str()).copied() {
+                Some(annotation)
+                    if annotation.exact_type == union.union_name
+                        && annotation.cardinality == "one"
+                        && annotation.layout == union.encoding_context
+                        && annotation.reference_semantics == "none"
+                        && annotation.target_schema_ids.is_empty() => {}
+                _ => out.push(Violation::new(
+                    "source_union_annotation_mismatch",
+                    &target.row_id,
+                    "complete ordinary union annotation must exactly describe its tagged non-reference encoding",
+                )),
+            }
+        }
+    }
+}
+
+fn verify_ambiguity_adjudications(
+    catalog: &Catalog,
+    census: &AppendixSourceCensus,
+    out: &mut Vec<Violation>,
+) {
+    let mut expected: BTreeMap<String, (&str, &AmbiguityCandidate, Vec<String>)> = BTreeMap::new();
+    for slice in &census.slices {
+        for ambiguity in &slice.ambiguities {
+            expected.insert(
+                ambiguity.key.source_key(),
+                (
+                    slice.slice_id.as_str(),
+                    ambiguity,
+                    structural_locations(catalog, &ambiguity.locations),
+                ),
+            );
+        }
+    }
+    let actual: BTreeMap<&str, &AmbiguityAdjudication> = catalog
+        .ambiguity_adjudications
+        .iter()
+        .map(|row| (row.ambiguity_source_key.as_str(), row))
+        .collect();
+    let top_level_source_coverage = approved_top_level_source_coverage(catalog);
+    let mut projected_source_keys: BTreeSet<&str> = catalog
+        .targets
+        .iter()
+        .filter(|row| !row.source_key.starts_with("top|"))
+        .map(|row| row.source_key.as_str())
+        .collect();
+    projected_source_keys.extend(top_level_source_coverage.keys().copied());
+    for (source_key, row) in &actual {
+        let Some((slice_id, ambiguity, locations)) = expected.get(*source_key) else {
+            out.push(Violation::new(
+                "source_ambiguity_adjudication_orphan",
+                &row.row_id,
+                "catalog adjudication key is absent from the raw source ambiguity census",
+            ));
+            continue;
+        };
+        if row.slice_id != *slice_id || row.source_locations != *locations {
+            out.push(Violation::new(
+                "source_ambiguity_adjudication_mismatch",
+                &row.row_id,
+                "adjudication slice and source locations must exactly match the raw ambiguity census",
+            ));
+        }
+        if matches!(
+            row.resolution.as_str(),
+            "maps-to-source" | "not-a-durable-schema"
+        ) {
+            if !final_ambiguity_resolution_matches(row, ambiguity) {
+                out.push(Violation::new(
+                    "source_ambiguity_resolution_relation_mismatch",
+                    &row.row_id,
+                    "final adjudication must byte-match the parser-owned exact affected source-key set; only an unowned structural fragment may close with an empty set",
+                ));
+            }
+            for resolved in &row.resolved_source_keys {
+                let projection_matches = projected_source_keys.contains(resolved.as_str());
+                if (row.resolution == "maps-to-source" && !projection_matches)
+                    || (row.resolution == "not-a-durable-schema" && projection_matches)
+                {
+                    out.push(Violation::new(
+                        "source_ambiguity_resolution_projection_mismatch",
+                        &row.row_id,
+                        format!(
+                            "resolution {:?} is inconsistent with projected source key {resolved:?}",
+                            row.resolution
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    for slice in catalog
+        .slices
+        .iter()
+        .filter(|slice| slice.definition_status == "complete")
+    {
+        let expected_keys: BTreeSet<String> = census
+            .slices
+            .iter()
+            .find(|source_slice| source_slice.slice_id == slice.id)
+            .into_iter()
+            .flat_map(|source_slice| &source_slice.ambiguities)
+            .map(|row| row.key.source_key())
+            .collect();
+        let final_keys: BTreeSet<String> =
+            catalog
+                .ambiguity_adjudications
+                .iter()
+                .filter(|row| {
+                    row.slice_id == slice.id
+                        && matches!(
+                            row.resolution.as_str(),
+                            "maps-to-source" | "not-a-durable-schema"
+                        )
+                        && ambiguity_adjudication_contract_matches_with(
+                            &AMBIGUITY_ADJUDICATION_CONTRACT,
+                            row,
+                        )
+                        && expected.get(&row.ambiguity_source_key).is_some_and(
+                            |(_, ambiguity, _)| final_ambiguity_resolution_matches(row, ambiguity),
+                        )
+                })
+                .map(|row| row.ambiguity_source_key.clone())
+                .collect();
+        if final_keys != expected_keys {
+            out.push(Violation::new(
+                "source_complete_slice_ambiguity_unresolved",
+                &slice.id,
+                "complete slice requires one approved final adjudication for every raw source ambiguity and no extras",
+            ));
+        }
+    }
+}
+
+fn final_ambiguity_resolution_matches(
+    row: &AmbiguityAdjudication,
+    ambiguity: &AmbiguityCandidate,
+) -> bool {
+    if row.resolved_source_keys != ambiguity.affected_source_keys {
+        return false;
+    }
+    match row.resolution.as_str() {
+        "maps-to-source" => !ambiguity.affected_source_keys.is_empty(),
+        "not-a-durable-schema" => {
+            !ambiguity.affected_source_keys.is_empty()
+                || ambiguity.key.kind == AmbiguityKind::UnownedStructuralFragment
+        }
+        _ => false,
+    }
 }
 
 fn verify_structural_target_source_keys(
@@ -2292,6 +2806,11 @@ fn verify_annotation_source_contracts(
         .iter()
         .map(|schema| (schema.key.source_key(), schema))
         .collect();
+    let ambiguity_by_source_key: BTreeMap<String, &AmbiguityCandidate> = census
+        .ambiguities
+        .iter()
+        .map(|ambiguity| (ambiguity.key.source_key(), ambiguity))
+        .collect();
 
     for annotation in &catalog.annotations {
         let Some(target) = target_by_projection
@@ -2301,7 +2820,22 @@ fn verify_annotation_source_contracts(
             continue;
         };
         if let Some(field) = field_by_source_key.get(&target.source_key).copied() {
-            let source_is_exact = !field.ambiguous
+            let field_source_key = field.key.source_key();
+            let ambiguity_is_discharged = !field.ambiguous
+                || catalog.ambiguity_adjudications.iter().any(|row| {
+                    row.resolution == "maps-to-source"
+                        && row.resolved_source_keys.contains(&field_source_key)
+                        && ambiguity_adjudication_contract_matches_with(
+                            &AMBIGUITY_ADJUDICATION_CONTRACT,
+                            row,
+                        )
+                        && ambiguity_by_source_key
+                            .get(&row.ambiguity_source_key)
+                            .is_some_and(|ambiguity| {
+                                final_ambiguity_resolution_matches(row, ambiguity)
+                            })
+                });
+            let source_is_exact = ambiguity_is_discharged
                 && !field.type_conflict
                 && matches!(field.exact_types.as_slice(), [_])
                 && matches!(field.cardinalities.as_slice(), [_]);
@@ -2333,7 +2867,7 @@ fn verify_annotation_source_contracts(
         if let Some(schema) = schema_by_source_key.get(&target.source_key).copied() {
             let exact_type_matches = annotation.exact_type == schema.key.family;
             let expansions_match =
-                top_level_annotation_expansions_match(annotation, schema, &census.schemas);
+                top_level_annotation_expansions_match(catalog, annotation, schema, &census.schemas);
             if !exact_type_matches || !expansions_match {
                 out.push(Violation::new(
                     "source_annotation_contract_mismatch",
@@ -2349,104 +2883,272 @@ fn verify_annotation_source_contracts(
 }
 
 fn top_level_annotation_expansions_match(
+    catalog: &Catalog,
     annotation: &Annotation,
     schema: &SchemaCandidate,
     schemas: &[SchemaCandidate],
 ) -> bool {
-    let formals = generic_formals_from_signature(&schema.key.generic_signature);
-    let requires_role_expansions = formals.contains("Role");
-    let requires_generic_expansions = formals.iter().any(|formal| formal != "Role");
-    let (expected_role_expansions, expected_generic_expansions) =
-        source_concrete_expansion_sets(schema, schemas);
-    let actual_role_expansions: BTreeSet<&str> = annotation
-        .role_expansions
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let actual_generic_expansions: BTreeSet<&str> = annotation
-        .generic_expansions
-        .iter()
-        .map(String::as_str)
-        .collect();
-
-    expansion_set_matches(
-        &annotation.role_expansions,
-        &actual_role_expansions,
-        requires_role_expansions,
-        &expected_role_expansions,
-    ) && expansion_set_matches(
-        &annotation.generic_expansions,
-        &actual_generic_expansions,
-        requires_generic_expansions,
-        &expected_generic_expansions,
+    top_level_annotation_expansions_match_with(
+        &EXPANSION_BINDING_CONTRACT,
+        catalog,
+        annotation,
+        schema,
+        schemas,
     )
 }
 
-fn expansion_set_matches(
-    actual: &[String],
-    actual_set: &BTreeSet<&str>,
-    required: bool,
-    expected: &BTreeSet<String>,
-) -> bool {
-    if !required {
-        return actual.is_empty();
-    }
-    if actual.is_empty() || actual.len() != actual_set.len() {
-        return false;
-    }
-    expected.is_empty()
-        || (actual.len() == expected.len()
-            && actual_set
-                .iter()
-                .copied()
-                .eq(expected.iter().map(String::as_str)))
-}
-
-fn source_concrete_expansion_sets(
+fn top_level_annotation_expansions_match_with(
+    contract: &[ExpansionBindingContractPin],
+    catalog: &Catalog,
+    annotation: &Annotation,
     schema: &SchemaCandidate,
     schemas: &[SchemaCandidate],
-) -> (BTreeSet<String>, BTreeSet<String>) {
-    let Some(formal_parameters) = generic_signature_parameters(&schema.key.generic_signature)
+) -> bool {
+    let approved: Vec<_> = catalog
+        .expansion_bindings
+        .iter()
+        .filter(|row| {
+            row.target_row_id == annotation.target_row_id
+                && expansion_binding_contract_matches_with(contract, catalog, row)
+        })
+        .collect();
+    let family_signatures = schemas
+        .iter()
+        .filter(|candidate| candidate.key.family == schema.key.family)
+        .map(|candidate| candidate.key.generic_signature.as_str());
+    let Some(dimensions) = expansion_dimensions(&schema.key.generic_signature, family_signatures)
     else {
-        return (BTreeSet::new(), BTreeSet::new());
+        return false;
     };
+    if !expansion_bindings_match_dimensions(&approved, &dimensions) {
+        return false;
+    }
     let mut role_expansions = BTreeSet::new();
     let mut generic_expansions = BTreeSet::new();
-
-    for (index, formal_parameter) in formal_parameters.iter().enumerate() {
-        let Some(formal) = generic_parameter_formal(formal_parameter) else {
-            continue;
-        };
-        if let Some((_, bound)) = formal_parameter.split_once(':')
-            && bound.contains('|')
-            && let Some(values) = concrete_parameter_alternatives(bound)
-        {
-            expansion_set_for_formal(formal, &mut role_expansions, &mut generic_expansions)
-                .extend(values);
+    for binding in approved {
+        let actual: BTreeSet<String> = binding.values.iter().cloned().collect();
+        if binding.values.len() != actual.len() {
+            return false;
         }
-        for candidate in schemas
+        expansion_set_for_formal(
+            &binding.formal,
+            &mut role_expansions,
+            &mut generic_expansions,
+        )
+        .extend(actual);
+    }
+    annotation.role_expansions.iter().eq(role_expansions.iter())
+        && annotation
+            .generic_expansions
             .iter()
-            .filter(|candidate| candidate.key.family == schema.key.family)
-        {
-            let Some(candidate_parameters) =
-                generic_signature_parameters(&candidate.key.generic_signature)
-            else {
-                continue;
-            };
-            if candidate_parameters.len() != formal_parameters.len() {
-                continue;
+            .eq(generic_expansions.iter())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpansionDimension {
+    parameter_ordinal: i64,
+    explicit_formal: Option<String>,
+    source_values: BTreeSet<String>,
+}
+
+fn expansion_dimensions<'a>(
+    selected_signature: &str,
+    family_signatures: impl IntoIterator<Item = &'a str>,
+) -> Option<Vec<ExpansionDimension>> {
+    let selected: Vec<String> = generic_signature_parameters(selected_signature)?
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let family: Vec<Vec<String>> = family_signatures
+        .into_iter()
+        .map(|signature| {
+            generic_signature_parameters(signature)
+                .map(|parameters| parameters.into_iter().map(str::to_owned).collect())
+        })
+        .collect::<Option<_>>()?;
+    if family
+        .iter()
+        .any(|parameters| parameters.len() != selected.len())
+    {
+        return None;
+    }
+
+    let mut dimensions = Vec::new();
+    for (index, _) in selected.iter().enumerate() {
+        let parameter_ordinal = i64::try_from(index).ok()?.checked_add(1)?;
+        let raw_parameters: BTreeSet<&str> = family
+            .iter()
+            .map(|parameters| parameters[index].as_str())
+            .collect();
+        let explicit_formals: BTreeSet<&str> = raw_parameters
+            .iter()
+            .filter_map(|parameter| generic_parameter_formal(parameter))
+            .collect();
+        if explicit_formals.len() > 1 {
+            return None;
+        }
+        let explicit_formal = explicit_formals.first().map(|formal| (*formal).to_owned());
+        let mut source_values = BTreeSet::new();
+        for parameter in raw_parameters.iter().copied() {
+            if let Some(values) = concrete_parameter_values(parameter) {
+                source_values.extend(values);
             }
-            let Some(values) = candidate_parameters
-                .get(index)
-                .and_then(|parameter| concrete_parameter_alternatives(parameter))
-            else {
-                continue;
-            };
-            expansion_set_for_formal(formal, &mut role_expansions, &mut generic_expansions)
-                .extend(values);
+        }
+        if explicit_formal.is_none() && raw_parameters.len() > 1 && source_values.is_empty() {
+            return None;
+        }
+        let requires_binding =
+            explicit_formal.is_some() || raw_parameters.len() > 1 || source_values.len() > 1;
+        if requires_binding {
+            dimensions.push(ExpansionDimension {
+                parameter_ordinal,
+                explicit_formal,
+                source_values,
+            });
         }
     }
-    (role_expansions, generic_expansions)
+    Some(dimensions)
+}
+
+fn concrete_parameter_values(parameter: &str) -> Option<Vec<String>> {
+    if let Some((formal, values)) = parameter.split_once(':') {
+        if valid_generic_formal_token(formal.trim()) && values.contains('|') {
+            concrete_parameter_alternatives(values.trim())
+        } else {
+            None
+        }
+    } else if generic_parameter_formal(parameter).is_some() {
+        None
+    } else {
+        concrete_parameter_alternatives(parameter)
+    }
+}
+
+fn expansion_bindings_match_dimensions(
+    bindings: &[&ExpansionBinding],
+    dimensions: &[ExpansionDimension],
+) -> bool {
+    if bindings.len() != dimensions.len() {
+        return false;
+    }
+    let mut used = BTreeSet::new();
+    for dimension in dimensions {
+        let matches: Vec<_> = bindings
+            .iter()
+            .enumerate()
+            .filter(|(index, binding)| {
+                if used.contains(index) {
+                    return false;
+                }
+                let actual: BTreeSet<String> = binding.values.iter().cloned().collect();
+                binding.values.len() == actual.len()
+                    && binding.parameter_ordinal == dimension.parameter_ordinal
+                    && dimension
+                        .explicit_formal
+                        .as_deref()
+                        .is_none_or(|formal| binding.formal == formal)
+                    && (dimension.source_values.is_empty() || actual == dimension.source_values)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if matches.len() != 1 {
+            return false;
+        }
+        used.insert(matches[0]);
+    }
+    true
+}
+
+fn approved_top_level_source_coverage(catalog: &Catalog) -> BTreeMap<&str, &Target> {
+    approved_top_level_source_coverage_with(&EXPANSION_BINDING_CONTRACT, catalog)
+}
+
+fn approved_top_level_source_coverage_with<'a>(
+    contract: &[ExpansionBindingContractPin],
+    catalog: &'a Catalog,
+) -> BTreeMap<&'a str, &'a Target> {
+    let mut candidates: BTreeMap<&str, BTreeMap<&str, &Target>> = BTreeMap::new();
+    for target in catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key.starts_with("top|"))
+    {
+        candidates
+            .entry(target.source_key.as_str())
+            .or_default()
+            .insert(target.row_id.as_str(), target);
+        let Some(selected) = catalog
+            .top_level_candidates
+            .iter()
+            .find(|candidate| candidate.source_key == target.source_key)
+        else {
+            continue;
+        };
+        let family: Vec<_> = catalog
+            .top_level_candidates
+            .iter()
+            .filter(|candidate| candidate.symbol == selected.symbol)
+            .collect();
+        if family
+            .iter()
+            .any(|candidate| candidate.identity_class != selected.identity_class)
+        {
+            continue;
+        }
+        let Some(dimensions) = expansion_dimensions(
+            &selected.generic_signature,
+            family
+                .iter()
+                .map(|candidate| candidate.generic_signature.as_str()),
+        ) else {
+            continue;
+        };
+        let approved: Vec<_> = catalog
+            .expansion_bindings
+            .iter()
+            .filter(|row| {
+                row.target_row_id == target.target_row_id
+                    && expansion_binding_contract_matches_with(contract, catalog, row)
+            })
+            .collect();
+        if !expansion_bindings_match_dimensions(&approved, &dimensions) {
+            continue;
+        }
+        for candidate in family {
+            candidates
+                .entry(candidate.source_key.as_str())
+                .or_default()
+                .insert(target.row_id.as_str(), target);
+        }
+    }
+    candidates
+        .into_iter()
+        .filter_map(|(source_key, targets)| {
+            let mut targets = targets.into_values();
+            let target = targets.next()?;
+            targets.next().is_none().then_some((source_key, target))
+        })
+        .collect()
+}
+
+fn top_level_coverage_for_slice<'a>(
+    catalog: &'a Catalog,
+    coverage: &BTreeMap<&'a str, &'a Target>,
+    slice_id: &str,
+) -> (Vec<&'a str>, BTreeMap<&'a str, &'a Target>) {
+    let mut source_keys = Vec::new();
+    let mut targets = BTreeMap::new();
+    for candidate in catalog
+        .top_level_candidates
+        .iter()
+        .filter(|candidate| candidate.slice_id == slice_id)
+    {
+        if let Some(target) = coverage.get(candidate.source_key.as_str()).copied() {
+            source_keys.push(candidate.source_key.as_str());
+            targets.insert(target.target_row_id.as_str(), target);
+        }
+    }
+    (source_keys, targets)
 }
 
 fn expansion_set_for_formal<'a>(
@@ -2473,21 +3175,13 @@ fn generic_signature_parameters(signature: &str) -> Option<Vec<&str>> {
 }
 
 fn generic_parameter_formal(parameter: &str) -> Option<&str> {
-    const KNOWN_FORMALS: [&str; 9] = [
-        "T",
-        "Role",
-        "Contract",
-        "Kind",
-        "Profile",
-        "Disposition",
-        "Operation",
-        "Action",
-        "Tag",
-    ];
-    let formal = parameter
+    let (formal, has_bound) = parameter
         .split_once(':')
-        .map_or(parameter.trim(), |(formal, _)| formal.trim());
-    KNOWN_FORMALS.contains(&formal).then_some(formal)
+        .map_or((parameter.trim(), false), |(formal, _)| {
+            (formal.trim(), true)
+        });
+    (valid_generic_formal_token(formal) && (has_bound || KNOWN_GENERIC_FORMALS.contains(&formal)))
+        .then_some(formal)
 }
 
 fn concrete_parameter_alternatives(parameter: &str) -> Option<Vec<String>> {
@@ -2999,7 +3693,7 @@ fn parse_identity_projections(
         Some((bootstrap_epoch, bootstrap)),
         Some((prebootstrap_epoch, prebootstrap)),
         Some((wire_epoch, wire)),
-        Some((fields_epoch, fields, unions)),
+        Some((fields_epoch, fields, ordinary_unions, unions)),
     ) = (logical, physical, bootstrap, prebootstrap, wire, fields)
     else {
         return None;
@@ -3018,6 +3712,7 @@ fn parse_identity_projections(
         wire_epoch,
         fields,
         fields_epoch,
+        ordinary_unions,
         unions,
     };
     canonicalize_identity(&mut identity);
@@ -3047,6 +3742,18 @@ fn canonicalize_identity(identity: &mut IdentityRegistries) {
             &right.stable_name,
         ))
     });
+    identity.ordinary_unions.sort_by(|left, right| {
+        (&left.containing_schema, &left.union_path, &left.union_name).cmp(&(
+            &right.containing_schema,
+            &right.union_path,
+            &right.union_name,
+        ))
+    });
+    for union in &mut identity.ordinary_unions {
+        union.arms.sort_by(|left, right| {
+            (left.arm_tag, &left.stable_name).cmp(&(right.arm_tag, &right.stable_name))
+        });
+    }
     identity.unions.sort_by(|left, right| {
         (&left.containing_schema, left.field_tag, &left.union_name).cmp(&(
             &right.containing_schema,
@@ -3106,6 +3813,22 @@ fn durable_fields_projection_root(
         metadata,
         violations,
     )?;
+    let ordinary_unions = catalog_projection_rows(
+        catalog_root,
+        "union",
+        "durable_fields",
+        "union",
+        metadata,
+        violations,
+    )?;
+    let ordinary_arms = catalog_projection_rows(
+        catalog_root,
+        "union_arm",
+        "durable_fields",
+        "union-arm",
+        metadata,
+        violations,
+    )?;
     let unions = catalog_projection_rows(
         catalog_root,
         "reference_union",
@@ -3127,6 +3850,8 @@ fn durable_fields_projection_root(
         projection_epoch(epochs, "durable_fields", violations),
     );
     root.insert("field".into(), Value::Array(fields));
+    root.insert("union".into(), Value::Array(ordinary_unions));
+    root.insert("union_arm".into(), Value::Array(ordinary_arms));
     root.insert("reference_union".into(), Value::Array(unions));
     root.insert("reference_union_arm".into(), Value::Array(arms));
     Some(root)
@@ -3164,12 +3889,15 @@ fn catalog_projection_rows(
                     ));
                 }
             }
+            let (canonical_suffix, canonical_symbol) =
+                identity.unwrap_or_else(|| (String::new(), String::new()));
             metadata.push(ProjectionRowMeta {
                 projection: registry_name.to_owned(),
                 row_kind: row_kind.to_owned(),
                 slice_id,
                 row_id,
-                canonical_symbol: identity.map_or_else(String::new, |(_, symbol)| symbol),
+                canonical_suffix,
+                canonical_symbol,
             });
         }
         rows.push(Value::Table(projection));
@@ -3182,6 +3910,51 @@ fn projection_row_identity(catalog_key: &str, table: &Table) -> Option<(String, 
         "logical_kind" | "physical_kind" | "bootstrap_frame" | "prebootstrap_kind"
         | "wire_type" => &["name"],
         "field" => &["containing_schema", "stable_name"],
+        "union" => {
+            let Value::Str(containing_schema) = table.get("containing_schema")? else {
+                return None;
+            };
+            let Value::Str(union_path) = table.get("union_path")? else {
+                return None;
+            };
+            let Value::Str(union_name) = table.get("union_name")? else {
+                return None;
+            };
+            let source_key = format!("union|{containing_schema}|{union_path}");
+            let digest = sha256_hex(source_key.as_bytes());
+            return Some((
+                format!("{}-{}", lower_kebab(union_name), &digest[..16]),
+                format!("{containing_schema}.{union_path}"),
+            ));
+        }
+        "union_arm" => {
+            let Value::Str(containing_schema) = table.get("containing_schema")? else {
+                return None;
+            };
+            let Value::Str(union_path) = table.get("union_path")? else {
+                return None;
+            };
+            let Value::Str(source_arm_name) = table.get("source_arm_name")? else {
+                return None;
+            };
+            let Value::Str(union_name) = table.get("union_name")? else {
+                return None;
+            };
+            let Value::Str(stable_name) = table.get("stable_name")? else {
+                return None;
+            };
+            let source_key = format!("arm|{containing_schema}|{union_path}|{source_arm_name}");
+            let digest = sha256_hex(source_key.as_bytes());
+            return Some((
+                format!(
+                    "{}-{}-{}",
+                    lower_kebab(union_name),
+                    lower_kebab(stable_name),
+                    &digest[..16]
+                ),
+                format!("{containing_schema}.{union_path}.{source_arm_name}"),
+            ));
+        }
         "reference_union" => &["containing_schema", "union_name"],
         "reference_union_arm" => &["union_name", "stable_name"],
         _ => return None,
@@ -3562,6 +4335,7 @@ fn parse_semantic_bindings(
             read_string(table, "target_row_id", &context, violations),
             read_string(table, "owner_bead_id", &context, violations),
             read_string(table, "owner_crate", &context, violations),
+            read_string(table, "owner_status", &context, violations),
             read_string_array(table, "consumer_crates", &context, violations),
         );
         if let (
@@ -3569,6 +4343,7 @@ fn parse_semantic_bindings(
             Some(target_row_id),
             Some(owner_bead_id),
             Some(owner_crate),
+            Some(owner_status),
             Some(consumer_crates),
         ) = values
         {
@@ -3577,7 +4352,50 @@ fn parse_semantic_bindings(
                 target_row_id,
                 owner_bead_id,
                 owner_crate,
+                owner_status,
                 consumer_crates,
+            });
+        }
+    }
+    Some(rows)
+}
+
+fn parse_expansion_bindings(
+    root: &Table,
+    violations: &mut Vec<Violation>,
+) -> Option<Vec<ExpansionBinding>> {
+    let tables = read_table_array(root, "expansion_binding", "catalog", violations)?;
+    let mut rows = Vec::new();
+    for (index, table) in tables.iter().enumerate() {
+        let context = format!("expansion_binding[{index}]");
+        exact_keys(table, &EXPANSION_BINDING_KEYS, &context, violations);
+        let values = (
+            read_string(table, "row_id", &context, violations),
+            read_string(table, "target_row_id", &context, violations),
+            read_int(table, "parameter_ordinal", &context, violations),
+            read_string(table, "formal", &context, violations),
+            read_string(table, "formal_class", &context, violations),
+            read_string_array(table, "values", &context, violations),
+            read_string(table, "rationale", &context, violations),
+        );
+        if let (
+            Some(row_id),
+            Some(target_row_id),
+            Some(parameter_ordinal),
+            Some(formal),
+            Some(formal_class),
+            Some(values),
+            Some(rationale),
+        ) = values
+        {
+            rows.push(ExpansionBinding {
+                row_id,
+                target_row_id,
+                parameter_ordinal,
+                formal,
+                formal_class,
+                values,
+                rationale,
             });
         }
     }
@@ -3662,6 +4480,48 @@ fn parse_source_symbol_dispositions(
                 symbol,
                 disposition,
                 source_locations,
+            });
+        }
+    }
+    Some(rows)
+}
+
+fn parse_ambiguity_adjudications(
+    root: &Table,
+    violations: &mut Vec<Violation>,
+) -> Option<Vec<AmbiguityAdjudication>> {
+    let tables = read_table_array(root, "ambiguity_adjudication", "catalog", violations)?;
+    let mut rows = Vec::new();
+    for (index, table) in tables.iter().enumerate() {
+        let context = format!("ambiguity_adjudication[{index}]");
+        exact_keys(table, &AMBIGUITY_ADJUDICATION_KEYS, &context, violations);
+        let values = (
+            read_string(table, "row_id", &context, violations),
+            read_string(table, "slice_id", &context, violations),
+            read_string(table, "ambiguity_source_key", &context, violations),
+            read_string_array(table, "source_locations", &context, violations),
+            read_string(table, "resolution", &context, violations),
+            read_string_array(table, "resolved_source_keys", &context, violations),
+            read_string(table, "rationale", &context, violations),
+        );
+        if let (
+            Some(row_id),
+            Some(slice_id),
+            Some(ambiguity_source_key),
+            Some(source_locations),
+            Some(resolution),
+            Some(resolved_source_keys),
+            Some(rationale),
+        ) = values
+        {
+            rows.push(AmbiguityAdjudication {
+                row_id,
+                slice_id,
+                ambiguity_source_key,
+                source_locations,
+                resolution,
+                resolved_source_keys,
+                rationale,
             });
         }
     }
@@ -3992,7 +4852,35 @@ fn validate_binding_contract_pins(catalog: &Catalog, out: &mut Vec<Violation>) {
             ),
         ));
     }
+    let expansion_sha256 = expansion_binding_contract_sha256(&catalog.expansion_bindings);
+    if catalog.expansion_bindings.len() != EXPECTED_EXPANSION_BINDING_COUNT
+        || expansion_sha256 != EXPECTED_EXPANSION_BINDING_SHA256
+    {
+        out.push(Violation::new(
+            "catalog_expansion_binding_contract_drift",
+            "expansion_binding",
+            format!(
+                "expansion binding contract must contain {EXPECTED_EXPANSION_BINDING_COUNT} independently pinned rows with sha256 {EXPECTED_EXPANSION_BINDING_SHA256}; found {} rows with sha256 {expansion_sha256}",
+                catalog.expansion_bindings.len()
+            ),
+        ));
+    }
+    let ambiguity_sha256 = ambiguity_adjudication_contract_sha256(&catalog.ambiguity_adjudications);
+    if catalog.ambiguity_adjudications.len() != EXPECTED_AMBIGUITY_ADJUDICATION_COUNT
+        || ambiguity_sha256 != EXPECTED_AMBIGUITY_ADJUDICATION_SHA256
+    {
+        out.push(Violation::new(
+            "catalog_ambiguity_adjudication_contract_drift",
+            "ambiguity_adjudication",
+            format!(
+                "ambiguity adjudication contract must contain {EXPECTED_AMBIGUITY_ADJUDICATION_COUNT} independently pinned rows with sha256 {EXPECTED_AMBIGUITY_ADJUDICATION_SHA256}; found {} rows with sha256 {ambiguity_sha256}",
+                catalog.ambiguity_adjudications.len()
+            ),
+        ));
+    }
     validate_readable_binding_contract(catalog, out);
+    validate_readable_expansion_contract(catalog, out);
+    validate_readable_ambiguity_contract(catalog, out);
 }
 
 fn validate_readable_binding_contract(catalog: &Catalog, out: &mut Vec<Violation>) {
@@ -4050,6 +4938,7 @@ fn validate_readable_binding_contract_with(
                     && source_key == Some(pin.target_source_key)
                     && row.owner_bead_id == pin.owner_bead_id
                     && row.owner_crate == pin.owner_crate
+                    && row.owner_status == pin.owner_status
                     && row
                         .consumer_crates
                         .iter()
@@ -4170,11 +5059,189 @@ fn semantic_binding_contract_matches_with(
         && source_key == Some(pin.target_source_key)
         && row.owner_bead_id == pin.owner_bead_id
         && row.owner_crate == pin.owner_crate
+        && row.owner_status == pin.owner_status
         && row
             .consumer_crates
             .iter()
             .map(String::as_str)
             .eq(pin.consumer_crates.iter().copied())
+}
+
+fn expansion_binding_contract_matches_with(
+    contract: &[ExpansionBindingContractPin],
+    catalog: &Catalog,
+    row: &ExpansionBinding,
+) -> bool {
+    let Some(pin) = contract.iter().find(|pin| pin.row_id == row.row_id) else {
+        return false;
+    };
+    let source_key = catalog
+        .targets
+        .iter()
+        .find(|target| target.target_row_id == row.target_row_id)
+        .map(|target| target.source_key.as_str());
+    row.target_row_id == pin.target_row_id
+        && source_key == Some(pin.target_source_key)
+        && row.parameter_ordinal == pin.parameter_ordinal
+        && row.formal == pin.formal
+        && row.formal_class == pin.formal_class
+        && row
+            .values
+            .iter()
+            .map(String::as_str)
+            .eq(pin.values.iter().copied())
+        && row.rationale == pin.rationale
+}
+
+fn ambiguity_adjudication_contract_matches_with(
+    contract: &[AmbiguityAdjudicationContractPin],
+    row: &AmbiguityAdjudication,
+) -> bool {
+    let Some(pin) = contract.iter().find(|pin| pin.row_id == row.row_id) else {
+        return false;
+    };
+    row.slice_id == pin.slice_id
+        && row.ambiguity_source_key == pin.ambiguity_source_key
+        && row
+            .source_locations
+            .iter()
+            .map(String::as_str)
+            .eq(pin.source_locations.iter().copied())
+        && row.resolution == pin.resolution
+        && row
+            .resolved_source_keys
+            .iter()
+            .map(String::as_str)
+            .eq(pin.resolved_source_keys.iter().copied())
+        && row.rationale == pin.rationale
+}
+
+fn approved_final_ambiguity_keys_with<'a>(
+    contract: &[AmbiguityAdjudicationContractPin],
+    catalog: &'a Catalog,
+    slice_id: &str,
+) -> Vec<&'a str> {
+    catalog
+        .ambiguity_adjudications
+        .iter()
+        .filter(|row| {
+            row.slice_id == slice_id
+                && matches!(
+                    row.resolution.as_str(),
+                    "maps-to-source" | "not-a-durable-schema"
+                )
+                && ambiguity_adjudication_contract_matches_with(contract, row)
+        })
+        .map(|row| row.ambiguity_source_key.as_str())
+        .collect()
+}
+
+fn validate_readable_expansion_contract(catalog: &Catalog, out: &mut Vec<Violation>) {
+    if EXPANSION_BINDING_CONTRACT.len() != EXPECTED_EXPANSION_BINDING_COUNT {
+        out.push(Violation::new(
+            "catalog_expansion_binding_contract_pin_inconsistent",
+            "expansion_binding",
+            "readable expansion pins and released transcript count must be updated together",
+        ));
+    }
+    let pins: BTreeMap<&str, &ExpansionBindingContractPin> = EXPANSION_BINDING_CONTRACT
+        .iter()
+        .map(|pin| (pin.row_id, pin))
+        .collect();
+    if pins.len() != EXPANSION_BINDING_CONTRACT.len() {
+        out.push(Violation::new(
+            "catalog_expansion_binding_contract_ambiguous",
+            "expansion_binding",
+            "readable expansion contract contains duplicate row IDs",
+        ));
+    }
+    for row in &catalog.expansion_bindings {
+        match pins.get(row.row_id.as_str()).copied() {
+            Some(_) if expansion_binding_contract_matches_with(
+                &EXPANSION_BINDING_CONTRACT,
+                catalog,
+                row,
+            ) => {}
+            Some(_) => out.push(Violation::new(
+                "catalog_expansion_binding_contract_mismatch",
+                &row.row_id,
+                "expansion binding does not byte-match its readable target/source/ordinal/formal/value contract",
+            )),
+            None => out.push(Violation::new(
+                "catalog_expansion_binding_contract_unapproved",
+                &row.row_id,
+                "expansion binding has no independent readable per-formal contract",
+            )),
+        }
+    }
+    let rows: BTreeSet<&str> = catalog
+        .expansion_bindings
+        .iter()
+        .map(|row| row.row_id.as_str())
+        .collect();
+    for pin in &EXPANSION_BINDING_CONTRACT {
+        if !rows.contains(pin.row_id) {
+            out.push(Violation::new(
+                "catalog_expansion_binding_contract_missing",
+                pin.row_id,
+                "readable expansion contract has no reciprocal catalog row",
+            ));
+        }
+    }
+}
+
+fn validate_readable_ambiguity_contract(catalog: &Catalog, out: &mut Vec<Violation>) {
+    if AMBIGUITY_ADJUDICATION_CONTRACT.len() != EXPECTED_AMBIGUITY_ADJUDICATION_COUNT {
+        out.push(Violation::new(
+            "catalog_ambiguity_adjudication_contract_pin_inconsistent",
+            "ambiguity_adjudication",
+            "readable ambiguity pins and released transcript count must be updated together",
+        ));
+    }
+    let pins: BTreeMap<&str, &AmbiguityAdjudicationContractPin> = AMBIGUITY_ADJUDICATION_CONTRACT
+        .iter()
+        .map(|pin| (pin.row_id, pin))
+        .collect();
+    if pins.len() != AMBIGUITY_ADJUDICATION_CONTRACT.len() {
+        out.push(Violation::new(
+            "catalog_ambiguity_adjudication_contract_ambiguous",
+            "ambiguity_adjudication",
+            "readable ambiguity contract contains duplicate row IDs",
+        ));
+    }
+    for row in &catalog.ambiguity_adjudications {
+        match pins.get(row.row_id.as_str()).copied() {
+            Some(_)
+                if ambiguity_adjudication_contract_matches_with(
+                    &AMBIGUITY_ADJUDICATION_CONTRACT,
+                    row,
+                ) => {}
+            Some(_) => out.push(Violation::new(
+                "catalog_ambiguity_adjudication_contract_mismatch",
+                &row.row_id,
+                "ambiguity adjudication does not byte-match its readable source/resolution contract",
+            )),
+            None => out.push(Violation::new(
+                "catalog_ambiguity_adjudication_contract_unapproved",
+                &row.row_id,
+                "ambiguity adjudication has no independent readable source contract",
+            )),
+        }
+    }
+    let rows: BTreeSet<&str> = catalog
+        .ambiguity_adjudications
+        .iter()
+        .map(|row| row.row_id.as_str())
+        .collect();
+    for pin in &AMBIGUITY_ADJUDICATION_CONTRACT {
+        if !rows.contains(pin.row_id) {
+            out.push(Violation::new(
+                "catalog_ambiguity_adjudication_contract_missing",
+                pin.row_id,
+                "readable ambiguity contract has no reciprocal catalog row",
+            ));
+        }
+    }
 }
 
 fn evidence_binding_contract_matches_with(
@@ -4265,6 +5332,40 @@ fn approved_binding_counts_with(
         }
     }
     counts
+}
+
+fn validate_runtime_live_owner_coupling(catalog: &Catalog, out: &mut Vec<Violation>) {
+    for evidence in &catalog.evidence {
+        if evidence.phase != "runtime"
+            || evidence.status != "live"
+            || !evidence_binding_contract_matches_with(
+                &EVIDENCE_BINDING_CONTRACT,
+                catalog,
+                evidence,
+            )
+        {
+            continue;
+        }
+        let owners: Vec<_> = catalog
+            .semantic_bindings
+            .iter()
+            .filter(|binding| {
+                binding.target_row_id == evidence.target_row_id
+                    && semantic_binding_contract_matches_with(
+                        &SEMANTIC_BINDING_CONTRACT,
+                        catalog,
+                        binding,
+                    )
+            })
+            .collect();
+        if owners.len() != 1 || owners[0].owner_status != "live" {
+            out.push(Violation::new(
+                "catalog_runtime_live_owner_mismatch",
+                &evidence.row_id,
+                "runtime live evidence requires exactly one approved live semantic implementation owner",
+            ));
+        }
+    }
 }
 
 fn validate_source_manifest_pin(manifest: &SourceManifest, out: &mut Vec<Violation>) {
@@ -4414,6 +5515,13 @@ fn validate_projection_catalog(catalog: &Catalog, out: &mut Vec<Violation>) {
         + catalog.identity.prebootstrap.len()
         + catalog.identity.wire.len()
         + catalog.identity.fields.len()
+        + catalog.identity.ordinary_unions.len()
+        + catalog
+            .identity
+            .ordinary_unions
+            .iter()
+            .map(|union| union.arms.len())
+            .sum::<usize>()
         + catalog.identity.unions.len()
         + catalog
             .identity
@@ -4450,22 +5558,7 @@ fn validate_projection_catalog(catalog: &Catalog, out: &mut Vec<Violation>) {
     let mut row_ids = BTreeSet::new();
     for row in &catalog.projection_rows {
         validate_row_identity(&row.row_id, &row.slice_id, &row.row_kind, out);
-        let expected_row_id = format!(
-            "{}:{}:{}",
-            row.slice_id,
-            row.row_kind,
-            lower_kebab(&row.canonical_symbol)
-        );
-        if row.canonical_symbol.trim().is_empty() || row.row_id != expected_row_id {
-            out.push(Violation::new(
-                "catalog_row_id_derived_mismatch",
-                &row.row_id,
-                format!(
-                    "projection row_id must derive from canonical symbol {:?}; expected {expected_row_id:?}",
-                    row.canonical_symbol
-                ),
-            ));
-        }
+        validate_projection_row_derived_identity(row, out);
         if !row_ids.insert(row.row_id.as_str()) {
             out.push(Violation::new(
                 "catalog_row_duplicate",
@@ -4555,6 +5648,23 @@ fn validate_projection_catalog(catalog: &Catalog, out: &mut Vec<Violation>) {
             &format!("projection_{}", violation.code),
             format!("{}::{}", violation.registry, violation.row_id),
             violation.msg,
+        ));
+    }
+}
+
+fn validate_projection_row_derived_identity(row: &ProjectionRowMeta, out: &mut Vec<Violation>) {
+    let expected_row_id = format!("{}:{}:{}", row.slice_id, row.row_kind, row.canonical_suffix);
+    if row.canonical_suffix.trim().is_empty()
+        || row.canonical_symbol.trim().is_empty()
+        || row.row_id != expected_row_id
+    {
+        out.push(Violation::new(
+            "catalog_row_id_derived_mismatch",
+            &row.row_id,
+            format!(
+                "projection row_id must derive from canonical typed suffix {:?} for symbol {:?}; expected {expected_row_id:?}",
+                row.canonical_suffix, row.canonical_symbol
+            ),
         ));
     }
 }
@@ -5010,6 +6120,7 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
         static_live: static_live_counts,
         runtime: runtime_counts,
     } = approved_binding_counts(catalog);
+    validate_runtime_live_owner_coupling(catalog, out);
     for row in &catalog.semantic_bindings {
         validate_metadata_row_id(&row.row_id, "semantic-binding", out);
         insert_owned_row_id(&mut all_row_ids, &row.row_id, out);
@@ -5022,6 +6133,13 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
         );
         validate_semantic_binding(row, &slice_map, out);
     }
+    validate_expansion_binding_rows(
+        catalog,
+        &projection_targets,
+        &candidate_by_key,
+        &mut all_row_ids,
+        out,
+    );
 
     let mut evidence_keys = BTreeSet::new();
     for row in &catalog.evidence {
@@ -5045,7 +6163,9 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
     }
 
     validate_source_dispositions(catalog, &slice_map, &known_slices, &mut all_row_ids, out);
+    validate_ambiguity_adjudication_rows(catalog, &slice_map, &known_slices, &mut all_row_ids, out);
 
+    let top_level_source_coverage = approved_top_level_source_coverage(catalog);
     for slice in catalog
         .slices
         .iter()
@@ -5056,33 +6176,58 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
             .iter()
             .filter(|row| row.slice_id == slice.id)
             .collect();
-        if slice_targets.is_empty() {
+        let mut closure_targets: BTreeMap<&str, &Target> = slice_targets
+            .iter()
+            .map(|target| (target.target_row_id.as_str(), *target))
+            .collect();
+        let (mut top_keys, top_level_closure_targets) =
+            top_level_coverage_for_slice(catalog, &top_level_source_coverage, &slice.id);
+        closure_targets.extend(top_level_closure_targets);
+        if closure_targets.is_empty() {
             out.push(Violation::new(
                 "complete_slice_target_missing",
                 &slice.id,
                 "complete slice has no source-backed targets",
             ));
         }
-        let top_keys: Vec<&str> = slice_targets
-            .iter()
-            .filter(|row| row.source_key.starts_with("top|"))
-            .map(|row| row.source_key.as_str())
-            .collect();
-        let field_keys: Vec<&str> = slice_targets
+        let mut field_keys: Vec<&str> = slice_targets
             .iter()
             .filter(|row| row.source_key.starts_with("field|"))
             .map(|row| row.source_key.as_str())
             .collect();
-        let union_keys: Vec<&str> = slice_targets
+        let mut union_keys: Vec<&str> = slice_targets
             .iter()
             .filter(|row| row.source_key.starts_with("union|"))
             .map(|row| row.source_key.as_str())
             .collect();
-        let arm_keys: Vec<&str> = slice_targets
+        let mut arm_keys: Vec<&str> = slice_targets
             .iter()
             .filter(|row| row.source_key.starts_with("arm|"))
             .map(|row| row.source_key.as_str())
             .collect();
+        for source_key in catalog
+            .ambiguity_adjudications
+            .iter()
+            .filter(|row| {
+                row.slice_id == slice.id
+                    && row.resolution == "not-a-durable-schema"
+                    && ambiguity_adjudication_contract_matches_with(
+                        &AMBIGUITY_ADJUDICATION_CONTRACT,
+                        row,
+                    )
+            })
+            .flat_map(|row| row.resolved_source_keys.iter().map(String::as_str))
+        {
+            if source_key.starts_with("top|") {
+                top_keys.push(source_key);
+            } else if source_key.starts_with("field|") {
+                field_keys.push(source_key);
+            } else if source_key.starts_with("union|") {
+                union_keys.push(source_key);
+            } else if source_key.starts_with("arm|") {
+                arm_keys.push(source_key);
+            }
+        }
         validate_census_pin(
             &slice.id,
             "complete_top_level",
@@ -5115,14 +6260,20 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
             arm_keys,
             out,
         );
-        if slice.ambiguity_count != 0 {
-            out.push(Violation::new(
-                "complete_slice_ambiguity",
-                &slice.id,
-                "complete slice must resolve every source-census ambiguity",
-            ));
-        }
-        for row in &slice_targets {
+        let ambiguity_keys = approved_final_ambiguity_keys_with(
+            &AMBIGUITY_ADJUDICATION_CONTRACT,
+            catalog,
+            &slice.id,
+        );
+        validate_census_pin(
+            &slice.id,
+            "complete_ambiguity_adjudication",
+            slice.ambiguity_count,
+            &slice.ambiguity_ids_sha256,
+            ambiguity_keys,
+            out,
+        );
+        for row in closure_targets.into_values() {
             if row.definition_status != "complete" {
                 out.push(Violation::new(
                     "complete_slice_target_declared",
@@ -5130,11 +6281,15 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
                     "complete slice contains a target that is still declared",
                 ));
             }
-            if !row.source_key.starts_with("top|") && !row.source_key.starts_with("field|") {
+            let source_contract_supported = row.source_key.starts_with("top|")
+                || row.source_key.starts_with("field|")
+                || (row.target_kind == "union" && row.source_key.starts_with("union|"))
+                || (row.target_kind == "union-arm" && row.source_key.starts_with("arm|"));
+            if !source_contract_supported {
                 out.push(Violation::new(
                     "complete_slice_source_contract_unverified",
                     &row.target_row_id,
-                    "complete target requires a source-reconciled top-level or field contract; union, arm, reference-only, and projection fallback targets remain declared until their exact source checker exists",
+                    "complete target requires a source-reconciled top-level, field, union, or arm contract; reference-only and projection fallback targets remain declared",
                 ));
             }
             let annotation_count = annotation_counts
@@ -5447,6 +6602,40 @@ fn validate_target_source_identity(
                 ));
             }
         }
+        "union" => {
+            let mut parts = row.source_key.split('|');
+            let source_matches = parts.next() == Some("union")
+                && parts.next().zip(parts.next()).is_some_and(|(schema, path)| {
+                    parts.next().is_none()
+                        && projection.canonical_symbol == format!("{schema}.{path}")
+                });
+            if !source_matches {
+                out.push(Violation::new(
+                    "catalog_target_source_identity_mismatch",
+                    &row.row_id,
+                    "ordinary union projection must map to the exact source schema owner and union path",
+                ));
+            }
+        }
+        "union-arm" => {
+            let mut parts = row.source_key.split('|');
+            let source_matches = parts.next() == Some("arm")
+                && parts
+                    .next()
+                    .zip(parts.next())
+                    .zip(parts.next())
+                    .is_some_and(|((schema, path), arm)| {
+                        parts.next().is_none()
+                            && projection.canonical_symbol == format!("{schema}.{path}.{arm}")
+                    });
+            if !source_matches {
+                out.push(Violation::new(
+                    "catalog_target_source_identity_mismatch",
+                    &row.row_id,
+                    "ordinary union-arm projection must map to the exact source parent and arm token",
+                ));
+            }
+        }
         "reference-union" if !row.source_key.starts_with("union|") => {
             out.push(Violation::new(
                 "catalog_target_source_identity_mismatch",
@@ -5488,9 +6677,11 @@ fn validate_maintenance_proof(row: &MaintenanceProof, out: &mut Vec<Violation>) 
         "appendix_a_catalog_projection_diff",
         "appendix_a_catalog_source",
     ];
-    const EVENTS: [&str; 3] = [
+    const EVENTS: [&str; 5] = [
         "appendix_closure_checked",
         "appendix_projection_checked",
+        "appendix_projection_regenerated",
+        "appendix_regeneration_completed",
         "appendix_source_manifest",
     ];
     if row.row_id != MAINTENANCE_PROOF_ROW_ID
@@ -5510,7 +6701,7 @@ fn validate_maintenance_proof(row: &MaintenanceProof, out: &mut Vec<Violation>) 
         out.push(Violation::new(
             "catalog_maintenance_proof_mismatch",
             &row.row_id,
-            "maintenance proof must exactly bind the scaffold owner, seven checked-in artifacts, three live checkers, G0 scenario/events, and G0",
+            "maintenance proof must exactly bind the scaffold owner, seven checked-in artifacts, three live checkers, G0 scenario/events including regeneration, and G0",
         ));
     }
 }
@@ -5531,11 +6722,12 @@ fn validate_semantic_binding(
         || !(row.owner_crate == "fgdb" || row.owner_crate.starts_with("fgdb-"))
         || row.owner_crate == MAINTENANCE_OWNER_CRATE
         || row.owner_crate == "appendix-a-catalog"
+        || !matches!(row.owner_status.as_str(), "planned" | "live")
     {
         out.push(Violation::new(
             "catalog_semantic_owner_invalid",
             &row.row_id,
-            "semantic owner must be a non-maintenance implementation Bead and crate",
+            "semantic owner must be a non-maintenance implementation Bead and crate with owner_status planned|live",
         ));
     }
     validate_sorted_nonempty(&row.row_id, "consumer_crates", &row.consumer_crates, out);
@@ -5549,6 +6741,241 @@ fn validate_semantic_binding(
             &row.row_id,
             "catalog-maintenance components are not semantic consumer crates",
         ));
+    }
+}
+
+fn validate_expansion_binding_rows(
+    catalog: &Catalog,
+    projection_targets: &BTreeMap<String, String>,
+    candidate_by_key: &BTreeMap<&str, &TopLevelCandidate>,
+    all_row_ids: &mut BTreeSet<String>,
+    out: &mut Vec<Violation>,
+) {
+    let target_by_projection: BTreeMap<&str, &Target> = catalog
+        .targets
+        .iter()
+        .map(|target| (target.target_row_id.as_str(), target))
+        .collect();
+    let mut target_ordinals = BTreeSet::new();
+    for row in &catalog.expansion_bindings {
+        validate_metadata_row_id(&row.row_id, "expansion-binding", out);
+        insert_owned_row_id(all_row_ids, &row.row_id, out);
+        validate_metadata_target(&row.row_id, &row.target_row_id, "", projection_targets, out);
+        let expected = split_catalog_row_id(&row.target_row_id).map(|(scope, kind, suffix)| {
+            format!(
+                "{scope}:expansion-binding:{kind}-{suffix}-parameter-{}-{}",
+                row.parameter_ordinal,
+                lower_kebab(&row.formal)
+            )
+        });
+        if expected.as_deref() != Some(row.row_id.as_str()) {
+            out.push(Violation::new(
+                "catalog_row_id_derived_mismatch",
+                &row.row_id,
+                format!(
+                    "expansion binding row_id must be {:?}",
+                    expected.unwrap_or_default()
+                ),
+            ));
+        }
+        if row.parameter_ordinal <= 0 {
+            out.push(Violation::new(
+                "catalog_expansion_parameter_ordinal_invalid",
+                &row.row_id,
+                "parameter_ordinal must be a positive 1-based source parameter position",
+            ));
+        }
+        let source_candidate = target_by_projection
+            .get(row.target_row_id.as_str())
+            .and_then(|target| candidate_by_key.get(target.source_key.as_str()))
+            .copied();
+        let source_formals = source_candidate
+            .map(|candidate| generic_formals_from_signature(&candidate.generic_signature))
+            .unwrap_or_default();
+        let dimensions = source_candidate.and_then(|candidate| {
+            expansion_dimensions(
+                &candidate.generic_signature,
+                catalog
+                    .top_level_candidates
+                    .iter()
+                    .filter(|peer| peer.symbol == candidate.symbol)
+                    .map(|peer| peer.generic_signature.as_str()),
+            )
+        });
+        let actual_values: BTreeSet<String> = row.values.iter().cloned().collect();
+        let matching_dimensions = dimensions
+            .as_ref()
+            .map(|dimensions| {
+                dimensions
+                    .iter()
+                    .filter(|dimension| {
+                        dimension.parameter_ordinal == row.parameter_ordinal
+                            && dimension
+                                .explicit_formal
+                                .as_deref()
+                                .is_none_or(|formal| formal == row.formal)
+                            && (dimension.source_values.is_empty()
+                                || dimension.source_values == actual_values)
+                    })
+                    .count()
+            })
+            .unwrap_or_default();
+        let expected_class = if row.formal == "Role" {
+            "role"
+        } else {
+            "generic"
+        };
+        if !valid_generic_formal_token(&row.formal)
+            || (row.parameter_ordinal > 0 && matching_dimensions != 1)
+            || row.formal_class != expected_class
+        {
+            out.push(Violation::new(
+                "catalog_expansion_formal_invalid",
+                &row.row_id,
+                "formal and parameter_ordinal must identify exactly one explicit or concrete-varying source parameter and use class role exactly for Role, generic otherwise",
+            ));
+        }
+        validate_sorted_nonempty(&row.row_id, "values", &row.values, out);
+        let mut residual_formals = source_formals;
+        residual_formals.insert(row.formal.clone());
+        if row.values.iter().any(|value| {
+            contains_placeholder_marker(value)
+                || contains_residual_formal(value, &residual_formals)
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        }) || row.rationale.trim().is_empty()
+            || contains_placeholder_marker(&row.rationale)
+        {
+            out.push(Violation::new(
+                "catalog_expansion_contract_invalid",
+                &row.row_id,
+                "expansion values must be concrete identifiers and rationale must be nonblank and final",
+            ));
+        }
+        if row.parameter_ordinal > 0
+            && !target_ordinals.insert((row.target_row_id.as_str(), row.parameter_ordinal))
+        {
+            out.push(Violation::new(
+                "catalog_expansion_parameter_ordinal_duplicate",
+                &row.row_id,
+                "target has more than one expansion binding for the same parameter_ordinal",
+            ));
+        }
+    }
+
+    for target_row_id in catalog
+        .expansion_bindings
+        .iter()
+        .map(|row| row.target_row_id.as_str())
+        .collect::<BTreeSet<_>>()
+    {
+        let Some(candidate) = target_by_projection
+            .get(target_row_id)
+            .and_then(|target| candidate_by_key.get(target.source_key.as_str()))
+            .copied()
+        else {
+            continue;
+        };
+        let Some(dimensions) = expansion_dimensions(
+            &candidate.generic_signature,
+            catalog
+                .top_level_candidates
+                .iter()
+                .filter(|peer| peer.symbol == candidate.symbol)
+                .map(|peer| peer.generic_signature.as_str()),
+        ) else {
+            out.push(Violation::new(
+                "catalog_expansion_source_coverage_mismatch",
+                target_row_id,
+                "source-family generic signatures do not have one compatible parameter arity",
+            ));
+            continue;
+        };
+        let bindings: Vec<_> = catalog
+            .expansion_bindings
+            .iter()
+            .filter(|row| row.target_row_id == target_row_id)
+            .collect();
+        if !expansion_bindings_match_dimensions(&bindings, &dimensions) {
+            out.push(Violation::new(
+                "catalog_expansion_source_coverage_mismatch",
+                target_row_id,
+                "expansion bindings must cover every explicit or concrete-varying source parameter ordinal exactly once",
+            ));
+        }
+    }
+}
+
+fn validate_ambiguity_adjudication_rows(
+    catalog: &Catalog,
+    slice_map: &BTreeMap<&str, &Slice>,
+    known_slices: &BTreeSet<&str>,
+    all_row_ids: &mut BTreeSet<String>,
+    out: &mut Vec<Violation>,
+) {
+    let mut source_keys = BTreeSet::new();
+    for row in &catalog.ambiguity_adjudications {
+        validate_metadata_row_id(&row.row_id, "ambiguity-adjudication", out);
+        validate_slice_id(&row.row_id, &row.slice_id, known_slices, out);
+        insert_owned_row_id(all_row_ids, &row.row_id, out);
+        let digest = sha256_hex(row.ambiguity_source_key.as_bytes());
+        let expected = format!("{}:ambiguity-adjudication:{digest}", row.slice_id);
+        if row.row_id != expected {
+            out.push(Violation::new(
+                "catalog_row_id_derived_mismatch",
+                &row.row_id,
+                format!("ambiguity adjudication row_id must be {expected:?}"),
+            ));
+        }
+        if !row.ambiguity_source_key.starts_with("ambiguity|")
+            || row.rationale.trim().is_empty()
+            || contains_placeholder_marker(&row.rationale)
+            || !matches!(
+                row.resolution.as_str(),
+                "maps-to-source" | "not-a-durable-schema" | "needs-parser-fix" | "needs-source-fix"
+            )
+        {
+            out.push(Violation::new(
+                "catalog_ambiguity_adjudication_invalid",
+                &row.row_id,
+                "adjudication requires an ambiguity source key, final rationale, and a closed resolution",
+            ));
+        }
+        validate_sorted_nonempty(&row.row_id, "source_locations", &row.source_locations, out);
+        for location in &row.source_locations {
+            validate_appendix_location(&row.row_id, location, slice_map, out);
+        }
+        if row.resolution == "maps-to-source" {
+            validate_sorted_nonempty(
+                &row.row_id,
+                "resolved_source_keys",
+                &row.resolved_source_keys,
+                out,
+            );
+        } else if row.resolution == "not-a-durable-schema" {
+            if !row.resolved_source_keys.is_empty() {
+                validate_sorted_nonempty(
+                    &row.row_id,
+                    "resolved_source_keys",
+                    &row.resolved_source_keys,
+                    out,
+                );
+            }
+        } else if !row.resolved_source_keys.is_empty() {
+            out.push(Violation::new(
+                "catalog_ambiguity_resolution_target_invalid",
+                &row.row_id,
+                "only final adjudications may name the exact structural source keys they accept or reject",
+            ));
+        }
+        if !source_keys.insert(row.ambiguity_source_key.as_str()) {
+            out.push(Violation::new(
+                "catalog_ambiguity_adjudication_duplicate",
+                &row.row_id,
+                "ambiguity source key has more than one adjudication",
+            ));
+        }
     }
 }
 
@@ -5915,7 +7342,11 @@ fn annotation_generic_formals(
         return BTreeSet::new();
     };
     if let Some(candidate) = candidates_by_key.get(target.source_key.as_str()).copied() {
-        return generic_formals_from_signature(&candidate.generic_signature);
+        return candidates
+            .iter()
+            .filter(|peer| peer.symbol == candidate.symbol)
+            .flat_map(|peer| generic_formals_from_signature(&peer.generic_signature))
+            .collect();
     }
     let source_family = target.source_key.split('|').nth(1).filter(|_| {
         target.source_key.starts_with("field|")
@@ -5929,18 +7360,27 @@ fn annotation_generic_formals(
         .collect()
 }
 
+const KNOWN_GENERIC_FORMALS: [&str; 9] = [
+    "T",
+    "Role",
+    "Contract",
+    "Kind",
+    "Profile",
+    "Disposition",
+    "Operation",
+    "Action",
+    "Tag",
+];
+
+fn valid_generic_formal_token(formal: &str) -> bool {
+    !formal.is_empty()
+        && !formal.contains('|')
+        && formal
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 fn generic_formals_from_signature(signature: &str) -> BTreeSet<String> {
-    const KNOWN_FORMALS: [&str; 9] = [
-        "T",
-        "Role",
-        "Contract",
-        "Kind",
-        "Profile",
-        "Disposition",
-        "Operation",
-        "Action",
-        "Tag",
-    ];
     let mut formals = BTreeSet::new();
     let Some(inner) = signature
         .strip_prefix('<')
@@ -5954,12 +7394,8 @@ fn generic_formals_from_signature(signature: &str) -> BTreeSet<String> {
             .map_or((parameter.trim(), false), |(formal, _)| {
                 (formal.trim(), true)
             });
-        if !formal.contains('|')
-            && (has_bound || KNOWN_FORMALS.contains(&formal))
-            && !formal.is_empty()
-            && formal
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        if valid_generic_formal_token(formal)
+            && (has_bound || KNOWN_GENERIC_FORMALS.contains(&formal))
         {
             formals.insert(formal.to_owned());
         }
@@ -6805,6 +8241,52 @@ fn render_fields(identity: &IdentityRegistries) -> String {
             write_string(&mut out, "recipe_pin", value);
         }
     }
+    let mut ordinary_unions: Vec<_> = identity.ordinary_unions.iter().collect();
+    ordinary_unions.sort_by_key(|union| {
+        (
+            union.containing_schema.as_str(),
+            union.union_path.as_str(),
+            union.union_name.as_str(),
+        )
+    });
+    for union in &ordinary_unions {
+        writeln!(&mut out, "\n[[union]]").expect("writing to String cannot fail");
+        write_string(&mut out, "union_name", &union.union_name);
+        write_string(&mut out, "containing_schema", &union.containing_schema);
+        write_string(&mut out, "union_path", &union.union_path);
+        if let Some(field_tag) = union.field_tag {
+            writeln!(&mut out, "field_tag = {field_tag:#06x}")
+                .expect("writing to String cannot fail");
+        }
+        write_string(&mut out, "tag_wire_type", &union.tag_wire_type);
+        write_string(&mut out, "encoding_context", &union.encoding_context);
+        write_string(&mut out, "role_predicate", &union.role_predicate);
+        write_string(&mut out, "version_status", &union.version_status);
+        writeln!(&mut out, "max_size_bytes = {}", union.max_size_bytes)
+            .expect("writing to String cannot fail");
+    }
+    for union in ordinary_unions {
+        let mut arms: Vec<_> = union.arms.iter().collect();
+        arms.sort_by_key(|arm| (arm.arm_tag, arm.stable_name.as_str()));
+        for arm in arms {
+            writeln!(&mut out, "\n[[union_arm]]").expect("writing to String cannot fail");
+            write_string(&mut out, "union_name", &arm.union_name);
+            write_string(&mut out, "containing_schema", &arm.containing_schema);
+            write_string(&mut out, "union_path", &arm.union_path);
+            writeln!(&mut out, "arm_tag = {:#06x}", arm.arm_tag)
+                .expect("writing to String cannot fail");
+            write_string(&mut out, "source_arm_name", &arm.source_arm_name);
+            write_string(&mut out, "stable_name", &arm.stable_name);
+            write_string(&mut out, "payload_kind", &arm.payload_kind);
+            if let Some(payload_sha256) = &arm.payload_sha256 {
+                write_string(&mut out, "payload_sha256", payload_sha256);
+            }
+            write_string(&mut out, "role_predicate", &arm.role_predicate);
+            write_string(&mut out, "version_status", &arm.version_status);
+            writeln!(&mut out, "max_size_bytes = {}", arm.max_size_bytes)
+                .expect("writing to String cannot fail");
+        }
+    }
     let mut unions: Vec<_> = identity.unions.iter().collect();
     unions.sort_by_key(|union| {
         (
@@ -7123,9 +8605,157 @@ fn sort_violations(violations: &mut [Violation]) {
 #[cfg(test)]
 mod binding_contract_tests {
     use super::*;
+    use crate::appendix_source::{AmbiguityKey, DefinitionKind, SchemaCandidateKey};
 
     const TARGET_ROW_ID: &str = "a01:bootstrap-frame:root-slot";
     const TARGET_SOURCE_KEY: &str = "top|RootSlot";
+
+    #[test]
+    fn cargo_package_identity_ignores_unrelated_full_toml_syntax() {
+        let manifest = r#"
+[package]
+name = "fgdb-fixture"
+version = "0.0.1"
+
+[dependencies]
+asupersync = { git = "https://example.invalid/asupersync", default-features = false }
+"#;
+        assert_eq!(
+            cargo_package_name(manifest, Path::new("fixture/Cargo.toml")),
+            Ok("fgdb-fixture".to_owned())
+        );
+    }
+
+    #[test]
+    fn workspace_member_paths_preserve_unexcluded_explicit_member() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let document = toml::parse(
+            r#"
+[workspace]
+members = ["tools/registry-check"]
+"#,
+        )
+        .expect("workspace fixture parses");
+        let workspace =
+            toml::get_table(&document, "workspace", "Cargo.toml").expect("workspace exists");
+        let members = toml::get_str_array(workspace, "members", "Cargo.toml.workspace")
+            .expect("members parse");
+        let excludes = workspace_exact_excludes(workspace).expect("missing exclude is empty");
+
+        assert_eq!(
+            workspace_member_paths(&root, &members, &excludes).expect("explicit member resolves"),
+            vec![PathBuf::from("tools/registry-check")]
+        );
+    }
+
+    #[test]
+    fn workspace_member_paths_apply_exact_exclude_to_glob() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let document = toml::parse(
+            r#"
+[workspace]
+members = ["crates/*"]
+exclude = ["crates/fgdb-types"]
+"#,
+        )
+        .expect("workspace fixture parses");
+        let workspace =
+            toml::get_table(&document, "workspace", "Cargo.toml").expect("workspace exists");
+        let members = toml::get_str_array(workspace, "members", "Cargo.toml.workspace")
+            .expect("members parse");
+        let excludes = workspace_exact_excludes(workspace).expect("exact exclude parses");
+        let member_paths =
+            workspace_member_paths(&root, &members, &excludes).expect("member glob resolves");
+
+        assert!(member_paths.contains(&PathBuf::from("crates/fgdb-bigint")));
+        assert!(!member_paths.contains(&PathBuf::from("crates/fgdb-types")));
+    }
+
+    #[test]
+    fn workspace_exclude_patterns_fail_closed() {
+        let document = toml::parse(
+            r#"
+[workspace]
+members = ["crates/*"]
+exclude = ["crates/fgdb-*"]
+"#,
+        )
+        .expect("workspace fixture parses");
+        let workspace =
+            toml::get_table(&document, "workspace", "Cargo.toml").expect("workspace exists");
+
+        assert_eq!(
+            workspace_exact_excludes(workspace),
+            Err("unsupported non-exact Cargo workspace exclude \"crates/fgdb-*\"".to_owned())
+        );
+    }
+
+    #[test]
+    fn ordinary_union_row_identity_is_shared_by_projection_consumers() {
+        let union_digest = sha256_hex(b"union|RestoreOutcome|result");
+        let arm_digest = sha256_hex(b"arm|RestoreOutcome|result|Ready");
+        let union_row_id = format!("a20:union:restore-result-{}", &union_digest[..16]);
+        let arm_row_id = format!("a20:union-arm:restore-result-ready-{}", &arm_digest[..16]);
+        let document = format!(
+            r#"
+[[union]]
+row_id = "{union_row_id}"
+slice_id = "a20"
+containing_schema = "RestoreOutcome"
+union_path = "result"
+union_name = "RestoreResult"
+
+[[union_arm]]
+row_id = "{arm_row_id}"
+slice_id = "a20"
+containing_schema = "RestoreOutcome"
+union_path = "result"
+union_name = "RestoreResult"
+source_arm_name = "Ready"
+stable_name = "Ready"
+"#
+        );
+        let root = toml::parse(&document).expect("ordinary union fixture parses");
+        let mut metadata = Vec::new();
+        let mut producer_violations = Vec::new();
+        catalog_projection_rows(
+            &root,
+            "union",
+            "durable_fields",
+            "union",
+            &mut metadata,
+            &mut producer_violations,
+        )
+        .expect("union projection rows");
+        catalog_projection_rows(
+            &root,
+            "union_arm",
+            "durable_fields",
+            "union-arm",
+            &mut metadata,
+            &mut producer_violations,
+        )
+        .expect("union-arm projection rows");
+        assert!(producer_violations.is_empty(), "{producer_violations:?}");
+        assert_eq!(metadata.len(), 2);
+
+        let mut consumer_violations = Vec::new();
+        for row in &metadata {
+            validate_projection_row_derived_identity(row, &mut consumer_violations);
+        }
+        assert!(consumer_violations.is_empty(), "{consumer_violations:?}");
+
+        metadata[0].row_id.push('0');
+        validate_projection_row_derived_identity(&metadata[0], &mut consumer_violations);
+        assert_eq!(
+            consumer_violations
+                .iter()
+                .filter(|violation| violation.code == "catalog_row_id_derived_mismatch")
+                .count(),
+            1,
+            "a mutated hash-bearing row ID must fail closed: {consumer_violations:?}"
+        );
+    }
 
     fn catalog_with_bindings() -> Catalog {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -7135,6 +8765,7 @@ mod binding_contract_tests {
             target_row_id: TARGET_ROW_ID.to_owned(),
             owner_bead_id: "fgdb-w2-owner-fixture".to_owned(),
             owner_crate: "fgdb-chronicle".to_owned(),
+            owner_status: "planned".to_owned(),
             consumer_crates: vec!["fgdb".to_owned(), "fgdb-server".to_owned()],
         });
         catalog.evidence.push(EvidenceBinding {
@@ -7171,6 +8802,7 @@ mod binding_contract_tests {
             target_source_key: TARGET_SOURCE_KEY,
             owner_bead_id: "fgdb-w2-owner-fixture",
             owner_crate: "fgdb-chronicle",
+            owner_status: "planned",
             consumer_crates: &["fgdb", "fgdb-server"],
         }
     }
@@ -7205,6 +8837,613 @@ mod binding_contract_tests {
             event_ids: &["appendix_closure_checked"],
             gate_ids: &["G0"],
         }
+    }
+
+    fn schema(generic_signature: &str) -> SchemaCandidate {
+        SchemaCandidate {
+            key: SchemaCandidateKey {
+                family: "RecoveryBridgeSpec".to_owned(),
+                generic_signature: generic_signature.to_owned(),
+            },
+            owner_statuses: vec![SchemaOwnerStatus::ConfirmedTopLevel],
+            definition_kinds: vec![DefinitionKind::InlineRecord],
+            expression_sha256s: vec!["fixture".to_owned()],
+            body_conflict: false,
+            locations: Vec::new(),
+        }
+    }
+
+    fn ambiguity(kind: AmbiguityKind, affected_source_keys: &[&str]) -> AmbiguityCandidate {
+        AmbiguityCandidate {
+            key: AmbiguityKey {
+                kind,
+                schema_family: None,
+                path: None,
+                raw_sha256: "0".repeat(64),
+                affected_source_key_count: affected_source_keys.len(),
+                affected_source_keys_sha256: "0".repeat(64),
+                reason: "fixture".to_owned(),
+            },
+            raw: "fixture".to_owned(),
+            affected_source_keys: affected_source_keys
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            locations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn per_formal_expansion_binding_is_exact_and_source_derived() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let row_id = "a19:expansion-binding:logical-kind-recovery-bridge-spec-parameter-1-role";
+        let rationale = "Appendix source instantiates exactly Local and Meta";
+        catalog.expansion_bindings.push(ExpansionBinding {
+            row_id: row_id.to_owned(),
+            target_row_id: "a19:logical-kind:recovery-bridge-spec".to_owned(),
+            parameter_ordinal: 1,
+            formal: "Role".to_owned(),
+            formal_class: "role".to_owned(),
+            values: vec!["Local".to_owned(), "Meta".to_owned()],
+            rationale: rationale.to_owned(),
+        });
+        let annotation = Annotation {
+            row_id: "a19:annotation:logical-kind-recovery-bridge-spec".to_owned(),
+            target_row_id: "a19:logical-kind:recovery-bridge-spec".to_owned(),
+            exact_type: "RecoveryBridgeSpec".to_owned(),
+            cardinality: "one".to_owned(),
+            layout: "canonical".to_owned(),
+            role: "Local".to_owned(),
+            posture: "recovery".to_owned(),
+            authority: "recovery".to_owned(),
+            locality: "local".to_owned(),
+            generic_expansions: Vec::new(),
+            role_expansions: vec!["Local".to_owned(), "Meta".to_owned()],
+            reference_semantics: "embedded".to_owned(),
+            target_schema_ids: Vec::new(),
+            construction_order: "source-before-bridge".to_owned(),
+            retention_and_cut_rule: "retain-through-recovery".to_owned(),
+            digest_recipe: "canonical-fields".to_owned(),
+            redaction_class: "authority-metadata".to_owned(),
+            resource_bounds: "bounded-by-source-manifest".to_owned(),
+            compatibility: "v1".to_owned(),
+        };
+        let contract = [ExpansionBindingContractPin {
+            row_id,
+            target_row_id: "a19:logical-kind:recovery-bridge-spec",
+            target_source_key: "top|RecoveryBridgeSpec<Role>",
+            parameter_ordinal: 1,
+            formal: "Role",
+            formal_class: "role",
+            values: &["Local", "Meta"],
+            rationale,
+        }];
+        let schemas = vec![schema("<Role>"), schema("<Local>"), schema("<Meta>")];
+        assert!(top_level_annotation_expansions_match_with(
+            &contract,
+            &catalog,
+            &annotation,
+            &schemas[0],
+            &schemas,
+        ));
+
+        catalog.expansion_bindings[0].values = vec!["Local".to_owned(), "Shard".to_owned()];
+        assert!(
+            !top_level_annotation_expansions_match_with(
+                &contract,
+                &catalog,
+                &annotation,
+                &schemas[0],
+                &schemas,
+            ),
+            "cross-formal or arbitrary expansion values must not self-authorize"
+        );
+    }
+
+    #[test]
+    fn expansion_dimensions_distinguish_bounds_from_concrete_source_values() {
+        let bounded =
+            expansion_dimensions("<Role:AuthorityOwningRole>", ["<Role:AuthorityOwningRole>"])
+                .expect("bounded formal is a supported source signature");
+        assert_eq!(
+            bounded,
+            vec![ExpansionDimension {
+                parameter_ordinal: 1,
+                explicit_formal: Some("Role".to_owned()),
+                source_values: BTreeSet::new(),
+            }],
+            "a trait bound is not a concrete expansion value"
+        );
+
+        let arbitrary_bounded = expansion_dimensions("<Scope:Trait>", ["<Scope:Trait>"])
+            .expect("a bound explicitly declares its formal name");
+        assert_eq!(
+            arbitrary_bounded,
+            vec![ExpansionDimension {
+                parameter_ordinal: 1,
+                explicit_formal: Some("Scope".to_owned()),
+                source_values: BTreeSet::new(),
+            }],
+            "bound formals must not depend on the conventional short-name vocabulary"
+        );
+
+        let constrained =
+            expansion_dimensions("<Role:Local|Meta|Shard>", ["<Role:Local|Meta|Shard>"])
+                .expect("closed role alternatives are a supported source signature");
+        assert_eq!(
+            constrained,
+            vec![ExpansionDimension {
+                parameter_ordinal: 1,
+                explicit_formal: Some("Role".to_owned()),
+                source_values: ["Local", "Meta", "Shard"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            }],
+            "closed alternatives after a formal are concrete source values"
+        );
+
+        let arbitrary_constrained = expansion_dimensions("<Scope:A|B>", ["<Scope:A|B>"])
+            .expect("an arbitrary formal may have closed concrete alternatives");
+        assert_eq!(
+            arbitrary_constrained,
+            vec![ExpansionDimension {
+                parameter_ordinal: 1,
+                explicit_formal: Some("Scope".to_owned()),
+                source_values: ["A", "B"].into_iter().map(str::to_owned).collect(),
+            }]
+        );
+
+        let concrete = expansion_dimensions("<Local>", ["<Local>", "<Meta>", "<Shard>"])
+            .expect("concrete-only family is a supported source signature");
+        assert_eq!(
+            concrete,
+            vec![ExpansionDimension {
+                parameter_ordinal: 1,
+                explicit_formal: None,
+                source_values: ["Local", "Meta", "Shard"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            }]
+        );
+
+        let anchored_on_concrete = expansion_dimensions("<Local>", ["<Role>", "<Local>", "<Meta>"])
+            .expect("a concrete anchor inherits the family formal");
+        assert_eq!(
+            anchored_on_concrete,
+            vec![ExpansionDimension {
+                parameter_ordinal: 1,
+                explicit_formal: Some("Role".to_owned()),
+                source_values: ["Local", "Meta"].into_iter().map(str::to_owned).collect(),
+            }],
+            "binding identity must come from the whole source family, not the selected occurrence"
+        );
+    }
+
+    #[test]
+    fn parameter_ordinals_disambiguate_identical_concrete_only_dimensions() {
+        let dimensions = expansion_dimensions("<Local,Local>", ["<Local,Local>", "<Meta,Meta>"])
+            .expect("repeated concrete-only dimensions are supported");
+        assert_eq!(
+            dimensions
+                .iter()
+                .map(|dimension| dimension.parameter_ordinal)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(
+            dimensions[0].source_values, dimensions[1].source_values,
+            "the regression requires value-identical anonymous dimensions"
+        );
+
+        let mut bindings = vec![
+            ExpansionBinding {
+                row_id: "a19:expansion-binding:logical-kind-recovery-bridge-spec-parameter-1-role"
+                    .to_owned(),
+                target_row_id: "a19:logical-kind:recovery-bridge-spec".to_owned(),
+                parameter_ordinal: 1,
+                formal: "Role".to_owned(),
+                formal_class: "role".to_owned(),
+                values: vec!["Local".to_owned(), "Meta".to_owned()],
+                rationale: "The first source parameter has two concrete roles".to_owned(),
+            },
+            ExpansionBinding {
+                row_id: "a19:expansion-binding:logical-kind-recovery-bridge-spec-parameter-2-role"
+                    .to_owned(),
+                target_row_id: "a19:logical-kind:recovery-bridge-spec".to_owned(),
+                parameter_ordinal: 2,
+                formal: "Role".to_owned(),
+                formal_class: "role".to_owned(),
+                values: vec!["Local".to_owned(), "Meta".to_owned()],
+                rationale: "The second source parameter has the same two concrete roles".to_owned(),
+            },
+        ];
+        let binding_refs: Vec<_> = bindings.iter().collect();
+        assert!(
+            expansion_bindings_match_dimensions(&binding_refs, &dimensions),
+            "source position must make equal anonymous dimensions inhabitable"
+        );
+
+        bindings[1].parameter_ordinal = 1;
+        let duplicate_ordinal_refs: Vec<_> = bindings.iter().collect();
+        assert!(
+            !expansion_bindings_match_dimensions(&duplicate_ordinal_refs, &dimensions),
+            "one source parameter ordinal cannot discharge two dimensions"
+        );
+
+        bindings[1].parameter_ordinal = 2;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let target_row_id = "a19:logical-kind:recovery-bridge-spec";
+        let mut target = catalog
+            .targets
+            .iter()
+            .find(|target| target.target_row_id == target_row_id)
+            .cloned()
+            .expect("RecoveryBridgeSpec target");
+        let mut selected = catalog
+            .top_level_candidates
+            .iter()
+            .find(|candidate| candidate.source_key == target.source_key)
+            .cloned()
+            .expect("RecoveryBridgeSpec source candidate");
+        selected.generic_signature = "<Local,Local>".to_owned();
+        selected.source_key = "top|RecoveryBridgeSpec<Local,Local>".to_owned();
+        target.source_key.clone_from(&selected.source_key);
+        let mut peer = selected.clone();
+        peer.row_id.push_str("-meta-meta");
+        peer.generic_signature = "<Meta,Meta>".to_owned();
+        peer.source_key = "top|RecoveryBridgeSpec<Meta,Meta>".to_owned();
+        catalog.targets = vec![target];
+        catalog.top_level_candidates = vec![selected, peer];
+        catalog.expansion_bindings = bindings;
+
+        let projection_targets =
+            BTreeMap::from([(target_row_id.to_owned(), "logical-kind".to_owned())]);
+        let candidate_by_key: BTreeMap<&str, &TopLevelCandidate> = catalog
+            .top_level_candidates
+            .iter()
+            .map(|candidate| (candidate.source_key.as_str(), candidate))
+            .collect();
+        let mut all_row_ids = BTreeSet::new();
+        let mut violations = Vec::new();
+        validate_expansion_binding_rows(
+            &catalog,
+            &projection_targets,
+            &candidate_by_key,
+            &mut all_row_ids,
+            &mut violations,
+        );
+        assert!(
+            violations.is_empty(),
+            "ordinal-distinguished anonymous dimensions must validate end to end: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn expansion_row_validation_accepts_an_arbitrary_bound_formal() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let target_row_id = "a19:logical-kind:recovery-bridge-spec";
+        let mut target = catalog
+            .targets
+            .iter()
+            .find(|target| target.target_row_id == target_row_id)
+            .cloned()
+            .expect("RecoveryBridgeSpec target");
+        let mut candidate = catalog
+            .top_level_candidates
+            .iter()
+            .find(|candidate| candidate.source_key == target.source_key)
+            .cloned()
+            .expect("RecoveryBridgeSpec source candidate");
+        let source_key = "top|RecoveryBridgeSpec<Scope:Trait>".to_owned();
+        target.source_key.clone_from(&source_key);
+        candidate.source_key = source_key;
+        candidate.generic_signature = "<Scope:Trait>".to_owned();
+        catalog.targets = vec![target];
+        catalog.top_level_candidates = vec![candidate];
+        catalog.expansion_bindings = vec![ExpansionBinding {
+            row_id: "a19:expansion-binding:logical-kind-recovery-bridge-spec-parameter-1-scope"
+                .to_owned(),
+            target_row_id: target_row_id.to_owned(),
+            parameter_ordinal: 1,
+            formal: "Scope".to_owned(),
+            formal_class: "generic".to_owned(),
+            values: vec!["Local".to_owned()],
+            rationale: "Appendix source binds the Scope formal to Local".to_owned(),
+        }];
+
+        let projection_targets =
+            BTreeMap::from([(target_row_id.to_owned(), "logical_object_kinds".to_owned())]);
+        let candidate_by_key: BTreeMap<&str, &TopLevelCandidate> = catalog
+            .top_level_candidates
+            .iter()
+            .map(|candidate| (candidate.source_key.as_str(), candidate))
+            .collect();
+        let mut all_row_ids = BTreeSet::new();
+        let mut violations = Vec::new();
+        validate_expansion_binding_rows(
+            &catalog,
+            &projection_targets,
+            &candidate_by_key,
+            &mut all_row_ids,
+            &mut violations,
+        );
+        assert!(
+            violations.is_empty(),
+            "an explicit arbitrary bound formal must validate end to end: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn annotation_formals_follow_the_whole_family_for_a_concrete_anchor() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let target_row_id = "a19:logical-kind:recovery-bridge-spec";
+        let mut target = catalog
+            .targets
+            .iter()
+            .find(|target| target.target_row_id == target_row_id)
+            .cloned()
+            .expect("RecoveryBridgeSpec target");
+        let mut selected = catalog
+            .top_level_candidates
+            .iter()
+            .find(|candidate| candidate.source_key == target.source_key)
+            .cloned()
+            .expect("RecoveryBridgeSpec source candidate");
+        selected.generic_signature = "<Local>".to_owned();
+        selected.source_key = "top|RecoveryBridgeSpec<Local>".to_owned();
+        target.source_key.clone_from(&selected.source_key);
+        let mut formal_peer = selected.clone();
+        formal_peer.row_id.push_str("-scope-formal");
+        formal_peer.generic_signature = "<Scope:Trait>".to_owned();
+        formal_peer.source_key = "top|RecoveryBridgeSpec<Scope:Trait>".to_owned();
+        let candidates = vec![selected, formal_peer];
+        let targets = BTreeMap::from([(target.target_row_id.as_str(), &target)]);
+        let candidates_by_key: BTreeMap<&str, &TopLevelCandidate> = candidates
+            .iter()
+            .map(|candidate| (candidate.source_key.as_str(), candidate))
+            .collect();
+        let annotation = Annotation {
+            row_id: "a19:annotation:logical-kind-recovery-bridge-spec".to_owned(),
+            target_row_id: target_row_id.to_owned(),
+            exact_type: "RecoveryBridgeSpec<Local>".to_owned(),
+            cardinality: "one".to_owned(),
+            layout: "canonical".to_owned(),
+            role: "Scope".to_owned(),
+            posture: "recovery".to_owned(),
+            authority: "recovery".to_owned(),
+            locality: "local".to_owned(),
+            generic_expansions: vec!["Local".to_owned()],
+            role_expansions: Vec::new(),
+            reference_semantics: "embedded".to_owned(),
+            target_schema_ids: Vec::new(),
+            construction_order: "source-before-bridge".to_owned(),
+            retention_and_cut_rule: "retain-through-recovery".to_owned(),
+            digest_recipe: "canonical-fields".to_owned(),
+            redaction_class: "authority-metadata".to_owned(),
+            resource_bounds: "bounded-by-source-manifest".to_owned(),
+            compatibility: "v1".to_owned(),
+        };
+
+        let formals =
+            annotation_generic_formals(&annotation, &targets, &candidates_by_key, &candidates);
+        assert!(
+            formals.contains(annotation.role.as_str()),
+            "a concrete selected occurrence must not hide a bound formal present in its source family"
+        );
+    }
+
+    #[test]
+    fn approved_expansion_coverage_crosses_source_slices_through_one_target() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let target_row_id = "a19:logical-kind:recovery-bridge-spec";
+        let target_source_key = "top|RecoveryBridgeSpec<Role>";
+        let expanded_source_key = "top|RecoveryBridgeSpec<Local|Meta>";
+        catalog
+            .top_level_candidates
+            .iter_mut()
+            .find(|candidate| candidate.source_key == expanded_source_key)
+            .expect("released concrete RecoveryBridgeSpec occurrence exists")
+            .slice_id = "a07".to_owned();
+        let row_id = "a19:expansion-binding:logical-kind-recovery-bridge-spec-parameter-1-role";
+        let rationale = "Appendix source instantiates exactly Local and Meta";
+        catalog.expansion_bindings.push(ExpansionBinding {
+            row_id: row_id.to_owned(),
+            target_row_id: target_row_id.to_owned(),
+            parameter_ordinal: 1,
+            formal: "Role".to_owned(),
+            formal_class: "role".to_owned(),
+            values: vec!["Local".to_owned(), "Meta".to_owned()],
+            rationale: rationale.to_owned(),
+        });
+        let contract = [ExpansionBindingContractPin {
+            row_id,
+            target_row_id,
+            target_source_key,
+            parameter_ordinal: 1,
+            formal: "Role",
+            formal_class: "role",
+            values: &["Local", "Meta"],
+            rationale,
+        }];
+
+        let coverage = approved_top_level_source_coverage_with(&contract, &catalog);
+        for source_key in [target_source_key, expanded_source_key] {
+            assert_eq!(
+                coverage
+                    .get(source_key)
+                    .map(|target| target.target_row_id.as_str()),
+                Some(target_row_id),
+                "one independently pinned target must cover every exact family occurrence"
+            );
+        }
+        let (a07_keys, a07_targets) = top_level_coverage_for_slice(&catalog, &coverage, "a07");
+        assert_eq!(
+            a07_keys,
+            [expanded_source_key],
+            "the completing source slice must count the exact cross-slice occurrence"
+        );
+        assert_eq!(
+            a07_targets.keys().copied().collect::<Vec<_>>(),
+            [target_row_id]
+        );
+
+        let unapproved = approved_top_level_source_coverage_with(&[], &catalog);
+        assert!(unapproved.contains_key(target_source_key));
+        assert!(!unapproved.contains_key(expanded_source_key));
+
+        catalog
+            .top_level_candidates
+            .iter_mut()
+            .find(|candidate| candidate.source_key == expanded_source_key)
+            .expect("released concrete RecoveryBridgeSpec occurrence exists")
+            .identity_class = "physical".to_owned();
+        let mixed_class = approved_top_level_source_coverage_with(&contract, &catalog);
+        assert!(mixed_class.contains_key(target_source_key));
+        assert!(!mixed_class.contains_key(expanded_source_key));
+
+        catalog
+            .top_level_candidates
+            .iter_mut()
+            .find(|candidate| candidate.source_key == expanded_source_key)
+            .expect("released concrete RecoveryBridgeSpec occurrence exists")
+            .identity_class = "logical".to_owned();
+        let shadow_target_row_id = "a07:logical-kind:recovery-bridge-spec-shadow";
+        catalog.targets.push(Target {
+            row_id: "a07:target:logical-kind-recovery-bridge-spec-shadow".to_owned(),
+            target_row_id: shadow_target_row_id.to_owned(),
+            slice_id: "a07".to_owned(),
+            source_key: expanded_source_key.to_owned(),
+            target_kind: "logical-kind".to_owned(),
+            definition_status: "complete".to_owned(),
+        });
+        let shadow_row_id =
+            "a07:expansion-binding:logical-kind-recovery-bridge-spec-shadow-parameter-1-role";
+        catalog.expansion_bindings.push(ExpansionBinding {
+            row_id: shadow_row_id.to_owned(),
+            target_row_id: shadow_target_row_id.to_owned(),
+            parameter_ordinal: 1,
+            formal: "Role".to_owned(),
+            formal_class: "role".to_owned(),
+            values: vec!["Local".to_owned(), "Meta".to_owned()],
+            rationale: rationale.to_owned(),
+        });
+        let duplicate_contract = [
+            contract[0],
+            ExpansionBindingContractPin {
+                row_id: shadow_row_id,
+                target_row_id: shadow_target_row_id,
+                target_source_key: expanded_source_key,
+                parameter_ordinal: 1,
+                formal: "Role",
+                formal_class: "role",
+                values: &["Local", "Meta"],
+                rationale,
+            },
+        ];
+        let duplicate = approved_top_level_source_coverage_with(&duplicate_contract, &catalog);
+        assert!(!duplicate.contains_key(target_source_key));
+        assert!(!duplicate.contains_key(expanded_source_key));
+    }
+
+    #[test]
+    fn final_ambiguity_resolution_requires_the_exact_parser_owned_relation() {
+        let source_key = "field|Record|Record.value|value";
+        let candidate = ambiguity(AmbiguityKind::FieldTypeAmbiguous, &[source_key]);
+        let mut row = AmbiguityAdjudication {
+            row_id: "a02:ambiguity-adjudication:fixture".to_owned(),
+            slice_id: "a02".to_owned(),
+            ambiguity_source_key: candidate.key.source_key(),
+            source_locations: vec!["a02:1".to_owned()],
+            resolution: "maps-to-source".to_owned(),
+            resolved_source_keys: vec![source_key.to_owned()],
+            rationale: "The parser identified this exact field candidate".to_owned(),
+        };
+        assert!(final_ambiguity_resolution_matches(&row, &candidate));
+
+        row.resolved_source_keys = vec!["field|Record|Record.other|other".to_owned()];
+        assert!(
+            !final_ambiguity_resolution_matches(&row, &candidate),
+            "same-family but unrelated source keys must not discharge an ambiguity"
+        );
+
+        let ownerless = ambiguity(AmbiguityKind::UnownedStructuralFragment, &[]);
+        row.resolution = "not-a-durable-schema".to_owned();
+        row.resolved_source_keys.clear();
+        assert!(final_ambiguity_resolution_matches(&row, &ownerless));
+
+        let lexical = ambiguity(AmbiguityKind::UnterminatedInlineCode, &[]);
+        assert!(
+            !final_ambiguity_resolution_matches(&row, &lexical),
+            "lexically unterminated source must remain a parser/source repair instead of closing as an empty rejection"
+        );
+    }
+
+    #[test]
+    fn nonzero_raw_ambiguity_pin_closes_only_with_exact_final_adjudication() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let source_key = "ambiguity|ambiguous-schema-owner|Sharded||0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef|fixture";
+        let row_id = "a20:ambiguity-adjudication:fe317e2f4f78c1a778d4bb278a220758595a0e3de1ebf15174148546ff93f13c";
+        let rationale = "Sharded is the target_posture union arm, not a schema";
+        catalog.ambiguity_adjudications.push(AmbiguityAdjudication {
+            row_id: row_id.to_owned(),
+            slice_id: "a20".to_owned(),
+            ambiguity_source_key: source_key.to_owned(),
+            source_locations: vec!["a20:2575".to_owned()],
+            resolution: "not-a-durable-schema".to_owned(),
+            resolved_source_keys: vec!["top|Sharded".to_owned()],
+            rationale: rationale.to_owned(),
+        });
+        let pin = [AmbiguityAdjudicationContractPin {
+            row_id,
+            slice_id: "a20",
+            ambiguity_source_key: source_key,
+            source_locations: &["a20:2575"],
+            resolution: "not-a-durable-schema",
+            resolved_source_keys: &["top|Sharded"],
+            rationale,
+        }];
+        let keys = approved_final_ambiguity_keys_with(&pin, &catalog, "a20");
+        let raw_count = 1;
+        let raw_sha256 = sha256_hex(format!("{source_key}\n").as_bytes());
+        let mut violations = Vec::new();
+        validate_census_pin(
+            "a20",
+            "complete_ambiguity_adjudication",
+            raw_count,
+            &raw_sha256,
+            keys,
+            &mut violations,
+        );
+        assert!(
+            violations.is_empty(),
+            "nonzero raw ambiguity pin did not close with its exact final adjudication: {violations:?}"
+        );
+
+        catalog.ambiguity_adjudications[0].resolution = "needs-parser-fix".to_owned();
+        let keys = approved_final_ambiguity_keys_with(&pin, &catalog, "a20");
+        let mut violations = Vec::new();
+        validate_census_pin(
+            "a20",
+            "complete_ambiguity_adjudication",
+            raw_count,
+            &raw_sha256,
+            keys,
+            &mut violations,
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.code == "slice_census_pin_mismatch"),
+            "nonfinal ambiguity state incorrectly counted as resolved"
+        );
     }
 
     #[test]

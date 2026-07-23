@@ -3,18 +3,20 @@
 # =============================================================================
 # Bead: fgdb-appendix-a-catalog-scaffold-gvvf
 #
-# Schema v2 separates source-derived candidates from semantic completion.
+# Schema v3 separates source-derived candidates from semantic completion and
+# adds ordinary-union, ambiguity-adjudication, expansion, and owner-lifecycle
+# contracts without weakening the retaining-reference union model.
 # Every slice is deliberately declared: later A01-A21 work must supply exact
 # annotations, real implementation ownership, and static/runtime evidence.
 # =============================================================================
 
-schema_version = 2
+schema_version = 3
 
 [catalog]
 name = "appendix_a_catalog"
-catalog_epoch = 2
-row_id_grammar_version = 2
-canonical_order = "source-key,projection-registry,assigned-code,containing-schema,field-tag,arm-tag,row-id"
+catalog_epoch = 3
+row_id_grammar_version = 3
+canonical_order = "source-key,projection-registry,assigned-code,containing-schema,union-path,field-tag,arm-tag,row-id"
 diagnostic_version = 1
 hash_algorithm = "sha256"
 source_encoding = "utf-8-lf"
@@ -47,7 +49,7 @@ owner_crate = "registry-check"
 covered_artifacts = ["registries/appendix_a_catalog.toml", "registries/bootstrap_frames.toml", "registries/durable_fields.toml", "registries/logical_object_kinds.toml", "registries/physical_record_kinds.toml", "registries/prebootstrap_artifact_kinds.toml", "registries/wire_types.toml"]
 checker_ids = ["appendix_a_catalog_closure", "appendix_a_catalog_projection_diff", "appendix_a_catalog_source"]
 scenario_ids = ["g0_identity_e2e"]
-event_ids = ["appendix_closure_checked", "appendix_projection_checked", "appendix_source_manifest"]
+event_ids = ["appendix_closure_checked", "appendix_projection_checked", "appendix_projection_regenerated", "appendix_regeneration_completed", "appendix_source_manifest"]
 gate_ids = ["G0"]
 evidence_status = "live"
 
@@ -74,7 +76,7 @@ union_candidate_ids_sha256 = "c291df0246e0b4c854ddda816d11c7775aa7cda05abc891509
 arm_candidate_count = 36
 arm_candidate_ids_sha256 = "acf50cd4bcfcf5b76f39877ba3db70701a4458323a6988115b76e2949e28bf21"
 ambiguity_count = 184
-ambiguity_ids_sha256 = "1a5e585d594c9c8557813c5b8d0a65987c5cbea3982e40f67108223b66240cb6"
+ambiguity_ids_sha256 = "239e4f51f5065eeb313bca17d8820be9f2699dc20b3580275892f1544217f297"
 
 [[slice]]
 ordinal = 2
@@ -99,7 +101,7 @@ union_candidate_ids_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca4
 arm_candidate_count = 0
 arm_candidate_ids_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 ambiguity_count = 57
-ambiguity_ids_sha256 = "ebc61779c6a140b7ec19f8661264ef33a230e085e8910495f71ebec6b898ddae"
+ambiguity_ids_sha256 = "315006f4901f160c150f25a8774433a1462eac1d4d565c74d7ad160076a140da"
 
 [[slice]]
 ordinal = 3
@@ -124,7 +126,7 @@ union_candidate_ids_sha256 = "65e427afafb289ecfd92449f4f73381f84ea574f8f905560a2
 arm_candidate_count = 129
 arm_candidate_ids_sha256 = "6c40ce7f70b31633b96fc946cfd8759e34b5ed1efad53239b69f7f76d9b09e24"
 ambiguity_count = 486
-ambiguity_ids_sha256 = "a4d5e464df962956b9780f64805d8d3c6219d5c5f4b4920bf0b41e76ef1b7962"
+ambiguity_ids_sha256 = "dcb1a859d16687c4d70931bef96b0fb3e601f9d3e0b9b473d11915b114292fea"
 
 [[slice]]
 ordinal = 4
@@ -149,7 +151,7 @@ union_candidate_ids_sha256 = "2a98b59e5fdde61d2551ce3ab35fbfbac5066f590aa5026011
 arm_candidate_count = 46
 arm_candidate_ids_sha256 = "c9aed9e79bc64fb35d651deff2d072570b45937f100e84bd5f37fbcd4c818e2e"
 ambiguity_count = 205
-ambiguity_ids_sha256 = "760be2f5a8d665c30494149a9ed33c9f2f6db7f1ecde103d696467bc04ce7eca"
+ambiguity_ids_sha256 = "fdbc302558a32e9acc1ded41e0639f80972c26de0ce225b2438afa1609ff993c"
 
 [[slice]]
 ordinal = 5
@@ -174,7 +176,7 @@ union_candidate_ids_sha256 = "e5f78118ed170d6fe31876c746e6d60f6a32f22e2ecfc4a498
 arm_candidate_count = 60
 arm_candidate_ids_sha256 = "628c0d4bdf5ed53ef8e4f7908dbf182fdb8686d28695ab723816f9f9df2be627"
 ambiguity_count = 541
-ambiguity_ids_sha256 = "b044b28d331ea74e4faabd11d984b8453d406b441645fc725227cf3cd4f44bf6"
+ambiguity_ids_sha256 = "70aa44fa9bc8cbab184ced5ecfb57941833f5d59c903c83f05462ce6a6ceb9ce"
 
 [[slice]]
 ordinal = 6
@@ -199,7 +201,7 @@ union_candidate_ids_sha256 = "29e8e8f834cf4ddc73eb5faa5fbf76a72bd8a33cb9368cd851
 arm_candidate_count = 51
 arm_candidate_ids_sha256 = "26ed5557dfe99c18410d1992312ffc09e1e9369113fbe87f9119d76251760bc6"
 ambiguity_count = 259
-ambiguity_ids_sha256 = "e11c149cfe6387ddc57b9c42442aa4de7ed33adec2694f649048834d89ac7c89"
+ambiguity_ids_sha256 = "46252aded3dcbf089569cdfe09a2f3d207391262dbdf1838d2c1cddd7f5d7c85"
 
 [[slice]]
 ordinal = 7
@@ -224,7 +226,7 @@ union_candidate_ids_sha256 = "67c7e10d83701d43e163f3f2e56cd8ad4b2bdb12e0bdf0b187
 arm_candidate_count = 245
 arm_candidate_ids_sha256 = "7cfcb3bc12e5afe3b64345ce07d33457e85a745fe068cdcfc4767bff55f86e61"
 ambiguity_count = 503
-ambiguity_ids_sha256 = "a14df8430cf50754f40226f917f039545a73626015bdefe1097c50a65d29cd97"
+ambiguity_ids_sha256 = "eff639c3c31fb115d01c1a160011bb2233a49caffb4843ccc28336ccdf9b7835"
 
 [[slice]]
 ordinal = 8
@@ -249,7 +251,7 @@ union_candidate_ids_sha256 = "23db225062d030e226790c58b445a5d3d14d0fc6fd3855f6f7
 arm_candidate_count = 140
 arm_candidate_ids_sha256 = "11469f1e7b7a6bd0b28f583eea4281e37cc68969479acefb63816f93c16606ea"
 ambiguity_count = 702
-ambiguity_ids_sha256 = "08f01e22672d48d35e0e76811c071a55030d9d311542aafa2bbb12f6debb89be"
+ambiguity_ids_sha256 = "cf2f86f5e53271a02fb601a99e52543eae35af86beb11ada8fd5768a2e5d5e0b"
 
 [[slice]]
 ordinal = 9
@@ -274,7 +276,7 @@ union_candidate_ids_sha256 = "2231db4c82ac7d8e980b3d9b192136d69b39bda8184d954316
 arm_candidate_count = 12
 arm_candidate_ids_sha256 = "78421c2968d2b5baa12ab3ac00269ce7c5d10cdb1160e84dabad680f9f7c3fb2"
 ambiguity_count = 148
-ambiguity_ids_sha256 = "5e8c3c36425330df542f0d94032e2e7243f53b14e23324a20047fe73d108282c"
+ambiguity_ids_sha256 = "f7800d599243f9e88d34f2f03420d779283e077c8fb425861f07766d50ac294b"
 
 [[slice]]
 ordinal = 10
@@ -299,7 +301,7 @@ union_candidate_ids_sha256 = "75ebe16c9c17ce6e6b305ed0698851985ac53b2c42c6cc1683
 arm_candidate_count = 13
 arm_candidate_ids_sha256 = "442fae0a7cf50d4c06719a00b37c26bfc16349763cf3f2cc9717b04039496fe7"
 ambiguity_count = 90
-ambiguity_ids_sha256 = "8aab83cfb8bf17621177e5478716be010e4c3a8c644b8ddab6d8e34f7bde8cb8"
+ambiguity_ids_sha256 = "6bfc9a84c94791f6182df9904dc972d63ea0852970460884b0688a4e01bb0a97"
 
 [[slice]]
 ordinal = 11
@@ -324,7 +326,7 @@ union_candidate_ids_sha256 = "1df066c06046b9a288d8bcc5f64caa6d7574c4e6e5c2138c3a
 arm_candidate_count = 28
 arm_candidate_ids_sha256 = "8ea9a13576028bc8fc66e22aba9ffaf8f02b1b5aa70867f86f5142426d1afd4b"
 ambiguity_count = 70
-ambiguity_ids_sha256 = "6ba068e795f20f7a5478876e19875179f5a1109c328bea9854db4b5bb0fcaa16"
+ambiguity_ids_sha256 = "516e324777eaa692c467ae7db60430492d949aded999e22e5bdb0f7e2fcdc09e"
 
 [[slice]]
 ordinal = 12
@@ -349,7 +351,7 @@ union_candidate_ids_sha256 = "cb8bb179a1e38a53dc675c6097c36f6cde6a8db057df5ddf4e
 arm_candidate_count = 58
 arm_candidate_ids_sha256 = "1ff9688521c4b4ec5f82d55973a98a3568e99c6e7a2b65374968aa23b065d528"
 ambiguity_count = 166
-ambiguity_ids_sha256 = "578dee2496261589e12d84b3e625f1dc2d69dbfed584e0db039d2d2eb7a05297"
+ambiguity_ids_sha256 = "6cbe9c47700cab21960acfd70604dfc5ca856647cee703e1e9a4a9e679927560"
 
 [[slice]]
 ordinal = 13
@@ -374,7 +376,7 @@ union_candidate_ids_sha256 = "44fe00f2fa5715450a121b7294e379da59e822e83bf63dc362
 arm_candidate_count = 27
 arm_candidate_ids_sha256 = "0aa15f668f52db3a8c123f490322017228dd26297aecf685c3a949dec229006a"
 ambiguity_count = 157
-ambiguity_ids_sha256 = "6f15c139c2aae3ac453d47e044e31b06423a8777d8a9bda29c570cd935102d0a"
+ambiguity_ids_sha256 = "0703aa61a5f4de15bc001ef3c4b5e71236d3a3444f29b7d0bf85935dd37aa01b"
 
 [[slice]]
 ordinal = 14
@@ -399,7 +401,7 @@ union_candidate_ids_sha256 = "15e303a3e58a1840bb506926c05b7cb208a699ec1a1bb3deab
 arm_candidate_count = 14
 arm_candidate_ids_sha256 = "c7df914eb8691036d5d60156878e4b216c4cc223434d4dd70e37b61a999f8a8e"
 ambiguity_count = 85
-ambiguity_ids_sha256 = "7bc686b2868856356bdb2db6b2bb609f5aa91ca4b409fc659c1387acd38bc3f1"
+ambiguity_ids_sha256 = "178f2f07b7354b769b32cbb27f1a9daff72570145fda5f2070fadff7e3a6a32a"
 
 [[slice]]
 ordinal = 15
@@ -424,7 +426,7 @@ union_candidate_ids_sha256 = "7ae8c34a227cf7241c420848692817ab58f1052869af7470c1
 arm_candidate_count = 162
 arm_candidate_ids_sha256 = "51becf54c432a95fac5e4cb79fc7245f373904d7f97f629645619b10729ad798"
 ambiguity_count = 806
-ambiguity_ids_sha256 = "04181417434609de98606edc13ace9264b73e276ef7bea6d573308c20417e74b"
+ambiguity_ids_sha256 = "9b2913fc590e419a4593facc5fa5d6c9a16c57680f63ce61785cabe65442863b"
 
 [[slice]]
 ordinal = 16
@@ -449,7 +451,7 @@ union_candidate_ids_sha256 = "8811f8862ba07e42642ef78a67ddad05c227f54cccdf7cc6f1
 arm_candidate_count = 79
 arm_candidate_ids_sha256 = "4396cd4a7fc4a353ba56b29b3944921401e1763d66ec05192a9bcbcebbc8eed7"
 ambiguity_count = 825
-ambiguity_ids_sha256 = "b543886caf00aa4ec879a0032eafafc5b8106d858d45294cae07a3f24c37a650"
+ambiguity_ids_sha256 = "bf9119647ec4065423958f4721e6cdead82b9b90ef4327313621c8940565c152"
 
 [[slice]]
 ordinal = 17
@@ -474,7 +476,7 @@ union_candidate_ids_sha256 = "6be970c7ace5683babf2d496844f3edc401e3af6730612f314
 arm_candidate_count = 90
 arm_candidate_ids_sha256 = "b1d4a5eeeb726f3507f450387bb4e97b044a615263978cd41bb14cd826133bfa"
 ambiguity_count = 702
-ambiguity_ids_sha256 = "4551434a1b55368068607ceb27c0088fe2ebeeff665540c63709d45841b835a6"
+ambiguity_ids_sha256 = "15617d55bce1ccf15d592180e7e1d325eb13ce1cf311dfa07243528e08368afa"
 
 [[slice]]
 ordinal = 18
@@ -499,7 +501,7 @@ union_candidate_ids_sha256 = "02e360ece43b33e790c2e6e2d235e27333120672aa0e81b7e3
 arm_candidate_count = 155
 arm_candidate_ids_sha256 = "600e39044e47a16d3a8397b4fde7293446664cb74e017befbc22b818fa7ecb7c"
 ambiguity_count = 890
-ambiguity_ids_sha256 = "4d88744891327f74014783965aa1b8ad73251b33f8747bf122a283be6078ee0b"
+ambiguity_ids_sha256 = "2816e7307075a33cb220609ae80e3f2b0ff408954cbb019efdf11171425c33b7"
 
 [[slice]]
 ordinal = 19
@@ -524,7 +526,7 @@ union_candidate_ids_sha256 = "20a21cfefd0e9140d915d2bf9563d14b6edf382e3fd5821ed6
 arm_candidate_count = 108
 arm_candidate_ids_sha256 = "0399aa0964847c7930ded7fb06b27e5df73b8848bf4c3b5ebb1fcfca52b5b5c7"
 ambiguity_count = 775
-ambiguity_ids_sha256 = "cd83fd7d089d29688cf1e6f8a4ce3d6afb7b633279f49c14f3bde05c7ee05449"
+ambiguity_ids_sha256 = "3f481991f57e9fb993b3b60abfa7d00f8c5a61bef5d26b1c7d1464274bcbd5ba"
 
 [[slice]]
 ordinal = 20
@@ -549,7 +551,7 @@ union_candidate_ids_sha256 = "133b529dcba2dedc03e4e6e216c37903010c95647579c19681
 arm_candidate_count = 17
 arm_candidate_ids_sha256 = "99315207439758d8e55f2147719cb82a0118197282e95f1018e524afdc403121"
 ambiguity_count = 145
-ambiguity_ids_sha256 = "27b7490c2430dede63e0052057528562a9f860e84ac2ebf3d009d8c3ad86afbf"
+ambiguity_ids_sha256 = "15f87f1ec6bea346e8ada63602a0b8e777bcef6d3a308120c541f594ce6f00e9"
 
 [[slice]]
 ordinal = 21
@@ -574,7 +576,7 @@ union_candidate_ids_sha256 = "9562c7233b5538045635aef4ef2039866774df64410174ed30
 arm_candidate_count = 196
 arm_candidate_ids_sha256 = "b8b6a640e6294a0bd9436774e7265c372e686b5bab2a0990186761b37a9f14f9"
 ambiguity_count = 627
-ambiguity_ids_sha256 = "8a5b4a6f9e8d7c5e13246e63e49180bd7f479be49f23fb510b00cd3e6800a76c"
+ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0d7722b61"
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
@@ -598,7 +600,7 @@ registry_epoch = 2
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 2
+registry_epoch = 3
 
 [[logical_kind]]
 slice_id = "a03"

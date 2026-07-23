@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 2
+registry_epoch = 3
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"

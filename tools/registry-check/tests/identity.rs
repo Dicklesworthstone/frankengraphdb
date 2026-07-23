@@ -166,6 +166,82 @@ fn kind(code: i64, name: &str, status: &str, order: i64) -> LogicalKind {
     }
 }
 
+fn ordinary_top_level_union_fixture() -> IdentityRegistries {
+    let source = r#"
+schema_version = 1
+
+[registry]
+name = "durable_fields"
+registry_epoch = 3
+
+[[union]]
+union_name = "FixtureTopLevelUnion"
+containing_schema = "RootBootstrap"
+union_path = "fixture_top_level_union"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+role_predicate = "true"
+version_status = "active"
+max_size_bytes = 128
+
+[[union_arm]]
+union_name = "FixtureTopLevelUnion"
+containing_schema = "RootBootstrap"
+union_path = "fixture_top_level_union"
+arm_tag = 1
+source_arm_name = "Absent"
+stable_name = "absent"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "active"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "FixtureTopLevelUnion"
+containing_schema = "RootBootstrap"
+union_path = "fixture_top_level_union"
+arm_tag = 2
+source_arm_name = "Present"
+stable_name = "present"
+payload_kind = "inline-record"
+payload_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+role_predicate = "true"
+version_status = "active"
+max_size_bytes = 127
+"#;
+    let table = registry_check::toml::parse(source).expect("ordinary-union fixture parses");
+    let (epoch, fields, ordinary_unions, reference_unions) =
+        identity::fields_from(&table).expect("ordinary-union fixture models");
+
+    assert_eq!(epoch, 3);
+    assert!(fields.is_empty());
+    assert!(reference_unions.is_empty());
+    assert_eq!(ordinary_unions.len(), 1);
+    let union = &ordinary_unions[0];
+    assert_eq!(union.field_tag, None, "omitted field_tag means top-level");
+    assert_eq!(union.arms.len(), 2);
+    assert_eq!(union.arms[0].payload_kind, "unit");
+    assert_eq!(union.arms[0].payload_sha256, None);
+    assert_eq!(union.arms[1].payload_kind, "inline-record");
+    assert_eq!(
+        union.arms[1].payload_sha256.as_deref(),
+        Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+    );
+
+    let mut identity = real_identity();
+    identity.fields_epoch = epoch;
+    identity.ordinary_unions = ordinary_unions;
+    identity
+}
+
+fn codes_without_assignment_drift(r: &IdentityRegistries) -> Vec<String> {
+    identity::validate_identity(r)
+        .into_iter()
+        .filter(|violation| violation.code != "registry_assignment_drift")
+        .map(|violation| violation.code)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Baseline.
 // ---------------------------------------------------------------------------
@@ -226,8 +302,8 @@ fn appendix_a_catalog_parse_is_closed_and_versioned() {
         (
             "unknown root",
             source.replacen(
-                "schema_version = 2",
-                "schema_version = 2\nunknown_root_key = true",
+                "schema_version = 3",
+                "schema_version = 3\nunknown_root_key = true",
                 1,
             ),
             "catalog_unknown_key",
@@ -275,7 +351,7 @@ fn appendix_a_catalog_parse_is_closed_and_versioned() {
         ),
         (
             "wrong schema version",
-            source.replacen("schema_version = 2", "schema_version = 3", 1),
+            source.replacen("schema_version = 3", "schema_version = 4", 1),
             "catalog_pin_mismatch",
             "schema_version",
         ),
@@ -528,6 +604,7 @@ fn appendix_a_catalog_projection_targets_are_exact_and_reservations_are_nonseman
             target_row_id: reservation.row_id.clone(),
             owner_bead_id: "fgdb-w10-fixture".to_owned(),
             owner_crate: "fgdb-fixture".to_owned(),
+            owner_status: "planned".to_owned(),
             consumer_crates: vec!["fgdb".to_owned()],
         });
     let violations = appendix_a::validate_catalog(&reservation_metadata);
@@ -567,6 +644,7 @@ fn appendix_a_catalog_maintenance_and_semantic_binding_contracts_are_distinct() 
         target_row_id: target.target_row_id,
         owner_bead_id: "fgdb-w10-fixture".to_owned(),
         owner_crate: "fgdb-warden".to_owned(),
+        owner_status: "planned".to_owned(),
         consumer_crates: vec!["fgdb".to_owned(), "fgdb-server".to_owned()],
     };
 
@@ -968,7 +1046,7 @@ fn appendix_a_field_annotations_match_identity_reference_contract() {
     catalog.annotations.push(appendix_a::Annotation {
         row_id: "a01:annotation:field-root-slot-root-manifest-oid".to_owned(),
         target_row_id: "a01:field:root-slot-root-manifest-oid".to_owned(),
-        exact_type: "[u8;32]".to_owned(),
+        exact_type: "oid256".to_owned(),
         cardinality: "one".to_owned(),
         layout: "fixed".to_owned(),
         role: "Local".to_owned(),
@@ -977,7 +1055,7 @@ fn appendix_a_field_annotations_match_identity_reference_contract() {
         locality: "local".to_owned(),
         generic_expansions: Vec::new(),
         role_expansions: Vec::new(),
-        reference_semantics: "locator".to_owned(),
+        reference_semantics: "external_root".to_owned(),
         target_schema_ids: vec![root_manifest_schema_id.clone()],
         construction_order: "root-first".to_owned(),
         retention_and_cut_rule: "nonretaining-manifest-locator".to_owned(),
@@ -1018,7 +1096,7 @@ fn appendix_a_field_annotations_match_identity_reference_contract() {
         "a field annotation suppressed its authoritative locator target: {violations:?}"
     );
 
-    catalog.annotations[0].reference_semantics = "locator".to_owned();
+    catalog.annotations[0].reference_semantics = "external_root".to_owned();
     catalog.annotations[0].target_schema_ids = vec![unrelated_schema_id];
     let violations = appendix_a::validate_catalog(&catalog);
     assert!(
@@ -1067,10 +1145,10 @@ fn appendix_a_top_level_generic_annotations_discharge_source_formals() {
     let source = real_plan_source();
     let violations = appendix_a::appendix_a_catalog_source(&catalog, &source);
     assert!(
-        !violations
+        violations
             .iter()
             .any(|violation| violation.code == "source_annotation_contract_mismatch"),
-        "the exact RecoveryBridgeSpec role expansion was rejected: {violations:?}"
+        "an unpinned flattened role expansion self-authorized: {violations:?}"
     );
 
     catalog.annotations[0].role_expansions = vec!["Local".to_owned()];
@@ -1207,6 +1285,7 @@ fn appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events() {
         target_row_id: "a01:bootstrap-frame:root-slot".to_owned(),
         owner_bead_id: owner.to_owned(),
         owner_crate: "fgdb-types".to_owned(),
+        owner_status: "live".to_owned(),
         consumer_crates: vec!["fgdb".to_owned(), "fgdb-server".to_owned()],
     });
     catalog.evidence.push(appendix_a::EvidenceBinding {
@@ -1252,8 +1331,19 @@ fn appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events() {
     assert!(
         violations
             .iter()
-            .any(|violation| violation.code == "catalog_semantic_owner_crate_unresolved"),
-        "a merely planned, absent crate was accepted as an implementation owner: {violations:?}"
+            .any(|violation| violation.code == "catalog_semantic_live_owner_crate_unresolved"),
+        "an absent crate was accepted as a live implementation owner: {violations:?}"
+    );
+
+    merely_planned_owner.semantic_bindings[0].owner_status = "planned".to_owned();
+    let violations = appendix_a::verify_repository_bindings(&root, &merely_planned_owner);
+    assert!(
+        !violations.iter().any(|violation| matches!(
+            violation.code.as_str(),
+            "catalog_semantic_owner_crate_unresolved"
+                | "catalog_semantic_live_owner_crate_unresolved"
+        )),
+        "an architecture-planned owner was incorrectly required to exist in the workspace: {violations:?}"
     );
 
     let mut stub_live = catalog.clone();
@@ -1368,7 +1458,7 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     );
     assert_eq!(baseline.source_symbol_dispositions.len(), 848);
     assert_eq!(baseline.top_level_candidates.len(), 1_229);
-    assert_eq!(baseline.targets.len(), 128);
+    assert_eq!(baseline.targets.len(), 162);
     assert_eq!(
         baseline
             .targets
@@ -1377,8 +1467,8 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
             .count(),
         appendix_a::EXPECTED_PROJECTION_FALLBACK_COUNT
     );
-    assert_eq!(baseline.target_manifest.target_count, 128);
-    assert_eq!(baseline.target_manifest.projection_fallback_count, 83);
+    assert_eq!(baseline.target_manifest.target_count, 162);
+    assert_eq!(baseline.target_manifest.projection_fallback_count, 81);
     assert_eq!(
         appendix_a::target_source_assignment_sha256(&baseline.targets),
         appendix_a::EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256
@@ -1891,10 +1981,11 @@ fn appendix_a_catalog_projections_are_deterministic_and_round_trip() {
                 assert_eq!(rows, catalog.identity.wire);
             }
             "durable_fields.toml" => {
-                let (epoch, fields, unions) =
+                let (epoch, fields, ordinary_unions, unions) =
                     identity::fields_from(&table).expect("durable-field projection");
                 assert_eq!(epoch, catalog.identity.fields_epoch);
                 assert_eq!(fields, catalog.identity.fields);
+                assert_eq!(ordinary_unions, catalog.identity.ordinary_unions);
                 assert_eq!(unions, catalog.identity.unions);
             }
             // The exact filename assertion above proves this arm unreachable;
@@ -1950,7 +2041,11 @@ fn idr_schema_valid_all_six() {
     // Sanity on the seeded corpus shape.
     assert!(r.logical.len() >= 20, "logical spine seeded");
     assert!(r.physical.len() >= 6, "physical pipeline seeded");
-    assert_eq!(r.bootstrap.len(), 2, "RootSlot + reserved RaftHardFrame");
+    assert_eq!(
+        r.bootstrap.len(),
+        3,
+        "RootSlot, RootBootstrap, and reserved RaftHardFrame"
+    );
     assert!(
         r.prebootstrap.len() >= 5,
         "prebootstrap artifact classes seeded"
@@ -2002,6 +2097,187 @@ fn idr_schema_rejects_unknown_keys_and_versions() {
     assert_eq!(
         err.path,
         "logical_object_kinds.toml.kind[0].unknown_row_key"
+    );
+}
+
+#[test]
+fn idr_ordinary_top_level_union_parses_and_validates() {
+    let identity = ordinary_top_level_union_fixture();
+    let violations = identity::validate_identity(&identity);
+    assert_eq!(
+        violations
+            .iter()
+            .filter(|violation| violation.code == "registry_assignment_drift")
+            .count(),
+        1,
+        "the synthetic union must differ only from the released assignment pin: {violations:?}"
+    );
+    assert!(
+        codes_without_assignment_drift(&identity).is_empty(),
+        "a top-level closed tagged union with unit and inline-record arms was rejected: {violations:?}"
+    );
+}
+
+#[test]
+fn idr_ordinary_union_rejects_duplicate_arm_tag() {
+    let mut identity = ordinary_top_level_union_fixture();
+    let first_arm_tag = identity.ordinary_unions[0].arms[0].arm_tag;
+    identity.ordinary_unions[0].arms[1].arm_tag = first_arm_tag;
+
+    assert_eq!(
+        codes_without_assignment_drift(&identity),
+        vec!["ordinary_union_arm_duplicate_tag".to_owned()],
+    );
+}
+
+#[test]
+fn idr_ordinary_union_rejects_invalid_inline_record_hash() {
+    let mut identity = ordinary_top_level_union_fixture();
+    identity.ordinary_unions[0].arms[1].payload_sha256 = Some("not-a-sha256".into());
+
+    assert_eq!(
+        codes_without_assignment_drift(&identity),
+        vec!["ordinary_union_arm_payload_mismatch".to_owned()],
+    );
+}
+
+#[test]
+fn idr_ordinary_union_rejects_unresolved_containing_schema() {
+    let mut identity = ordinary_top_level_union_fixture();
+    identity.ordinary_unions[0].containing_schema = "MissingFixtureSchema".into();
+    for arm in &mut identity.ordinary_unions[0].arms {
+        arm.containing_schema = "MissingFixtureSchema".into();
+    }
+
+    assert_eq!(
+        codes_without_assignment_drift(&identity),
+        vec!["ordinary_union_unresolved_schema".to_owned()],
+    );
+}
+
+#[test]
+fn idr_ordinary_union_rejects_reference_union_name_collision() {
+    let mut identity = ordinary_top_level_union_fixture();
+    let colliding_name = identity.unions[0].union_name.clone();
+    identity.ordinary_unions[0]
+        .union_name
+        .clone_from(&colliding_name);
+    for arm in &mut identity.ordinary_unions[0].arms {
+        arm.union_name.clone_from(&colliding_name);
+    }
+
+    assert_eq!(
+        codes_without_assignment_drift(&identity),
+        vec!["ordinary_union_name_collision".to_owned()],
+    );
+}
+
+#[test]
+fn idr_ordinary_union_rejects_wire_type_name_collision() {
+    let mut identity = ordinary_top_level_union_fixture();
+    let colliding_name = identity.wire[0].name.clone();
+    identity.ordinary_unions[0]
+        .union_name
+        .clone_from(&colliding_name);
+    for arm in &mut identity.ordinary_unions[0].arms {
+        arm.union_name.clone_from(&colliding_name);
+    }
+
+    assert_eq!(
+        codes_without_assignment_drift(&identity),
+        vec!["ordinary_union_name_collision".to_owned()],
+    );
+}
+
+#[test]
+fn idr_ordinary_union_embedded_field_requires_exact_anchor() {
+    let mut identity = ordinary_top_level_union_fixture();
+    let field_tag = 0x7ffe;
+    let anchor_index = identity.fields.len();
+    identity.fields.push(FieldRow {
+        containing_schema: "RootBootstrap".into(),
+        field_tag,
+        stable_name: "fixture_union".into(),
+        exact_wire_type: "FixtureTopLevelUnion".into(),
+        cardinality: "one".into(),
+        identity_class: "inline".into(),
+        reference_semantics: "none".into(),
+        target_schema_id: None,
+        construction_order: 0,
+        role_predicate: "true".into(),
+        retention_and_cut_rule: "embedded-fixture".into(),
+        version_status: "active".into(),
+        max_size_bytes: 128,
+        digest_class: None,
+        transcript_recipe: None,
+        bd_domain_separator: None,
+        bd_schema_major: None,
+        bd_included_field_tags: None,
+        bd_excluded_field_tags: None,
+        recipe_pin: None,
+    });
+
+    assert_eq!(
+        codes_without_assignment_drift(&identity),
+        vec!["ordinary_union_field_mismatch".to_owned()],
+    );
+
+    identity.ordinary_unions[0].field_tag = Some(field_tag);
+    assert!(
+        codes_without_assignment_drift(&identity).is_empty(),
+        "an embedded union with one exact field anchor must validate"
+    );
+
+    let mut scalar_anchor = identity.clone();
+    scalar_anchor.fields[anchor_index].identity_class = "scalar".into();
+    assert_eq!(
+        codes_without_assignment_drift(&scalar_anchor),
+        vec!["ordinary_union_field_mismatch".to_owned()],
+        "an ordinary union is an inline value, not a scalar field"
+    );
+
+    let mut reference_anchor = identity.clone();
+    reference_anchor.fields[anchor_index].reference_semantics = "locator".into();
+    assert_eq!(
+        codes_without_assignment_drift(&reference_anchor),
+        vec!["ordinary_union_field_mismatch".to_owned()],
+        "an ordinary union field cannot silently acquire reference semantics"
+    );
+
+    let mut targeted_anchor = identity.clone();
+    targeted_anchor.fields[anchor_index].target_schema_id = Some(identity.logical[0].name.clone());
+    assert_eq!(
+        codes_without_assignment_drift(&targeted_anchor),
+        vec!["ordinary_union_field_mismatch".to_owned()],
+        "a non-reference ordinary union field cannot name a reference target"
+    );
+
+    let mut undersized_anchor = identity.clone();
+    undersized_anchor.fields[anchor_index].max_size_bytes =
+        identity.ordinary_unions[0].max_size_bytes - 1;
+    assert_eq!(
+        codes_without_assignment_drift(&undersized_anchor),
+        vec!["ordinary_union_field_mismatch".to_owned()],
+        "the field bound must admit every byte allowed by the union bound"
+    );
+
+    let mut lifecycle_mismatched_anchor = identity.clone();
+    lifecycle_mismatched_anchor.fields[anchor_index].version_status = "reserved".into();
+    assert_eq!(
+        codes_without_assignment_drift(&lifecycle_mismatched_anchor),
+        vec!["ordinary_union_field_mismatch".to_owned()],
+        "field and union lifecycle states must move together"
+    );
+}
+
+#[test]
+fn idr_ordinary_union_arm_bound_must_fit_union_bound() {
+    let mut identity = ordinary_top_level_union_fixture();
+    identity.ordinary_unions[0].arms[1].max_size_bytes = 129;
+
+    assert_eq!(
+        codes_without_assignment_drift(&identity),
+        vec!["ordinary_union_arm_bound_exceeds_union".to_owned()],
     );
 }
 
@@ -2538,10 +2814,12 @@ fn idr_golden_vector_mutation() {
 
     let source = replace_first_assignment(&read("durable_fields.toml"), "field_tag", "0");
     let table = registry_check::toml::parse(&source).expect("mutated fields parse");
-    let (epoch, fields, unions) = identity::fields_from(&table).expect("mutated fields model");
+    let (epoch, fields, ordinary_unions, unions) =
+        identity::fields_from(&table).expect("mutated fields model");
     let mut mutated = r.clone();
     mutated.fields_epoch = epoch;
     mutated.fields = fields;
+    mutated.ordinary_unions = ordinary_unions;
     mutated.unions = unions;
     assert!(!identity::validate_identity(&mutated).is_empty());
 }

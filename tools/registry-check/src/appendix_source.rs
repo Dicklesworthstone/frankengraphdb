@@ -170,7 +170,17 @@ pub struct AmbiguityKey {
     pub schema_family: Option<String>,
     pub path: Option<String>,
     pub raw_sha256: String,
+    pub affected_source_key_count: usize,
+    pub affected_source_keys_sha256: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum StructuralCandidateKey {
+    Schema(SchemaCandidateKey),
+    Field(FieldCandidateKey),
+    Union(UnionCandidateKey),
+    Arm(ArmCandidateKey),
 }
 
 impl SchemaCandidateKey {
@@ -208,13 +218,44 @@ impl ArmCandidateKey {
 impl AmbiguityKey {
     pub fn source_key(&self) -> String {
         format!(
-            "ambiguity|{}|{}|{}|{}|{}",
+            "ambiguity|{}|{}|{}|{}|{}|{}|{}",
             self.kind.as_str(),
             self.schema_family.as_deref().unwrap_or_default(),
             self.path.as_deref().unwrap_or_default(),
             self.raw_sha256,
+            self.affected_source_key_count,
+            self.affected_source_keys_sha256,
             self.reason
         )
+    }
+}
+
+impl StructuralCandidateKey {
+    fn source_key(&self) -> String {
+        match self {
+            Self::Schema(key) => key.source_key(),
+            Self::Field(key) => key.source_key(),
+            Self::Union(key) => key.source_key(),
+            Self::Arm(key) => key.source_key(),
+        }
+    }
+
+    fn schema_family(&self) -> &str {
+        match self {
+            Self::Schema(key) => &key.family,
+            Self::Field(key) => &key.schema_family,
+            Self::Union(key) => &key.schema_family,
+            Self::Arm(key) => &key.schema_family,
+        }
+    }
+
+    fn container_path(&self) -> String {
+        match self {
+            Self::Schema(key) => format!("{}{}", key.family, key.generic_signature),
+            Self::Field(key) => key.path.clone(),
+            Self::Union(key) => key.union_path.clone(),
+            Self::Arm(key) => format!("{}.{}", key.union_path, key.arm_name),
+        }
     }
 }
 
@@ -263,6 +304,7 @@ pub struct ArmCandidate {
 pub struct AmbiguityCandidate {
     pub key: AmbiguityKey,
     pub raw: String,
+    pub affected_source_keys: Vec<String>,
     pub locations: Vec<SourceSpan>,
 }
 
@@ -445,6 +487,7 @@ struct AmbiguityOccurrence {
     path: Option<String>,
     raw: String,
     reason: String,
+    affected_source_keys: BTreeSet<StructuralCandidateKey>,
     source_range: Range<usize>,
 }
 
@@ -1068,6 +1111,7 @@ fn extract_markdown_fragments(
                     path: None,
                     raw: content.to_owned(),
                     reason: "Markdown code fence has no closing fence".to_owned(),
+                    affected_source_keys: BTreeSet::new(),
                     source_range: line.start..content_end,
                 });
                 break;
@@ -1121,6 +1165,7 @@ fn extract_markdown_fragments(
                 raw: content[open + 1..].to_owned(),
                 reason: "Markdown inline-code opener has no closing backtick on its physical line"
                     .to_owned(),
+                affected_source_keys: BTreeSet::new(),
                 source_range: line.start + open..content_end,
             });
         }
@@ -1314,6 +1359,10 @@ fn make_schema_occurrence(
     })
 }
 
+fn affected_source_key(key: StructuralCandidateKey) -> BTreeSet<StructuralCandidateKey> {
+    BTreeSet::from([key])
+}
+
 fn delimiter_ambiguity(
     issue: DelimiterIssue,
     mapped: &MappedText,
@@ -1321,6 +1370,7 @@ fn delimiter_ambiguity(
     path: Option<String>,
     raw: String,
     reason: &str,
+    affected_source_keys: BTreeSet<StructuralCandidateKey>,
 ) -> AmbiguityOccurrence {
     let offset = issue.offset.min(mapped.text.len());
     let range = if offset == mapped.text.len() {
@@ -1338,6 +1388,7 @@ fn delimiter_ambiguity(
         path,
         raw,
         reason: reason.to_owned(),
+        affected_source_keys,
         source_range: range,
     }
 }
@@ -1403,6 +1454,7 @@ fn direct_schemas_from_inline(
                         Some(occurrence.display_name.clone()),
                         normalize_whitespace(&fragment.text),
                         "inline alias contains an unbalanced or mismatched delimiter",
+                        affected_source_key(StructuralCandidateKey::Schema(occurrence.key.clone())),
                     ));
                     occurrences.push(occurrence);
                     claimed_ranges.push(fragment.source_range.clone());
@@ -1435,6 +1487,7 @@ fn direct_schemas_from_inline(
                         Some(occurrence.display_name.clone()),
                         normalize_whitespace(&fragment.text),
                         "inline record has no balanced closing delimiter",
+                        affected_source_key(StructuralCandidateKey::Schema(occurrence.key.clone())),
                     ));
                     occurrences.push(occurrence);
                     claimed_ranges.push(fragment.source_range.clone());
@@ -1448,6 +1501,7 @@ fn direct_schemas_from_inline(
                 None,
                 normalize_whitespace(&fragment.text),
                 "structural inline-code fragment has invalid delimiter structure",
+                BTreeSet::new(),
             ));
             return;
         }
@@ -1510,6 +1564,9 @@ fn direct_schemas_from_inline(
                             raw: normalize_whitespace(text),
                             reason: "leading named record has no explicit top-level ownership cue"
                                 .to_owned(),
+                            affected_source_keys: affected_source_key(
+                                StructuralCandidateKey::Schema(occurrence.key.clone()),
+                            ),
                             source_range: mapped.source_range(0..mapped.text.len()),
                         });
                     }
@@ -1532,6 +1589,7 @@ fn direct_schemas_from_inline(
                         Some(occurrence.display_name.clone()),
                         normalize_whitespace(text),
                         "inline record has no balanced closing delimiter",
+                        affected_source_key(StructuralCandidateKey::Schema(occurrence.key.clone())),
                     ));
                     occurrences.push(occurrence);
                     claimed_ranges.push(mapped.source_range(0..mapped.text.len()));
@@ -1600,6 +1658,9 @@ fn direct_schemas_from_fence(
                                 Some(occurrence.display_name.clone()),
                                 normalize_whitespace(&expression.text),
                                 "fenced declaration has no balanced closing delimiter",
+                                affected_source_key(StructuralCandidateKey::Schema(
+                                    occurrence.key.clone(),
+                                )),
                             ));
                             occurrences.push(occurrence);
                             claimed_ranges
@@ -1691,6 +1752,9 @@ fn extract_schema_occurrences(
                     raw: owner.text.clone(),
                     reason: "definitional prose names a type but supplies no adjacent structural expression"
                         .to_owned(),
+                    affected_source_keys: affected_source_key(
+                        StructuralCandidateKey::Schema(occurrence.key.clone()),
+                    ),
                     source_range: owner.source_range.clone(),
                 });
                 occurrences.push(occurrence);
@@ -1745,6 +1809,7 @@ fn extract_schema_occurrences(
                 raw: normalize_whitespace(text),
                 reason: "schema-like notation has no owner under the conservative source grammar"
                     .to_owned(),
+                affected_source_keys: BTreeSet::new(),
                 source_range: range,
             });
         }
@@ -1921,6 +1986,7 @@ fn push_nesting_ambiguity(
     schema: &SchemaOccurrence,
     path: &str,
     mapped: &MappedText,
+    owner_key: &StructuralCandidateKey,
     ambiguities: &mut Vec<AmbiguityOccurrence>,
 ) {
     ambiguities.push(AmbiguityOccurrence {
@@ -1929,6 +1995,7 @@ fn push_nesting_ambiguity(
         path: Some(path.to_owned()),
         raw: normalize_whitespace(&mapped.text),
         reason: format!("structural nesting exceeds the limit of {MAX_STRUCTURAL_NESTING}"),
+        affected_source_keys: affected_source_key(owner_key.clone()),
         source_range: mapped.source_range(0..mapped.text.len()),
     });
 }
@@ -1944,11 +2011,12 @@ fn parse_union(
     schema: &SchemaOccurrence,
     mapped: &MappedText,
     union_path: &str,
+    owner_key: &StructuralCandidateKey,
     rows: &mut StructuralOccurrences,
     depth: usize,
 ) -> bool {
     if depth > MAX_STRUCTURAL_NESTING {
-        push_nesting_ambiguity(schema, union_path, mapped, &mut rows.ambiguities);
+        push_nesting_ambiguity(schema, union_path, mapped, owner_key, &mut rows.ambiguities);
         return false;
     }
     let alternatives = match split_top_level(&mapped.text, b"|") {
@@ -1961,6 +2029,7 @@ fn parse_union(
                 Some(union_path.to_owned()),
                 normalize_whitespace(&mapped.text),
                 "union expression contains an unbalanced or mismatched delimiter",
+                affected_source_key(owner_key.clone()),
             ));
             return false;
         }
@@ -1968,13 +2037,14 @@ fn parse_union(
     if alternatives.len() < 2 {
         return false;
     }
+    let union_key = UnionCandidateKey {
+        schema_family: schema.key.family.clone(),
+        schema_owner: schema.display_name.clone(),
+        union_path: union_path.to_owned(),
+    };
     let union_index = rows.unions.len();
     rows.unions.push(UnionOccurrence {
-        key: UnionCandidateKey {
-            schema_family: schema.key.family.clone(),
-            schema_owner: schema.display_name.clone(),
-            union_path: union_path.to_owned(),
-        },
+        key: union_key.clone(),
         source_range: mapped.source_range(0..mapped.text.len()),
         evidence_ranges: Vec::new(),
         arm_names: BTreeSet::new(),
@@ -1995,6 +2065,9 @@ fn parse_union(
                 path: Some(union_path.to_owned()),
                 raw: String::new(),
                 reason: "top-level union contains an empty alternative".to_owned(),
+                affected_source_keys: affected_source_key(StructuralCandidateKey::Union(
+                    union_key.clone(),
+                )),
                 source_range,
             });
             continue;
@@ -2012,11 +2085,20 @@ fn parse_union(
                 raw: normalize_whitespace(&alternative_mapped.text),
                 reason: "top-level union alternative does not start with a stable arm token"
                     .to_owned(),
+                affected_source_keys: affected_source_key(StructuralCandidateKey::Union(
+                    union_key.clone(),
+                )),
                 source_range: alternative_mapped.source_range(0..alternative_mapped.text.len()),
             });
             continue;
         };
         let arm_name = normalize_whitespace(&alternative_mapped.text[token.clone()]);
+        let arm_key = ArmCandidateKey {
+            schema_family: schema.key.family.clone(),
+            schema_owner: schema.display_name.clone(),
+            union_path: union_path.to_owned(),
+            arm_name: arm_name.clone(),
+        };
         let new_arm = rows.unions[union_index].arm_names.insert(arm_name.clone());
         rows.unions[union_index]
             .evidence_ranges
@@ -2028,6 +2110,9 @@ fn parse_union(
                 path: Some(format!("{union_path}.{arm_name}")),
                 raw: normalize_whitespace(&alternative_mapped.text),
                 reason: "one union occurrence repeats the same arm name".to_owned(),
+                affected_source_keys: affected_source_key(StructuralCandidateKey::Arm(
+                    arm_key.clone(),
+                )),
                 source_range: alternative_mapped.source_range(0..alternative_mapped.text.len()),
             });
         }
@@ -2044,6 +2129,9 @@ fn parse_union(
                     raw: normalize_whitespace(&trailing.text),
                     reason: "tokens between a union arm name and its record payload are not part of the closed source grammar"
                         .to_owned(),
+                    affected_source_keys: affected_source_key(StructuralCandidateKey::Arm(
+                        arm_key.clone(),
+                    )),
                     source_range: trailing.source_range(0..trailing.text.len()),
                 });
             }
@@ -2065,6 +2153,9 @@ fn parse_union(
                             raw: normalize_whitespace(&trailing.text),
                             reason: "tokens after a balanced union arm payload are not part of the closed source grammar"
                                 .to_owned(),
+                            affected_source_keys: affected_source_key(
+                                StructuralCandidateKey::Arm(arm_key.clone()),
+                            ),
                             source_range: trailing.source_range(0..trailing.text.len()),
                         });
                     }
@@ -2076,6 +2167,7 @@ fn parse_union(
                     Some(format!("{union_path}.{arm_name}")),
                     normalize_whitespace(&alternative_mapped.text),
                     "union arm payload contains an unbalanced or mismatched delimiter",
+                    affected_source_key(StructuralCandidateKey::Arm(arm_key.clone())),
                 )),
             }
         } else {
@@ -2093,17 +2185,15 @@ fn parse_union(
                     reason:
                         "tokens after a union arm name are not part of the closed source grammar"
                             .to_owned(),
+                    affected_source_keys: affected_source_key(StructuralCandidateKey::Arm(
+                        arm_key.clone(),
+                    )),
                     source_range: trailing.source_range(0..trailing.text.len()),
                 });
             }
         }
         rows.arms.push(ArmOccurrence {
-            key: ArmCandidateKey {
-                schema_family: schema.key.family.clone(),
-                schema_owner: schema.display_name.clone(),
-                union_path: union_path.to_owned(),
-                arm_name: arm_name.clone(),
-            },
+            key: arm_key.clone(),
             payload,
             raw: normalize_whitespace(&alternative_mapped.text),
             source_range: alternative_mapped.source_range(0..alternative_mapped.text.len()),
@@ -2114,6 +2204,7 @@ fn parse_union(
                 schema,
                 &body,
                 &format!("{union_path}.{arm_name}"),
+                &StructuralCandidateKey::Arm(arm_key),
                 rows,
                 depth + 1,
             );
@@ -2126,11 +2217,12 @@ fn parse_record_fields(
     schema: &SchemaOccurrence,
     mapped: &MappedText,
     path: &str,
+    owner_key: &StructuralCandidateKey,
     rows: &mut StructuralOccurrences,
     depth: usize,
 ) {
     if depth > MAX_STRUCTURAL_NESTING {
-        push_nesting_ambiguity(schema, path, mapped, &mut rows.ambiguities);
+        push_nesting_ambiguity(schema, path, mapped, owner_key, &mut rows.ambiguities);
         return;
     }
     let pieces = match split_top_level(&mapped.text, b",") {
@@ -2143,6 +2235,7 @@ fn parse_record_fields(
                 Some(path.to_owned()),
                 normalize_whitespace(&mapped.text),
                 "record body contains an unbalanced or mismatched delimiter",
+                affected_source_key(owner_key.clone()),
             ));
             return;
         }
@@ -2160,6 +2253,7 @@ fn parse_record_fields(
                     path: Some(path.to_owned()),
                     raw: String::new(),
                     reason: "record body contains an empty comma-delimited item".to_owned(),
+                    affected_source_keys: affected_source_key(owner_key.clone()),
                     source_range: mapped.source_range(piece.start..piece.end),
                 });
             }
@@ -2179,6 +2273,7 @@ fn parse_record_fields(
                 path: Some(path.to_owned()),
                 raw: normalize_whitespace(&field_mapped.text),
                 reason: "record item does not begin with a lowercase stable field name".to_owned(),
+                affected_source_keys: affected_source_key(owner_key.clone()),
                 source_range: field_mapped.source_range(0..field_mapped.text.len()),
             });
             continue;
@@ -2224,6 +2319,13 @@ fn parse_record_fields(
             value.push('?');
         }
         let field_path = format!("{path}.{name}");
+        let field_key = FieldCandidateKey {
+            schema_family: schema.key.family.clone(),
+            schema_owner: schema.display_name.clone(),
+            path: field_path.clone(),
+            stable_name: name.clone(),
+        };
+        let structural_field_key = StructuralCandidateKey::Field(field_key.clone());
         let raw = normalize_whitespace(&field_mapped.text);
         let source_range = field_mapped.source_range(0..field_mapped.text.len());
         if let Some((first_raw, first_range)) = seen_fields.get(&name) {
@@ -2234,6 +2336,7 @@ fn parse_record_fields(
                     path: Some(field_path.clone()),
                     raw: first_raw.clone(),
                     reason: "one record occurrence repeats the same field name".to_owned(),
+                    affected_source_keys: affected_source_key(structural_field_key.clone()),
                     source_range: first_range.clone(),
                 });
             }
@@ -2243,18 +2346,14 @@ fn parse_record_fields(
                 path: Some(field_path.clone()),
                 raw: raw.clone(),
                 reason: "one record occurrence repeats the same field name".to_owned(),
+                affected_source_keys: affected_source_key(structural_field_key.clone()),
                 source_range: source_range.clone(),
             });
         } else {
             seen_fields.insert(name.clone(), (raw.clone(), source_range.clone()));
         }
         rows.fields.push(FieldOccurrence {
-            key: FieldCandidateKey {
-                schema_family: schema.key.family.clone(),
-                schema_owner: schema.display_name.clone(),
-                path: field_path.clone(),
-                stable_name: name.clone(),
-            },
+            key: field_key,
             exact_type,
             cardinality: infer_cardinality(
                 &name,
@@ -2271,6 +2370,7 @@ fn parse_record_fields(
                 path: Some(field_path.clone()),
                 raw,
                 reason,
+                affected_source_keys: affected_source_key(structural_field_key.clone()),
                 source_range,
             });
         }
@@ -2278,7 +2378,14 @@ fn parse_record_fields(
             continue;
         };
         let exact_mapped = field_mapped.subrange(exact_range);
-        if parse_union(schema, &exact_mapped, &field_path, rows, depth + 1) {
+        if parse_union(
+            schema,
+            &exact_mapped,
+            &field_path,
+            &structural_field_key,
+            rows,
+            depth + 1,
+        ) {
             continue;
         }
         match outermost_record_ranges(&exact_mapped.text) {
@@ -2299,6 +2406,7 @@ fn parse_record_fields(
                         schema,
                         &exact_mapped.subrange(open + 1..close),
                         &nested_path,
+                        &structural_field_key,
                         rows,
                         depth + 1,
                     );
@@ -2311,6 +2419,7 @@ fn parse_record_fields(
                 Some(field_path),
                 normalize_whitespace(&exact_mapped.text),
                 "nested record type contains an unbalanced or mismatched delimiter",
+                affected_source_key(structural_field_key),
             )),
         }
     }
@@ -2332,6 +2441,7 @@ fn extract_fields_and_arms(
         ambiguities,
     };
     for schema in schemas {
+        let structural_schema_key = StructuralCandidateKey::Schema(schema.key.clone());
         let body = match outer_expression_body(schema) {
             Ok(body) => body,
             Err(issue) => {
@@ -2343,6 +2453,7 @@ fn extract_fields_and_arms(
                         Some(schema.display_name.clone()),
                         normalize_whitespace(&expression.text),
                         "schema expression has an unbalanced or mismatched outer delimiter",
+                        affected_source_key(structural_schema_key.clone()),
                     ));
                 }
                 continue;
@@ -2359,11 +2470,19 @@ fn extract_fields_and_arms(
                 raw: normalize_whitespace(&trailing.text),
                 reason: "tokens after a balanced schema record are not part of the closed source grammar"
                     .to_owned(),
+                affected_source_keys: affected_source_key(structural_schema_key.clone()),
                 source_range: trailing.source_range(0..trailing.text.len()),
             });
         }
         if shape == ExpressionShape::Alias {
-            if parse_union(schema, &mapped, &schema.display_name, &mut rows, 0) {
+            if parse_union(
+                schema,
+                &mapped,
+                &schema.display_name,
+                &structural_schema_key,
+                &mut rows,
+                0,
+            ) {
                 continue;
             }
             let empty = mapped.text.trim().is_empty();
@@ -2378,11 +2497,19 @@ fn extract_fields_and_arms(
                     "alias body is neither a top-level pipe union nor a record body"
                 }
                 .to_owned(),
+                affected_source_keys: affected_source_key(structural_schema_key.clone()),
                 source_range: mapped.source_range(0..mapped.text.len()),
             });
             continue;
         }
-        parse_record_fields(schema, &mapped, &schema.display_name, &mut rows, 0);
+        parse_record_fields(
+            schema,
+            &mapped,
+            &schema.display_name,
+            &structural_schema_key,
+            &mut rows,
+            0,
+        );
     }
     rows.fields.sort_by(|left, right| {
         (
@@ -2476,6 +2603,9 @@ fn candidate_conflict_ambiguities(
                     .map(|expression| normalize_whitespace(&expression.text))
                     .unwrap_or_default(),
                 reason: "the same schema source key has divergent structural bodies".to_owned(),
+                affected_source_keys: affected_source_key(StructuralCandidateKey::Schema(
+                    row.key.clone(),
+                )),
                 source_range: row.declaration_range.clone(),
             });
         }
@@ -2500,6 +2630,9 @@ fn candidate_conflict_ambiguities(
                 path: Some(row.key.path.clone()),
                 raw: row.raw.clone(),
                 reason: "the same field source key has divergent exact types".to_owned(),
+                affected_source_keys: affected_source_key(StructuralCandidateKey::Field(
+                    row.key.clone(),
+                )),
                 source_range: row.source_range.clone(),
             });
         }
@@ -2521,6 +2654,9 @@ fn candidate_conflict_ambiguities(
                 path: Some(row.key.union_path.clone()),
                 raw: normalize_whitespace(&source_map.source[row.source_range.clone()]),
                 reason: "the same union source key has divergent arm sets".to_owned(),
+                affected_source_keys: affected_source_key(StructuralCandidateKey::Union(
+                    row.key.clone(),
+                )),
                 source_range: row.source_range.clone(),
             });
         }
@@ -2542,6 +2678,9 @@ fn candidate_conflict_ambiguities(
                 path: Some(format!("{}.{}", row.key.union_path, row.key.arm_name)),
                 raw: row.raw.clone(),
                 reason: "the same arm source key has divergent payloads".to_owned(),
+                affected_source_keys: affected_source_key(StructuralCandidateKey::Arm(
+                    row.key.clone(),
+                )),
                 source_range: row.source_range.clone(),
             });
         }
@@ -2667,29 +2806,157 @@ fn canonical_arms(rows: &[&ArmOccurrence], source_map: &SourceMap<'_>) -> Vec<Ar
         .collect()
 }
 
+fn ambiguity_affinity_is_valid(row: &AmbiguityOccurrence) -> bool {
+    let single_key = (row.affected_source_keys.len() == 1)
+        .then(|| row.affected_source_keys.iter().next())
+        .flatten();
+    let family_matches =
+        |key: &StructuralCandidateKey| row.schema_family.as_deref() == Some(key.schema_family());
+    let path_matches = |key: &StructuralCandidateKey| {
+        let Some(path) = row.path.as_deref() else {
+            return false;
+        };
+        let container_path = key.container_path();
+        path == container_path
+            || path
+                .strip_prefix(&container_path)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+    };
+    let exact_key = |predicate: fn(&StructuralCandidateKey) -> bool| {
+        single_key.is_some_and(|key| family_matches(key) && path_matches(key) && predicate(key))
+    };
+
+    match row.kind {
+        AmbiguityKind::UnterminatedCodeFence
+        | AmbiguityKind::UnterminatedInlineCode
+        | AmbiguityKind::UnownedStructuralFragment => row.affected_source_keys.is_empty(),
+        AmbiguityKind::AliasExpressionUnparsed | AmbiguityKind::AmbiguousSchemaOwner => {
+            exact_key(|key| matches!(key, StructuralCandidateKey::Schema(_)))
+        }
+        AmbiguityKind::DefinitionWithoutStructuralBody => {
+            single_key.is_some_and(|key| {
+                family_matches(key) && matches!(key, StructuralCandidateKey::Schema(_))
+            }) && row.path.is_none()
+        }
+        AmbiguityKind::FieldTypeAmbiguous => {
+            exact_key(|key| matches!(key, StructuralCandidateKey::Field(_)))
+        }
+        AmbiguityKind::UnparsedUnionArm => {
+            exact_key(|key| matches!(key, StructuralCandidateKey::Union(_)))
+        }
+        AmbiguityKind::UnparsedTrailingTokens => exact_key(|key| {
+            matches!(
+                key,
+                StructuralCandidateKey::Schema(_) | StructuralCandidateKey::Arm(_)
+            )
+        }),
+        AmbiguityKind::ConflictingCandidateEvidence => exact_key(|_| true),
+        AmbiguityKind::NestingLimitExceeded | AmbiguityKind::UnparsedRecordItem => {
+            exact_key(|key| {
+                matches!(
+                    key,
+                    StructuralCandidateKey::Schema(_)
+                        | StructuralCandidateKey::Field(_)
+                        | StructuralCandidateKey::Arm(_)
+                )
+            })
+        }
+        AmbiguityKind::MismatchedDelimiter | AmbiguityKind::UnbalancedDefinition => {
+            if row.schema_family.is_none() && row.path.is_none() {
+                row.affected_source_keys.is_empty()
+            } else {
+                exact_key(|key| {
+                    matches!(
+                        key,
+                        StructuralCandidateKey::Schema(_)
+                            | StructuralCandidateKey::Field(_)
+                            | StructuralCandidateKey::Arm(_)
+                    )
+                })
+            }
+        }
+    }
+}
+
 fn canonical_ambiguities(
     rows: &[&AmbiguityOccurrence],
     source_map: &SourceMap<'_>,
-) -> Vec<AmbiguityCandidate> {
-    let mut grouped: BTreeMap<AmbiguityKey, Vec<&AmbiguityOccurrence>> = BTreeMap::new();
+) -> Result<Vec<AmbiguityCandidate>, CensusError> {
+    type AmbiguityIdentity = (
+        AmbiguityKind,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+    );
+    let mut grouped: BTreeMap<AmbiguityIdentity, (Vec<String>, Vec<&AmbiguityOccurrence>)> =
+        BTreeMap::new();
     for row in rows {
-        let key = AmbiguityKey {
-            kind: row.kind,
-            schema_family: row.schema_family.clone(),
-            path: row.path.clone(),
-            raw_sha256: sha256_hex(row.raw.as_bytes()),
-            reason: row.reason.clone(),
-        };
-        grouped.entry(key).or_default().push(*row);
+        if !ambiguity_affinity_is_valid(row) {
+            return Err(census_error(
+                CensusErrorKind::CandidateAssignmentInvariant,
+                None,
+                format!(
+                    "ambiguity kind {:?} at family {:?} path {:?} has invalid affected structural source keys {:?}",
+                    row.kind, row.schema_family, row.path, row.affected_source_keys
+                ),
+            ));
+        }
+        let affected_source_keys = row
+            .affected_source_keys
+            .iter()
+            .map(StructuralCandidateKey::source_key)
+            .collect::<Vec<_>>();
+        let identity = (
+            row.kind,
+            row.schema_family.clone(),
+            row.path.clone(),
+            sha256_hex(row.raw.as_bytes()),
+            row.reason.clone(),
+        );
+        if let Some((expected_source_keys, grouped_rows)) = grouped.get_mut(&identity) {
+            if expected_source_keys != &affected_source_keys {
+                return Err(census_error(
+                    CensusErrorKind::CandidateAssignmentInvariant,
+                    None,
+                    format!(
+                        "ambiguity identity {:?} has inconsistent affected structural source keys: {:?} versus {:?}",
+                        identity, expected_source_keys, affected_source_keys
+                    ),
+                ));
+            }
+            grouped_rows.push(*row);
+        } else {
+            grouped.insert(identity, (affected_source_keys, vec![*row]));
+        }
     }
-    grouped
+    Ok(grouped
         .into_iter()
-        .map(|(key, rows)| AmbiguityCandidate {
-            raw: rows[0].raw.clone(),
-            key,
-            locations: sorted_unique(rows.iter().map(|row| source_map.span(&row.source_range))),
-        })
-        .collect()
+        .map(
+            |((kind, schema_family, path, raw_sha256, reason), (affected_source_keys, rows))| {
+                // Structural source keys come from the closed parser grammar and cannot
+                // contain LF, so the sorted LF-terminated relation transcript is injective.
+                let relation =
+                    source_key_transcript(affected_source_keys.iter().map(String::as_str));
+                AmbiguityCandidate {
+                    raw: rows[0].raw.clone(),
+                    key: AmbiguityKey {
+                        kind,
+                        schema_family,
+                        path,
+                        raw_sha256,
+                        affected_source_key_count: relation.rows,
+                        affected_source_keys_sha256: relation.sha256,
+                        reason,
+                    },
+                    affected_source_keys,
+                    locations: sorted_unique(
+                        rows.iter().map(|row| source_map.span(&row.source_range)),
+                    ),
+                }
+            },
+        )
+        .collect())
 }
 
 fn transcript_digest(transcript: String, rows: usize) -> TranscriptDigest {
@@ -2711,7 +2978,8 @@ fn source_key_transcript<'a>(keys: impl IntoIterator<Item = &'a str>) -> Transcr
 /// Candidate-key transcript grammar is one UTF-8 key per LF-terminated row:
 /// `top|Family<generic>`, `field|Family|path|name`,
 /// `union|Family|path`, `arm|Family|path|arm`, and
-/// `ambiguity|kind|family-or-empty|path-or-empty|raw-sha256|reason`.
+/// `ambiguity|kind|family-or-empty|path-or-empty|raw-sha256|affected-key-count|`
+/// `affected-keys-sha256|reason`.
 /// Rows are sorted and duplicate-free. Exact source movement is deliberately
 /// excluded because each slice already pins its complete source bytes.
 fn candidate_transcripts(
@@ -2913,7 +3181,31 @@ pub fn census_appendix_source(
     let canonical_field_rows = canonical_fields(&all_field_rows, &source_map);
     let canonical_union_rows = canonical_unions(&all_union_rows, &source_map);
     let canonical_arm_rows = canonical_arms(&all_arm_rows, &source_map);
-    let canonical_ambiguity_rows = canonical_ambiguities(&all_ambiguity_rows, &source_map);
+    let canonical_ambiguity_rows = canonical_ambiguities(&all_ambiguity_rows, &source_map)?;
+    let structural_source_keys = canonical_schema_rows
+        .iter()
+        .map(|row| row.key.source_key())
+        .chain(canonical_field_rows.iter().map(|row| row.key.source_key()))
+        .chain(canonical_union_rows.iter().map(|row| row.key.source_key()))
+        .chain(canonical_arm_rows.iter().map(|row| row.key.source_key()))
+        .collect::<BTreeSet<_>>();
+    for ambiguity in &canonical_ambiguity_rows {
+        if let Some(unknown_source_key) = ambiguity
+            .affected_source_keys
+            .iter()
+            .find(|source_key| !structural_source_keys.contains(*source_key))
+        {
+            return Err(census_error(
+                CensusErrorKind::CandidateAssignmentInvariant,
+                None,
+                format!(
+                    "ambiguity source key {:?} names unknown affected structural source key {:?}",
+                    ambiguity.key.source_key(),
+                    unknown_source_key
+                ),
+            ));
+        }
+    }
     let global_counts = counts(
         [
             all_schema_rows.len(),
@@ -3117,9 +3409,62 @@ pub fn census_appendix_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        AmbiguityKind, CensusErrorKind, SourceSliceSpec, census_appendix_source,
-        matching_delimiter, normalize_whitespace, split_top_level,
+        AmbiguityCandidate, AmbiguityKind, AmbiguityOccurrence, CensusErrorKind, FieldCandidateKey,
+        SchemaCandidateKey, SourceMap, SourceSliceSpec, StructuralCandidateKey,
+        affected_source_key, canonical_ambiguities, census_appendix_source, matching_delimiter,
+        normalize_whitespace, source_key_transcript, split_top_level,
     };
+
+    fn assert_ambiguity_relation_digest(candidate: &AmbiguityCandidate) {
+        let expected =
+            source_key_transcript(candidate.affected_source_keys.iter().map(String::as_str));
+        assert_eq!(candidate.key.affected_source_key_count, expected.rows);
+        assert_eq!(candidate.key.affected_source_keys_sha256, expected.sha256);
+    }
+
+    #[test]
+    fn canonical_ambiguity_affinity_is_typed_and_consistent() {
+        let source_map = SourceMap::new("x", 1);
+        let schema_key = StructuralCandidateKey::Schema(SchemaCandidateKey {
+            family: "Same".to_owned(),
+            generic_signature: String::new(),
+        });
+        let field_key = StructuralCandidateKey::Field(FieldCandidateKey {
+            schema_family: "Same".to_owned(),
+            schema_owner: "Same".to_owned(),
+            path: "Same.x".to_owned(),
+            stable_name: "x".to_owned(),
+        });
+        let invalid_type = AmbiguityOccurrence {
+            kind: AmbiguityKind::UnparsedUnionArm,
+            schema_family: Some("Same".to_owned()),
+            path: Some("Same".to_owned()),
+            raw: "x".to_owned(),
+            reason: "fixture".to_owned(),
+            affected_source_keys: affected_source_key(schema_key.clone()),
+            source_range: 0..1,
+        };
+        let error = canonical_ambiguities(&[&invalid_type], &source_map)
+            .expect_err("an unparsed union arm cannot affect a top-level schema key");
+        assert_eq!(error.kind, CensusErrorKind::CandidateAssignmentInvariant);
+
+        let first = AmbiguityOccurrence {
+            kind: AmbiguityKind::NestingLimitExceeded,
+            schema_family: Some("Same".to_owned()),
+            path: Some("Same.x".to_owned()),
+            raw: "x".to_owned(),
+            reason: "fixture".to_owned(),
+            affected_source_keys: affected_source_key(schema_key),
+            source_range: 0..1,
+        };
+        let second = AmbiguityOccurrence {
+            affected_source_keys: affected_source_key(field_key),
+            ..first.clone()
+        };
+        let error = canonical_ambiguities(&[&first, &second], &source_map)
+            .expect_err("one ambiguity identity cannot broaden to two affected key sets");
+        assert_eq!(error.kind, CensusErrorKind::CandidateAssignmentInvariant);
+    }
 
     #[test]
     fn balanced_delimiters_ignore_quotes_and_non_generic_angles() {
@@ -3227,6 +3572,13 @@ mod tests {
                 .count(),
             2
         );
+        assert!(census.ambiguities.iter().all(|row| {
+            row.key.kind != AmbiguityKind::UnparsedUnionArm
+                || row.affected_source_keys == ["union|Odd|Odd"]
+        }));
+        for ambiguity in &census.ambiguities {
+            assert_ambiguity_relation_digest(ambiguity);
+        }
     }
 
     #[test]
@@ -3347,6 +3699,32 @@ mod tests {
         assert!(kinds.contains(&AmbiguityKind::UnparsedTrailingTokens));
         assert!(kinds.contains(&AmbiguityKind::UnparsedUnionArm));
         assert!(kinds.contains(&AmbiguityKind::AmbiguousSchemaOwner));
+        assert!(census.ambiguities.iter().any(|row| {
+            row.key.kind == AmbiguityKind::FieldTypeAmbiguous
+                && row.raw == "field:"
+                && row.affected_source_keys == ["field|Record|Record.field|field"]
+        }));
+        assert!(census.ambiguities.iter().any(|row| {
+            row.key.kind == AmbiguityKind::UnparsedRecordItem
+                && row.raw.is_empty()
+                && row.affected_source_keys == ["top|Record"]
+        }));
+        assert!(census.ambiguities.iter().any(|row| {
+            row.key.kind == AmbiguityKind::UnparsedTrailingTokens
+                && row.raw == "junk"
+                && row.affected_source_keys == ["arm|Choice|Choice|Left"]
+        }));
+        assert!(census.ambiguities.iter().any(|row| {
+            row.key.kind == AmbiguityKind::UnparsedUnionArm
+                && row.affected_source_keys == ["union|Choice|Choice"]
+        }));
+        assert!(census.ambiguities.iter().any(|row| {
+            row.key.kind == AmbiguityKind::AmbiguousSchemaOwner
+                && row.affected_source_keys == ["top|Unowned"]
+        }));
+        for ambiguity in &census.ambiguities {
+            assert_ambiguity_relation_digest(ambiguity);
+        }
     }
 
     #[test]
@@ -3376,6 +3754,13 @@ mod tests {
                 .filter(|row| row.key.kind == AmbiguityKind::UnownedStructuralFragment)
                 .count(),
             2
+        );
+        assert!(
+            census
+                .ambiguities
+                .iter()
+                .filter(|row| row.key.kind == AmbiguityKind::UnownedStructuralFragment)
+                .all(|row| row.affected_source_keys.is_empty())
         );
         let twin = census
             .schemas
@@ -3450,12 +3835,31 @@ mod tests {
         assert_eq!(union.arm_name_sets.len(), 2);
         assert!(census.fields.iter().any(|field| field.type_conflict));
         assert!(census.arms.iter().any(|arm| arm.payload_conflict));
-        assert!(
-            census
-                .ambiguities
-                .iter()
-                .any(|row| row.key.kind == AmbiguityKind::ConflictingCandidateEvidence)
-        );
+        let conflicting: Vec<_> = census
+            .ambiguities
+            .iter()
+            .filter(|row| row.key.kind == AmbiguityKind::ConflictingCandidateEvidence)
+            .collect();
+        assert!(!conflicting.is_empty());
+        assert!(conflicting.iter().any(|row| {
+            row.key.reason == "the same schema source key has divergent structural bodies"
+                && row.affected_source_keys == ["top|Same"]
+        }));
+        assert!(conflicting.iter().any(|row| {
+            row.key.reason == "the same field source key has divergent exact types"
+                && row.affected_source_keys == ["field|Same|Same.Left.x|x"]
+        }));
+        assert!(conflicting.iter().any(|row| {
+            row.key.reason == "the same union source key has divergent arm sets"
+                && row.affected_source_keys == ["union|Same|Same"]
+        }));
+        assert!(conflicting.iter().any(|row| {
+            row.key.reason == "the same arm source key has divergent payloads"
+                && row.affected_source_keys == ["arm|Same|Same|Left"]
+        }));
+        for ambiguity in &census.ambiguities {
+            assert_ambiguity_relation_digest(ambiguity);
+        }
     }
 
     #[test]
@@ -3558,12 +3962,27 @@ mod tests {
             .collect();
         assert!(kinds.contains(&AmbiguityKind::UnbalancedDefinition));
         assert!(kinds.contains(&AmbiguityKind::UnterminatedCodeFence));
+        assert!(census.ambiguities.iter().any(|row| {
+            row.key.kind == AmbiguityKind::UnbalancedDefinition
+                && row.key.path.as_deref() == Some("Broken")
+                && row.affected_source_keys == ["top|Broken"]
+        }));
+        assert!(
+            census
+                .ambiguities
+                .iter()
+                .filter(|row| row.key.kind == AmbiguityKind::UnterminatedCodeFence)
+                .all(|row| row.affected_source_keys.is_empty())
+        );
         assert!(
             census
                 .ambiguities
                 .iter()
                 .all(|candidate| !candidate.locations.is_empty())
         );
+        for ambiguity in &census.ambiguities {
+            assert_ambiguity_relation_digest(ambiguity);
+        }
     }
 
     #[test]

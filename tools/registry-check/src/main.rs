@@ -11,6 +11,7 @@
 //!   registry-check identity --root <repo-root>
 //!   registry-check appendix --root <repo-root>
 //!   registry-check appendix-generate --root <repo-root>
+//!   registry-check appendix-regenerate --root <repo-root>
 //!   registry-check all      --root <repo-root> [--manifest <path>]
 
 use registry_check::appendix_a;
@@ -21,7 +22,9 @@ use registry_check::jsonl::{JsonValue, arr, b, event, n, s};
 use registry_check::lint;
 use registry_check::model::{self, Registries};
 use registry_check::validate::{self, Violation, expected_invariant_ids};
-use std::path::{Path, PathBuf};
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 struct Args {
@@ -58,10 +61,11 @@ fn parse_args() -> Result<Args, String> {
 fn usage() -> String {
     concat!(
         "usage: registry-check ",
-        "<validate|lint|closure|hash|identity|appendix|appendix-generate|all> ",
+        "<validate|lint|closure|hash|identity|appendix|appendix-generate|appendix-regenerate|all> ",
         "--root <repo-root> [--manifest <path>]\n",
         "  appendix           verify the Appendix A catalog, source, and checked-in projections\n",
-        "  appendix-generate  render in memory and byte-verify the six Appendix A projections"
+        "  appendix-generate  render in memory and byte-verify the six Appendix A projections\n",
+        "  appendix-regenerate  verify Appendix A inputs, then write only its six projections"
     )
     .to_string()
 }
@@ -187,23 +191,48 @@ fn finish_appendix_load_failure(
 ) -> Result<usize, String> {
     emit_appendix_violations(violations);
     let structural = appendix_has_structural_error(violations);
-    println!(
-        "{}",
-        event(&[
-            ("event", s(completion_event)),
-            ("slices", n(0)),
-            ("projection_rows", n(0)),
-            ("projection_files", n(0)),
-            ("reservations", n(0)),
-            ("source_dispositions", n(0)),
-            ("top_level_candidates", n(0)),
-            ("targets", n(0)),
-            ("semantic_bindings", n(0)),
-            ("evidence_rows", n(0)),
-            ("violations", n(violations.len() as i64)),
-            ("outcome", s(if structural { "error" } else { "fail" })),
-        ])
-    );
+    let outcome = if structural { "error" } else { "fail" };
+    match completion_event {
+        "appendix_generation_completed" => println!(
+            "{}",
+            event(&[
+                ("event", s(completion_event)),
+                ("projection_files", n(0)),
+                ("violations", n(violations.len() as i64)),
+                ("outcome", s(outcome)),
+            ])
+        ),
+        "appendix_regeneration_completed" => println!(
+            "{}",
+            event(&[
+                ("event", s(completion_event)),
+                ("projection_files", n(0)),
+                ("changed_files", n(0)),
+                ("unchanged_files", n(0)),
+                ("published_files", n(0)),
+                ("violations", n(violations.len() as i64)),
+                ("outcome", s(outcome)),
+            ])
+        ),
+        _ => println!(
+            "{}",
+            event(&[
+                ("event", s(completion_event)),
+                ("slices", n(0)),
+                ("projection_rows", n(0)),
+                ("projection_files", n(0)),
+                ("reservations", n(0)),
+                ("source_dispositions", n(0)),
+                ("top_level_candidates", n(0)),
+                ("targets", n(0)),
+                ("semantic_bindings", n(0)),
+                ("evidence_rows", n(0)),
+                ("reference_only_symbols", n(0)),
+                ("violations", n(violations.len() as i64)),
+                ("outcome", s(outcome)),
+            ])
+        ),
+    }
     if structural {
         Err("Appendix A structural load failed; see redacted violation events".to_string())
     } else {
@@ -567,6 +596,419 @@ fn run_appendix_generate(root: &Path) -> Result<usize, String> {
     }
 }
 
+#[cfg(unix)]
+fn metadata_has_one_link(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    metadata.nlink() == 1
+}
+
+#[cfg(windows)]
+fn metadata_has_one_link(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    metadata.number_of_links() == Some(1)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_has_one_link(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn metadata_identifies_same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn metadata_identifies_same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    matches!(
+        (
+            left.volume_serial_number(),
+            left.file_index(),
+            right.volume_serial_number(),
+            right.file_index(),
+        ),
+        (Some(left_volume), Some(left_index), Some(right_volume), Some(right_index))
+            if left_volume == right_volume && left_index == right_index
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_identifies_same_file(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
+    false
+}
+
+fn canonical_appendix_registries(canonical_root: &Path) -> Result<PathBuf, String> {
+    let registries = canonical_root.join("registries");
+    let metadata = fs::symlink_metadata(&registries)
+        .map_err(|_| "cannot inspect the Appendix A registry directory".to_string())?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err("the Appendix A registry directory is not a real directory".to_string());
+    }
+    let canonical_registries = fs::canonicalize(&registries)
+        .map_err(|_| "cannot canonicalize the Appendix A registry directory".to_string())?;
+    if canonical_registries != registries
+        || canonical_registries.parent() != Some(canonical_root)
+        || canonical_registries
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("registries")
+    {
+        return Err(
+            "the Appendix A registry directory is not a direct canonical child of the repository root"
+                .to_string(),
+        );
+    }
+    Ok(canonical_registries)
+}
+
+fn lock_appendix_catalog(root: &Path) -> Result<(PathBuf, PathBuf, File), String> {
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|_| "cannot canonicalize the Appendix A repository root".to_string())?;
+    if !canonical_root.is_dir() {
+        return Err("the Appendix A repository root is not a directory".to_string());
+    }
+    let canonical_registries = canonical_appendix_registries(&canonical_root)?;
+    let catalog_path = canonical_root.join(appendix_a::CATALOG_PATH);
+    if catalog_path.parent() != Some(canonical_registries.as_path()) {
+        return Err("the canonical Appendix A catalog path is outside registries".to_string());
+    }
+    let catalog_metadata = fs::symlink_metadata(&catalog_path)
+        .map_err(|_| "cannot inspect the canonical Appendix A catalog".to_string())?;
+    if !catalog_metadata.file_type().is_file() || catalog_metadata.file_type().is_symlink() {
+        return Err("the canonical Appendix A catalog is not a regular file".to_string());
+    }
+    let canonical_catalog = fs::canonicalize(&catalog_path)
+        .map_err(|_| "cannot canonicalize the Appendix A catalog".to_string())?;
+    if canonical_catalog != catalog_path {
+        return Err("the canonical Appendix A catalog escapes its fixed path".to_string());
+    }
+    let catalog_lock = OpenOptions::new()
+        .read(true)
+        .open(&canonical_catalog)
+        .map_err(|_| "cannot open the canonical Appendix A catalog lock".to_string())?;
+    catalog_lock
+        .lock()
+        .map_err(|_| "cannot lock the canonical Appendix A catalog".to_string())?;
+    Ok((canonical_root, canonical_registries, catalog_lock))
+}
+
+fn validate_projection_destination(
+    canonical_registries: &Path,
+    destination: &Path,
+) -> Result<(), String> {
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(
+                    "an Appendix A projection destination is not a regular file".to_string()
+                );
+            }
+            if !metadata_has_one_link(&metadata) {
+                return Err("an Appendix A projection destination is not singly linked".to_string());
+            }
+            let canonical_destination = fs::canonicalize(destination).map_err(|_| {
+                "cannot canonicalize an Appendix A projection destination".to_string()
+            })?;
+            if canonical_destination.parent() != Some(canonical_registries)
+                || canonical_destination.file_name() != destination.file_name()
+            {
+                return Err(
+                    "an Appendix A projection destination escapes the registry directory"
+                        .to_string(),
+                );
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err("cannot inspect an Appendix A projection destination".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn appendix_projection_destinations(canonical_registries: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut destinations = Vec::with_capacity(appendix_a::PROJECTION_FILES.len());
+    for (_, file) in appendix_a::PROJECTION_FILES {
+        let mut components = Path::new(file).components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            return Err("an Appendix A projection destination is not a safe file name".to_string());
+        }
+        let destination = canonical_registries.join(file);
+        validate_projection_destination(canonical_registries, &destination)?;
+        destinations.push(destination);
+    }
+    Ok(destinations)
+}
+
+struct PreparedAppendixProjection {
+    path: PathBuf,
+    file: File,
+}
+
+struct AppendixProjectionWrite {
+    registry: &'static str,
+    file_name: String,
+    contents: String,
+    destination: PathBuf,
+    rows: usize,
+    changed: bool,
+    prepared: Option<PreparedAppendixProjection>,
+}
+
+fn prepare_appendix_projection(
+    canonical_registries: &Path,
+    file_name: &str,
+    contents: &[u8],
+) -> Result<PreparedAppendixProjection, String> {
+    let digest = registry_check::hash::sha256_hex(contents);
+    for attempt in 0..1_024_u16 {
+        let prepared_name =
+            format!(".appendix-regenerate-{file_name}-{digest}-{attempt:04}.prepared");
+        let prepared_path = canonical_registries.join(prepared_name);
+        let mut prepared_file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&prepared_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err("cannot create an Appendix A prepared projection".to_string()),
+        };
+        prepared_file
+            .write_all(contents)
+            .map_err(|_| "cannot write an Appendix A prepared projection".to_string())?;
+        prepared_file
+            .sync_all()
+            .map_err(|_| "cannot sync an Appendix A prepared projection".to_string())?;
+        return Ok(PreparedAppendixProjection {
+            path: prepared_path,
+            file: prepared_file,
+        });
+    }
+    Err("cannot allocate a collision-free Appendix A prepared projection".to_string())
+}
+
+fn revalidate_prepared_projection(
+    canonical_registries: &Path,
+    prepared: &mut PreparedAppendixProjection,
+    expected: &[u8],
+) -> Result<(), String> {
+    let path_metadata = fs::symlink_metadata(&prepared.path)
+        .map_err(|_| "cannot inspect an Appendix A prepared projection".to_string())?;
+    let file_metadata = prepared
+        .file
+        .metadata()
+        .map_err(|_| "cannot inspect an open Appendix A prepared projection".to_string())?;
+    if !path_metadata.file_type().is_file()
+        || path_metadata.file_type().is_symlink()
+        || !file_metadata.file_type().is_file()
+        || !metadata_has_one_link(&path_metadata)
+        || !metadata_has_one_link(&file_metadata)
+        || !metadata_identifies_same_file(&path_metadata, &file_metadata)
+    {
+        return Err("an Appendix A prepared projection changed identity".to_string());
+    }
+    let canonical_prepared = fs::canonicalize(&prepared.path)
+        .map_err(|_| "cannot canonicalize an Appendix A prepared projection".to_string())?;
+    if canonical_prepared.parent() != Some(canonical_registries)
+        || canonical_prepared.file_name() != prepared.path.file_name()
+    {
+        return Err("an Appendix A prepared projection escapes registries".to_string());
+    }
+    prepared
+        .file
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| "cannot seek an Appendix A prepared projection".to_string())?;
+    let mut persisted = Vec::new();
+    prepared
+        .file
+        .read_to_end(&mut persisted)
+        .map_err(|_| "cannot read an Appendix A prepared projection".to_string())?;
+    if persisted != expected {
+        return Err("an Appendix A prepared projection failed byte verification".to_string());
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct AppendixRegenerationProgress {
+    projection_files: usize,
+    changed_files: usize,
+    unchanged_files: usize,
+    published_files: usize,
+    violations: usize,
+}
+
+fn emit_appendix_regeneration_completed(progress: &AppendixRegenerationProgress, outcome: &str) {
+    println!(
+        "{}",
+        event(&[
+            ("event", s("appendix_regeneration_completed")),
+            ("projection_files", n(progress.projection_files as i64)),
+            ("changed_files", n(progress.changed_files as i64)),
+            ("unchanged_files", n(progress.unchanged_files as i64)),
+            ("published_files", n(progress.published_files as i64)),
+            ("violations", n(progress.violations as i64)),
+            ("outcome", s(outcome)),
+        ])
+    );
+}
+
+/// Regenerate the six Appendix A consumer registries after all canonical
+/// catalog, source, and repository bindings have passed. This is intentionally
+/// distinct from `appendix-generate`, whose read-only contract is permanent.
+fn run_appendix_regenerate(root: &Path) -> Result<usize, String> {
+    let mut progress = AppendixRegenerationProgress::default();
+    let result = run_appendix_regenerate_inner(root, &mut progress);
+    let outcome = match &result {
+        Ok(0) => "pass",
+        Ok(_) => "fail",
+        Err(_) => "error",
+    };
+    emit_appendix_regeneration_completed(&progress, outcome);
+    result
+}
+
+fn run_appendix_regenerate_inner(
+    root: &Path,
+    progress: &mut AppendixRegenerationProgress,
+) -> Result<usize, String> {
+    let (canonical_root, canonical_registries, _catalog_lock) = lock_appendix_catalog(root)?;
+    let catalog = match appendix_a::load_and_verify(&canonical_root) {
+        Ok(catalog) => catalog,
+        Err(violations) => {
+            emit_appendix_violations(&violations);
+            progress.violations = violations.len();
+            if appendix_has_structural_error(&violations) {
+                return Err(
+                    "Appendix A structural load failed; see redacted violation events".to_string(),
+                );
+            }
+            return Ok(violations.len());
+        }
+    };
+    let generated = appendix_a::generated_projections(&catalog);
+    progress.projection_files = generated.len();
+    if generated.len() != appendix_a::PROJECTION_FILES.len() {
+        return Err("Appendix A did not render exactly six projections".to_string());
+    }
+    let destinations = appendix_projection_destinations(&canonical_registries)?;
+
+    let mut writes = Vec::with_capacity(appendix_a::PROJECTION_FILES.len());
+    for (((generated_file, contents), (registry, expected_file)), destination) in generated
+        .into_iter()
+        .zip(appendix_a::PROJECTION_FILES)
+        .zip(destinations)
+    {
+        if generated_file != expected_file {
+            return Err("Appendix A rendered an unexpected projection destination".to_string());
+        }
+        let existing = match fs::read(&destination) {
+            Ok(existing) => Some(existing),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(_) => return Err("cannot read an Appendix A projection destination".to_string()),
+        };
+        let changed = existing
+            .as_deref()
+            .is_none_or(|bytes| bytes != contents.as_bytes());
+        let rows = catalog
+            .projection_rows
+            .iter()
+            .filter(|row| row.projection == registry)
+            .count();
+        writes.push(AppendixProjectionWrite {
+            registry,
+            file_name: generated_file,
+            contents,
+            destination,
+            rows,
+            changed,
+            prepared: None,
+        });
+    }
+
+    let changed_files = writes.iter().filter(|write| write.changed).count();
+    progress.changed_files = changed_files;
+    progress.unchanged_files = writes.len() - changed_files;
+    for write in &mut writes {
+        if write.changed {
+            write.prepared = Some(prepare_appendix_projection(
+                &canonical_registries,
+                &write.file_name,
+                write.contents.as_bytes(),
+            )?);
+        }
+    }
+
+    let revalidated_registries = canonical_appendix_registries(&canonical_root)?;
+    if revalidated_registries != canonical_registries {
+        return Err("the Appendix A registry directory changed identity".to_string());
+    }
+    for write in &mut writes {
+        validate_projection_destination(&canonical_registries, &write.destination)?;
+        if let Some(prepared) = &mut write.prepared {
+            revalidate_prepared_projection(
+                &canonical_registries,
+                prepared,
+                write.contents.as_bytes(),
+            )?;
+        }
+    }
+
+    for write in &mut writes {
+        let Some(prepared) = &mut write.prepared else {
+            continue;
+        };
+        let revalidated_registries = canonical_appendix_registries(&canonical_root)?;
+        if revalidated_registries != canonical_registries {
+            return Err("the Appendix A registry directory changed identity".to_string());
+        }
+        validate_projection_destination(&canonical_registries, &write.destination)?;
+        revalidate_prepared_projection(&canonical_registries, prepared, write.contents.as_bytes())?;
+        fs::rename(&prepared.path, &write.destination)
+            .map_err(|_| "cannot publish an Appendix A prepared projection".to_string())?;
+        progress.published_files += 1;
+        let persisted = fs::read(&write.destination)
+            .map_err(|_| "cannot verify a regenerated Appendix A projection".to_string())?;
+        if persisted != write.contents.as_bytes() {
+            return Err("a regenerated Appendix A projection failed byte verification".to_string());
+        }
+    }
+    File::open(&canonical_registries)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "cannot sync the Appendix A registry directory".to_string())?;
+
+    let violations = appendix_a::appendix_a_catalog_projection_diff(&canonical_root, &catalog);
+    progress.violations = violations.len();
+    if !violations.is_empty() {
+        emit_appendix_violations(&violations);
+        return Ok(violations.len());
+    }
+
+    for write in &writes {
+        println!(
+            "{}",
+            event(&[
+                ("event", s("appendix_projection_regenerated")),
+                ("registry", s(write.registry)),
+                ("file", s(&write.file_name)),
+                ("rows", n(write.rows as i64)),
+                ("byte_count", n(write.contents.len() as i64)),
+                (
+                    "sha256",
+                    s(registry_check::hash::sha256_hex(write.contents.as_bytes())),
+                ),
+                ("changed", b(write.changed)),
+                ("outcome", s("pass")),
+            ])
+        );
+    }
+    Ok(0)
+}
+
 fn identity_violation_diff(
     violation: &Violation,
     assignment_pins: &[identity::AssignmentPin],
@@ -594,6 +1036,17 @@ fn run_identity(root: &Path) -> Result<usize, String> {
     let ir = identity::load_identity(&root.join("registries")).map_err(|e| e.to_string())?;
     let violations = identity::validate_identity(&ir);
     let assignment_pins = identity::assignment_pins(&ir);
+    let durable_rows = ir.fields.len()
+        + ir.ordinary_unions.len()
+        + ir.ordinary_unions
+            .iter()
+            .map(|union| union.arms.len())
+            .sum::<usize>()
+        + ir.unions.len()
+        + ir.unions
+            .iter()
+            .map(|union| union.arms.len())
+            .sum::<usize>();
     let registry_rows: [(&str, i64, i64); 6] = [
         (
             "logical_object_kinds",
@@ -616,7 +1069,7 @@ fn run_identity(root: &Path) -> Result<usize, String> {
             ir.prebootstrap_epoch,
         ),
         ("wire_types", ir.wire.len() as i64, ir.wire_epoch),
-        ("durable_fields", ir.fields.len() as i64, ir.fields_epoch),
+        ("durable_fields", durable_rows as i64, ir.fields_epoch),
     ];
     for (name, rows, epoch) in registry_rows {
         let count = violations.iter().filter(|v| v.registry == name).count();
@@ -1239,6 +1692,7 @@ fn run() -> Result<usize, String> {
     match args.command.as_str() {
         "appendix" => return run_appendix(&args.root),
         "appendix-generate" => return run_appendix_generate(&args.root),
+        "appendix-regenerate" => return run_appendix_regenerate(&args.root),
         _ => {}
     }
     let r = load(&args.root)?;

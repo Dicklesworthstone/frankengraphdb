@@ -1145,6 +1145,80 @@ fn read_toml(path: &Path) -> Result<Table, String> {
     toml::parse(&text).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+fn cargo_entrypoint_manifest(manifest_text: &str, manifest_path: &Path) -> Result<Table, String> {
+    #[derive(Clone, Copy)]
+    enum Section {
+        Package,
+        Bin,
+    }
+
+    fn key_matches(raw_key: &str, expected: &str) -> bool {
+        let key = raw_key.trim();
+        key == expected
+            || key
+                .strip_prefix('"')
+                .and_then(|key| key.strip_suffix('"'))
+                .is_some_and(|key| key == expected)
+            || key
+                .strip_prefix('\'')
+                .and_then(|key| key.strip_suffix('\''))
+                .is_some_and(|key| key == expected)
+    }
+
+    let mut projection = String::new();
+    let mut section = None;
+    for line in manifest_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            let header = trimmed
+                .split_once('#')
+                .map_or(trimmed, |(before_comment, _)| before_comment)
+                .trim();
+            section = match header {
+                "[package]" => Some(Section::Package),
+                "[[bin]]" => Some(Section::Bin),
+                _ => None,
+            };
+            match section {
+                Some(Section::Package) => projection.push_str("[package]\n"),
+                Some(Section::Bin) => projection.push_str("[[bin]]\n"),
+                None => {}
+            }
+            continue;
+        }
+        let Some(current) = section else {
+            continue;
+        };
+        let Some((raw_key, _)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let relevant = match current {
+            Section::Package => key_matches(raw_key, "name"),
+            Section::Bin => key_matches(raw_key, "name") || key_matches(raw_key, "path"),
+        };
+        if relevant {
+            projection.push_str(line);
+            projection.push('\n');
+        }
+    }
+
+    // Cargo manifests use TOML's full surface, while registry-check's
+    // in-house parser intentionally accepts only the registry subset. Parse
+    // only the package/target identity fields this architecture contract owns
+    // so unrelated dependency syntax cannot change entrypoint resolution.
+    let manifest = toml::parse(&projection).map_err(|error| {
+        format!(
+            "{}: package/target identity: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let package = get_table(&manifest, "package", "workspace member Cargo.toml")
+        .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+    get_str(package, "name", "workspace member Cargo.toml.package")
+        .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+    Ok(manifest)
+}
+
 #[derive(Debug)]
 struct WorkspacePackage {
     relative_path: String,
@@ -1188,7 +1262,10 @@ fn workspace_member_paths(root: &Path) -> Result<Vec<String>, String> {
 fn resolve_workspace_package(root: &Path, name: &str) -> Result<Option<WorkspacePackage>, String> {
     let mut resolved = None;
     for relative_path in workspace_member_paths(root)? {
-        let manifest = read_toml(&root.join(&relative_path).join("Cargo.toml"))?;
+        let manifest_path = root.join(&relative_path).join("Cargo.toml");
+        let manifest_text = fs::read_to_string(&manifest_path)
+            .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+        let manifest = cargo_entrypoint_manifest(&manifest_text, &manifest_path)?;
         let package = get_table(&manifest, "package", "workspace member Cargo.toml")
             .map_err(|error| error.to_string())?;
         let package_name = get_str(package, "name", "workspace member Cargo.toml.package")
@@ -1235,6 +1312,71 @@ fn cargo_bin_artifact(
     }
     let conventional = format!("{}/src/bin/{target}.rs", package.relative_path);
     Ok(Some(conventional).filter(|path| root.join(path).is_file()))
+}
+
+#[cfg(test)]
+mod cargo_entrypoint_manifest_tests {
+    use super::*;
+
+    #[test]
+    fn valid_inline_dependency_tables_do_not_affect_cargo_identity() {
+        let manifest = r#"
+[package]
+name = "fgdb-fixture"
+version = "0.0.1"
+
+[[bin]]
+name = "fixture-bin"
+path = "src/main.rs"
+
+[dependencies]
+asupersync = { git = "https://example.invalid/asupersync", default-features = false }
+"#;
+        let parsed = cargo_entrypoint_manifest(manifest, Path::new("fixture/Cargo.toml"))
+            .expect("unrelated Cargo TOML syntax must not affect package identity");
+        let package = get_table(&parsed, "package", "fixture").expect("package projects");
+        assert_eq!(
+            get_str(package, "name", "fixture.package"),
+            Ok("fgdb-fixture".to_owned())
+        );
+
+        let package = WorkspacePackage {
+            relative_path: "fixture".to_owned(),
+            manifest: parsed,
+        };
+        assert_eq!(
+            cargo_bin_artifact(Path::new("unused"), &package, "fixture-bin"),
+            Ok(Some("fixture/src/main.rs".to_owned()))
+        );
+    }
+
+    #[test]
+    fn malformed_package_identity_fails_closed() {
+        for (label, manifest, expected) in [
+            (
+                "duplicate",
+                "[package]\nname = \"first\"\nname = \"second\"\n",
+                "duplicate key \"name\"",
+            ),
+            (
+                "missing",
+                "[package]\nversion = \"0.0.1\"\n",
+                "package.name: missing required key",
+            ),
+            (
+                "wrong type",
+                "[package]\nname = false\n",
+                "package.name: expected string",
+            ),
+        ] {
+            let error = cargo_entrypoint_manifest(manifest, Path::new("fixture/Cargo.toml"))
+                .expect_err("malformed package identity must be rejected");
+            assert!(
+                error.contains(expected),
+                "{label} identity returned unexpected error: {error}"
+            );
+        }
+    }
 }
 
 fn rust_test_selector_count(source: &str, selector: &str) -> usize {
