@@ -384,6 +384,15 @@ pub trait NeighborKernel: KernelDispatch {
         limit: neighbor::EntryLimit,
     ) -> Result<neighbor::EncodedNeighbors, neighbor::NeighborError>;
 
+    /// Creates an allocation-free, fused forward cursor over logical values.
+    ///
+    /// The cursor retains only representation-bounded state and never
+    /// materializes a complete decoded neighbor list.
+    fn neighbors_cursor<'a>(
+        &self,
+        values: &'a neighbor::EncodedNeighbors,
+    ) -> neighbor::NeighborCursor<'a>;
+
     /// Returns whether `value` belongs to the neighbor list.
     fn neighbors_contains(&self, values: &neighbor::EncodedNeighbors, value: u64) -> bool;
 
@@ -718,6 +727,13 @@ impl NeighborKernel for ScalarKernels {
                 neighbor::EncodedNeighbors::try_dense_intervals(values, limit)
             }
         }
+    }
+
+    fn neighbors_cursor<'a>(
+        &self,
+        values: &'a neighbor::EncodedNeighbors,
+    ) -> neighbor::NeighborCursor<'a> {
+        values.cursor()
     }
 
     fn neighbors_contains(&self, values: &neighbor::EncodedNeighbors, value: u64) -> bool {
@@ -1249,6 +1265,19 @@ mod tests {
 
             let encoded = direct.expect("valid neighbor fixture");
             assert_eq!(encoded.codec(), codec);
+            let mut cursor = NeighborKernel::neighbors_cursor(&KERNELS, &encoded);
+            assert_eq!(cursor.codec(), codec);
+            assert_eq!(cursor.logical_index(), 0);
+            assert_eq!(cursor.remaining(), values.len());
+            assert!(!cursor.is_fused());
+            for (index, expected) in values.iter().copied().enumerate() {
+                assert_eq!(cursor.try_next(), Ok(Some(expected)));
+                assert_eq!(cursor.logical_index(), index + 1);
+                assert_eq!(cursor.remaining(), values.len() - index - 1);
+            }
+            assert!(cursor.is_fused());
+            assert_eq!(cursor.try_next(), Ok(None));
+            assert_eq!(cursor.try_next(), Ok(None));
             for probe in [0_u64, 3, 5, 65_536, u64::MAX] {
                 assert_eq!(
                     NeighborKernel::neighbors_contains(&KERNELS, &encoded, probe),

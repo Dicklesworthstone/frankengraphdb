@@ -38,6 +38,10 @@ const WIDTHS_PER_CONTROL_BYTE: usize = 2;
 std::thread_local! {
     static STREAM_BLOCK_DECODE_ATTEMPTS: core::cell::Cell<usize> =
         const { core::cell::Cell::new(0) };
+    static ELIAS_FANO_SELECT_ATTEMPTS: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+    static DENSE_INTERVAL_SELECT_ATTEMPTS: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -53,6 +57,21 @@ fn reset_stream_block_decode_attempts() {
 #[cfg(test)]
 fn stream_block_decode_attempts() -> usize {
     STREAM_BLOCK_DECODE_ATTEMPTS.with(core::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_random_access_select_attempts() {
+    ELIAS_FANO_SELECT_ATTEMPTS.with(|attempts| attempts.set(0));
+    DENSE_INTERVAL_SELECT_ATTEMPTS.with(|attempts| attempts.set(0));
+}
+
+#[cfg(test)]
+fn random_access_select_attempts(codec: NeighborCodec) -> usize {
+    match codec {
+        NeighborCodec::EliasFano => ELIAS_FANO_SELECT_ATTEMPTS.with(core::cell::Cell::get),
+        NeighborCodec::DenseIntervals => DENSE_INTERVAL_SELECT_ATTEMPTS.with(core::cell::Cell::get),
+        NeighborCodec::StreamVByte => 0,
+    }
 }
 
 /// Closed scalar neighbor representation union.
@@ -446,6 +465,8 @@ impl EliasFanoNeighbors {
     /// Neighbor at `index`, if present.
     #[must_use]
     pub fn select(&self, index: usize) -> Option<u64> {
+        #[cfg(test)]
+        ELIAS_FANO_SELECT_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
         self.inner.select(index)
     }
 
@@ -1154,6 +1175,8 @@ impl DenseIntervals {
     /// interval arithmetic.
     #[must_use]
     pub fn select(&self, index: usize) -> Option<u64> {
+        #[cfg(test)]
+        DENSE_INTERVAL_SELECT_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
         if index >= self.len {
             return None;
         }
@@ -1199,6 +1222,270 @@ pub enum EncodedNeighbors {
     DenseIntervals(DenseIntervals),
 }
 
+/// Allocation-free forward cursor over one explicit neighbor representation.
+///
+/// Elias-Fano and dense-interval arms retain state for linear sequential scans.
+/// One fixed [`STREAM_BLOCK_ENTRIES`]-value buffer bounds Elias-Fano fills and
+/// StreamVByte block decodes; StreamVByte decodes each visited block at most
+/// once. No arm materializes a complete decoded list.
+///
+/// The cursor is fused: after returning `Ok(None)` or one `Err`, every later
+/// [`try_next`](Self::try_next) call returns `Ok(None)`.
+#[must_use = "a neighbor cursor does no work until try_next is called"]
+pub struct NeighborCursor<'a> {
+    codec: NeighborCodec,
+    logical_index: usize,
+    logical_len: usize,
+    fused: bool,
+    state: NeighborCursorState<'a>,
+    buffer_index: usize,
+    buffer_len: usize,
+    buffer: [u64; STREAM_BLOCK_ENTRIES],
+}
+
+enum NeighborCursorState<'a> {
+    EliasFano(crate::elias_fano::EliasFanoSequentialCursor<'a>),
+    StreamVByte(&'a StreamVByteNeighbors),
+    DenseIntervals(DenseSequentialCursor<'a>),
+}
+
+struct DenseSequentialCursor<'a> {
+    values: &'a DenseIntervals,
+    logical_index: usize,
+    interval_index: usize,
+    #[cfg(test)]
+    interval_advances: usize,
+    #[cfg(test)]
+    values_yielded: usize,
+}
+
+impl<'a> NeighborCursor<'a> {
+    fn new(values: &'a EncodedNeighbors) -> Self {
+        let codec = values.codec();
+        let logical_len = values.len();
+        let state = match values {
+            EncodedNeighbors::EliasFano(values) => {
+                NeighborCursorState::EliasFano(values.inner.sequential_cursor())
+            }
+            EncodedNeighbors::StreamVByte(values) => NeighborCursorState::StreamVByte(values),
+            EncodedNeighbors::DenseIntervals(values) => {
+                NeighborCursorState::DenseIntervals(DenseSequentialCursor::new(values))
+            }
+        };
+        Self {
+            codec,
+            logical_index: 0,
+            logical_len,
+            fused: false,
+            state,
+            buffer_index: 0,
+            buffer_len: 0,
+            buffer: [0; STREAM_BLOCK_ENTRIES],
+        }
+    }
+
+    /// Returns the next logical neighbor without allocating.
+    ///
+    /// Private representation corruption is returned as the existing typed
+    /// [`NeighborError`] at the first affected logical position. That error
+    /// fuses the cursor, so partially decoded data can never be resumed.
+    pub fn try_next(&mut self) -> Result<Option<u64>, NeighborError> {
+        if self.fused {
+            return Ok(None);
+        }
+        if self.logical_index >= self.logical_len {
+            self.fused = true;
+            return Ok(None);
+        }
+
+        let next = match &mut self.state {
+            NeighborCursorState::EliasFano(cursor) => next_buffered_elias_fano(
+                cursor,
+                self.logical_index,
+                &mut self.buffer,
+                &mut self.buffer_index,
+                &mut self.buffer_len,
+            ),
+            NeighborCursorState::StreamVByte(values) => next_buffered_stream_vbyte(
+                values,
+                self.logical_index,
+                &mut self.buffer,
+                &mut self.buffer_index,
+                &mut self.buffer_len,
+            ),
+            NeighborCursorState::DenseIntervals(cursor) => cursor.try_next(),
+        };
+        let value = match next {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                self.fused = true;
+                return Err(NeighborError::InternalValueMissing {
+                    codec: self.codec,
+                    index: self.logical_index,
+                });
+            }
+            Err(error) => {
+                self.fused = true;
+                return Err(error);
+            }
+        };
+
+        self.logical_index += 1;
+        if self.logical_index == self.logical_len {
+            self.fused = true;
+        }
+        Ok(Some(value))
+    }
+
+    /// Explicit representation arm traversed by this cursor.
+    #[must_use]
+    pub const fn codec(&self) -> NeighborCodec {
+        self.codec
+    }
+
+    /// Number of logical values yielded successfully.
+    #[must_use]
+    pub const fn logical_index(&self) -> usize {
+        self.logical_index
+    }
+
+    /// Number of values still available before normal exhaustion.
+    ///
+    /// A cursor fused by an error reports zero because it cannot be resumed.
+    #[must_use]
+    pub const fn remaining(&self) -> usize {
+        if self.fused {
+            0
+        } else {
+            self.logical_len - self.logical_index
+        }
+    }
+
+    /// Whether normal exhaustion or an error has fused the cursor.
+    #[must_use]
+    pub const fn is_fused(&self) -> bool {
+        self.fused
+    }
+}
+
+impl<'a> DenseSequentialCursor<'a> {
+    fn new(values: &'a DenseIntervals) -> Self {
+        Self {
+            values,
+            logical_index: 0,
+            interval_index: 0,
+            #[cfg(test)]
+            interval_advances: 0,
+            #[cfg(test)]
+            values_yielded: 0,
+        }
+    }
+
+    fn try_next(&mut self) -> Result<Option<u64>, NeighborError> {
+        if self.logical_index >= self.values.len {
+            return Ok(None);
+        }
+        while self
+            .values
+            .intervals
+            .get(self.interval_index)
+            .is_some_and(|interval| interval.logical_end <= self.logical_index)
+        {
+            self.interval_index =
+                self.interval_index
+                    .checked_add(1)
+                    .ok_or(NeighborError::SizeOverflow {
+                        calculation: SizeCalculation::DenseIntervalLength,
+                    })?;
+            #[cfg(test)]
+            {
+                self.interval_advances += 1;
+            }
+        }
+
+        let interval = self.values.intervals.get(self.interval_index).ok_or(
+            NeighborError::InternalValueMissing {
+                codec: NeighborCodec::DenseIntervals,
+                index: self.logical_index,
+            },
+        )?;
+        let preceding = if self.interval_index == 0 {
+            0
+        } else {
+            self.values.intervals[self.interval_index - 1].logical_end
+        };
+        let offset = self.logical_index.checked_sub(preceding).and_then(|value| {
+            u64::try_from(value)
+                .ok()
+                .and_then(|value| interval.start.checked_add(value))
+        });
+        let value = offset.ok_or(NeighborError::InternalValueMissing {
+            codec: NeighborCodec::DenseIntervals,
+            index: self.logical_index,
+        })?;
+        self.logical_index += 1;
+        #[cfg(test)]
+        {
+            self.values_yielded += 1;
+        }
+        Ok(Some(value))
+    }
+}
+
+fn next_buffered_elias_fano(
+    cursor: &mut crate::elias_fano::EliasFanoSequentialCursor<'_>,
+    logical_index: usize,
+    buffer: &mut [u64; STREAM_BLOCK_ENTRIES],
+    buffer_index: &mut usize,
+    buffer_len: &mut usize,
+) -> Result<Option<u64>, NeighborError> {
+    if *buffer_index == *buffer_len {
+        *buffer_len = cursor.fill(buffer);
+        *buffer_index = 0;
+        if *buffer_len == 0 {
+            return Ok(None);
+        }
+    }
+    let value = buffer
+        .get(*buffer_index)
+        .copied()
+        .ok_or(NeighborError::InternalValueMissing {
+            codec: NeighborCodec::EliasFano,
+            index: logical_index,
+        })?;
+    *buffer_index += 1;
+    Ok(Some(value))
+}
+
+fn next_buffered_stream_vbyte(
+    values: &StreamVByteNeighbors,
+    logical_index: usize,
+    buffer: &mut [u64; STREAM_BLOCK_ENTRIES],
+    buffer_index: &mut usize,
+    buffer_len: &mut usize,
+) -> Result<Option<u64>, NeighborError> {
+    if logical_index >= values.len {
+        return Ok(None);
+    }
+    if *buffer_index == *buffer_len {
+        let block_index = logical_index / STREAM_BLOCK_ENTRIES;
+        *buffer_len = values.decode_block_into(block_index, buffer)?;
+        *buffer_index = 0;
+        if *buffer_len == 0 {
+            return Ok(None);
+        }
+    }
+    let value = buffer
+        .get(*buffer_index)
+        .copied()
+        .ok_or(NeighborError::InternalValueMissing {
+            codec: NeighborCodec::StreamVByte,
+            index: logical_index,
+        })?;
+    *buffer_index += 1;
+    Ok(Some(value))
+}
+
 impl EncodedNeighbors {
     /// Explicitly constructs the Elias-Fano arm.
     pub fn try_elias_fano(values: &[u64], limit: EntryLimit) -> Result<Self, NeighborError> {
@@ -1239,6 +1526,11 @@ impl EncodedNeighbors {
             Self::StreamVByte(_) => NeighborCodec::StreamVByte,
             Self::DenseIntervals(_) => NeighborCodec::DenseIntervals,
         }
+    }
+
+    /// Creates an allocation-free, fused forward cursor over logical values.
+    pub fn cursor(&self) -> NeighborCursor<'_> {
+        NeighborCursor::new(self)
     }
 
     /// True when `value` is present.
@@ -1530,30 +1822,30 @@ impl<'a, S: SortedNeighbors> SequenceCursor<'a, S> {
     }
 }
 
-fn verify_neighbor_sequences<L: SortedNeighbors, R: SortedNeighbors>(
-    left: &L,
-    right: &R,
+fn verify_neighbor_sequences(
+    left: &EncodedNeighbors,
+    right: &EncodedNeighbors,
 ) -> Result<(), NeighborEquivalenceError> {
-    let mut left_cursor = SequenceCursor::new(left);
-    let mut right_cursor = SequenceCursor::new(right);
+    let mut left_cursor = left.cursor();
+    let mut right_cursor = right.cursor();
     let mut index = 0_usize;
 
     loop {
         let left_value =
             left_cursor
-                .current()
+                .try_next()
                 .map_err(|source| NeighborEquivalenceError::Internal {
                     side: NeighborEquivalenceSide::Left,
-                    codec: left.sequence_codec(),
+                    codec: left.codec(),
                     index,
                     source,
                 })?;
         let right_value =
             right_cursor
-                .current()
+                .try_next()
                 .map_err(|source| NeighborEquivalenceError::Internal {
                     side: NeighborEquivalenceSide::Right,
-                    codec: right.sequence_codec(),
+                    codec: right.codec(),
                     index,
                     source,
                 })?;
@@ -1561,9 +1853,7 @@ fn verify_neighbor_sequences<L: SortedNeighbors, R: SortedNeighbors>(
         match (left_value, right_value) {
             (None, None) => return Ok(()),
             (Some(left), Some(right)) if left == right => {
-                left_cursor.advance();
-                right_cursor.advance();
-                index = left_cursor.logical_index;
+                index += 1;
             }
             (left, right) => {
                 return Err(NeighborEquivalenceError::ValueMismatch { index, left, right });
@@ -1778,8 +2068,35 @@ mod tests {
         ]
     }
 
+    fn drain_cursor(encoded: &EncodedNeighbors) -> Vec<u64> {
+        let mut cursor = encoded.cursor();
+        assert_eq!(cursor.codec(), encoded.codec());
+        assert_eq!(cursor.logical_index(), 0);
+        assert_eq!(cursor.remaining(), encoded.len());
+        assert!(!cursor.is_fused());
+
+        let mut values = Vec::with_capacity(encoded.len());
+        while let Some(value) = cursor.try_next().expect("valid representation must scan") {
+            values.push(value);
+        }
+        assert_eq!(cursor.logical_index(), encoded.len());
+        assert_eq!(cursor.remaining(), 0);
+        assert!(cursor.is_fused());
+        assert_eq!(cursor.try_next(), Ok(None));
+        assert_eq!(cursor.try_next(), Ok(None));
+        values
+    }
+
     fn assert_cross_arm_equivalent(values: &[u64]) {
         let encoded = encodings(values);
+        for representation in &encoded {
+            assert_eq!(
+                drain_cursor(representation),
+                values,
+                "{:?} cursor",
+                representation.codec()
+            );
+        }
         for left in &encoded {
             for right in &encoded {
                 assert_eq!(
@@ -1918,6 +2235,65 @@ mod tests {
     }
 
     #[test]
+    fn neighbor_cursor_crosses_block_and_full_width_boundaries_for_every_arm() {
+        let mut values = (0..(2 * STREAM_BLOCK_ENTRIES + 3))
+            .map(|value| (value as u64) * 3)
+            .collect::<Vec<_>>();
+        values.push(u64::MAX);
+
+        for encoded in encodings(&values) {
+            assert_eq!(drain_cursor(&encoded), values, "{:?}", encoded.codec());
+        }
+        for encoded in encodings(&[]) {
+            assert!(drain_cursor(&encoded).is_empty(), "{:?}", encoded.codec());
+        }
+    }
+
+    #[test]
+    fn neighbor_cursor_uses_linear_native_elias_fano_and_dense_state() -> Result<(), &'static str> {
+        let values = (0..4_097_u64).map(|value| value * 2).collect::<Vec<_>>();
+        let encoded = encodings(&values);
+
+        reset_random_access_select_attempts();
+        let mut elias_cursor = encoded[0].cursor();
+        for &expected in &values {
+            assert_eq!(elias_cursor.try_next(), Ok(Some(expected)));
+        }
+        assert_eq!(elias_cursor.try_next(), Ok(None));
+        assert_eq!(
+            random_access_select_attempts(NeighborCodec::EliasFano),
+            0,
+            "sequential Elias-Fano traversal must not re-enter logarithmic select"
+        );
+        let NeighborCursorState::EliasFano(cursor) = &elias_cursor.state else {
+            return Err("explicit Elias-Fano representation returned another cursor arm");
+        };
+        assert_eq!(cursor.len(), 0);
+
+        reset_random_access_select_attempts();
+        let mut dense_cursor = encoded[2].cursor();
+        for &expected in &values {
+            assert_eq!(dense_cursor.try_next(), Ok(Some(expected)));
+        }
+        assert_eq!(dense_cursor.try_next(), Ok(None));
+        assert_eq!(
+            random_access_select_attempts(NeighborCodec::DenseIntervals),
+            0,
+            "sequential dense traversal must not re-enter logarithmic select"
+        );
+        let NeighborCursorState::DenseIntervals(cursor) = &dense_cursor.state else {
+            return Err("explicit dense representation returned another cursor arm");
+        };
+        assert_eq!(cursor.values_yielded, values.len());
+        assert_eq!(
+            cursor.interval_advances + 1,
+            cursor.values.intervals().len(),
+            "each dense interval boundary must be crossed exactly once"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn logical_equivalence_reports_first_value_and_length_mismatches() {
         let left = encodings(&[2, 4, 6, 8]);
         let right = encodings(&[2, 4, 7, 8]);
@@ -1988,6 +2364,41 @@ mod tests {
                 },
             })
         ));
+    }
+
+    #[test]
+    fn neighbor_cursor_preserves_stream_errors_and_fuses_after_partial_decode() {
+        let values = (0..(STREAM_BLOCK_ENTRIES + 1))
+            .map(|value| (value as u64) * 2)
+            .collect::<Vec<_>>();
+        let mut malformed =
+            StreamVByteNeighbors::try_new(&values, EntryLimit::new(values.len())).unwrap();
+        malformed.fences[1].entry_count = 0;
+        let malformed = EncodedNeighbors::StreamVByte(malformed);
+        let mut cursor = malformed.cursor();
+
+        reset_stream_block_decode_attempts();
+        for &expected in &values[..STREAM_BLOCK_ENTRIES] {
+            assert_eq!(cursor.try_next(), Ok(Some(expected)));
+        }
+        assert!(matches!(
+            cursor.try_next(),
+            Err(NeighborError::MalformedStream {
+                block_index: 1,
+                cause: MalformedStream::InvalidEntryCount { actual: 0 },
+                ..
+            })
+        ));
+        assert_eq!(cursor.logical_index(), STREAM_BLOCK_ENTRIES);
+        assert_eq!(cursor.remaining(), 0);
+        assert!(cursor.is_fused());
+        assert_eq!(cursor.try_next(), Ok(None));
+        assert_eq!(cursor.try_next(), Ok(None));
+        assert_eq!(
+            stream_block_decode_attempts(),
+            2,
+            "the cursor must decode the first block once and attempt the malformed block once"
+        );
     }
 
     #[test]

@@ -2,9 +2,10 @@
 //!
 //! This example deliberately proves only the mechanics that exist today:
 //! deterministic graph generation, all three explicit neighbor arms, bounded
-//! cross-arm logical-equivalence checks, type-safe scalar FOR identity columns
-//! tied to that graph, a canonical diagnostic adjacency transcript, scalar
-//! block round-trip/scan, and execution inside an asupersync lab root task.
+//! allocation-free scans, cross-arm logical-equivalence checks, type-safe
+//! scalar FOR identity columns tied to that graph, a canonical diagnostic
+//! adjacency transcript, scalar block round-trip/scan, and execution inside an
+//! asupersync lab root task.
 //!
 //! It is **not** evidence for durable framing, registered codec IDs, a logical
 //! digest, SIMD parity, `OriginBirthOrder`, delta-coded identity slots, or the
@@ -95,6 +96,7 @@ struct DiagnosticScan {
 struct PipelineOutput {
     evidence_rows: String,
     stream_rows: usize,
+    neighbor_scan_checks: usize,
     neighbor_equivalence_checks: usize,
     identities: StableFixtureIds,
     scan: DiagnosticScan,
@@ -141,11 +143,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let summary = format!(
         concat!(
             "{{\"kind\":\"scope-summary\",",
-            "\"proof\":\"scalar-graph-codec-pipeline-v2\",",
+            "\"proof\":\"scalar-graph-codec-pipeline-v3\",",
             "\"scope\":\"registry-independent-partial-e2e\",",
             "\"fixture\":\"{}\",",
             "\"nodes\":{},\"edges\":{},\"adjacency_entries\":{},",
             "\"neighbor_arms_per_list\":3,\"stream_evidence_rows\":{},",
+            "\"neighbor_scan_checks\":{},",
             "\"neighbor_equivalence_checks\":{},",
             "\"identity_payload_evidence_rows\":2,",
             "\"vertex_identity_rows\":{},\"edge_identity_rows\":{},",
@@ -164,6 +167,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         pipeline.scan.edges,
         pipeline.scan.adjacency_entries,
         pipeline.stream_rows,
+        pipeline.neighbor_scan_checks,
         pipeline.neighbor_equivalence_checks,
         pipeline.identities.vertices.len(),
         pipeline.identities.edges.len(),
@@ -217,7 +221,7 @@ fn run_pipeline() -> Result<PipelineOutput, ProofError> {
     // Run all neighbor codecs and every cross-arm intersection from the rows
     // recovered by the transcript scan, preserving the requested cycle order.
     let mut evidence_rows = String::new();
-    let (encoded, neighbor_equivalence_checks) =
+    let (encoded, neighbor_scan_checks, neighbor_equivalence_checks) =
         encode_and_verify_neighbors(&scan.adjacency, &mut evidence_rows, &kernels)?;
     verify_all_intersections(&encoded, &kernels)?;
 
@@ -247,6 +251,7 @@ fn run_pipeline() -> Result<PipelineOutput, ProofError> {
     Ok(PipelineOutput {
         evidence_rows,
         stream_rows: NODE_COUNT,
+        neighbor_scan_checks,
         neighbor_equivalence_checks,
         identities,
         scan,
@@ -327,8 +332,9 @@ fn encode_and_verify_neighbors(
     adjacency: &[Vec<u64>],
     evidence_rows: &mut String,
     kernels: &ScalarKernels,
-) -> Result<(Vec<EncodedAdjacency>, usize), ProofError> {
+) -> Result<(Vec<EncodedAdjacency>, usize, usize), ProofError> {
     let mut encoded = Vec::new();
+    let mut scan_checks = 0_usize;
     let mut equivalence_checks = 0_usize;
     encoded
         .try_reserve_exact(adjacency.len())
@@ -360,6 +366,10 @@ fn encode_and_verify_neighbors(
         }
 
         for arm in &arms {
+            verify_cursor_scan(node, values, arm, kernels)?;
+            scan_checks = scan_checks
+                .checked_add(1)
+                .ok_or_else(|| ProofError::new("neighbor scan-check count overflowed"))?;
             verify_select_and_rank(node, values, arm, kernels)?;
         }
         for left in &arms {
@@ -410,7 +420,64 @@ fn encode_and_verify_neighbors(
             arms,
         });
     }
-    Ok((encoded, equivalence_checks))
+    Ok((encoded, scan_checks, equivalence_checks))
+}
+
+fn verify_cursor_scan(
+    node: usize,
+    values: &[u64],
+    encoded: &EncodedNeighbors,
+    kernels: &ScalarKernels,
+) -> Result<(), ProofError> {
+    let mut cursor = NeighborKernel::neighbors_cursor(kernels, encoded);
+    if cursor.codec() != encoded.codec() {
+        return Err(ProofError::new(format!(
+            "node {node} {:?} scan cursor reported {:?}",
+            encoded.codec(),
+            cursor.codec()
+        )));
+    }
+    if cursor.logical_index() != 0 || cursor.remaining() != values.len() || cursor.is_fused() {
+        return Err(ProofError::new(format!(
+            "node {node} {:?} scan cursor began in an invalid state",
+            encoded.codec()
+        )));
+    }
+
+    for (index, &expected) in values.iter().enumerate() {
+        let actual = cursor.try_next().map_err(|error| {
+            ProofError::new(format!(
+                "node {node} {:?} scan failed at index {index}: {error}",
+                encoded.codec()
+            ))
+        })?;
+        if actual != Some(expected) {
+            return Err(ProofError::new(format!(
+                "node {node} {:?} scan index {index} returned {actual:?}, expected {expected}",
+                encoded.codec()
+            )));
+        }
+        if cursor.logical_index() != index + 1 || cursor.remaining() != values.len() - index - 1 {
+            return Err(ProofError::new(format!(
+                "node {node} {:?} scan accounting diverged after index {index}",
+                encoded.codec()
+            )));
+        }
+    }
+
+    let exhausted = cursor.try_next().map_err(|error| {
+        ProofError::new(format!(
+            "node {node} {:?} exhausted scan returned an error: {error}",
+            encoded.codec()
+        ))
+    })?;
+    if !cursor.is_fused() || exhausted.is_some() {
+        return Err(ProofError::new(format!(
+            "node {node} {:?} scan cursor did not fuse at exact exhaustion",
+            encoded.codec()
+        )));
+    }
+    Ok(())
 }
 
 fn verify_select_and_rank(
