@@ -4,7 +4,9 @@
 //! It assigns no tags or codec IDs and defines no wire envelope. The
 //! [`IdentityColumn`] chooser compares only the scalar payload represented
 //! here: raw 16-byte identities versus an 11-byte sorted prefix dictionary,
-//! fixed-width prefix indexes, and 6-byte slots.
+//! fixed-width prefix indexes, and either 6-byte or canonical FOR-packed slots.
+//! FOR admission is explicit on [`SortedIdentityColumn`] and remains below
+//! durable codec registration and framing.
 //!
 //! Row order is always retained. Binary search is exposed only by
 //! [`SortedIdentityColumn`], whose constructor validates monotone identity
@@ -15,6 +17,8 @@
 use core::{fmt, iter::FusedIterator, marker::PhantomData};
 
 use fgdb_types::{EId, VId};
+
+use crate::bitpack;
 
 /// Number of bits in the partition component of a vertex or edge identity.
 pub const PARTITION_BITS: u32 = 20;
@@ -28,6 +32,7 @@ pub const MAX_SLOT: u64 = (1_u64 << SLOT_BITS) - 1;
 const RAW_ID_BYTES: usize = 16;
 const PREFIX_BYTES: usize = 11;
 const SLOT_BYTES: usize = 6;
+const FOR_SLOT_METADATA_BYTES: usize = SLOT_BYTES + 1;
 
 /// Checked decomposition of a `VId` or `EId`.
 ///
@@ -243,6 +248,12 @@ pub enum IdentityRepresentation {
     Raw128,
     /// Sorted 11-byte prefix dictionary, fixed-width indexes, and 6-byte slots.
     SharedPrefixFixed,
+    /// Sorted prefix dictionary, fixed-width indexes, and FOR-packed slots.
+    ///
+    /// The registry-independent payload carries a 6-byte big-endian base and a
+    /// one-byte width immediately before the canonical LSB-first packed slot
+    /// deltas. Durable framing still needs a registered codec ID and counts.
+    SharedPrefixFor,
 }
 
 /// Internal allocation named by an identity-column failure.
@@ -256,6 +267,10 @@ pub enum AllocationTarget {
     PrefixIndexes,
     /// Six-byte per-row monotone slots.
     Slots,
+    /// Temporary absolute slots passed to the canonical FOR scalar kernel.
+    ForSlotScratch,
+    /// Canonical FOR-packed monotone-slot bytes.
+    ForSlotPayload,
     /// Complete registry-independent scalar payload bytes.
     EncodedPayload,
 }
@@ -271,6 +286,8 @@ pub enum SizeCalculation {
     PrefixIndexPayload,
     /// Six bytes per row for slots.
     SlotPayload,
+    /// FOR base, width, and bitpacked slot deltas.
+    ForSlotPayload,
     /// Sum of all shared-prefix components.
     SharedPayload,
     /// Incrementing the distinct-prefix count.
@@ -288,6 +305,8 @@ pub enum IdentityConstructionInvariant {
     PrefixIndexRange,
     /// Materialized payload bytes disagreed with checked chooser accounting.
     EncodedPayloadLength,
+    /// The canonical FOR scalar kernel rejected a prevalidated slot plan.
+    ForSlotEncoding,
 }
 
 /// Checked identity-column construction failure.
@@ -500,6 +519,52 @@ enum IdentityStorage {
         indexes: PrefixIndexes,
         slots: Vec<[u8; SLOT_BYTES]>,
     },
+    SharedPrefixFor {
+        prefixes: Vec<IdentityPrefix>,
+        indexes: PrefixIndexes,
+        slots: ForSlots,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ForSlots {
+    base: u64,
+    width: u8,
+    row_count: usize,
+    packed_deltas: Vec<u8>,
+}
+
+impl ForSlots {
+    fn get(&self, row: usize) -> Option<u64> {
+        if row >= self.row_count {
+            return None;
+        }
+        let delta = packed_value_at(&self.packed_deltas, row, self.width)?;
+        self.base
+            .checked_add(delta)
+            .filter(|slot| *slot <= MAX_SLOT)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SlotRepresentationPolicy {
+    FixedOnly,
+    ForEligible,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ForSlotPlan {
+    base: u64,
+    width: u8,
+    packed_len: usize,
+    payload_len: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectedRepresentation {
+    Raw,
+    Fixed { payload_len: usize },
+    For { plan: ForSlotPlan },
 }
 
 /// Bounded in-memory identity column retaining arbitrary row order.
@@ -520,6 +585,14 @@ impl<T: ElementIdentity> IdentityColumn<T> {
         values: &[T],
         limits: IdentityColumnLimits,
     ) -> Result<Self, IdentityColumnError> {
+        Self::try_new_with_policy(values, limits, SlotRepresentationPolicy::FixedOnly)
+    }
+
+    fn try_new_with_policy(
+        values: &[T],
+        limits: IdentityColumnLimits,
+        slot_policy: SlotRepresentationPolicy,
+    ) -> Result<Self, IdentityColumnError> {
         validate_row_limit(values.len(), limits)?;
 
         let raw_payload_len = raw_payload_len(values.len())?;
@@ -527,10 +600,16 @@ impl<T: ElementIdentity> IdentityColumn<T> {
             return Self::try_raw(values, raw_payload_len, limits);
         }
 
-        let minimum_shared_payload =
+        let fixed_minimum_shared_payload =
             shared_payload_len(values.len(), 1)?.ok_or(IdentityColumnError::SizeOverflow {
                 calculation: SizeCalculation::SharedPayload,
             })?;
+        let minimum_shared_payload = match slot_policy {
+            SlotRepresentationPolicy::FixedOnly => fixed_minimum_shared_payload,
+            SlotRepresentationPolicy::ForEligible => {
+                fixed_minimum_shared_payload.min(PREFIX_BYTES + FOR_SLOT_METADATA_BYTES)
+            }
+        };
         if raw_payload_len > limits.max_payload_bytes()
             && minimum_shared_payload > limits.max_payload_bytes()
         {
@@ -563,23 +642,64 @@ impl<T: ElementIdentity> IdentityColumn<T> {
             return Self::try_raw(values, raw_payload_len, limits);
         }
 
-        let Some(shared_payload_len) = shared_payload_len(values.len(), prefixes.len())? else {
+        let Some(fixed_payload_len) = shared_payload_len(values.len(), prefixes.len())? else {
             return Self::try_raw(values, raw_payload_len, limits);
         };
-        if shared_payload_len >= raw_payload_len {
+        let Some(index_width) = prefix_index_width(prefixes.len()) else {
             return Self::try_raw(values, raw_payload_len, limits);
+        };
+        let for_plan = match slot_policy {
+            SlotRepresentationPolicy::FixedOnly => None,
+            SlotRepresentationPolicy::ForEligible => {
+                for_slot_plan(values, prefixes.len(), index_width)?
+            }
+        };
+
+        let mut selected = SelectedRepresentation::Raw;
+        let mut selected_len = raw_payload_len;
+        if fixed_payload_len < selected_len {
+            selected = SelectedRepresentation::Fixed {
+                payload_len: fixed_payload_len,
+            };
+            selected_len = fixed_payload_len;
         }
-        if shared_payload_len > limits.max_payload_bytes() {
+        if let Some(plan) = for_plan
+            && plan.payload_len < selected_len
+        {
+            selected = SelectedRepresentation::For { plan };
+            selected_len = plan.payload_len;
+        }
+
+        if selected_len > limits.max_payload_bytes() {
+            let representation = match selected {
+                SelectedRepresentation::Raw => IdentityRepresentation::Raw128,
+                SelectedRepresentation::Fixed { .. } => IdentityRepresentation::SharedPrefixFixed,
+                SelectedRepresentation::For { .. } => IdentityRepresentation::SharedPrefixFor,
+            };
             return Err(IdentityColumnError::PayloadLimitExceeded {
-                representation: IdentityRepresentation::SharedPrefixFixed,
-                required: shared_payload_len,
+                representation,
+                required: selected_len,
                 limit: limits.max_payload_bytes(),
             });
         }
 
-        let Some(index_width) = prefix_index_width(prefixes.len()) else {
-            return Self::try_raw(values, raw_payload_len, limits);
-        };
+        match selected {
+            SelectedRepresentation::Raw => Self::try_raw(values, raw_payload_len, limits),
+            SelectedRepresentation::Fixed { payload_len } => {
+                Self::try_shared_fixed(values, prefixes, index_width, payload_len)
+            }
+            SelectedRepresentation::For { plan } => {
+                Self::try_shared_for(values, prefixes, index_width, plan)
+            }
+        }
+    }
+
+    fn try_shared_fixed(
+        values: &[T],
+        prefixes: Vec<IdentityPrefix>,
+        index_width: usize,
+        payload_len: usize,
+    ) -> Result<Self, IdentityColumnError> {
         let mut indexes = allocate_indexes(index_width, values.len())?;
         let mut slots = Vec::new();
         slots.try_reserve_exact(values.len()).map_err(|_| {
@@ -607,7 +727,69 @@ impl<T: ElementIdentity> IdentityColumn<T> {
                 indexes,
                 slots,
             },
-            encoded_payload_len: shared_payload_len,
+            encoded_payload_len: payload_len,
+            identity_type: PhantomData,
+        })
+    }
+
+    fn try_shared_for(
+        values: &[T],
+        prefixes: Vec<IdentityPrefix>,
+        index_width: usize,
+        plan: ForSlotPlan,
+    ) -> Result<Self, IdentityColumnError> {
+        let mut indexes = allocate_indexes(index_width, values.len())?;
+        let mut absolute_slots = Vec::new();
+        absolute_slots
+            .try_reserve_exact(values.len())
+            .map_err(|_| IdentityColumnError::AllocationFailed {
+                target: AllocationTarget::ForSlotScratch,
+                requested: values.len(),
+            })?;
+
+        for value in values {
+            let parts = IdentityParts::unpack(value.identity_bits());
+            let prefix = IdentityPrefix::from_parts(parts);
+            let index = prefixes.binary_search(&prefix).map_err(|_| {
+                IdentityColumnError::ConstructionInvariantViolation {
+                    invariant: IdentityConstructionInvariant::PrefixDictionaryMembership,
+                }
+            })?;
+            push_index(&mut indexes, index)?;
+            absolute_slots.push(parts.monotone_slot());
+        }
+
+        let packed_deltas = bitpack::encode_for(&absolute_slots, plan.base, plan.width).map_err(
+            |error| match error {
+                bitpack::BitpackError::AllocationFailed { requested, .. } => {
+                    IdentityColumnError::AllocationFailed {
+                        target: AllocationTarget::ForSlotPayload,
+                        requested,
+                    }
+                }
+                _ => IdentityColumnError::ConstructionInvariantViolation {
+                    invariant: IdentityConstructionInvariant::ForSlotEncoding,
+                },
+            },
+        )?;
+        if packed_deltas.len() != plan.packed_len {
+            return Err(IdentityColumnError::ConstructionInvariantViolation {
+                invariant: IdentityConstructionInvariant::EncodedPayloadLength,
+            });
+        }
+
+        Ok(Self {
+            storage: IdentityStorage::SharedPrefixFor {
+                prefixes,
+                indexes,
+                slots: ForSlots {
+                    base: plan.base,
+                    width: plan.width,
+                    row_count: values.len(),
+                    packed_deltas,
+                },
+            },
+            encoded_payload_len: plan.payload_len,
             identity_type: PhantomData,
         })
     }
@@ -646,6 +828,7 @@ impl<T: ElementIdentity> IdentityColumn<T> {
         match &self.storage {
             IdentityStorage::Raw128(rows) => rows.len(),
             IdentityStorage::SharedPrefixFixed { slots, .. } => slots.len(),
+            IdentityStorage::SharedPrefixFor { slots, .. } => slots.row_count,
         }
     }
 
@@ -661,6 +844,7 @@ impl<T: ElementIdentity> IdentityColumn<T> {
         match self.storage {
             IdentityStorage::Raw128(_) => IdentityRepresentation::Raw128,
             IdentityStorage::SharedPrefixFixed { .. } => IdentityRepresentation::SharedPrefixFixed,
+            IdentityStorage::SharedPrefixFor { .. } => IdentityRepresentation::SharedPrefixFor,
         }
     }
 
@@ -709,26 +893,20 @@ impl<T: ElementIdentity> IdentityColumn<T> {
                 indexes,
                 slots,
             } => {
-                for prefix in prefixes {
-                    output.extend_from_slice(&prefix.bytes);
-                }
-                match indexes {
-                    PrefixIndexes::Zero => {}
-                    PrefixIndexes::U8(values) => output.extend_from_slice(values),
-                    PrefixIndexes::U16(values) => {
-                        for value in values {
-                            output.extend_from_slice(&value.to_le_bytes());
-                        }
-                    }
-                    PrefixIndexes::U32(values) => {
-                        for value in values {
-                            output.extend_from_slice(&value.to_le_bytes());
-                        }
-                    }
-                }
+                append_prefixes_and_indexes(&mut output, prefixes, indexes);
                 for slot in slots {
                     output.extend_from_slice(slot);
                 }
+            }
+            IdentityStorage::SharedPrefixFor {
+                prefixes,
+                indexes,
+                slots,
+            } => {
+                append_prefixes_and_indexes(&mut output, prefixes, indexes);
+                output.extend_from_slice(&slot_be_bytes(slots.base));
+                output.push(slots.width);
+                output.extend_from_slice(&slots.packed_deltas);
             }
         }
         if output.len() != self.encoded_payload_len {
@@ -744,7 +922,8 @@ impl<T: ElementIdentity> IdentityColumn<T> {
     pub fn prefix_dictionary(&self) -> Option<&[IdentityPrefix]> {
         match &self.storage {
             IdentityStorage::Raw128(_) => None,
-            IdentityStorage::SharedPrefixFixed { prefixes, .. } => Some(prefixes),
+            IdentityStorage::SharedPrefixFixed { prefixes, .. }
+            | IdentityStorage::SharedPrefixFor { prefixes, .. } => Some(prefixes),
         }
     }
 
@@ -753,7 +932,8 @@ impl<T: ElementIdentity> IdentityColumn<T> {
     pub const fn prefix_index_width(&self) -> usize {
         match &self.storage {
             IdentityStorage::Raw128(_) => 0,
-            IdentityStorage::SharedPrefixFixed { indexes, .. } => indexes.width(),
+            IdentityStorage::SharedPrefixFixed { indexes, .. }
+            | IdentityStorage::SharedPrefixFor { indexes, .. } => indexes.width(),
         }
     }
 
@@ -770,6 +950,14 @@ impl<T: ElementIdentity> IdentityColumn<T> {
                 let prefix = *prefixes.get(indexes.get(row)?)?;
                 let slot = slot_from_be_bytes(*slots.get(row)?);
                 prefix.with_slot(slot)
+            }
+            IdentityStorage::SharedPrefixFor {
+                prefixes,
+                indexes,
+                slots,
+            } => {
+                let prefix = *prefixes.get(indexes.get(row)?)?;
+                prefix.with_slot(slots.get(row)?)
             }
         };
         Some(T::from_identity_bits(bits))
@@ -799,6 +987,20 @@ impl<T: ElementIdentity> IdentityColumn<T> {
                 let row_prefix = *prefixes.get(indexes.get(row)?)?;
                 let probe_prefix = IdentityPrefix::from_parts(probe);
                 let row_slot = slot_from_be_bytes(*slots.get(row)?);
+                Some(
+                    row_prefix
+                        .cmp(&probe_prefix)
+                        .then_with(|| row_slot.cmp(&probe.monotone_slot())),
+                )
+            }
+            IdentityStorage::SharedPrefixFor {
+                prefixes,
+                indexes,
+                slots,
+            } => {
+                let row_prefix = *prefixes.get(indexes.get(row)?)?;
+                let probe_prefix = IdentityPrefix::from_parts(probe);
+                let row_slot = slots.get(row)?;
                 Some(
                     row_prefix
                         .cmp(&probe_prefix)
@@ -855,18 +1057,36 @@ impl<T: ElementIdentity> SortedIdentityColumn<T> {
         values: &[T],
         limits: IdentityColumnLimits,
     ) -> Result<Self, IdentityColumnError> {
-        validate_row_limit(values.len(), limits)?;
-        for (offset, pair) in values.windows(2).enumerate() {
-            if pair[0] > pair[1] {
-                return Err(IdentityColumnError::NotSorted {
-                    index: offset + 1,
-                    previous: pair[0].identity_bits().to_be_bytes(),
-                    current: pair[1].identity_bits().to_be_bytes(),
-                });
-            }
-        }
+        validate_sorted_values(values, limits)?;
         Ok(Self {
             column: IdentityColumn::try_new(values, limits)?,
+        })
+    }
+
+    /// Validates monotone identity order and admits FOR-packed slot suffixes.
+    ///
+    /// This is an explicit, registry-independent acceptance path. The chooser
+    /// compares raw, shared-prefix fixed-slot, and shared-prefix FOR-slot
+    /// scalar payloads and selects a candidate only when it is strictly
+    /// smaller than the preceding candidates. Fixed slots therefore win a
+    /// size tie with FOR, and raw rows win a tie with either shared form.
+    ///
+    /// The FOR scalar payload is canonical for the chosen `(base, width)` and
+    /// retains exact typed identity reconstruction, canonical big-endian keys,
+    /// binary-search order, and the 16-byte-per-entry upper bound. It is not a
+    /// durable encoding until a caller supplies registered framing, counts,
+    /// and a codec ID.
+    pub fn try_new_with_for_slots(
+        values: &[T],
+        limits: IdentityColumnLimits,
+    ) -> Result<Self, IdentityColumnError> {
+        validate_sorted_values(values, limits)?;
+        Ok(Self {
+            column: IdentityColumn::try_new_with_policy(
+                values,
+                limits,
+                SlotRepresentationPolicy::ForEligible,
+            )?,
         })
     }
 
@@ -926,6 +1146,23 @@ impl<T: ElementIdentity> SortedIdentityColumn<T> {
     }
 }
 
+fn validate_sorted_values<T: ElementIdentity>(
+    values: &[T],
+    limits: IdentityColumnLimits,
+) -> Result<(), IdentityColumnError> {
+    validate_row_limit(values.len(), limits)?;
+    for (offset, pair) in values.windows(2).enumerate() {
+        if pair[0] > pair[1] {
+            return Err(IdentityColumnError::NotSorted {
+                index: offset + 1,
+                previous: pair[0].identity_bits().to_be_bytes(),
+                current: pair[1].identity_bits().to_be_bytes(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_row_limit(
     rows: usize,
     limits: IdentityColumnLimits,
@@ -973,6 +1210,71 @@ fn shared_payload_len(rows: usize, prefixes: usize) -> Result<Option<usize>, Ide
             calculation: SizeCalculation::SharedPayload,
         })?;
     Ok(Some(payload))
+}
+
+fn for_slot_plan<T: ElementIdentity>(
+    values: &[T],
+    prefixes: usize,
+    index_width: usize,
+) -> Result<Option<ForSlotPlan>, IdentityColumnError> {
+    if values.is_empty() || values.len() > bitpack::MAX_DECODED_VALUES {
+        return Ok(None);
+    }
+
+    let mut base = MAX_SLOT;
+    let mut maximum = 0_u64;
+    for value in values {
+        let slot = IdentityParts::unpack(value.identity_bits()).monotone_slot();
+        base = base.min(slot);
+        maximum = maximum.max(slot);
+    }
+    let maximum_delta = maximum - base;
+    let width = required_bits(maximum_delta);
+    let packed_len =
+        bitpack::expected_byte_len(values.len(), width).map_err(|error| match error {
+            bitpack::BitpackError::ByteLengthOverflow { .. } => IdentityColumnError::SizeOverflow {
+                calculation: SizeCalculation::ForSlotPayload,
+            },
+            _ => IdentityColumnError::ConstructionInvariantViolation {
+                invariant: IdentityConstructionInvariant::ForSlotEncoding,
+            },
+        })?;
+
+    let prefix_bytes =
+        prefixes
+            .checked_mul(PREFIX_BYTES)
+            .ok_or(IdentityColumnError::SizeOverflow {
+                calculation: SizeCalculation::PrefixPayload,
+            })?;
+    let index_bytes =
+        values
+            .len()
+            .checked_mul(index_width)
+            .ok_or(IdentityColumnError::SizeOverflow {
+                calculation: SizeCalculation::PrefixIndexPayload,
+            })?;
+    let payload_len = prefix_bytes
+        .checked_add(index_bytes)
+        .and_then(|partial| partial.checked_add(FOR_SLOT_METADATA_BYTES))
+        .and_then(|partial| partial.checked_add(packed_len))
+        .ok_or(IdentityColumnError::SizeOverflow {
+            calculation: SizeCalculation::ForSlotPayload,
+        })?;
+
+    Ok(Some(ForSlotPlan {
+        base,
+        width,
+        packed_len,
+        payload_len,
+    }))
+}
+
+const fn required_bits(value: u64) -> u8 {
+    if value == 0 {
+        0
+    } else {
+        (u64::BITS - value.leading_zeros()) as u8
+    }
 }
 
 const fn prefix_index_width(prefixes: usize) -> Option<usize> {
@@ -1049,6 +1351,60 @@ fn push_index(indexes: &mut PrefixIndexes, index: usize) -> Result<(), IdentityC
         })?),
     }
     Ok(())
+}
+
+fn append_prefixes_and_indexes(
+    output: &mut Vec<u8>,
+    prefixes: &[IdentityPrefix],
+    indexes: &PrefixIndexes,
+) {
+    for prefix in prefixes {
+        output.extend_from_slice(&prefix.bytes);
+    }
+    match indexes {
+        PrefixIndexes::Zero => {}
+        PrefixIndexes::U8(values) => output.extend_from_slice(values),
+        PrefixIndexes::U16(values) => {
+            for value in values {
+                output.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        PrefixIndexes::U32(values) => {
+            for value in values {
+                output.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+}
+
+fn packed_value_at(input: &[u8], row: usize, width: u8) -> Option<u64> {
+    if width > SLOT_BITS as u8 {
+        return None;
+    }
+    if width == 0 {
+        return Some(0);
+    }
+
+    let width = usize::from(width);
+    let mut bit_cursor = row.checked_mul(width)?;
+    let end_bit = bit_cursor.checked_add(width)?;
+    if end_bit.div_ceil(8) > input.len() {
+        return None;
+    }
+
+    let mut decoded = 0_u64;
+    let mut decoded_bits = 0_usize;
+    while decoded_bits < width {
+        let byte = *input.get(bit_cursor / 8)?;
+        let bit_in_byte = bit_cursor % 8;
+        let take = (8 - bit_in_byte).min(width - decoded_bits);
+        let mask = ((1_u16 << take) - 1) as u8;
+        let chunk = (byte >> bit_in_byte) & mask;
+        decoded |= u64::from(chunk) << decoded_bits;
+        bit_cursor += take;
+        decoded_bits += take;
+    }
+    Some(decoded)
 }
 
 const fn slot_be_bytes(slot: u64) -> [u8; SLOT_BYTES] {
@@ -1552,6 +1908,255 @@ mod tests {
             &first[..PREFIX_BYTES],
             &shared.prefix_dictionary().unwrap()[0].bytes
         );
+    }
+
+    #[test]
+    fn for_slot_constructor_exhaustively_round_trips_every_legal_width() {
+        for width in 0..=SLOT_BITS as u8 {
+            let base = if width == SLOT_BITS as u8 { 0 } else { 7 };
+            let maximum_delta = if width == 0 { 0 } else { (1_u64 << width) - 1 };
+            let mut values = vec![vid(11, 23, base); 16];
+            values[15] = vid(11, 23, base + maximum_delta);
+
+            let column =
+                SortedIdentityColumn::try_new_with_for_slots(&values, limits(values.len(), 1))
+                    .unwrap();
+            assert_eq!(
+                column.as_column().representation(),
+                IdentityRepresentation::SharedPrefixFor,
+                "width {width}"
+            );
+            assert_eq!(column.iter().collect::<Vec<_>>(), values, "width {width}");
+            assert_eq!(
+                column.as_column().encoded_payload_len(),
+                PREFIX_BYTES
+                    + FOR_SLOT_METADATA_BYTES
+                    + bitpack::expected_byte_len(values.len(), width).unwrap(),
+                "width {width}"
+            );
+            assert!(
+                column.as_column().encoded_payload_len() <= values.len() * RAW_ID_BYTES,
+                "width {width}"
+            );
+
+            let payload = column
+                .as_column()
+                .try_scalar_payload(column.as_column().encoded_payload_len())
+                .unwrap();
+            assert_eq!(
+                &payload[PREFIX_BYTES..PREFIX_BYTES + SLOT_BYTES],
+                &slot_be_bytes(base),
+                "width {width}"
+            );
+            assert_eq!(payload[PREFIX_BYTES + SLOT_BYTES], width);
+            let packed = &payload[PREFIX_BYTES + FOR_SLOT_METADATA_BYTES..];
+            let absolute_slots = values
+                .iter()
+                .map(|value| IdentityParts::unpack(value.0).monotone_slot())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                packed,
+                bitpack::encode_for(&absolute_slots, base, width).unwrap(),
+                "width {width}"
+            );
+            for (row, value) in values.iter().enumerate() {
+                assert_eq!(
+                    packed_value_at(packed, row, width),
+                    Some(IdentityParts::unpack(value.0).monotone_slot() - base),
+                    "width {width}, row {row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn for_slots_preserve_eid_type_and_canonical_big_endian_order() {
+        let values = (0..512)
+            .map(|slot| eid(17, 29, slot * slot))
+            .collect::<Vec<_>>();
+        let column =
+            SortedIdentityColumn::try_new_with_for_slots(&values, limits(values.len(), 1)).unwrap();
+        assert_eq!(
+            column.as_column().representation(),
+            IdentityRepresentation::SharedPrefixFor
+        );
+        assert_eq!(column.iter().collect::<Vec<_>>(), values);
+        assert!(
+            (0..column.len())
+                .map(|row| column.as_column().canonical_key_at(row).unwrap())
+                .collect::<Vec<_>>()
+                .windows(2)
+                .all(|pair| pair[0] <= pair[1])
+        );
+        assert_eq!(column.get(values.len()), None);
+    }
+
+    #[test]
+    fn seeded_for_slots_match_slice_lower_bound_across_many_prefixes() {
+        let prefixes = (0_u64..32)
+            .map(|prefix| (prefix.wrapping_mul(0x9e37_79b9), prefix as u32 * 17))
+            .collect::<Vec<_>>();
+        let mut state = 0xa076_1d64_78bd_642f_u64;
+        let mut values = Vec::new();
+        for row in 0..4_096 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let (epoch, partition) = prefixes[row % prefixes.len()];
+            values.push(vid(epoch, partition, state & MAX_SLOT));
+        }
+        values.sort_unstable();
+
+        let column = SortedIdentityColumn::try_new_with_for_slots(
+            &values,
+            IdentityColumnLimits::new(values.len(), prefixes.len(), values.len() * RAW_ID_BYTES),
+        )
+        .unwrap();
+        assert_eq!(
+            column.as_column().representation(),
+            IdentityRepresentation::SharedPrefixFor
+        );
+        assert_eq!(column.iter().collect::<Vec<_>>(), values);
+        assert!(column.as_column().encoded_payload_len() < values.len() * RAW_ID_BYTES);
+
+        for probe_index in 0..2_048 {
+            state = state
+                .wrapping_mul(2_862_933_555_777_941_757)
+                .wrapping_add(3_037_000_493);
+            let (epoch, partition) = prefixes[probe_index % prefixes.len()];
+            let probe = vid(epoch, partition, state & MAX_SLOT);
+            assert_eq!(
+                column.lower_bound(probe),
+                values.partition_point(|value| *value < probe),
+                "probe {probe_index}"
+            );
+        }
+    }
+
+    #[test]
+    fn for_slot_chooser_is_explicit_and_degrades_to_raw_when_it_loses() {
+        let compact = (0..256).map(|slot| vid(3, 5, slot)).collect::<Vec<_>>();
+        let fixed = SortedIdentityColumn::try_new(&compact, limits(compact.len(), 1)).unwrap();
+        assert_eq!(
+            fixed.as_column().representation(),
+            IdentityRepresentation::SharedPrefixFixed
+        );
+        let for_slots =
+            SortedIdentityColumn::try_new_with_for_slots(&compact, limits(compact.len(), 1))
+                .unwrap();
+        assert_eq!(
+            for_slots.as_column().representation(),
+            IdentityRepresentation::SharedPrefixFor
+        );
+        assert_eq!(for_slots.as_column().encoded_payload_len(), 274);
+
+        let fixed_for_tie = [vid(3, 5, 0), vid(3, 5, 1 << 16)];
+        let tied = SortedIdentityColumn::try_new_with_for_slots(
+            &fixed_for_tie,
+            limits(fixed_for_tie.len(), 1),
+        )
+        .unwrap();
+        assert_eq!(
+            tied.as_column().representation(),
+            IdentityRepresentation::SharedPrefixFixed
+        );
+        assert_eq!(tied.as_column().encoded_payload_len(), 23);
+
+        let mut state = 0xe703_7ed1_a0b4_28db_u64;
+        let diverse = (0..256)
+            .map(|prefix| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                vid(prefix, prefix as u32, state & MAX_SLOT)
+            })
+            .collect::<Vec<_>>();
+        let raw = SortedIdentityColumn::try_new_with_for_slots(
+            &diverse,
+            limits(diverse.len(), diverse.len()),
+        )
+        .unwrap();
+        assert_eq!(
+            raw.as_column().representation(),
+            IdentityRepresentation::Raw128
+        );
+        assert_eq!(
+            raw.as_column().encoded_payload_len(),
+            diverse.len() * RAW_ID_BYTES
+        );
+        assert_eq!(raw.iter().collect::<Vec<_>>(), diverse);
+
+        let prefix_disabled =
+            SortedIdentityColumn::try_new_with_for_slots(&compact, limits(compact.len(), 0))
+                .unwrap();
+        assert_eq!(
+            prefix_disabled.as_column().representation(),
+            IdentityRepresentation::Raw128
+        );
+    }
+
+    #[test]
+    fn for_slot_limits_and_order_fail_before_publication() {
+        let values = (0..256).map(|slot| vid(3, 5, slot)).collect::<Vec<_>>();
+        assert_eq!(
+            SortedIdentityColumn::try_new_with_for_slots(
+                &values,
+                IdentityColumnLimits::new(values.len(), 1, 273),
+            ),
+            Err(IdentityColumnError::PayloadLimitExceeded {
+                representation: IdentityRepresentation::SharedPrefixFor,
+                required: 274,
+                limit: 273,
+            })
+        );
+        assert_eq!(
+            SortedIdentityColumn::try_new_with_for_slots(
+                &values,
+                IdentityColumnLimits::new(values.len(), 1, 17),
+            ),
+            Err(IdentityColumnError::NoRepresentationFits {
+                raw_required: values.len() * RAW_ID_BYTES,
+                minimum_shared_required: PREFIX_BYTES + FOR_SLOT_METADATA_BYTES,
+                limit: 17,
+            })
+        );
+
+        let unsorted = [vid(1, 0, 2), vid(1, 0, 1)];
+        assert_eq!(
+            SortedIdentityColumn::try_new_with_for_slots(&unsorted, limits(1, 1)),
+            Err(IdentityColumnError::RowLimitExceeded { rows: 2, limit: 1 })
+        );
+        assert!(matches!(
+            SortedIdentityColumn::try_new_with_for_slots(&unsorted, limits(2, 1)),
+            Err(IdentityColumnError::NotSorted { index: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn packed_slot_random_access_rejects_out_of_range_or_malformed_storage() {
+        let zero_width = ForSlots {
+            base: 9,
+            width: 0,
+            row_count: 1,
+            packed_deltas: Vec::new(),
+        };
+        assert_eq!(zero_width.get(0), Some(9));
+        assert_eq!(zero_width.get(1), None);
+
+        assert_eq!(packed_value_at(&[], 0, 0), Some(0));
+        assert_eq!(packed_value_at(&[], 0, SLOT_BITS as u8 + 1), None);
+        assert_eq!(packed_value_at(&[], 0, 1), None);
+        assert_eq!(packed_value_at(&[0xff], 8, 1), None);
+        assert_eq!(packed_value_at(&[0b1010_0101], 0, 4), Some(5));
+        assert_eq!(packed_value_at(&[0b1010_0101], 1, 4), Some(10));
+
+        let beyond_slot_domain = ForSlots {
+            base: MAX_SLOT,
+            width: 1,
+            row_count: 1,
+            packed_deltas: vec![1],
+        };
+        assert_eq!(beyond_slot_domain.get(0), None);
     }
 
     #[test]
