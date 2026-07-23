@@ -1,0 +1,9 @@
+[package]
+name = "fgdb-collections"
+version = "0.0.1"
+edition = "2024"
+description = "Deterministic in-memory collection kernels for FrankenGraphDB."
+publish = false
+
+[lints]
+workspace = true
