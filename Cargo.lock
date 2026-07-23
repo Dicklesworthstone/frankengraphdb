@@ -494,6 +494,16 @@ name = "fgdb-bigint"
 version = "0.0.1"
 
 [[package]]
+name = "fgdb-calibrate"
+version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "fgdb-claim",
+ "fgdb-evidence",
+ "fgdb-types",
+]
+
+[[package]]
 name = "fgdb-claim"
 version = "0.0.1"
 
