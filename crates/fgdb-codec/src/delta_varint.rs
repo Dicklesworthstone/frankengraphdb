@@ -379,6 +379,46 @@ mod tests {
         }
     }
 
+    fn reference_accepts(input: &[u8], count: usize) -> Option<Vec<u64>> {
+        let mut values = Vec::new();
+        let mut cursor = 0_usize;
+        let mut previous: Option<u64> = None;
+
+        for _ in 0..count {
+            let component_start = cursor;
+            let mut component = 0_u64;
+            let mut shift = 0_u32;
+
+            loop {
+                let byte = *input.get(cursor)?;
+                let component_index = cursor - component_start;
+                let payload = byte & 0x7f;
+                if component_index == 9 && (payload > 1 || byte & 0x80 != 0) {
+                    return None;
+                }
+                if component_index >= 10 {
+                    return None;
+                }
+
+                component |= u64::from(payload) << shift;
+                cursor += 1;
+                if byte & 0x80 == 0 {
+                    if component_index != 0 && payload == 0 {
+                        return None;
+                    }
+                    break;
+                }
+                shift += 7;
+            }
+
+            let current = previous.map_or(Some(component), |value| value.checked_add(component))?;
+            values.push(current);
+            previous = Some(current);
+        }
+
+        (cursor == input.len()).then_some(values)
+    }
+
     #[test]
     fn canonical_byte_vectors_are_stable() {
         let cases: &[(&[u64], &[u8])] = &[
@@ -557,6 +597,73 @@ mod tests {
                 cause: DeltaVarintDecodeCause::Varint(VarintDecodeError::Truncated { consumed: 1 }),
             })
         );
+    }
+
+    #[test]
+    fn exhaustive_short_byte_streams_match_reference_and_preserve_typed_bounds() {
+        for input_len in 0..=2_usize {
+            let case_count = 1_usize << (input_len * 8);
+            for packed in 0..case_count {
+                let bytes = packed.to_le_bytes();
+                let input = &bytes[..input_len];
+
+                for count in 0..=3_usize {
+                    let expected = reference_accepts(input, count);
+                    let actual = decode(input, count, EntryLimit::new(count));
+                    match expected {
+                        Some(expected) => {
+                            assert_eq!(
+                                actual.as_ref(),
+                                Ok(&expected),
+                                "input={input:02x?}, count={count}"
+                            );
+                            let Ok(actual) = actual else {
+                                continue;
+                            };
+                            assert_eq!(
+                                encode(&actual).as_deref(),
+                                Ok(input),
+                                "accepted input must be the unique canonical encoding"
+                            );
+                        }
+                        None => {
+                            assert!(
+                                matches!(&actual, Err(DeltaVarintDecodeError::Value { .. })),
+                                "bounded malformed input returned non-value error: \
+                                 input={input:02x?}, count={count}, actual={actual:?}"
+                            );
+                            let Err(DeltaVarintDecodeError::Value {
+                                value_index,
+                                byte_offset,
+                                ..
+                            }) = actual
+                            else {
+                                continue;
+                            };
+                            assert!(
+                                value_index <= count,
+                                "input={input:02x?}, count={count}, value_index={value_index}"
+                            );
+                            assert!(
+                                byte_offset <= input.len(),
+                                "input={input:02x?}, count={count}, byte_offset={byte_offset}"
+                            );
+                        }
+                    }
+
+                    if count != 0 {
+                        assert_eq!(
+                            decode(input, count, EntryLimit::new(count - 1)),
+                            Err(DeltaVarintDecodeError::EntryLimitExceeded {
+                                count,
+                                limit: count - 1,
+                            }),
+                            "entry bound must win for input={input:02x?}, count={count}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
