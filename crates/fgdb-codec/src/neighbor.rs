@@ -1362,6 +1362,7 @@ where
 fn sequence_intersection_cardinality<L: SortedNeighbors, R: SortedNeighbors>(
     left: &L,
     right: &R,
+    limit: EntryLimit,
 ) -> Result<usize, NeighborError> {
     let mut cardinality = 0_usize;
     visit_sequence_intersection(left, right, |_| {
@@ -1370,6 +1371,11 @@ fn sequence_intersection_cardinality<L: SortedNeighbors, R: SortedNeighbors>(
             .ok_or(NeighborError::SizeOverflow {
                 calculation: SizeCalculation::IntersectionCardinality,
             })?;
+        if cardinality > limit.max_entries() {
+            return Err(NeighborError::IntersectionLimitExceeded {
+                limit: limit.max_entries(),
+            });
+        }
         Ok(())
     })?;
     Ok(cardinality)
@@ -1380,7 +1386,7 @@ fn intersect_sequences<L: SortedNeighbors, R: SortedNeighbors>(
     right: &R,
     limit: EntryLimit,
 ) -> Result<Vec<u64>, NeighborError> {
-    let cardinality = sequence_intersection_cardinality(left, right)?;
+    let cardinality = sequence_intersection_cardinality(left, right, limit)?;
     let mut output = intersection_output_exact(cardinality, limit)?;
     visit_sequence_intersection(left, right, |value| {
         output.push(value);
@@ -1393,11 +1399,22 @@ fn intersect_sequences<L: SortedNeighbors, R: SortedNeighbors>(
 fn dense_intersection_cardinality(
     left: &DenseIntervals,
     right: &DenseIntervals,
+    limit: EntryLimit,
+) -> Result<usize, NeighborError> {
+    dense_intersection_cardinality_with(left, right, limit, || {})
+}
+
+fn dense_intersection_cardinality_with(
+    left: &DenseIntervals,
+    right: &DenseIntervals,
+    limit: EntryLimit,
+    mut inspect_pair: impl FnMut(),
 ) -> Result<usize, NeighborError> {
     let mut cardinality = 0_usize;
     let mut left_index = 0_usize;
     let mut right_index = 0_usize;
     while left_index < left.intervals.len() && right_index < right.intervals.len() {
+        inspect_pair();
         let left_interval = left.intervals[left_index];
         let right_interval = right.intervals[right_index];
         let overlap_start = cmp::max(left_interval.start, right_interval.start);
@@ -1416,6 +1433,11 @@ fn dense_intersection_cardinality(
                     .ok_or(NeighborError::SizeOverflow {
                         calculation: SizeCalculation::IntersectionCardinality,
                     })?;
+            if cardinality > limit.max_entries() {
+                return Err(NeighborError::IntersectionLimitExceeded {
+                    limit: limit.max_entries(),
+                });
+            }
         }
 
         match left_interval.end.cmp(&right_interval.end) {
@@ -1435,7 +1457,7 @@ fn intersect_dense_intervals(
     right: &DenseIntervals,
     limit: EntryLimit,
 ) -> Result<Vec<u64>, NeighborError> {
-    let cardinality = dense_intersection_cardinality(left, right)?;
+    let cardinality = dense_intersection_cardinality(left, right, limit)?;
     let mut output = intersection_output_exact(cardinality, limit)?;
     let mut left_index = 0_usize;
     let mut right_index = 0_usize;
@@ -1481,6 +1503,27 @@ fn intersect_dense_intervals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CountingSequence<'a> {
+        values: &'a [u64],
+        selects: core::cell::Cell<usize>,
+        codec: NeighborCodec,
+    }
+
+    impl SortedNeighbors for CountingSequence<'_> {
+        fn sequence_len(&self) -> usize {
+            self.values.len()
+        }
+
+        fn sequence_codec(&self) -> NeighborCodec {
+            self.codec
+        }
+
+        fn sequence_select(&self, index: usize) -> Option<u64> {
+            self.selects.set(self.selects.get() + 1);
+            self.values.get(index).copied()
+        }
+    }
 
     fn encodings(values: &[u64]) -> [EncodedNeighbors; 3] {
         let limit = EntryLimit::new(values.len());
@@ -1895,7 +1938,7 @@ mod tests {
             EliasFanoNeighbors::try_new(&right_values, EntryLimit::new(right_values.len()))
                 .unwrap();
         assert_eq!(
-            sequence_intersection_cardinality(&left_stream, &right_elias),
+            sequence_intersection_cardinality(&left_stream, &right_elias, EntryLimit::new(0)),
             Ok(0)
         );
         let generic = intersect_sequences(&left_stream, &right_elias, EntryLimit::new(0)).unwrap();
@@ -1907,12 +1950,58 @@ mod tests {
         let right_dense =
             DenseIntervals::try_new(&right_values, EntryLimit::new(right_values.len())).unwrap();
         assert_eq!(
-            dense_intersection_cardinality(&left_dense, &right_dense),
+            dense_intersection_cardinality(&left_dense, &right_dense, EntryLimit::new(0)),
             Ok(0)
         );
         let dense =
             intersect_dense_intervals(&left_dense, &right_dense, EntryLimit::new(0)).unwrap();
         assert!(dense.is_empty());
         assert_eq!(dense.capacity(), 0);
+    }
+
+    #[test]
+    fn zero_limit_stops_cardinality_work_after_first_identical_match() {
+        let values: Vec<u64> = (0..100_000).map(|value| value * 2).collect();
+        let counted_left = CountingSequence {
+            values: &values,
+            selects: core::cell::Cell::new(0),
+            codec: NeighborCodec::StreamVByte,
+        };
+        let counted_right = CountingSequence {
+            values: &values,
+            selects: core::cell::Cell::new(0),
+            codec: NeighborCodec::EliasFano,
+        };
+        assert_eq!(
+            sequence_intersection_cardinality(&counted_left, &counted_right, EntryLimit::new(0)),
+            Err(NeighborError::IntersectionLimitExceeded { limit: 0 })
+        );
+        assert_eq!(counted_left.selects.get(), 1);
+        assert_eq!(counted_right.selects.get(), 1);
+
+        let stream = StreamVByteNeighbors::try_new(&values, EntryLimit::new(values.len())).unwrap();
+        let elias = EliasFanoNeighbors::try_new(&values, EntryLimit::new(values.len())).unwrap();
+        assert_eq!(
+            intersect_sequences(&stream, &elias, EntryLimit::new(0)),
+            Err(NeighborError::IntersectionLimitExceeded { limit: 0 })
+        );
+
+        let dense_left = DenseIntervals::try_new(&values, EntryLimit::new(values.len())).unwrap();
+        let dense_right = DenseIntervals::try_new(&values, EntryLimit::new(values.len())).unwrap();
+        let mut inspected_pairs = 0_usize;
+        assert_eq!(
+            dense_intersection_cardinality_with(
+                &dense_left,
+                &dense_right,
+                EntryLimit::new(0),
+                || inspected_pairs += 1,
+            ),
+            Err(NeighborError::IntersectionLimitExceeded { limit: 0 })
+        );
+        assert_eq!(inspected_pairs, 1);
+        assert_eq!(
+            intersect_dense_intervals(&dense_left, &dense_right, EntryLimit::new(0)),
+            Err(NeighborError::IntersectionLimitExceeded { limit: 0 })
+        );
     }
 }
