@@ -90,6 +90,10 @@ pub enum SketchFamily {
     Distinct = 5,
     /// Ordered-value zone map.
     ZoneMap = 6,
+    /// Sampled two-edge path correlation table.
+    PathCorrelation = 7,
+    /// Exact label and edge-type counts.
+    LabelCounts = 8,
 }
 
 impl SketchFamily {
@@ -101,6 +105,8 @@ impl SketchFamily {
             4 => Ok(Self::BottomK),
             5 => Ok(Self::Distinct),
             6 => Ok(Self::ZoneMap),
+            7 => Ok(Self::PathCorrelation),
+            8 => Ok(Self::LabelCounts),
             _ => Err(SketchMaintenanceCodecError::UnknownSketchFamily { tag }),
         }
     }
