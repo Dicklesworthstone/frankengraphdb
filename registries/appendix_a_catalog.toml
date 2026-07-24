@@ -35195,3 +35195,651 @@ source_locations = ["a01:1404"]
 resolution = "maps-to-source"
 resolved_source_keys = ["top|RemoteRetentionReleaseRequestCertificate"]
 rationale = "a01:1404: the leading `SameGroupCertificateHeader` item is a named closed sub-schema (compact-phrase law, a01:1412) embedded in the request-certificate body; it belongs to the `top|RemoteRetentionReleaseRequestCertificate` candidate."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:ba8e5e4bfced370e72e8c5f2de3110ca3176fc081dcbdf0ebbf5070c8109f914"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|AppliedAbortRef|AppliedAbortRef.LocalControl.logical_command_seq|6772e0b779a88c182d3c72658ff39117288f1e21888b6d645f18cbfaf31f4f07|1|020316d94da326c610f0b897f752c5ac34e9bff4c12f6680f768d43cca180259|shorthand field has no exact type"
+source_locations = ["a01:1408"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|AppliedAbortRef|AppliedAbortRef.LocalControl.logical_command_seq|logical_command_seq"]
+rationale = "a01:1408: shorthand member `logical_command_seq` at census path `AppliedAbortRef.LocalControl.logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedAbortRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:da6796d82ec8f0ad13cb7e98a3dd5027e081d6166fb25010f34fc1d3f942face"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|AppliedAbortRef|AppliedAbortRef.LocalTxn.logical_command_seq|6772e0b779a88c182d3c72658ff39117288f1e21888b6d645f18cbfaf31f4f07|1|28934fb3533f5bb21a32c45c48cfce245328d1c6558f4f857e28975fc21f3c5c|shorthand field has no exact type"
+source_locations = ["a01:1408"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|AppliedAbortRef|AppliedAbortRef.LocalTxn.logical_command_seq|logical_command_seq"]
+rationale = "a01:1408: shorthand member `logical_command_seq` at census path `AppliedAbortRef.LocalTxn.logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedAbortRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:cd5263e4e5a623d18abf05fd873322bd2aed0ecf4101650b392c8ac0dfe83342"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|AppliedAbortRef|AppliedAbortRef.MetaControl.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|a435b6b799e25900fad7061a75eb6f72e70c9ad0ece40effecd5ed88c14175fe|shorthand field has no exact type"
+source_locations = ["a01:1408"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|AppliedAbortRef|AppliedAbortRef.MetaControl.global_logical_command_seq|global_logical_command_seq"]
+rationale = "a01:1408: shorthand member `global_logical_command_seq` at census path `AppliedAbortRef.MetaControl.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedAbortRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:86c7e179248aaf7991f43a1f3327c09353cf813cc01b8b33a36e4fa7bc70c63d"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|AppliedAbortRef|AppliedAbortRef.MetaTxn.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|b6e63e586168ac30d40e23ccf6af531fefe10ee078b9496e0ddc5f30c3b33f11|shorthand field has no exact type"
+source_locations = ["a01:1408"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|AppliedAbortRef|AppliedAbortRef.MetaTxn.global_logical_command_seq|global_logical_command_seq"]
+rationale = "a01:1408: shorthand member `global_logical_command_seq` at census path `AppliedAbortRef.MetaTxn.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedAbortRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:5a6fd0f3b82c7f0e25cc7f2e54a6979556e86845159ade0fc5db84f20a68ce39"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|AppliedControlRef|AppliedControlRef.Local.logical_command_seq|6772e0b779a88c182d3c72658ff39117288f1e21888b6d645f18cbfaf31f4f07|1|e45f2177fcf44b32e9a17193ed8aabe669bb9347daeb8ebf57e3dc4764f21d4f|shorthand field has no exact type"
+source_locations = ["a01:1408"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|AppliedControlRef|AppliedControlRef.Local.logical_command_seq|logical_command_seq"]
+rationale = "a01:1408: shorthand member `logical_command_seq` at census path `AppliedControlRef.Local.logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedControlRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:2d3a238643d53101c5c0b1b76309f7842bac2fde143198374ce80f7a28460922"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|AppliedControlRef|AppliedControlRef.Meta.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|aeac36594abe2c36dd398f6201e669b186e27be64300033893a5d0f18c6b5f88|shorthand field has no exact type"
+source_locations = ["a01:1408"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|AppliedControlRef|AppliedControlRef.Meta.global_logical_command_seq|global_logical_command_seq"]
+rationale = "a01:1408: shorthand member `global_logical_command_seq` at census path `AppliedControlRef.Meta.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedControlRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:4cd9ff504a8f45737e9059b60893933afd7d86625b7e0c02f1f076120253317b"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|AuditCandidateRef|AuditCandidateRef.Local.blocked_after_logical_command_seq|eb3a91041e06c8ea6319585162eaa84725fc15980da9200e158bf1d836e1a29b|1|e7358e9b2beddda6abf89fee4da29c07f3f46809579c6c1424cb72fc058646a3|shorthand field has no exact type"
+source_locations = ["a01:1408"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|AuditCandidateRef|AuditCandidateRef.Local.blocked_after_logical_command_seq|blocked_after_logical_command_seq"]
+rationale = "a01:1408: shorthand member `blocked_after_logical_command_seq` at census path `AuditCandidateRef.Local.blocked_after_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AuditCandidateRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:000a7ee23e3de7a2a40e0eeaed2ea1b2597bf1afc47a0fa82604885626570e48"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|AuditCandidateRef|AuditCandidateRef.Meta.blocked_after_global_logical_command_seq|21d0e2c97da51ac81a638f3cefee1f55ac8b34162861e2f77161732dfbe8a3da|1|ade225fa1453a73fd4a109654d8a9b203d45e6674cd67c6dfdbfcc88b5826c23|shorthand field has no exact type"
+source_locations = ["a01:1408"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|AuditCandidateRef|AuditCandidateRef.Meta.blocked_after_global_logical_command_seq|blocked_after_global_logical_command_seq"]
+rationale = "a01:1408: shorthand member `blocked_after_global_logical_command_seq` at census path `AuditCandidateRef.Meta.blocked_after_global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AuditCandidateRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:3f8943e11fe38023572621016d3bd2736d76845c6fa86ca01ab11c963ac3d295"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|AuthorityAppliedRef|AuthorityAppliedRef.Local.logical_command_seq|6772e0b779a88c182d3c72658ff39117288f1e21888b6d645f18cbfaf31f4f07|1|1dc8eb7afed586eafdf11f9a589affc8f2eef276b63cc8498fe4365d7d63921e|shorthand field has no exact type"
+source_locations = ["a01:1404"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|AuthorityAppliedRef|AuthorityAppliedRef.Local.logical_command_seq|logical_command_seq"]
+rationale = "a01:1404: shorthand member `logical_command_seq` at census path `AuthorityAppliedRef.Local.logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AuthorityAppliedRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:cd8a157343d76e480a778f55bb074c26f2b450fe8d1a019afcb01160605d0736"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|AuthorityAppliedRef|AuthorityAppliedRef.Meta.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|c3480c2d81d0422a6ec095c619f951e715c2452ab223c567bac96566a5a8c8aa|shorthand field has no exact type"
+source_locations = ["a01:1404"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|AuthorityAppliedRef|AuthorityAppliedRef.Meta.global_logical_command_seq|global_logical_command_seq"]
+rationale = "a01:1404: shorthand member `global_logical_command_seq` at census path `AuthorityAppliedRef.Meta.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AuthorityAppliedRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:645cd3190c29d6877e5b52fbd9a7eb2d12617be3015867f30ebf73aff4d632f6"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|AuthorityAppliedRef|AuthorityAppliedRef.Shard.shard_raft_index|a27fa693b624fba3783550d90e89ab5aefe7ea90b62eb261b9121ba0e77873bb|1|76400cead191ecb9b721044ced97ee7880c32ff12f233ae14e615c9f1562b0a8|shorthand field has no exact type"
+source_locations = ["a01:1404"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|AuthorityAppliedRef|AuthorityAppliedRef.Shard.shard_raft_index|shard_raft_index"]
+rationale = "a01:1404: shorthand member `shard_raft_index` at census path `AuthorityAppliedRef.Shard.shard_raft_index` carries no inline exact type; the span is committed byte-exactly by the exact AuthorityAppliedRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:4798d0e4d5005fcd185c72d5e213ed7330f55d1af1d633542b7eab63fe45cf84"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CertifiedRemoteStrongRef|CertifiedRemoteStrongRef<T>.target_closure_inventory_digest|e9f4ca6621f4e36a6c7058504702c6ef874721b67a2a9208b46097af61cc285a|1|fb1eb2de82450003407412e48333584d6f8cc08dcafcda43f4db07459d0843af|shorthand field has no exact type"
+source_locations = ["a01:1402"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|CertifiedRemoteStrongRef<T>|CertifiedRemoteStrongRef<T>.target_closure_inventory_digest|target_closure_inventory_digest"]
+rationale = "a01:1402: shorthand member `target_closure_inventory_digest` at census path `CertifiedRemoteStrongRef<T>.target_closure_inventory_digest` carries no inline exact type; the span is committed byte-exactly by the exact CertifiedRemoteStrongRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:8d3b56aa3a767ea542872bc1ba3fd0ab477a7ed2ca662c337ee1bf8949583e7d"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalCommandRef|ConditionalCommandRef.command_ref|9b2ddb763a7736180dd65c3329ab8a347e9b3bee70006fb913700f8103032b71|1|a132328a25427bbdcde954a714f2d5a843cf5c92931bf4bbac824f5ce8d195bd|shorthand field has no exact type"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalCommandRef|ConditionalCommandRef.command_ref|command_ref"]
+rationale = "a01:1394: shorthand member `command_ref` at census path `ConditionalCommandRef.command_ref` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:35bc46ce1fd0d6c8b7488a044ef386504bc03fbd5d1ec2b770e86ab030a492d5"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalCoordinateRef|ConditionalCoordinateRef.branch|f38c764c8aa00b6578f4254a4dc6d9b50f88fa926e270ea7859bd1b707cd8662|1|1e5045ee3f3d13cdfac05bd4ccd2bddf5bfd776336d72ea79fc4ca5d60a7900c|shorthand field has no exact type"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalCoordinateRef|ConditionalCoordinateRef.branch|branch"]
+rationale = "a01:1394: shorthand member `branch` at census path `ConditionalCoordinateRef.branch` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalCoordinateRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:8bb17f7c3ce721f479db1a83c8e7dda855ec98c2eb641e4e187851f8c7c82723"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalCoordinateRef|ConditionalCoordinateRef.graph|eef93e1d14482804277fca0172464032d1a4fdbcc338524059fa1e861454ad4d|1|eb7d455bcbaf58f754c886d524cc8c717e267921b3e96e794c34600989d7db90|shorthand field has no exact type"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalCoordinateRef|ConditionalCoordinateRef.graph|graph"]
+rationale = "a01:1394: shorthand member `graph` at census path `ConditionalCoordinateRef.graph` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalCoordinateRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:71b82ee0c32114b11f3406e639c01a44934215169bc01a02acd1b77d779ffe60"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalCoordinateRef|ConditionalCoordinateRef.oid|68c55cdc265db5ebdce885c914c4774fedeb3d824fc79837cad12cf1f10ccff7|1|ea03546b1b30d85877d6cd7fd0310b7d76fea91a96aa3e1efdc53ee9a10ed340|shorthand field has no exact type"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalCoordinateRef|ConditionalCoordinateRef.oid|oid"]
+rationale = "a01:1394: shorthand member `oid` at census path `ConditionalCoordinateRef.oid` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalCoordinateRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:ce9bbf77be4d878c886864f08776365de232040b4d71c98b3322860c517e225c"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalGlobalCommandRef|ConditionalGlobalCommandRef.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|a9d7f5f81bf89596e7cc49849c1741fb7a4383595590a0f8aa724f9346d69a16|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalGlobalCommandRef|ConditionalGlobalCommandRef.global_logical_command_seq|global_logical_command_seq"]
+rationale = "a01:1406: shorthand member `global_logical_command_seq` at census path `ConditionalGlobalCommandRef.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalGlobalCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:91b4ecfbd59471f33fe1b99f790946e8559c552ac794ffb308e1dd109479fff3"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalGlobalCommandRef|ConditionalGlobalCommandRef.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|42d2719c29923363b9c82618a46102016ab373c389e80057d0ded691ef2165b0|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalGlobalCommandRef|ConditionalGlobalCommandRef.record_oid|record_oid"]
+rationale = "a01:1406: shorthand member `record_oid` at census path `ConditionalGlobalCommandRef.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalGlobalCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:fef8d53fe305b0feaba6773e11a19e89f6adbe510b9f58cb35907fed8fdda0ce"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalGlobalTxnInputRef|ConditionalGlobalTxnInputRef.assigned_global_logical_command_seq|a90c74bd92f9b5a2c59d35690153d7e7c4c3dd44d58e40532083e4871f436cdd|1|52b1140a2dbc8ecb37ffff58f0a0a0a38fe249b26f3bf13e919c1dcf6a8a32ac|shorthand field has no exact type"
+source_locations = ["a01:1406", "a11:1962"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalGlobalTxnInputRef|ConditionalGlobalTxnInputRef.assigned_global_logical_command_seq|assigned_global_logical_command_seq"]
+rationale = "a01:1406, a11:1962: shorthand member `assigned_global_logical_command_seq` at census path `ConditionalGlobalTxnInputRef.assigned_global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalGlobalTxnInputRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:56ab0b78574dcc4cc8ada1e27d64228256633d327386f25f3e31c79b082b93d3"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalGlobalTxnInputRef|ConditionalGlobalTxnInputRef.command_oid|4de54ef750635a0f9ebc9384f55c1f1b8e9300e65229bd3df6de781c6a1ce55f|1|db5267d46771c819d5d4a720d074a536fc5e3d9cc8cddf5cd34e8ed62fe919a5|shorthand field has no exact type"
+source_locations = ["a01:1406", "a11:1962"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalGlobalTxnInputRef|ConditionalGlobalTxnInputRef.command_oid|command_oid"]
+rationale = "a01:1406, a11:1962: shorthand member `command_oid` at census path `ConditionalGlobalTxnInputRef.command_oid` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalGlobalTxnInputRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:c9eacf0a0499722ac0abbf874b419638446536d586ed009714f01c2fe685713e"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalMarkerRef|ConditionalMarkerRef.marker_ref|8bd7f0937c09a3668e61f28badb35e6deb398cd9a5a4f9665f8015146106a3a0|1|a272df58881c324a3bef40b3bd63b15d8691ab09dba39f7e7e0eac85bb9ce3e0|shorthand field has no exact type"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalMarkerRef|ConditionalMarkerRef.marker_ref|marker_ref"]
+rationale = "a01:1394: shorthand member `marker_ref` at census path `ConditionalMarkerRef.marker_ref` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalMarkerRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:287525289d2fc48c53af7935b122ec99d01330bf6bc8e7acb3484a796c7b2dc1"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalShardCommandRef|ConditionalShardCommandRef.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|94074dd77fd021f951a4f00d7d1ce2f918f17bf62e465a71f84c5bd92a25064b|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalShardCommandRef|ConditionalShardCommandRef.record_oid|record_oid"]
+rationale = "a01:1406: shorthand member `record_oid` at census path `ConditionalShardCommandRef.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalShardCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:27f66e75e71751e7776eb0bf7f45d44cc30ae3153b29daccd9d65a3d1341a0df"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalShardCommandRef|ConditionalShardCommandRef.shard_id|b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0|1|c78dbe4d2d901dd6ce837744cfd507b9c9bc982ad496371310ce2bca90d145f0|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalShardCommandRef|ConditionalShardCommandRef.shard_id|shard_id"]
+rationale = "a01:1406: shorthand member `shard_id` at census path `ConditionalShardCommandRef.shard_id` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalShardCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:448fd4c780118dedd261ff04c0d3fdbb837394d31386becb8935f9bb5a7477f2"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConditionalShardCommandRef|ConditionalShardCommandRef.shard_raft_index|a27fa693b624fba3783550d90e89ab5aefe7ea90b62eb261b9121ba0e77873bb|1|368064c8af700831b0a48f4d438e1a1fe3b1cb69ffcc778a073290fabaa77479|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConditionalShardCommandRef|ConditionalShardCommandRef.shard_raft_index|shard_raft_index"]
+rationale = "a01:1406: shorthand member `shard_raft_index` at census path `ConditionalShardCommandRef.shard_raft_index` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalShardCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:51fde1eb845f5b657f68fc1295946c8f2077008b1f8310d772b449ee0959a974"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConsensusDomain|ConsensusDomain.cluster_incarnation|9d7c51a25eaf4da545c58407190cf355ea305487ea49cf6146f19f577bad1073|1|2ae0033d470b6c79d27264123e549a61dedf776ca0c61f5f80b5c422c10378ed|shorthand field has no exact type"
+source_locations = ["a01:1396"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConsensusDomain|ConsensusDomain.cluster_incarnation|cluster_incarnation"]
+rationale = "a01:1396: shorthand member `cluster_incarnation` at census path `ConsensusDomain.cluster_incarnation` carries no inline exact type; the span is committed byte-exactly by the exact ConsensusDomain wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:06e4b97e0d741edd0bb8d618d48df3daf7f39f7ff5f2b1aa0d2571b1cede5c2d"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConsensusDomain|ConsensusDomain.database_id|731e26be806308135ef676088749224ec417f251d99bb827ed4432e121e2f02b|1|062255e5fc291d68f45dac76138bc7e780c24dfd530db1316ae12302bb9a2710|shorthand field has no exact type"
+source_locations = ["a01:1396"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConsensusDomain|ConsensusDomain.database_id|database_id"]
+rationale = "a01:1396: shorthand member `database_id` at census path `ConsensusDomain.database_id` carries no inline exact type; the span is committed byte-exactly by the exact ConsensusDomain wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:bc4a928f57e4004abc66ef087f1484f9d14c2fa3ba3f740e52124e669b091bf2"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConsensusDomain|ConsensusDomain.database_security_namespace_id|27c2c87b407320770f92abe612b2dbea8c1711a0f5fbb2d2464ade311812a4b7|1|3f59203559c5ade5cb13c917378768436c361c17b2bd65f9dab37be776c60448|shorthand field has no exact type"
+source_locations = ["a01:1396"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConsensusDomain|ConsensusDomain.database_security_namespace_id|database_security_namespace_id"]
+rationale = "a01:1396: shorthand member `database_security_namespace_id` at census path `ConsensusDomain.database_security_namespace_id` carries no inline exact type; the span is committed byte-exactly by the exact ConsensusDomain wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:e03210167c369f94d93dc4c8253d36d29ac78011864a802f5843834bf284c4fb"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConsensusDomain|ConsensusDomain.group_id|abf8a60fbb818f7405d613d3760a68a8e794a415546761e42340661f7351f74b|1|aaf70e2f4fcf7470b24711c2607553342fbdad07f6db37d64c8b66540b71d196|shorthand field has no exact type"
+source_locations = ["a01:1396"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConsensusDomain|ConsensusDomain.group_id|group_id"]
+rationale = "a01:1396: shorthand member `group_id` at census path `ConsensusDomain.group_id` carries no inline exact type; the span is committed byte-exactly by the exact ConsensusDomain wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:afbc344d70d6cc6795f928f6378d234d4c01c0738c49b479437ecd307b85b863"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ConsensusDomain|ConsensusDomain.group_role.Shard.shard_id|b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0|1|cf674780f1d985fa5834a46425a25bbbb7ec14144b426419b56ffd5bc50e4651|shorthand field has no exact type"
+source_locations = ["a01:1396"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ConsensusDomain|ConsensusDomain.group_role.Shard.shard_id|shard_id"]
+rationale = "a01:1396: shorthand member `shard_id` at census path `ConsensusDomain.group_role.Shard.shard_id` carries no inline exact type; the span is committed byte-exactly by the exact ConsensusDomain wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:5d0a9654f53322e956d33010ca7df5afc44cb67dbde765dcef51425db02dac13"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.encoding_id|85d360220cc757431dd090a481da78fba2018975f0a2e5ea5fa5e161b7a16177|1|c7e57e032723c3f855ce48be060adea813e685683290a30ad36f3a7648869b0a|shorthand field has no exact type"
+source_locations = ["a01:1443", "a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.encoding_id|encoding_id"]
+rationale = "a01:1443, a02:1449: shorthand member `encoding_id` at census path `PlacementDescriptorWithoutId.encoding_id` carries no inline exact type; the span is committed byte-exactly by the exact PlacementDescriptorWithoutId wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:d24695012d4044e09c759f8614fa9a032db2cbec2fc3c93e77ab749ce5a608d8"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.failure_domain_policy_id|04709b2bb4927b600fac8deadfcf2eb5843fb528b15e1ad340a5a4439a9fc3ef|1|dc06ab84e3bce9c11070d01a52853ca7bca4f68cffeaf5d0a78c1aaceacf76ea|shorthand field has no exact type"
+source_locations = ["a01:1443"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.failure_domain_policy_id|failure_domain_policy_id"]
+rationale = "a01:1443: shorthand member `failure_domain_policy_id` at census path `PlacementDescriptorWithoutId.failure_domain_policy_id` carries no inline exact type; the span is committed byte-exactly by the exact PlacementDescriptorWithoutId wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:43d2f0e65a4dc39f329e611ac733251f6188cb5cc544e93beef46e135474beab"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.root_placement_epoch|e7a5dbd0ab1abef202352d60c1b4f5eca3f71b78f494476a4f54a55091c321f0|1|17de7b8f543ef7b2715baeaaf819e8ea35de5ae7fc3a81edecd16c549d972b6b|shorthand field has no exact type"
+source_locations = ["a01:1443"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.root_placement_epoch|root_placement_epoch"]
+rationale = "a01:1443: shorthand member `root_placement_epoch` at census path `PlacementDescriptorWithoutId.root_placement_epoch` carries no inline exact type; the span is committed byte-exactly by the exact PlacementDescriptorWithoutId wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:e1c52d6dcbd8885faf4eba1c8406864266ea081cd420b677c5467c4a97d9100b"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest|0d19b9043ba1e24e570c9ddb7f4952666ee2a7d62116d617b987fb4a75d0ac4f|1|b83c51729087fffa1fe3e3b3452234e78f5d92ec86b35d7df4fe1979b46f5fc5|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest|final_retirement_floor_digest"]
+rationale = "a01:1398: shorthand member `final_retirement_floor_digest` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:404a1f5ffca0b239e6d6304f019a320bfbb2f771e8d8f75075ea4aa41d31fbc6"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript|3a5b732b143e059fa75e5e80c97a6391ec5d5ba9b14e780d2b45b0d92e4f5c78|1|a6c99b864aa1ae5d26e3b7f26bd3c2c19c359c8ce07579d8919793f47ec4d476|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript|joint_transition_transcript"]
+rationale = "a01:1398: shorthand member `joint_transition_transcript` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:6150ede1e1b9372211d8fcedffd089371e78f6ef8bdf839499417b25f27d9e22"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures|274b2dfe7211b3a80c9d1a48ae7215b3a4e08741d73544a3c68555075e759568|1|15edeb75aa867f73d56562652894b4b13d03cc4fa747ee6ea6d470f97905be0c|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures|new_configuration_quorum_signatures"]
+rationale = "a01:1398: shorthand member `new_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:af2b5edb93577dd590386a385295f80a7ae01d42de718097a430f50357d49612"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures|4d3d631c393e2608fc220dc9ccc5b46c2ccf2f5adeee9792c26fe42cdae2eff3|1|8826373f9b0b5f49b16452b1d2ea787a1624cda9faa348937d0e6cec7f3540d1|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures|old_configuration_quorum_signatures"]
+rationale = "a01:1398: shorthand member `old_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:299ee60ab1337573ea4994c60bdbe86a53c9be1ecf08fd2f189e0a4f025be75e"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest|0d19b9043ba1e24e570c9ddb7f4952666ee2a7d62116d617b987fb4a75d0ac4f|1|1b2384171b391a46d17735555abbd4c7d6734f3d2b3c0539a90069ea6782324a|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest|final_retirement_floor_digest"]
+rationale = "a01:1398: shorthand member `final_retirement_floor_digest` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:3543ce46e3d146757ff29ca8552c7c2c03766d34c11e9c4b2e70e47446a29da2"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript|3a5b732b143e059fa75e5e80c97a6391ec5d5ba9b14e780d2b45b0d92e4f5c78|1|3baab0cda94ea5af5cd9fd2d99923856924760ac9a5703f7d876d0404f122cb4|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript|joint_transition_transcript"]
+rationale = "a01:1398: shorthand member `joint_transition_transcript` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:9bac05f943c14519aa377b05808e57bfa117279607768581f79fb2720b221f99"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures|274b2dfe7211b3a80c9d1a48ae7215b3a4e08741d73544a3c68555075e759568|1|547c7a0fd6a457595fa224c7f5b6a20d8ca308b182fd6270ed8097129182b109|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures|new_configuration_quorum_signatures"]
+rationale = "a01:1398: shorthand member `new_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:08cbc807047e544cd6c1e2598630e187feb142c28fc295cc0a7696e8d36dc68f"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures|4d3d631c393e2608fc220dc9ccc5b46c2ccf2f5adeee9792c26fe42cdae2eff3|1|74220eeea6d3b639145b77c67549571b2ed637d340b8c74474f1f76b0d9db17e|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures|old_configuration_quorum_signatures"]
+rationale = "a01:1398: shorthand member `old_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:107590809bb6e12167b2f2dd3e8f10051a169c3a28357753e2ddaeb18d7deb20"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteObjectIdentity|RemoteObjectIdentity.canonical_digest|cb716809bc72c2ad62ef437f82f63bd9bafe47dacf9a8df9b303efdedaa22434|1|f497359ffb570c42d350b2e5ed98ed737eed86381e950dc84fa1cd9af98d9737|shorthand field has no exact type"
+source_locations = ["a01:1396"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteObjectIdentity|RemoteObjectIdentity.canonical_digest|canonical_digest"]
+rationale = "a01:1396: shorthand member `canonical_digest` at census path `RemoteObjectIdentity.canonical_digest` carries no inline exact type; the span is committed byte-exactly by the exact RemoteObjectIdentity wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:bd6a0a183874f88db3ea3ec0302152530c28df45a9f5dd4897784ea8a85ec3a4"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteObjectIdentity|RemoteObjectIdentity.object_kind|f79080c76579371982ec2dfc62593cfbe282dd0d9ec076e5638251fc9ce30909|1|d04c9ba70a928a52dec5b4ea457f6fd768aada2b4dc4ff009110b89fd8fbb6b9|shorthand field has no exact type"
+source_locations = ["a01:1396"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteObjectIdentity|RemoteObjectIdentity.object_kind|object_kind"]
+rationale = "a01:1396: shorthand member `object_kind` at census path `RemoteObjectIdentity.object_kind` carries no inline exact type; the span is committed byte-exactly by the exact RemoteObjectIdentity wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:b5662f79036ce591940334355f520642a72b0634d4a15befe4513b36e25d90ba"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteObjectIdentity|RemoteObjectIdentity.object_oid|48f28b7b97e516c375e4651abda6b4d059ae71b431f5c7c360b8416382ec0830|1|fcdf56ca4807125d4919d0849d9cbb4cf5b050fa8fad9acda6bbbd5ab7372a21|shorthand field has no exact type"
+source_locations = ["a01:1396"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteObjectIdentity|RemoteObjectIdentity.object_oid|object_oid"]
+rationale = "a01:1396: shorthand member `object_oid` at census path `RemoteObjectIdentity.object_oid` carries no inline exact type; the span is committed byte-exactly by the exact RemoteObjectIdentity wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:6047adc7965b7865e94cb7668b9a58beefe4bc5ccad991358a95c9be0bc29aab"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Meta.migration_nonce|2b49d522166d09d8de34067bca5548329dbf4485bfe4f55e1f898ccfb886ca6d|1|380da794623fa2dfc4970c85a7c3067446b22af883a5b006a7c580845b5f6127|shorthand field has no exact type"
+source_locations = ["a01:1390"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RoleTransitionActivationState|RoleTransitionActivationState.Meta.migration_nonce|migration_nonce"]
+rationale = "a01:1390: shorthand member `migration_nonce` at census path `RoleTransitionActivationState.Meta.migration_nonce` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:20a8a347b7c249c90e09deab30ed8ff464b44114e205bbef6f1852afb27419c5"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Meta.phase.Complete.seal_release_state|37b2b3c60ca176d712f9e8320059a0b33f0f391506e7684f64f71ea9bb161e3c|1|4d726a2e5d1b209a1fc23d05f7646b58bad370dcccf8e993c2785ee4bb0b98e3|shorthand field has no exact type"
+source_locations = ["a01:1390"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RoleTransitionActivationState|RoleTransitionActivationState.Meta.phase.Complete.seal_release_state|seal_release_state"]
+rationale = "a01:1390: shorthand member `seal_release_state` at census path `RoleTransitionActivationState.Meta.phase.Complete.seal_release_state` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:ae9bc8dd611d9feec022771782f885fbc37718ed23bab487b4189f9841d51822"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Meta.target_service_visibility_epoch|a2197f22ecc6ffa08da8cee13fd767dd6acbb65efad9a4e75b1e5796d68df04c|1|809e5a9011863b4811a832204015b4490ab210e4628cbc9a9927c8e51307851e|shorthand field has no exact type"
+source_locations = ["a01:1390"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RoleTransitionActivationState|RoleTransitionActivationState.Meta.target_service_visibility_epoch|target_service_visibility_epoch"]
+rationale = "a01:1390: shorthand member `target_service_visibility_epoch` at census path `RoleTransitionActivationState.Meta.target_service_visibility_epoch` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:6fa3a8b63ee9d48d3658e670f75400ea12f03518bd4fea540eda6f1d8dc62f94"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Shard.migration_nonce|2b49d522166d09d8de34067bca5548329dbf4485bfe4f55e1f898ccfb886ca6d|1|0b3edf990adbfed6d06979e1d6ad385deff9f3277d26963d49c17913e456b399|shorthand field has no exact type"
+source_locations = ["a01:1390"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RoleTransitionActivationState|RoleTransitionActivationState.Shard.migration_nonce|migration_nonce"]
+rationale = "a01:1390: shorthand member `migration_nonce` at census path `RoleTransitionActivationState.Shard.migration_nonce` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:530ab398113ef1b97858212d423b792e306d68ce291da23fdb3ae00831158d3a"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Shard.phase.Complete.seal_release_state|37b2b3c60ca176d712f9e8320059a0b33f0f391506e7684f64f71ea9bb161e3c|1|dc1a7c1492c3109347f66575756f3b75912b6c3cb046e8a7e9297211f28409ee|shorthand field has no exact type"
+source_locations = ["a01:1390"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RoleTransitionActivationState|RoleTransitionActivationState.Shard.phase.Complete.seal_release_state|seal_release_state"]
+rationale = "a01:1390: shorthand member `seal_release_state` at census path `RoleTransitionActivationState.Shard.phase.Complete.seal_release_state` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:0dbcee60eff18a6b83fbfca6710c56cef320a2b09b9eacdd495000f524007939"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Shard.shard_id|b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0|1|01e2ac2f4f732616d71c01cbab47af4595f9fdbe36b4b1561537fd26024edd71|shorthand field has no exact type"
+source_locations = ["a01:1390"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RoleTransitionActivationState|RoleTransitionActivationState.Shard.shard_id|shard_id"]
+rationale = "a01:1390: shorthand member `shard_id` at census path `RoleTransitionActivationState.Shard.shard_id` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:2b3f0d0dc9a723abcaf65c604e43b62aa250900a9806fc691b61ad743557b433"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Shard.target_service_visibility_epoch|a2197f22ecc6ffa08da8cee13fd767dd6acbb65efad9a4e75b1e5796d68df04c|1|cac11bc6b4c7baf91ebc39623cf8e63e2b0d3b36b4ee939334b7aa2c4a4df488|shorthand field has no exact type"
+source_locations = ["a01:1390"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RoleTransitionActivationState|RoleTransitionActivationState.Shard.target_service_visibility_epoch|target_service_visibility_epoch"]
+rationale = "a01:1390: shorthand member `target_service_visibility_epoch` at census path `RoleTransitionActivationState.Shard.target_service_visibility_epoch` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:cb5825c40682074cd88d59caa2f46d67c9b6115be7ebbe0208b97da0b45d74c9"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.ciphertext_digest|639e8bce8cd2107b20eb748abd7a4fa29f62ecd3752dab46977890694061e0f8|1|842aaaf6f38e22319299a7cdd6e722024a97dca6e218981ba15530401820482f|shorthand field has no exact type"
+source_locations = ["a01:1410"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.ciphertext_digest|ciphertext_digest"]
+rationale = "a01:1410: shorthand member `ciphertext_digest` at census path `StrongCiphertextRef<T>.ciphertext_digest` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:b7504277054b04c1cf2ceed042250c26449c0452fd4d7c8e99ea4b9f75bdb846"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.ciphertext_id|47142c70021a01c228028cf69cea5c897a6985a67f0ff4234f8aa3bea11a523e|1|096d0abb87e92295bbdc4f05d7ab4753be474e6bbee0d5cedb0bbe6c41fd1cc7|shorthand field has no exact type"
+source_locations = ["a01:1410"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.ciphertext_id|ciphertext_id"]
+rationale = "a01:1410: shorthand member `ciphertext_id` at census path `StrongCiphertextRef<T>.ciphertext_id` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:0d955780da7823b64d2ac4832293cb252f40d4f7d23421df903e14e41dc3cab5"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.dek_id|8af69fe8b94da3d64b510caa0dab1b7e9030eae0b4bb2faac1b7680fc9a7edb1|1|5d5d4c629230065df34c5eef58af70ca02eb34716fca83994a29596faad119f1|shorthand field has no exact type"
+source_locations = ["a01:1410"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.dek_id|dek_id"]
+rationale = "a01:1410: shorthand member `dek_id` at census path `StrongCiphertextRef<T>.dek_id` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:a584b1e1a58dc60fff87a8bae2f09810790db317ac3222eccc0058ee781b6f6b"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.logical_oid|fdd9a74312ec7ab8a436466dbb215bc937ed5e6accb9d7b85a22c9c095a2d444|1|2c3bd464b139f8a31336a89e1897c252d80501b8b8f92aebd479383e0f883b56|shorthand field has no exact type"
+source_locations = ["a01:1410"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.logical_oid|logical_oid"]
+rationale = "a01:1410: shorthand member `logical_oid` at census path `StrongCiphertextRef<T>.logical_oid` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:1e315e718c1dc57fdb221a62568115435bbd13f2273a677b758dcd6bc444e86d"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.protected_length|5df4272c5f39dcef78c410b10c536a5704975cc8d6689dc6fbbcbeaed688ecf1|1|3e9b36e60da97f4543cfc50850f35e26cd72a01de7eb5127152027457f6dc462|shorthand field has no exact type"
+source_locations = ["a01:1410"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.protected_length|protected_length"]
+rationale = "a01:1410: shorthand member `protected_length` at census path `StrongCiphertextRef<T>.protected_length` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:652c475ecabc6c9b76ce0f9c6fc7e5158ce7db6433cbdfd4edd2e8013d9fcb04"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.recoverability_profile|6871207b09a5b8ea4e3e5059bafceaf24232761332d71407cccc6f45ec96b6e7|1|646b4ed076e19f40c0cf64ae193965d4f401462a33a6c5e37caa9878506aa5ac|shorthand field has no exact type"
+source_locations = ["a01:1410"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.recoverability_profile|recoverability_profile"]
+rationale = "a01:1410: shorthand member `recoverability_profile` at census path `StrongCiphertextRef<T>.recoverability_profile` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:bf14b1da59063849fedae6811820b7eac779d226996884d50707d7a33b9016e4"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongCommandRef|StrongCommandRef.command_ref|9b2ddb763a7736180dd65c3329ab8a347e9b3bee70006fb913700f8103032b71|1|4c0e7b3a074b759317ddb4a97054ddcf7bffb77b47748f11cf4cc0eb2170c5a2|shorthand field has no exact type"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongCommandRef|StrongCommandRef.command_ref|command_ref"]
+rationale = "a01:1394: shorthand member `command_ref` at census path `StrongCommandRef.command_ref` carries no inline exact type; the span is committed byte-exactly by the exact StrongCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:6eb7a154015a5376477a8c84497a17f9adcb3359e3f533d0547e2cc9c40a8799"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongGlobalCommandRef|StrongGlobalCommandRef.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|3785c1a77c1091e7462f5cf64078b3905406763659c8364c7cd884406c8ec7c7|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongGlobalCommandRef|StrongGlobalCommandRef.global_logical_command_seq|global_logical_command_seq"]
+rationale = "a01:1406: shorthand member `global_logical_command_seq` at census path `StrongGlobalCommandRef.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact StrongGlobalCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:acf6c339daf3a326175b85aabd84678e241367cdc7b5c946db9157b194a6ab34"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongGlobalCommandRef|StrongGlobalCommandRef.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|25ea8ff46587c2a3d0bdd8d51de58654bc73b12355eb28c244d84165779f2452|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongGlobalCommandRef|StrongGlobalCommandRef.record_oid|record_oid"]
+rationale = "a01:1406: shorthand member `record_oid` at census path `StrongGlobalCommandRef.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact StrongGlobalCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:cd64b0149d18dc9934a66167c0937515a7618074d137a31ebb79344501932118"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongMarkerRef|StrongMarkerRef.marker_ref|8bd7f0937c09a3668e61f28badb35e6deb398cd9a5a4f9665f8015146106a3a0|1|2475f4c2be72c94970090faa3947bfd8ad0c0b5f742dc6cdb3e579dfa6314e06|shorthand field has no exact type"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongMarkerRef|StrongMarkerRef.marker_ref|marker_ref"]
+rationale = "a01:1394: shorthand member `marker_ref` at census path `StrongMarkerRef.marker_ref` carries no inline exact type; the span is committed byte-exactly by the exact StrongMarkerRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:3f8f3176a7718116cb6f1545bd688ad47df7968959d783ff0267d18843369182"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongRef|StrongRef.oid|68c55cdc265db5ebdce885c914c4774fedeb3d824fc79837cad12cf1f10ccff7|1|3fc8080058ece4f672ffa97feb30b98be37bb1f21e59b59fd529f867ddb53257|shorthand field has no exact type"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongRef|StrongRef.oid|oid"]
+rationale = "a01:1394: shorthand member `oid` at census path `StrongRef.oid` carries no inline exact type; the span is committed byte-exactly by the exact StrongRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:a6fb8ede356a5dcb049d10c0e248c928bc56e5eaedc09be55230e95f73c77310"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongShardCommandRef|StrongShardCommandRef.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|99cb4e03942a97d67c9f3b53a90023900a21f8d4e7c6779b69f97311da137dee|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongShardCommandRef|StrongShardCommandRef.record_oid|record_oid"]
+rationale = "a01:1406: shorthand member `record_oid` at census path `StrongShardCommandRef.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact StrongShardCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:6b31b163a80c3768fbba1b6cdbfd63504b7796fd719f38e655aa60e1c4c7ed20"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongShardCommandRef|StrongShardCommandRef.shard_id|b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0|1|dcf6603296a32f7c751f560b3506e3a05f95155abd0d3561b2db1ae5790fa463|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongShardCommandRef|StrongShardCommandRef.shard_id|shard_id"]
+rationale = "a01:1406: shorthand member `shard_id` at census path `StrongShardCommandRef.shard_id` carries no inline exact type; the span is committed byte-exactly by the exact StrongShardCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:f84e8e64b2b57ad03afd6a8b703c0a8b7ed1979e0ecad941a601b2f9d4d39077"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|StrongShardCommandRef|StrongShardCommandRef.shard_raft_index|a27fa693b624fba3783550d90e89ab5aefe7ea90b62eb261b9121ba0e77873bb|1|1fcbeb355c0ea83b77cf928f2b329b24fa0b5236194fcd94813b17530734271e|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|StrongShardCommandRef|StrongShardCommandRef.shard_raft_index|shard_raft_index"]
+rationale = "a01:1406: shorthand member `shard_raft_index` at census path `StrongShardCommandRef.shard_raft_index` carries no inline exact type; the span is committed byte-exactly by the exact StrongShardCommandRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:50cbfe932bcfbb0429e3ec0a3f025fff8b69d37555f229b96b6bff6191c7bdb3"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|WeakDigest|WeakDigest.digest|0bf474896363505e5ea5e5d6ace8ebfb13a760a409b1fb467d428fc716f9f284|1|ac0260b36244a13f921e613b03c09fa4839d98967fade94e64f17d87989e6f60|shorthand field has no exact type"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|WeakDigest|WeakDigest.digest|digest"]
+rationale = "a01:1394: shorthand member `digest` at census path `WeakDigest.digest` carries no inline exact type; the span is committed byte-exactly by the exact WeakDigest wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:139510a77fde9ead91fa0ec2678ea00991c4e70d1df84f8ab78848677f222a67"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|WeakGlobalCommandIdentity|WeakGlobalCommandIdentity.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|0d0ca5c0470c50842d2b12212f14adb2f5744f3436bb903c77e6d9fe893e7196|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|WeakGlobalCommandIdentity|WeakGlobalCommandIdentity.global_logical_command_seq|global_logical_command_seq"]
+rationale = "a01:1406: shorthand member `global_logical_command_seq` at census path `WeakGlobalCommandIdentity.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact WeakGlobalCommandIdentity wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:7cad9b9c94e36c6ae8838f509fc3020a94487b0f21ebdd0de8116fbb71d64a82"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|WeakGlobalCommandIdentity|WeakGlobalCommandIdentity.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|429832236062df73658c420bd53c6eb1aeb25389c6f3dc6f4c0c6f015534330f|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|WeakGlobalCommandIdentity|WeakGlobalCommandIdentity.record_oid|record_oid"]
+rationale = "a01:1406: shorthand member `record_oid` at census path `WeakGlobalCommandIdentity.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact WeakGlobalCommandIdentity wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:9f08c1c75203bd3827179ad5f4a0310ca62537ca1fdc04fa423a491b8b53bf7d"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|WeakMarkerIdentity|WeakMarkerIdentity.commit_seq|e2893bd6c4461488df900513741a96335d5e7a20ec2ae2a99aa75835ba663ae2|1|099cc63b339b0492ca7dca7a29b5cbafc7d33af7ce3814ea1e95617f2dffa1ba|shorthand field has no exact type"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|WeakMarkerIdentity|WeakMarkerIdentity.commit_seq|commit_seq"]
+rationale = "a01:1394: shorthand member `commit_seq` at census path `WeakMarkerIdentity.commit_seq` carries no inline exact type; the span is committed byte-exactly by the exact WeakMarkerIdentity wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:e838c4e8c16f22e447b9f945df464fd6d6cbcccf0c9eaf87d67d9aaffd2dfc19"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|WeakMarkerIdentity|WeakMarkerIdentity.marker_oid|423c2869afb80889ddfc734cfcc992e00323c5ddc5774daf84d12374b7bd4ed0|1|9e2138ddab1831d94d123f97d5f31b18247add4c6f48efc01826940865b67d92|shorthand field has no exact type"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|WeakMarkerIdentity|WeakMarkerIdentity.marker_oid|marker_oid"]
+rationale = "a01:1394: shorthand member `marker_oid` at census path `WeakMarkerIdentity.marker_oid` carries no inline exact type; the span is committed byte-exactly by the exact WeakMarkerIdentity wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:71357f9cccbb9858750afa743c8c43e767f73a60ed20110a01be6f4aa2558826"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|WeakShardCommandIdentity|WeakShardCommandIdentity.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|9199d2431fdd33a1d4f1d09a13360c666944a5839ed03c7eb2251e2dae6d68a2|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|WeakShardCommandIdentity|WeakShardCommandIdentity.record_oid|record_oid"]
+rationale = "a01:1406: shorthand member `record_oid` at census path `WeakShardCommandIdentity.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact WeakShardCommandIdentity wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:d8cf9ed9c05e68dcf47540f49cf5e166b3e8a251f9c64c5f62afd135b057d125"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|WeakShardCommandIdentity|WeakShardCommandIdentity.shard_id|b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0|1|f9994109430d2cd07ea86ed53b692b86d5f774a3401194dd6505df72961531ad|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|WeakShardCommandIdentity|WeakShardCommandIdentity.shard_id|shard_id"]
+rationale = "a01:1406: shorthand member `shard_id` at census path `WeakShardCommandIdentity.shard_id` carries no inline exact type; the span is committed byte-exactly by the exact WeakShardCommandIdentity wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:6025faae5c1c51f71fecd00802a3336e4a8d6697a2073a9bab4340fbc38bea46"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|WeakShardCommandIdentity|WeakShardCommandIdentity.shard_raft_index|a27fa693b624fba3783550d90e89ab5aefe7ea90b62eb261b9121ba0e77873bb|1|acdd45487fd9d74f5837d87d7b30d0c400ed7ccb0395dd8af27dbf2bf55fa14e|shorthand field has no exact type"
+source_locations = ["a01:1406"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|WeakShardCommandIdentity|WeakShardCommandIdentity.shard_raft_index|shard_raft_index"]
+rationale = "a01:1406: shorthand member `shard_raft_index` at census path `WeakShardCommandIdentity.shard_raft_index` carries no inline exact type; the span is committed byte-exactly by the exact WeakShardCommandIdentity wire envelope contract, and the single affected census key maps to that source form."
