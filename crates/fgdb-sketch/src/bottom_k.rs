@@ -73,6 +73,110 @@ impl BottomKProfile {
             max_sample_bytes,
         }
     }
+
+    /// Returns the idealized continuous-rank error contract when `k >= 3`.
+    ///
+    /// This contract deliberately does not claim that a deterministic 64-bit
+    /// hash has continuous independent ranks. It is a calibration model for
+    /// callers that explicitly accept that idealization, not a finite-domain
+    /// guarantee for [`BottomKSketch::try_estimate_distinct_count`]. An
+    /// unsaturated sketch remains exact without any statistical model.
+    #[must_use]
+    pub fn idealized_distinct_count_error_contract(
+        self,
+    ) -> Option<BottomKIdealizedDistinctCountErrorContract> {
+        let variance_denominator = self.k.checked_sub(2)?.isqrt();
+        if variance_denominator == 0 {
+            return None;
+        }
+        Some(BottomKIdealizedDistinctCountErrorContract {
+            sample_size: self.k,
+            deviation_multiplier: 4,
+            variance_denominator,
+            model: BottomKDistinctCountModel::IdealizedIndependentUniformContinuousRanks,
+        })
+    }
+}
+
+/// Explicit model under which a bottom-k probability statement is interpreted.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum BottomKDistinctCountModel {
+    /// Ranks are independent draws from the continuous uniform distribution.
+    ///
+    /// This idealization has zero collision probability. It is not a claim
+    /// about the stable finite hash algorithm and excludes 64-bit quantization,
+    /// finite-population correction, and adversarially selected observations.
+    IdealizedIndependentUniformContinuousRanks,
+}
+
+/// Profile-derived error contract for an idealized bottom-k model.
+///
+/// For the unbiased continuous-rank estimator `(k - 1) / U[k]`, relative
+/// variance is no greater than `1 / (k - 2)`. This contract applies
+/// Chebyshev's inequality at four standard deviations, yielding confidence at
+/// least `15/16`. The integer denominator is rounded down, which rounds the
+/// permitted error outward.
+///
+/// This type does not bound the crate's finite 64-bit estimator. Doing so would
+/// additionally require a finite-domain proof and an explicit collision term.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct BottomKIdealizedDistinctCountErrorContract {
+    /// Retained sample count in the governing profile.
+    sample_size: usize,
+    /// Number of modeled standard deviations admitted by the contract.
+    deviation_multiplier: u64,
+    /// `floor(sqrt(k - 2))`, used as the conservative relative-error divisor.
+    variance_denominator: usize,
+    /// Named statistical model for the probability statement.
+    model: BottomKDistinctCountModel,
+}
+
+impl BottomKIdealizedDistinctCountErrorContract {
+    /// Retained sample count in the governing profile.
+    #[must_use]
+    pub const fn sample_size(self) -> usize {
+        self.sample_size
+    }
+
+    /// Number of modeled standard deviations admitted by the contract.
+    #[must_use]
+    pub const fn deviation_multiplier(self) -> u64 {
+        self.deviation_multiplier
+    }
+
+    /// Conservative `floor(sqrt(k - 2))` relative-error divisor.
+    #[must_use]
+    pub const fn variance_denominator(self) -> usize {
+        self.variance_denominator
+    }
+
+    /// Named statistical model for the probability statement.
+    #[must_use]
+    pub const fn model(self) -> BottomKDistinctCountModel {
+        self.model
+    }
+
+    /// Conservative absolute-error ceiling for an exact population size.
+    #[must_use]
+    pub fn maximum_absolute_error(self, exact_distinct_count: u64) -> u64 {
+        let numerator = u128::from(exact_distinct_count) * u128::from(self.deviation_multiplier);
+        let denominator = self.variance_denominator as u128;
+        u64::try_from(numerator.div_ceil(denominator)).unwrap_or(u64::MAX)
+    }
+
+    /// Conservative relative-error ceiling in parts per million.
+    #[must_use]
+    pub fn relative_error_parts_per_million_ceiling(self) -> u64 {
+        let numerator = u128::from(self.deviation_multiplier) * 1_000_000_u128;
+        let denominator = self.variance_denominator as u128;
+        u64::try_from(numerator.div_ceil(denominator)).unwrap_or(u64::MAX)
+    }
+
+    /// Confidence floor in parts per million (`15/16 = 937,500 ppm`).
+    #[must_use]
+    pub const fn confidence_parts_per_million_floor(self) -> u64 {
+        937_500
+    }
 }
 
 /// Caller-owned admission bounds for decoding one bottom-k value.
@@ -161,6 +265,31 @@ pub enum BottomKError {
         observation_hash: u64,
     },
 }
+
+/// Typed failure to derive a bottom-k distinct-count estimate.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum BottomKDistinctEstimateError {
+    /// A saturated order-statistic estimate requires at least two ranks.
+    InsufficientSampleSize {
+        /// Retained sample count.
+        retained: usize,
+        /// Smallest supported saturated sample count.
+        minimum: usize,
+    },
+    /// The platform-sized sample count cannot enter the canonical estimator.
+    SampleSizeUnrepresentable {
+        /// Profile sample count.
+        sample_size: usize,
+    },
+}
+
+impl fmt::Display for BottomKDistinctEstimateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for BottomKDistinctEstimateError {}
 
 impl fmt::Display for BottomKError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -364,6 +493,27 @@ pub struct BottomKState<'sketch> {
     pub samples: &'sketch [BottomKSample],
 }
 
+/// Estimator branch selected from bottom-k saturation state.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum BottomKDistinctEstimateMethod {
+    /// Fewer than `k` samples means the complete distinct population is held.
+    ExactUnsaturated,
+    /// A saturated sample uses a finite 64-bit kth-order-statistic approximation.
+    FiniteHash64KthOrderStatistic,
+}
+
+/// Deterministic integer distinct-count estimate from a bottom-k sample.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct BottomKDistinctEstimate {
+    /// Estimated distinct population: exact while unsaturated, otherwise
+    /// rounded to nearest and clamped to at least `k`.
+    pub value: u64,
+    /// Estimator branch selected by saturation state.
+    pub method: BottomKDistinctEstimateMethod,
+    /// Largest retained hash for the order-statistic branch.
+    pub threshold_hash: Option<u64>,
+}
+
 /// Mergeable deterministic distinct bottom-k sample.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BottomKSketch {
@@ -505,6 +655,55 @@ impl BottomKSketch {
     #[must_use]
     pub fn threshold(&self) -> Option<&BottomKSample> {
         self.samples.last()
+    }
+
+    /// Estimates the distinct observation population.
+    ///
+    /// Unsaturated state is exact. Saturated state with at least two samples
+    /// uses the finite-rank approximation
+    /// `(k - 1) * 2^64 / (threshold_hash + 1)`, rounded to nearest. The `+1`
+    /// maps the finite unsigned hash range to `(0, 1]` and avoids a zero
+    /// denominator.
+    ///
+    /// Unlike the analogous continuous-rank estimator, this discrete estimator
+    /// is not claimed to be exactly unbiased. The profile's
+    /// [`BottomKProfile::idealized_distinct_count_error_contract`] is an
+    /// explicitly idealized calibration model, not a finite-domain guarantee.
+    pub fn try_estimate_distinct_count(
+        &self,
+    ) -> Result<BottomKDistinctEstimate, BottomKDistinctEstimateError> {
+        let retained = u64::try_from(self.samples.len()).map_err(|_| {
+            BottomKDistinctEstimateError::SampleSizeUnrepresentable {
+                sample_size: self.samples.len(),
+            }
+        })?;
+        if !self.is_saturated() {
+            return Ok(BottomKDistinctEstimate {
+                value: retained,
+                method: BottomKDistinctEstimateMethod::ExactUnsaturated,
+                threshold_hash: None,
+            });
+        }
+        if self.samples.len() < 2 {
+            return Err(BottomKDistinctEstimateError::InsufficientSampleSize {
+                retained: self.samples.len(),
+                minimum: 2,
+            });
+        }
+
+        let threshold_hash = self
+            .threshold()
+            .ok_or(BottomKDistinctEstimateError::InsufficientSampleSize {
+                retained: self.samples.len(),
+                minimum: 2,
+            })?
+            .hash();
+        let value = finite_hash64_distinct_estimate(retained, threshold_hash);
+        Ok(BottomKDistinctEstimate {
+            value,
+            method: BottomKDistinctEstimateMethod::FiniteHash64KthOrderStatistic,
+            threshold_hash: Some(threshold_hash),
+        })
     }
 
     /// Computes this profile's stable hash for a bounded observation.
@@ -1069,6 +1268,16 @@ impl<'bytes> BottomKDecoder<'bytes> {
     }
 }
 
+fn finite_hash64_distinct_estimate(retained: u64, threshold_hash: u64) -> u64 {
+    debug_assert!(retained >= 2);
+    let rank = u128::from(threshold_hash) + 1;
+    let numerator = u128::from(retained - 1) << 64;
+    // `numerator <= 2^128 - 2^65` and `rank / 2 <= 2^63`, so the sum is
+    // strictly smaller than 2^128 and nearest-integer rounding cannot overflow.
+    let rounded = (numerator + rank / 2) / rank;
+    u64::try_from(rounded).unwrap_or(u64::MAX).max(retained)
+}
+
 fn stable_hash(
     algorithm: BottomKHashAlgorithm,
     seed: u64,
@@ -1119,6 +1328,7 @@ fn reserve_samples(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_accuracy_fixtures::{canonical_edge_bytes, named_graph_fixtures};
 
     const VERSION_OFFSET: usize = CANONICAL_MAGIC.len();
     const HASH_ALGORITHM_OFFSET: usize = VERSION_OFFSET + 2;
@@ -1243,6 +1453,156 @@ mod tests {
             stable_hash(profile(3).hash_algorithm, profile(3).seed ^ 1, b"alpha")
                 .expect("bounded hash input")
         );
+    }
+
+    #[test]
+    fn idealized_distinct_count_contract_matches_exact_vectors() {
+        assert_eq!(profile(1).idealized_distinct_count_error_contract(), None);
+        assert_eq!(profile(2).idealized_distinct_count_error_contract(), None);
+
+        let contract = profile(258)
+            .idealized_distinct_count_error_contract()
+            .expect("k >= 3 has finite variance in the idealized model");
+        assert_eq!(contract.sample_size(), 258);
+        assert_eq!(contract.deviation_multiplier(), 4);
+        assert_eq!(contract.variance_denominator(), 16);
+        assert_eq!(
+            contract.model(),
+            BottomKDistinctCountModel::IdealizedIndependentUniformContinuousRanks
+        );
+        assert_eq!(contract.confidence_parts_per_million_floor(), 937_500);
+        assert_eq!(contract.relative_error_parts_per_million_ceiling(), 250_000);
+        assert_eq!(contract.maximum_absolute_error(1_025), 257);
+
+        let smallest_contract = profile(3)
+            .idealized_distinct_count_error_contract()
+            .expect("k = 3 is the smallest finite-variance profile");
+        assert_eq!(smallest_contract.variance_denominator(), 1);
+        assert_eq!(smallest_contract.maximum_absolute_error(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn finite_hash64_estimator_rounding_and_saturation_match_exact_vectors() {
+        assert_eq!(
+            finite_hash64_distinct_estimate(3, 2),
+            12_297_829_382_473_034_411
+        );
+        assert_eq!(
+            finite_hash64_distinct_estimate(3, 4),
+            7_378_697_629_483_820_646
+        );
+        assert_eq!(
+            finite_hash64_distinct_estimate(4, 9),
+            5_534_023_222_112_865_485
+        );
+        assert_eq!(finite_hash64_distinct_estimate(3, u64::MAX), 3);
+        assert_eq!(finite_hash64_distinct_estimate(2, 0), u64::MAX);
+    }
+
+    #[test]
+    fn distinct_count_is_exact_before_saturation_and_typed_when_k_is_one() {
+        let mut complete = sketch(4);
+        observe_all(&mut complete, &[b"a", b"b", b"c"]);
+        assert_eq!(
+            complete
+                .try_estimate_distinct_count()
+                .expect("unsaturated state is exact"),
+            BottomKDistinctEstimate {
+                value: 3,
+                method: BottomKDistinctEstimateMethod::ExactUnsaturated,
+                threshold_hash: None,
+            }
+        );
+
+        let mut too_small = sketch(1);
+        too_small.try_observe(b"a").expect("bounded observation");
+        assert_eq!(
+            too_small.try_estimate_distinct_count(),
+            Err(BottomKDistinctEstimateError::InsufficientSampleSize {
+                retained: 1,
+                minimum: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn named_graph_finite_rank_calibration_matches_independent_bounds() {
+        const SAMPLE_SIZE: usize = 256;
+        const SEEDS: [u64; 4] = [
+            0x424b_4143_4300_0001,
+            0x424b_4143_4300_0002,
+            0x424b_4143_4300_0003,
+            0x424b_4143_4300_0004,
+        ];
+
+        for fixture in named_graph_fixtures() {
+            let exact =
+                u64::try_from(fixture.edges.len()).expect("fixture edge count fits canonical u64");
+            assert!(fixture.edges.len() > SAMPLE_SIZE);
+
+            for seed in SEEDS {
+                let profile = BottomKProfile::new(SAMPLE_SIZE, seed, 16, SAMPLE_SIZE * 16);
+                let contract = profile
+                    .idealized_distinct_count_error_contract()
+                    .expect("accuracy profile has finite idealized variance");
+                assert!(
+                    matches!(exact, 1_023 | 1_024 | 3_072),
+                    "fixture {} has unexpected edge count {exact}",
+                    fixture.name
+                );
+                let independent_bound = if exact == 3_072 {
+                    820
+                } else if exact == 1_024 {
+                    274
+                } else {
+                    273
+                };
+                assert_eq!(contract.maximum_absolute_error(exact), independent_bound);
+                assert_eq!(contract.relative_error_parts_per_million_ceiling(), 266_667);
+                let mut value =
+                    BottomKSketch::try_new(profile).expect("accuracy profile is bounded");
+                let mut population_hashes = Vec::with_capacity(fixture.edges.len());
+                for &(left, right) in &fixture.edges {
+                    let observation = canonical_edge_bytes(left, right);
+                    population_hashes.push(
+                        value
+                            .try_hash(&observation)
+                            .expect("canonical edge fits accuracy profile"),
+                    );
+                    value
+                        .try_observe(&observation)
+                        .expect("canonical edge fits accuracy profile");
+                }
+
+                population_hashes.sort_unstable();
+                assert!(
+                    population_hashes.windows(2).all(|pair| pair[0] != pair[1]),
+                    "fixture={} seed={seed:#018x} profile={profile:?}: the complete measured \
+                     population contains a finite-rank collision",
+                    fixture.name
+                );
+                assert!(value.is_saturated());
+                let estimate = value
+                    .try_estimate_distinct_count()
+                    .expect("saturated k >= 2 profile is estimable");
+                let error = estimate.value.abs_diff(exact);
+                assert!(
+                    error <= independent_bound,
+                    "fixture={} seed={seed:#018x} profile={profile:?} exact={exact} estimate={} \
+                     error={error} calibration_bound={independent_bound} \
+                     idealized_confidence_ppm={} idealized_relative_bound_ppm={} model={:?}",
+                    fixture.name,
+                    estimate.value,
+                    contract.confidence_parts_per_million_floor(),
+                    contract.relative_error_parts_per_million_ceiling(),
+                    contract.model()
+                );
+                assert_eq!(
+                    estimate.method,
+                    BottomKDistinctEstimateMethod::FiniteHash64KthOrderStatistic
+                );
+            }
+        }
     }
 
     #[test]

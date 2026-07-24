@@ -20,6 +20,9 @@ const COUNTER_BYTES: usize = 8;
 const DEFAULT_MAX_DECODED_DEPTH: usize = 64;
 const DEFAULT_MAX_ENCODED_BYTES: usize =
     CANONICAL_HEADER_BYTES + (DEFAULT_MAX_CELLS * COUNTER_BYTES);
+const PARTS_PER_MILLION: u64 = 1_000_000;
+const E_UPPER_PARTS_PER_MILLION: u64 = 2_718_282;
+const E_LOWER_PARTS_PER_MILLION: u64 = 2_718_281;
 
 /// Complete profile governing shape, hashing, and resource bounds.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -50,6 +53,98 @@ impl CountMinProfile {
             max_total_weight,
             max_cells: DEFAULT_MAX_CELLS,
         }
+    }
+
+    /// Validates this profile and returns its model-qualified overestimate contract.
+    ///
+    /// This is a statistical accuracy statement under the named row-collision
+    /// model, not a safety invariant. The one-sided property that estimates
+    /// never understate accepted positive weight is unconditional. A profile
+    /// that fails structural or resource-bound validation cannot produce a
+    /// contract.
+    pub fn error_contract(self) -> Result<CountMinErrorContract, CountMinError> {
+        validate_profile(self)?;
+        Ok(CountMinErrorContract {
+            width: self.width,
+            independent_rows: self.depth,
+            assumption: CountMinAccuracyAssumption::IndependentUniformRowCollisions,
+        })
+    }
+}
+
+/// Assumption under which a Count-Min probability statement is interpreted.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CountMinAccuracyAssumption {
+    /// Each row collision behaves as an independent uniform bucket choice.
+    ///
+    /// The stable production hash makes runs replayable; this assumption still
+    /// needs workload calibration and must not be promoted to an invariant.
+    IndependentUniformRowCollisions,
+}
+
+/// Profile-derived one-sided Count-Min accuracy contract.
+///
+/// Under [`CountMinAccuracyAssumption::IndependentUniformRowCollisions`], the
+/// estimate for one queried key is at most
+/// `truth + ceil(e * total_weight / width)` with failure probability at most
+/// `exp(-independent_rows)`. Integer accessors below round the error and failure
+/// probability outward so test gates never gain confidence from rounding.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CountMinErrorContract {
+    /// Counters per row in the governing profile.
+    width: usize,
+    /// Independently modeled rows in the governing profile.
+    independent_rows: usize,
+    /// Named statistical assumption for the probability statement.
+    assumption: CountMinAccuracyAssumption,
+}
+
+impl CountMinErrorContract {
+    /// Counters per row in the governing profile.
+    #[must_use]
+    pub const fn width(self) -> usize {
+        self.width
+    }
+
+    /// Independently modeled rows in the governing profile.
+    #[must_use]
+    pub const fn independent_rows(self) -> usize {
+        self.independent_rows
+    }
+
+    /// Named statistical assumption for the probability statement.
+    #[must_use]
+    pub const fn assumption(self) -> CountMinAccuracyAssumption {
+        self.assumption
+    }
+
+    /// Conservative integer ceiling on the permitted overestimate.
+    #[must_use]
+    pub fn maximum_overestimate(self, total_weight: u64) -> u64 {
+        let numerator = u128::from(total_weight) * u128::from(E_UPPER_PARTS_PER_MILLION);
+        let denominator = (self.width as u128) * u128::from(PARTS_PER_MILLION);
+        let rounded_up = numerator.div_ceil(denominator);
+        u64::try_from(rounded_up)
+            .unwrap_or(u64::MAX)
+            .min(total_weight)
+    }
+
+    /// Conservative lower bound on confidence, in parts per million.
+    ///
+    /// The complementary failure probability is rounded up after every
+    /// multiplication by the rational upper bound `1 / 2.718281`.
+    #[must_use]
+    pub fn confidence_parts_per_million_floor(self) -> u64 {
+        let mut failure = PARTS_PER_MILLION;
+        for _ in 0..self.independent_rows {
+            failure = (failure * PARTS_PER_MILLION)
+                .div_ceil(E_LOWER_PARTS_PER_MILLION)
+                .max(1);
+            if failure == 1 {
+                break;
+            }
+        }
+        PARTS_PER_MILLION - failure
     }
 }
 
@@ -771,6 +866,7 @@ impl<'bytes> CountMinDecoder<'bytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_accuracy_fixtures::named_graph_fixtures;
 
     fn profile() -> CountMinProfile {
         CountMinProfile {
@@ -844,6 +940,164 @@ mod tests {
         assert!(sketch.estimate(b"knows") >= 7);
         assert!(sketch.estimate(b"city") >= 5);
         assert_eq!(sketch.total_weight(), 36);
+    }
+
+    #[test]
+    fn error_contract_rejects_invalid_profiles_and_matches_exact_vectors() {
+        assert_eq!(
+            CountMinProfile::new(0, 3, 1, 10).error_contract(),
+            Err(CountMinError::EmptyDimension { width: 0, depth: 3 })
+        );
+        assert_eq!(
+            CountMinProfile::new(8, 0, 1, 10).error_contract(),
+            Err(CountMinError::EmptyDimension { width: 8, depth: 0 })
+        );
+        assert_eq!(
+            CountMinProfile {
+                width: usize::MAX,
+                depth: 2,
+                hash_algorithm: CountMinHashAlgorithm::SeededFnvMix64V1,
+                seed: 1,
+                max_total_weight: 10,
+                max_cells: usize::MAX,
+            }
+            .error_contract(),
+            Err(CountMinError::CellCountOverflow)
+        );
+        assert_eq!(
+            CountMinProfile {
+                width: 8,
+                depth: 3,
+                hash_algorithm: CountMinHashAlgorithm::SeededFnvMix64V1,
+                seed: 1,
+                max_total_weight: 10,
+                max_cells: 23,
+            }
+            .error_contract(),
+            Err(CountMinError::CellLimitExceeded {
+                requested: 24,
+                limit: 23,
+            })
+        );
+
+        let contract = profile()
+            .error_contract()
+            .expect("the standard test profile is valid");
+        assert_eq!(contract.width(), 256);
+        assert_eq!(contract.independent_rows(), 5);
+        assert_eq!(
+            contract.assumption(),
+            CountMinAccuracyAssumption::IndependentUniformRowCollisions
+        );
+        assert_eq!(contract.maximum_overestimate(0), 0);
+        assert_eq!(contract.maximum_overestimate(2_046), 22);
+        assert_eq!(contract.maximum_overestimate(6_144), 66);
+        assert_eq!(contract.confidence_parts_per_million_floor(), 993_261);
+
+        let rounding_contract = CountMinProfile {
+            width: 4,
+            depth: 1,
+            hash_algorithm: CountMinHashAlgorithm::SeededFnvMix64V1,
+            seed: 1,
+            max_total_weight: 10,
+            max_cells: 4,
+        }
+        .error_contract()
+        .expect("4x1 profile is valid");
+        assert_eq!(rounding_contract.maximum_overestimate(10), 7);
+        assert_eq!(
+            rounding_contract.confidence_parts_per_million_floor(),
+            632_120
+        );
+
+        let deep_contract = CountMinProfile {
+            width: 1,
+            depth: 15,
+            hash_algorithm: CountMinHashAlgorithm::SeededFnvMix64V1,
+            seed: 1,
+            max_total_weight: u64::MAX,
+            max_cells: 15,
+        }
+        .error_contract()
+        .expect("1x15 profile is valid");
+        assert_eq!(deep_contract.maximum_overestimate(u64::MAX), u64::MAX);
+        assert_eq!(deep_contract.confidence_parts_per_million_floor(), 999_999);
+    }
+
+    #[test]
+    fn named_graph_frequency_calibration_matches_independent_bounds() {
+        const SEEDS: [u64; 3] = [
+            0x434d_534b_0000_0001,
+            0x434d_534b_0000_0002,
+            0x434d_534b_0000_0003,
+        ];
+
+        for fixture in named_graph_fixtures() {
+            let total_weight = u64::try_from(fixture.edges.len())
+                .expect("fixture edge count fits u64")
+                .checked_mul(2)
+                .expect("fixture endpoint count fits u64");
+            let mut exact = vec![0_u64; fixture.node_count];
+            for &(left, right) in &fixture.edges {
+                exact[left as usize] += 1;
+                exact[right as usize] += 1;
+            }
+
+            for seed in SEEDS {
+                let profile = CountMinProfile {
+                    width: 256,
+                    depth: 5,
+                    hash_algorithm: CountMinHashAlgorithm::SeededFnvMix64V1,
+                    seed,
+                    max_total_weight: total_weight,
+                    max_cells: 256 * 5,
+                };
+                let contract = profile.error_contract().expect("accuracy profile is valid");
+                assert!(
+                    matches!(total_weight, 2_046 | 2_048 | 6_144),
+                    "fixture {} has unexpected total weight {total_weight}",
+                    fixture.name
+                );
+                let independent_bound = if total_weight == 6_144 { 66 } else { 22 };
+                assert_eq!(
+                    contract.maximum_overestimate(total_weight),
+                    independent_bound
+                );
+                assert_eq!(contract.confidence_parts_per_million_floor(), 993_261);
+                let mut value =
+                    CountMinSketch::try_new(profile).expect("accuracy profile is bounded");
+                for &(left, right) in &fixture.edges {
+                    value
+                        .try_observe(&left.to_be_bytes(), 1)
+                        .expect("fixture fits declared total weight");
+                    value
+                        .try_observe(&right.to_be_bytes(), 1)
+                        .expect("fixture fits declared total weight");
+                }
+
+                assert_eq!(value.total_weight(), total_weight);
+                for (node, &truth) in exact.iter().enumerate() {
+                    let estimate = value.estimate(&(node as u64).to_be_bytes());
+                    assert!(
+                        estimate >= truth,
+                        "fixture={} seed={seed:#018x} profile={profile:?} exact={truth} \
+                         estimate={estimate} bound={independent_bound}: Count-Min understated \
+                         frequency",
+                        fixture.name
+                    );
+                    let overestimate = estimate - truth;
+                    assert!(
+                        overestimate <= independent_bound,
+                        "fixture={} seed={seed:#018x} profile={profile:?} exact={truth} \
+                         estimate={estimate} error={overestimate} bound={independent_bound} \
+                         confidence_ppm={} assumption={:?}",
+                        fixture.name,
+                        contract.confidence_parts_per_million_floor(),
+                        contract.assumption()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
