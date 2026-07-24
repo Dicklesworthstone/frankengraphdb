@@ -609,7 +609,7 @@ construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "embedded canonical configuration bytes self-bind the complete domain; import byte-matches it before use (a01:1398)"
 version_status = "reserved"
-max_size_bytes = 96
+max_size_bytes = 93
 
 [[field]]
 containing_schema = "RemoteAuthorityConfigurationEvidence"
@@ -724,7 +724,7 @@ construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "closed union Genesis|Successor|ValidatedCheckpointSuccessor; the transition proves adoption from an already trusted root artifact, predecessor, or anchor — current-member signatures alone are never a trust root (a01:1398)"
 version_status = "reserved"
-max_size_bytes = 16777216
+max_size_bytes = 65537
 
 [[field]]
 containing_schema = "RemoteAuthorityConfigurationEvidence"
@@ -810,7 +810,7 @@ construction_order = 18
 role_predicate = "true"
 retention_and_cut_rule = "typed remote identity commitment; never decoded as a local StrongRef (a01:1400)"
 version_status = "reserved"
-max_size_bytes = 128
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "RemotePayloadAvailabilityEvidence"
@@ -939,7 +939,7 @@ construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "full ConsensusDomain per the shorthand law: cross-group schemas never serialize the scalar alone (a01:1396); retained under the permanent release-proof floor (a01:1404)"
 version_status = "reserved"
-max_size_bytes = 128
+max_size_bytes = 93
 
 [[field]]
 containing_schema = "RemoteReleaseSummaryEntry"
@@ -953,13 +953,13 @@ construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "full ConsensusDomain per the shorthand law (a01:1396); retained under the permanent release-proof floor (a01:1404)"
 version_status = "reserved"
-max_size_bytes = 128
+max_size_bytes = 93
 
 [[field]]
 containing_schema = "RemoteReleaseSummaryEntry"
 field_tag = 0x0003
 stable_name = "grant_id"
-exact_wire_type = "id256"
+exact_wire_type = "digest256"
 cardinality = "one"
 identity_class = "scalar"
 reference_semantics = "none"
@@ -968,6 +968,7 @@ role_predicate = "true"
 retention_and_cut_rule = "derived grant identity (a01:1402); summary map component key; collision with nonidentical bytes fails closed"
 version_status = "reserved"
 max_size_bytes = 32
+digest_class = "target"
 
 [[field]]
 containing_schema = "RemoteReleaseSummaryEntry"
@@ -981,13 +982,13 @@ construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the released target (a01:1396); proves release without retaining anything"
 version_status = "reserved"
-max_size_bytes = 256
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "RemoteReleaseSummaryEntry"
 field_tag = 0x0005
 stable_name = "release_nonce"
-exact_wire_type = "id256"
+exact_wire_type = "bytes"
 cardinality = "one"
 identity_class = "scalar"
 reference_semantics = "none"
@@ -1009,7 +1010,7 @@ construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the archive-backed ack leaf (a01:1396); the leaf itself is pinned by the publish record's ack_leaf_ref, not by this entry (a01:1404)"
 version_status = "reserved"
-max_size_bytes = 256
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "RemoteReleaseSummaryEntry"
@@ -1183,7 +1184,7 @@ construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "comparison identity of the authority-side grant record; the authority ledger, not the evidence, owns the remote target (a01:1402)"
 version_status = "reserved"
-max_size_bytes = 40
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "RemoteRetentionGrantEvidence"
@@ -1212,7 +1213,7 @@ construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "byte-matched against the grant_id derivation tuple on import (a01:1402); lives/dies with the evidence leaf"
 version_status = "reserved"
-max_size_bytes = 64
+max_size_bytes = 93
 
 [[field]]
 containing_schema = "RemoteRetentionGrantEvidence"
@@ -1226,7 +1227,7 @@ construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "comparison identity of the granted remote target; never a local reachability edge (a01:1402)"
 version_status = "reserved"
-max_size_bytes = 40
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "RemoteRetentionGrantEvidence"
@@ -1384,7 +1385,7 @@ construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "grant_id derivation input and map-key component (a01:1402); lives/dies with the spec object"
 version_status = "reserved"
-max_size_bytes = 64
+max_size_bytes = 93
 
 [[field]]
 containing_schema = "RemoteRetentionGrantSpec"
@@ -1398,7 +1399,7 @@ construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "grant_id derivation input (a01:1402); lives/dies with the spec object"
 version_status = "reserved"
-max_size_bytes = 64
+max_size_bytes = 93
 
 [[field]]
 containing_schema = "RemoteRetentionGrantSpec"
@@ -1412,7 +1413,7 @@ construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "comparison identity paired exactly with target_ref (a01:1402); grant_id derivation input; never a reachability edge"
 version_status = "reserved"
-max_size_bytes = 40
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "RemoteRetentionGrantSpec"
@@ -1491,7 +1492,7 @@ max_size_bytes = 40
 containing_schema = "RemoteRetentionReleaseAckCertificate"
 field_tag = 0x0002
 stable_name = "grant_id"
-exact_wire_type = "id256"
+exact_wire_type = "digest256"
 cardinality = "one"
 identity_class = "scalar"
 reference_semantics = "none"
@@ -1500,6 +1501,7 @@ role_predicate = "true"
 retention_and_cut_rule = "derived grant identity H(\"fgdb:remote-grant:v1\", authority_domain, consumer_domain, target_identity, grant_nonce) (a01:1402); collision with nonidentical bytes fails closed"
 version_status = "reserved"
 max_size_bytes = 32
+digest_class = "target"
 
 [[field]]
 containing_schema = "RemoteRetentionReleaseAckCertificate"
@@ -1513,7 +1515,7 @@ construction_order = 36
 role_predicate = "true"
 retention_and_cut_rule = "indivisible consumer identity in a signed cross-group transcript; never serialized as a bare scalar (a01:1396)"
 version_status = "reserved"
-max_size_bytes = 128
+max_size_bytes = 93
 
 [[field]]
 containing_schema = "RemoteRetentionReleaseAckCertificate"
@@ -1527,13 +1529,13 @@ construction_order = 36
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the released target; never a local reachability edge (a01:1396)"
 version_status = "reserved"
-max_size_bytes = 256
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "RemoteRetentionReleaseAckCertificate"
 field_tag = 0x0005
 stable_name = "release_nonce"
-exact_wire_type = "id256"
+exact_wire_type = "bytes"
 cardinality = "one"
 identity_class = "scalar"
 reference_semantics = "none"
@@ -1878,7 +1880,7 @@ construction_order = 34
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the removed grant record; never a local reachability edge (a01:1396); no strong edge by design (a01:1404)"
 version_status = "reserved"
-max_size_bytes = 256
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "RemoteRetentionReleaseTombstone"
@@ -1908,7 +1910,7 @@ construction_order = 34
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the released target; never a local reachability edge (a01:1396); no strong edge to the target by design (a01:1404)"
 version_status = "reserved"
-max_size_bytes = 256
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "RemoteRetentionReleaseTombstone"
@@ -1922,13 +1924,13 @@ construction_order = 34
 role_predicate = "true"
 retention_and_cut_rule = "comparison-only identity of the consumer's release-request certificate (a01:1396); the imported leaf itself is retained only by the release command/log until its verified cut (a01:1404)"
 version_status = "reserved"
-max_size_bytes = 256
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "RemoteRetentionReleaseTombstone"
 field_tag = 0x0005
 stable_name = "release_nonce"
-exact_wire_type = "id256"
+exact_wire_type = "bytes"
 cardinality = "one"
 identity_class = "scalar"
 reference_semantics = "none"
@@ -2040,7 +2042,7 @@ construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "complete domain the trust root vouches for; each root signature signs a tuple that includes it (a01:1398)"
 version_status = "reserved"
-max_size_bytes = 96
+max_size_bytes = 93
 
 [[field]]
 containing_schema = "RootAuthorityTrustBody"
@@ -2054,7 +2056,7 @@ construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "closed payload-free kind union FreshShardedGenesis|CertifiedLocalRoleTransition; included in every root signature tuple (a01:1398)"
 version_status = "reserved"
-max_size_bytes = 16777216
+max_size_bytes = 1
 
 [[field]]
 containing_schema = "RootAuthorityTrustBody"
@@ -2941,24 +2943,24 @@ union_name = "TrustTransition"
 containing_schema = "RemoteAuthorityConfigurationEvidence"
 union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
 field_tag = 0x0009
-tag_wire_type = "u16"
+tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RemoteAuthorityConfigurationEvidence"]
 role_predicate = "true"
 version_status = "reserved"
-max_size_bytes = 16777216
+max_size_bytes = 65537
 
 [[union]]
 union_name = "RootAuthorityTrustArtifactKind"
 containing_schema = "RootAuthorityTrustBody"
 union_path = "RootAuthorityTrustBody.artifact_kind"
 field_tag = 0x0002
-tag_wire_type = "u16"
+tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RootAuthorityTrustBody"]
 role_predicate = "true"
 version_status = "reserved"
-max_size_bytes = 16777216
+max_size_bytes = 1
 
 [[union]]
 union_name = "ServicePromotionExternalOperationKind"
@@ -3073,7 +3075,7 @@ payload_kind = "inline-record"
 payload_sha256 = "7aface9d4d3f6e04d01529994ec08c221c7b909ed468c5e268fefda3d856c063"
 role_predicate = "true"
 version_status = "reserved"
-max_size_bytes = 16777216
+max_size_bytes = 40
 
 [[union_arm]]
 union_name = "TrustTransition"
@@ -3086,7 +3088,7 @@ payload_kind = "inline-record"
 payload_sha256 = "160d187b6b8852d0adfc861629795e136d326a46dc5ee22281fa61d39fb1b392"
 role_predicate = "true"
 version_status = "reserved"
-max_size_bytes = 16777216
+max_size_bytes = 65536
 
 [[union_arm]]
 union_name = "TrustTransition"
@@ -3099,7 +3101,7 @@ payload_kind = "inline-record"
 payload_sha256 = "3a2d87d0f381667522afda570d38ae9c32537aede9bb42bee73ef3dbb8d5a749"
 role_predicate = "true"
 version_status = "reserved"
-max_size_bytes = 16777216
+max_size_bytes = 65536
 
 [[union_arm]]
 union_name = "RootAuthorityTrustArtifactKind"
@@ -3111,7 +3113,7 @@ stable_name = "fresh_sharded_genesis"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
-max_size_bytes = 16777216
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "RootAuthorityTrustArtifactKind"
@@ -3123,7 +3125,7 @@ stable_name = "certified_local_role_transition"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
-max_size_bytes = 16777216
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "ServicePromotionExternalOperationKind"

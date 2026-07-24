@@ -271,6 +271,43 @@ fn rename_logical_command_input_union(identity: &mut IdentityRegistries, name: &
         .exact_wire_type = name.to_owned();
 }
 
+/// Reverse the transcript-visible A01 increment-2B exactness repairs so the
+/// pre-erratum durable-fields pin keeps reconstructing from live rows.  The
+/// repair's bound corrections are transcript-invisible (field max_size_bytes
+/// is not pinned) and need no undo; only the five wire-type flips and the two
+/// ordinary-union tag/bound corrections appear in the assignment transcript.
+fn undo_a01_exactness_repair(identity: &mut IdentityRegistries) {
+    for field in &mut identity.fields {
+        let flipped = matches!(
+            (field.containing_schema.as_str(), field.stable_name.as_str()),
+            (
+                "RemoteReleaseSummaryEntry" | "RemoteRetentionReleaseAckCertificate",
+                "grant_id"
+            ) | (
+                "RemoteReleaseSummaryEntry"
+                    | "RemoteRetentionReleaseAckCertificate"
+                    | "RemoteRetentionReleaseTombstone",
+                "release_nonce"
+            )
+        );
+        if flipped {
+            field.exact_wire_type = "id256".to_owned();
+        }
+    }
+    for union in &mut identity.ordinary_unions {
+        if matches!(
+            union.union_name.as_str(),
+            "RootAuthorityTrustArtifactKind" | "TrustTransition"
+        ) {
+            union.tag_wire_type = "u16".to_owned();
+            union.max_size_bytes = 16_777_216;
+            for arm in &mut union.arms {
+                arm.max_size_bytes = 16_777_216;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Baseline.
 // ---------------------------------------------------------------------------
@@ -2964,6 +3001,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove exactly the two post-erratum A15 unions"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
+    undo_a01_exactness_repair(&mut pre_erratum);
     let reconstructed_previous_fields_pin = identity::assignment_pins(&pre_erratum)
         .into_iter()
         .find(|pin| pin.registry == "durable_fields")

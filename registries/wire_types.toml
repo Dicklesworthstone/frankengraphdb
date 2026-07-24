@@ -167,7 +167,7 @@ kind = "union"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family AppliedAbortRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 49
 
 [[type]]
 wire_type_id = 0x0013
@@ -176,7 +176,7 @@ kind = "union"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family AppliedControlRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 49
 
 [[type]]
 wire_type_id = 0x0014
@@ -185,7 +185,7 @@ kind = "union"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family AuditCandidateRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 49
 
 [[type]]
 wire_type_id = 0x0015
@@ -194,7 +194,7 @@ kind = "union"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family AuthorityAppliedRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 49
 
 [[type]]
 wire_type_id = 0x0016
@@ -203,7 +203,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family CertifiedRemoteStrongRef<T> (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 537
 
 [[type]]
 wire_type_id = 0x0017
@@ -212,7 +212,7 @@ kind = "record"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family CommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 40
 
 [[type]]
 wire_type_id = 0x0018
@@ -221,7 +221,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConditionalCoordinateRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 48
 
 [[type]]
 wire_type_id = 0x0019
@@ -230,7 +230,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConditionalGlobalCommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 40
 
 [[type]]
 wire_type_id = 0x001a
@@ -239,7 +239,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConditionalGlobalTxnInputRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 40
 
 [[type]]
 wire_type_id = 0x001b
@@ -248,7 +248,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConditionalMarkerRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 57
 
 [[type]]
 wire_type_id = 0x001c
@@ -257,7 +257,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConditionalShardCommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 44
 
 [[type]]
 wire_type_id = 0x001d
@@ -266,7 +266,7 @@ kind = "record"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family ConsensusDomain (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 93
 
 [[type]]
 wire_type_id = 0x001e
@@ -275,7 +275,7 @@ kind = "record"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family PlacementDescriptorWithoutId (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 65536
 
 [[type]]
 wire_type_id = 0x001f
@@ -284,7 +284,7 @@ kind = "record"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family RemoteObjectIdentity (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 159
 
 [[type]]
 wire_type_id = 0x0020
@@ -302,7 +302,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family StrongCommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 40
 
 [[type]]
 wire_type_id = 0x0022
@@ -311,7 +311,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family StrongGlobalCommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 40
 
 [[type]]
 wire_type_id = 0x0023
@@ -320,7 +320,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family StrongShardCommandRef (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 44
 
 [[type]]
 wire_type_id = 0x0024
@@ -329,7 +329,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family WeakGlobalCommandIdentity (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 40
 
 [[type]]
 wire_type_id = 0x0025
@@ -338,7 +338,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family WeakMarkerIdentity (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 40
 
 [[type]]
 wire_type_id = 0x0026
@@ -347,7 +347,7 @@ kind = "reference_wrapper"
 status = "reserved"
 encoding_context = "Appendix A reference-semantics family WeakShardCommandIdentity (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
-max_size_bytes = 4096
+max_size_bytes = 44
 
 [[type]]
 wire_type_id = 0x0027
