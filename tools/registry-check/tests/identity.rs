@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 7
+registry_epoch = 8
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 7);
+    assert_eq!(epoch, 8);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -1952,6 +1952,7 @@ fn appendix_a_wire_backed_union_requires_confirmed_owner_and_exact_arm_set() {
 
     for union_name in [
         "ServicePromotionExternalOperationKind",
+        "KeyDestroyExternalAckRef",
         "KeyDestroyFloorRef",
     ] {
         let mut missing_arm = real_appendix_catalog();
@@ -2058,6 +2059,9 @@ fn appendix_a_inline_record_unions_require_exact_payload_digests() {
     let source = real_plan_source();
     for (union_name, arm_name) in [
         ("NewDatabaseIdentityTargetCreationCommitment", "ExternalCas"),
+        ("KeyDestroyExternalAckRef", "Backup"),
+        ("KeyDestroyExternalAckRef", "LegalHold"),
+        ("KeyDestroyExternalAckRef", "RemoteConsumer"),
         ("KeyDestroyFloorRef", "Checkpoint"),
         ("KeyDestroyFloorRef", "Configuration"),
     ] {
@@ -2948,13 +2952,16 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     );
     let mut pre_erratum = r.clone();
     let current_union_count = pre_erratum.ordinary_unions.len();
-    pre_erratum
-        .ordinary_unions
-        .retain(|union| union.union_name != "KeyDestroyFloorRef");
+    pre_erratum.ordinary_unions.retain(|union| {
+        !matches!(
+            union.union_name.as_str(),
+            "KeyDestroyExternalAckRef" | "KeyDestroyFloorRef"
+        )
+    });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 1,
+        pre_erratum.ordinary_unions.len() + 2,
         current_union_count,
-        "the historical witness must remove exactly the post-erratum A15 union"
+        "the historical witness must remove exactly the two post-erratum A15 unions"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     let reconstructed_previous_fields_pin = identity::assignment_pins(&pre_erratum)

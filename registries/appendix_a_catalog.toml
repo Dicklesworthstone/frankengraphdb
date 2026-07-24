@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 341
+target_count = 349
 projection_fallback_count = 83
-target_source_assignment_sha256 = "e8694d2cc205ed2d69e53c6a31c1f015628f947dcf6266e89b3785e2ec9e8169"
+target_source_assignment_sha256 = "878ac35ac5df37458749ea1d3729df8d3220826abeb852359d010e3b281d7bc1"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -596,11 +596,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 6
+registry_epoch = 7
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 7
+registry_epoch = 8
 
 [[logical_kind]]
 slice_id = "a03"
@@ -1622,6 +1622,56 @@ containing_union = "KeyDestroyFloorRef"
 wire_tag = 0x0002
 encoding_context = "reserved inline-record payload; exact floor_ref field registration and bound proof remain required before activation"
 allowed_containing_schemas = ["KeyDestroyFloorRef"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destroy-external-ack-ref"
+wire_type_id = 0x0032
+name = "KeyDestroyExternalAckRef"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union; a15:2057 confirms Backup, LegalHold, and RemoteConsumer inline-record arms, while exact arm field rows and a source-derived bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyProposal"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destroy-external-ack-ref-backup"
+wire_type_id = 0x0033
+name = "KeyDestroyExternalAckRef.Backup"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestroyExternalAckRef"
+wire_tag = 0x0001
+encoding_context = "reserved inline-record payload; exact ack_ref field registration and bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyExternalAckRef"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destroy-external-ack-ref-legal-hold"
+wire_type_id = 0x0034
+name = "KeyDestroyExternalAckRef.LegalHold"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestroyExternalAckRef"
+wire_tag = 0x0002
+encoding_context = "reserved inline-record payload; exact ack_ref field registration and bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyExternalAckRef"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destroy-external-ack-ref-remote-consumer"
+wire_type_id = 0x0035
+name = "KeyDestroyExternalAckRef.RemoteConsumer"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestroyExternalAckRef"
+wire_tag = 0x0003
+encoding_context = "reserved inline-record payload; exact ack_ref field registration and bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyExternalAckRef"]
 max_size_bytes = 65536
 
 [[wire_type]]
@@ -5461,6 +5511,64 @@ source_arm_name = "Configuration"
 stable_name = "Configuration"
 payload_kind = "inline-record"
 payload_sha256 = "dd6892393874a249fd01e86d8722760a8a2ec9ac1b27d6ce1b8dc610769404fa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union]]
+slice_id = "a15"
+row_id = "a15:union:key-destroy-external-ack-ref-241fb842dd6e6eab"
+union_name = "KeyDestroyExternalAckRef"
+containing_schema = "KeyDestroyExternalAckRef"
+union_path = "KeyDestroyExternalAckRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyDestroyProposal"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a15"
+row_id = "a15:union-arm:key-destroy-external-ack-ref-backup-c594084c6b017d1a"
+union_name = "KeyDestroyExternalAckRef"
+containing_schema = "KeyDestroyExternalAckRef"
+union_path = "KeyDestroyExternalAckRef"
+arm_tag = 0x0001
+source_arm_name = "Backup"
+stable_name = "Backup"
+payload_kind = "inline-record"
+payload_sha256 = "d61f1a2a077121b0c38d4ce90023946de48e34fe561673f5a234ac872cb4be0f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a15"
+row_id = "a15:union-arm:key-destroy-external-ack-ref-legal-hold-11a62fe71e40ef11"
+union_name = "KeyDestroyExternalAckRef"
+containing_schema = "KeyDestroyExternalAckRef"
+union_path = "KeyDestroyExternalAckRef"
+arm_tag = 0x0002
+source_arm_name = "LegalHold"
+stable_name = "LegalHold"
+payload_kind = "inline-record"
+payload_sha256 = "acdf80f23a5b38fdc05bb76794d1318c3f78ceb15e1a72ccab8e3dcb7db4702c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a15"
+row_id = "a15:union-arm:key-destroy-external-ack-ref-remote-consumer-c32969d44f13646d"
+union_name = "KeyDestroyExternalAckRef"
+containing_schema = "KeyDestroyExternalAckRef"
+union_path = "KeyDestroyExternalAckRef"
+arm_tag = 0x0003
+source_arm_name = "RemoteConsumer"
+stable_name = "RemoteConsumer"
+payload_kind = "inline-record"
+payload_sha256 = "9173544b408ec4201373b1227160c6ae768b69351628159383d5b313b4b458a0"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
@@ -17211,7 +17319,7 @@ symbol = "KeyDestroyExternalAckRef"
 generic_signature = ""
 source_key = "top|KeyDestroyExternalAckRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a15:2057"]
 
 [[top_level_candidate]]
@@ -26150,6 +26258,70 @@ target_row_id = "a15:prebootstrap-kind:wrapped-key-artifact"
 slice_id = "a15"
 source_key = "projection|prebootstrap_artifact_kinds|WrappedKeyArtifact"
 target_kind = "prebootstrap-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-arm-key-destroy-external-ack-ref-backup-c594084c6b017d1a"
+target_row_id = "a15:union-arm:key-destroy-external-ack-ref-backup-c594084c6b017d1a"
+slice_id = "a15"
+source_key = "arm|KeyDestroyExternalAckRef|KeyDestroyExternalAckRef|Backup"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-arm-key-destroy-external-ack-ref-legal-hold-11a62fe71e40ef11"
+target_row_id = "a15:union-arm:key-destroy-external-ack-ref-legal-hold-11a62fe71e40ef11"
+slice_id = "a15"
+source_key = "arm|KeyDestroyExternalAckRef|KeyDestroyExternalAckRef|LegalHold"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-arm-key-destroy-external-ack-ref-remote-consumer-c32969d44f13646d"
+target_row_id = "a15:union-arm:key-destroy-external-ack-ref-remote-consumer-c32969d44f13646d"
+slice_id = "a15"
+source_key = "arm|KeyDestroyExternalAckRef|KeyDestroyExternalAckRef|RemoteConsumer"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:union-key-destroy-external-ack-ref-241fb842dd6e6eab"
+target_row_id = "a15:union:key-destroy-external-ack-ref-241fb842dd6e6eab"
+slice_id = "a15"
+source_key = "union|KeyDestroyExternalAckRef|KeyDestroyExternalAckRef"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destroy-external-ack-ref"
+target_row_id = "a15:wire-type:key-destroy-external-ack-ref"
+slice_id = "a15"
+source_key = "top|KeyDestroyExternalAckRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destroy-external-ack-ref-backup"
+target_row_id = "a15:wire-type:key-destroy-external-ack-ref-backup"
+slice_id = "a15"
+source_key = "arm|KeyDestroyExternalAckRef|KeyDestroyExternalAckRef|Backup"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destroy-external-ack-ref-legal-hold"
+target_row_id = "a15:wire-type:key-destroy-external-ack-ref-legal-hold"
+slice_id = "a15"
+source_key = "arm|KeyDestroyExternalAckRef|KeyDestroyExternalAckRef|LegalHold"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destroy-external-ack-ref-remote-consumer"
+target_row_id = "a15:wire-type:key-destroy-external-ack-ref-remote-consumer"
+slice_id = "a15"
+source_key = "arm|KeyDestroyExternalAckRef|KeyDestroyExternalAckRef|RemoteConsumer"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[target]]

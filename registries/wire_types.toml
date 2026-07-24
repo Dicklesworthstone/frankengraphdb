@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 6
+registry_epoch = 7
 
 [[type]]
 wire_type_id = 0x0001
@@ -462,4 +462,46 @@ containing_union = "KeyDestroyFloorRef"
 wire_tag = 0x0002
 encoding_context = "reserved inline-record payload; exact floor_ref field registration and bound proof remain required before activation"
 allowed_containing_schemas = ["KeyDestroyFloorRef"]
+max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x0032
+name = "KeyDestroyExternalAckRef"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union; a15:2057 confirms Backup, LegalHold, and RemoteConsumer inline-record arms, while exact arm field rows and a source-derived bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyProposal"]
+max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x0033
+name = "KeyDestroyExternalAckRef.Backup"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestroyExternalAckRef"
+wire_tag = 0x0001
+encoding_context = "reserved inline-record payload; exact ack_ref field registration and bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyExternalAckRef"]
+max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x0034
+name = "KeyDestroyExternalAckRef.LegalHold"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestroyExternalAckRef"
+wire_tag = 0x0002
+encoding_context = "reserved inline-record payload; exact ack_ref field registration and bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyExternalAckRef"]
+max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x0035
+name = "KeyDestroyExternalAckRef.RemoteConsumer"
+kind = "union_variant"
+status = "reserved"
+containing_union = "KeyDestroyExternalAckRef"
+wire_tag = 0x0003
+encoding_context = "reserved inline-record payload; exact ack_ref field registration and bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyExternalAckRef"]
 max_size_bytes = 65536

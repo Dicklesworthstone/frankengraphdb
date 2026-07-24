@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 7
+registry_epoch = 8
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -2904,6 +2904,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "KeyDestroyExternalAckRef"
+containing_schema = "KeyDestroyExternalAckRef"
+union_path = "KeyDestroyExternalAckRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyDestroyProposal"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union]]
 union_name = "KeyDestroyFloorRef"
 containing_schema = "KeyDestroyFloorRef"
 union_path = "KeyDestroyFloorRef"
@@ -2959,6 +2970,45 @@ allowed_containing_schemas = ["ServicePromotionExternalOperationRecord<Local>", 
 role_predicate = "role-local || role-meta"
 version_status = "active"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "KeyDestroyExternalAckRef"
+containing_schema = "KeyDestroyExternalAckRef"
+union_path = "KeyDestroyExternalAckRef"
+arm_tag = 0x0001
+source_arm_name = "Backup"
+stable_name = "Backup"
+payload_kind = "inline-record"
+payload_sha256 = "d61f1a2a077121b0c38d4ce90023946de48e34fe561673f5a234ac872cb4be0f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "KeyDestroyExternalAckRef"
+containing_schema = "KeyDestroyExternalAckRef"
+union_path = "KeyDestroyExternalAckRef"
+arm_tag = 0x0002
+source_arm_name = "LegalHold"
+stable_name = "LegalHold"
+payload_kind = "inline-record"
+payload_sha256 = "acdf80f23a5b38fdc05bb76794d1318c3f78ceb15e1a72ccab8e3dcb7db4702c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "KeyDestroyExternalAckRef"
+containing_schema = "KeyDestroyExternalAckRef"
+union_path = "KeyDestroyExternalAckRef"
+arm_tag = 0x0003
+source_arm_name = "RemoteConsumer"
+stable_name = "RemoteConsumer"
+payload_kind = "inline-record"
+payload_sha256 = "9173544b408ec4201373b1227160c6ae768b69351628159383d5b313b4b458a0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[union_arm]]
 union_name = "KeyDestroyFloorRef"
