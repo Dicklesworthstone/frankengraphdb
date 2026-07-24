@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 8
+registry_epoch = 9
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 8);
+    assert_eq!(epoch, 9);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -1991,6 +1991,7 @@ fn appendix_a_wire_backed_union_requires_confirmed_owner_and_exact_arm_set() {
         "ServicePromotionExternalOperationKind",
         "KeyDestroyExternalAckRef",
         "KeyDestroyFloorRef",
+        "KeyDestructionTarget",
     ] {
         let mut missing_arm = real_appendix_catalog();
         let union = missing_arm
@@ -2101,6 +2102,9 @@ fn appendix_a_inline_record_unions_require_exact_payload_digests() {
         ("KeyDestroyExternalAckRef", "RemoteConsumer"),
         ("KeyDestroyFloorRef", "Checkpoint"),
         ("KeyDestroyFloorRef", "Configuration"),
+        ("KeyDestructionTarget", "KmsKeyVersion"),
+        ("KeyDestructionTarget", "HsmObject"),
+        ("KeyDestructionTarget", "StorageMemberReplica"),
     ] {
         let mut wrong_payload = real_appendix_catalog();
         let arm = wrong_payload
@@ -2552,6 +2556,34 @@ fn idr_wire_backed_top_level_union_rejects_container_scope_drift() {
 }
 
 #[test]
+fn idr_key_destruction_target_consumer_closure_is_exact() {
+    let identity = real_identity();
+    let expected = vec![
+        "ExternalKeyDestructionOperationRecord".to_owned(),
+        "KeyDestructionOperationPlan".to_owned(),
+        "ShardKeyDestroyApplySpec".to_owned(),
+    ];
+    let union = identity
+        .ordinary_unions
+        .iter()
+        .find(|union| union.union_name == "KeyDestructionTarget")
+        .expect("KeyDestructionTarget ordinary union exists");
+    assert_eq!(
+        union.allowed_containing_schemas, expected,
+        "the source-derived ordinary-union consumer closure must remain exact"
+    );
+    let wire_parent = identity
+        .wire
+        .iter()
+        .find(|wire| wire.name == "KeyDestructionTarget")
+        .expect("KeyDestructionTarget wire parent exists");
+    assert_eq!(
+        wire_parent.allowed_containing_schemas, expected,
+        "the wire parent must exactly mirror the ordinary-union consumer closure"
+    );
+}
+
+#[test]
 fn idr_ordinary_union_container_pin_is_unambiguously_framed() {
     let mut split = wire_backed_top_level_union_fixture();
     split.ordinary_unions[0].allowed_containing_schemas = vec!["A".into(), "B".into()];
@@ -2992,13 +3024,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     pre_erratum.ordinary_unions.retain(|union| {
         !matches!(
             union.union_name.as_str(),
-            "KeyDestroyExternalAckRef" | "KeyDestroyFloorRef"
+            "KeyDestroyExternalAckRef" | "KeyDestroyFloorRef" | "KeyDestructionTarget"
         )
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 2,
+        pre_erratum.ordinary_unions.len() + 3,
         current_union_count,
-        "the historical witness must remove exactly the two post-erratum A15 unions"
+        "the historical witness must remove exactly the three post-erratum A15 unions"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
