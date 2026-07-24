@@ -12,6 +12,7 @@ pub mod degree_histogram;
 pub mod distinct;
 pub mod exact_quantiles;
 pub mod maintenance_log;
+pub mod path_correlation;
 pub mod zone_map;
 
 #[cfg(test)]
