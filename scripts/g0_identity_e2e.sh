@@ -139,7 +139,7 @@ else
 fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
-    '"target_count":465' \
+    '"target_count":482' \
     '"projection_fallback_count":83' \
     '"target_source_assignment_sha256":"48a5547a579c7e20d72394414ceea9bc50a561b468adca208ea530bf2f1da30a"' \
     '"outcome":"pass"'; then
@@ -170,7 +170,7 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"reserved_reservations":729' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":465' \
+    '"targets":482' \
     '"semantic_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \
@@ -186,12 +186,12 @@ fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_completed"' \
     '"slices":21' \
-    '"projection_rows":465' \
+    '"projection_rows":482' \
     '"projection_files":6' \
     '"reservations":813' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":465' \
+    '"targets":482' \
     '"semantic_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \

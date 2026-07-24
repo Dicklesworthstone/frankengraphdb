@@ -3098,9 +3098,14 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     );
     let mut pre_erratum = r.clone();
     let current_union_count = pre_erratum.ordinary_unions.len();
-    pre_erratum.ordinary_unions.retain(|union| {
-        !matches!(
-            union.union_name.as_str(),
+    let current_field_count = pre_erratum.fields.len();
+    // Post-erratum ordinary unions, whole-schema and embedded alike.  An
+    // embedded union's anchor field row exists only because the union does, so
+    // the two are removed together and the witness stays exact as the a16
+    // embedded-union closure lands.
+    let post_erratum_union = |name: &str| {
+        matches!(
+            name,
             "KeyDestroyExternalAckRef"
                 | "KeyDestroyFloorRef"
                 | "KeyDestructionTarget"
@@ -3119,12 +3124,27 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "RestoreClaimedTargetAuthorityRecipe"
                 | "RestoreIdentityKeyPlan"
                 | "RestoreIdentityKeyDispositionEvidence"
+                | "TimeValidationClassification"
+                | "OfflineMacaroonIssuerEpochState"
+                | "TimeAuthorityRegistryTransitionTerminalDisposition"
+                | "PortableRestoreSourceLeaseLineageBasis"
         )
-    });
+    };
+    pre_erratum
+        .ordinary_unions
+        .retain(|union| !post_erratum_union(&union.union_name));
+    pre_erratum
+        .fields
+        .retain(|field| !post_erratum_union(&field.exact_wire_type));
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 18,
+        pre_erratum.ordinary_unions.len() + 22,
         current_union_count,
         "the historical witness must remove exactly the post-erratum A15, A01, and A16 unions"
+    );
+    assert_eq!(
+        pre_erratum.fields.len() + 4,
+        current_field_count,
+        "the historical witness must remove exactly the post-erratum embedded-union anchor fields"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

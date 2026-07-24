@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 12
+registry_epoch = 13
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -479,6 +479,48 @@ role_predicate = "role-meta"
 retention_and_cut_rule = "reserved; a05-a07 populate the exact schema"
 version_status = "reserved"
 max_size_bytes = 268435456
+
+[[field]]
+containing_schema = "OfflineMacaroonIssuerEpochFenceReceipt"
+field_tag = 0x0009
+stable_name = "issuer_epoch_state"
+exact_wire_type = "OfflineMacaroonIssuerEpochState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "closed union VerifyOnly|Disabled; the fenced issuer-epoch posture this receipt attests, lives/dies with the fence receipt (a16:2175)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "PortableRestoreSourceLeaseLineageProof"
+field_tag = 0x0004
+stable_name = "lineage_basis"
+exact_wire_type = "PortableRestoreSourceLeaseLineageBasis"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "closed union Genesis|Checkpointed; the lineage root this portable proof is anchored at, lives/dies with the lineage proof (a16:2235)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "PortableTimeAuthorityRegistryTransitionTerminalEvidence"
+field_tag = 0x0009
+stable_name = "terminal_disposition"
+exact_wire_type = "TimeAuthorityRegistryTransitionTerminalDisposition"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "closed union Applied|AlreadyApplied; the idempotent terminal outcome of one registry transition — both arms carry the identical receipt/head/version triple by design — lives/dies with the terminal evidence (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "PreparedCommitRecord"
@@ -2905,6 +2947,20 @@ retention_and_cut_rule = "reserved; a05-a08 populate the exact schema"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[field]]
+containing_schema = "TimeValidationEvidence"
+field_tag = 0x0005
+stable_name = "classification"
+exact_wire_type = "TimeValidationClassification"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "closed union Usable|NotYetValid|Expired; the classification is the whole verdict of one portable time validation and lives/dies with its evidence object (a16:2167)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union]]
 union_name = "ContinuityAuthorityCurrentBasis<Role>"
 containing_schema = "ContinuityAuthorityCurrentBasis<Role>"
@@ -2970,6 +3026,42 @@ allowed_containing_schemas = ["NewDatabaseIdentityReservation"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
+
+[[union]]
+union_name = "OfflineMacaroonIssuerEpochState"
+containing_schema = "OfflineMacaroonIssuerEpochFenceReceipt"
+union_path = "OfflineMacaroonIssuerEpochFenceReceipt.issuer_epoch_state"
+field_tag = 0x0009
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["OfflineMacaroonIssuerEpochFenceReceipt"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "PortableRestoreSourceLeaseLineageBasis"
+containing_schema = "PortableRestoreSourceLeaseLineageProof"
+union_path = "PortableRestoreSourceLeaseLineageProof.lineage_basis"
+field_tag = 0x0004
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableRestoreSourceLeaseLineageProof"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "TimeAuthorityRegistryTransitionTerminalDisposition"
+containing_schema = "PortableTimeAuthorityRegistryTransitionTerminalEvidence"
+union_path = "PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition"
+field_tag = 0x0009
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableTimeAuthorityRegistryTransitionTerminalEvidence"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union]]
 union_name = "TrustTransition"
@@ -3145,6 +3237,18 @@ union_path = "TimeSubjectTerminalProjection"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["TimeSubjectTerminalProjection"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "TimeValidationClassification"
+containing_schema = "TimeValidationEvidence"
+union_path = "TimeValidationEvidence.classification"
+field_tag = 0x0005
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TimeValidationEvidence"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -3343,6 +3447,81 @@ payload_sha256 = "9a2e5500ed37de434f6779b593a266511aea44319fe27cb79cd03b0c819f75
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "OfflineMacaroonIssuerEpochState"
+containing_schema = "OfflineMacaroonIssuerEpochFenceReceipt"
+union_path = "OfflineMacaroonIssuerEpochFenceReceipt.issuer_epoch_state"
+arm_tag = 0x0001
+source_arm_name = "VerifyOnly"
+stable_name = "verify_only"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "OfflineMacaroonIssuerEpochState"
+containing_schema = "OfflineMacaroonIssuerEpochFenceReceipt"
+union_path = "OfflineMacaroonIssuerEpochFenceReceipt.issuer_epoch_state"
+arm_tag = 0x0002
+source_arm_name = "Disabled"
+stable_name = "disabled"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PortableRestoreSourceLeaseLineageBasis"
+containing_schema = "PortableRestoreSourceLeaseLineageProof"
+union_path = "PortableRestoreSourceLeaseLineageProof.lineage_basis"
+arm_tag = 0x0001
+source_arm_name = "Genesis"
+stable_name = "genesis"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PortableRestoreSourceLeaseLineageBasis"
+containing_schema = "PortableRestoreSourceLeaseLineageProof"
+union_path = "PortableRestoreSourceLeaseLineageProof.lineage_basis"
+arm_tag = 0x0002
+source_arm_name = "Checkpointed"
+stable_name = "checkpointed"
+payload_kind = "inline-record"
+payload_sha256 = "59ec368a8dc44afa3fe19ba51b406569eda42c02460bdb7c0564a2a4879f6436"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeAuthorityRegistryTransitionTerminalDisposition"
+containing_schema = "PortableTimeAuthorityRegistryTransitionTerminalEvidence"
+union_path = "PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition"
+arm_tag = 0x0001
+source_arm_name = "Applied"
+stable_name = "applied"
+payload_kind = "inline-record"
+payload_sha256 = "294d0a4f2910a324e15b8dc95e610bb0ac1a36b3f3e7845eb96b0966208565c5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeAuthorityRegistryTransitionTerminalDisposition"
+containing_schema = "PortableTimeAuthorityRegistryTransitionTerminalEvidence"
+union_path = "PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition"
+arm_tag = 0x0002
+source_arm_name = "AlreadyApplied"
+stable_name = "already_applied"
+payload_kind = "inline-record"
+payload_sha256 = "294d0a4f2910a324e15b8dc95e610bb0ac1a36b3f3e7845eb96b0966208565c5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "TrustTransition"
@@ -3828,6 +4007,45 @@ source_arm_name = "Reissued"
 stable_name = "reissued"
 payload_kind = "inline-record"
 payload_sha256 = "b2fbbf8b82500a6854f20df624ebce7b6a0776a010204f9de6203c8dbeea02c4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeValidationClassification"
+containing_schema = "TimeValidationEvidence"
+union_path = "TimeValidationEvidence.classification"
+arm_tag = 0x0001
+source_arm_name = "Usable"
+stable_name = "usable"
+payload_kind = "inline-record"
+payload_sha256 = "281266647a387489f86c415b46220b5db732cdcd0ce08984e540faa9d3f88c47"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeValidationClassification"
+containing_schema = "TimeValidationEvidence"
+union_path = "TimeValidationEvidence.classification"
+arm_tag = 0x0002
+source_arm_name = "NotYetValid"
+stable_name = "not_yet_valid"
+payload_kind = "inline-record"
+payload_sha256 = "c7c6f927267eba0536df651c835769a72cd1cb27eca35e937f43af180c0334cb"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeValidationClassification"
+containing_schema = "TimeValidationEvidence"
+union_path = "TimeValidationEvidence.classification"
+arm_tag = 0x0003
+source_arm_name = "Expired"
+stable_name = "expired"
+payload_kind = "inline-record"
+payload_sha256 = "a2d000e1977254b1f6671cf27654b07ff556c38c9f077ca7d6c768a5372acc47"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

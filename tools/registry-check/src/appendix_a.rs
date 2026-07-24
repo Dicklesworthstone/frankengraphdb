@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 465;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 482;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "b88f02522e9df098840ee8b5ccc2f923c4a528817ea7fb821a8ed55f14501458";
+    "78e2de5df9eb945719813aaace24150696fcfb2b2625a189d62e7f70b4dc3c1b";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 83;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "48a5547a579c7e20d72394414ceea9bc50a561b468adca208ea530bf2f1da30a";
+    "4d72118c1a5b4b381e69357fa3537be3b245281719e43031c650b61d986c961c";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";

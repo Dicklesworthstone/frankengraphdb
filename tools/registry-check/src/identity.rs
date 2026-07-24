@@ -1068,7 +1068,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
     const WIRE: &str = "fnv1a64:0f02a754916d418a";
-    const FIELDS: &str = "fnv1a64:8801d550dfd9733e";
+    const FIELDS: &str = "fnv1a64:2e309fc2ee6e8502";
 
     let logical = rows_pin(
         r.logical
@@ -1225,7 +1225,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 12,
+            expected_epoch: 13,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,

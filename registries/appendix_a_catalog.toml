@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 465
+target_count = 482
 projection_fallback_count = 83
-target_source_assignment_sha256 = "48a5547a579c7e20d72394414ceea9bc50a561b468adca208ea530bf2f1da30a"
+target_source_assignment_sha256 = "4d72118c1a5b4b381e69357fa3537be3b245281719e43031c650b61d986c961c"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -600,7 +600,7 @@ registry_epoch = 8
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 12
+registry_epoch = 13
 
 [[logical_kind]]
 slice_id = "a03"
@@ -5896,6 +5896,70 @@ retention_and_cut_rule = "reserved; a05-a08 populate the exact schema"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-validation-evidence-classification"
+containing_schema = "TimeValidationEvidence"
+field_tag = 0x0005
+stable_name = "classification"
+exact_wire_type = "TimeValidationClassification"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "closed union Usable|NotYetValid|Expired; the classification is the whole verdict of one portable time validation and lives/dies with its evidence object (a16:2167)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:offline-macaroon-issuer-epoch-fence-receipt-issuer-epoch-state"
+containing_schema = "OfflineMacaroonIssuerEpochFenceReceipt"
+field_tag = 0x0009
+stable_name = "issuer_epoch_state"
+exact_wire_type = "OfflineMacaroonIssuerEpochState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "closed union VerifyOnly|Disabled; the fenced issuer-epoch posture this receipt attests, lives/dies with the fence receipt (a16:2175)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:portable-time-authority-registry-transition-terminal-evidence-terminal-disposition"
+containing_schema = "PortableTimeAuthorityRegistryTransitionTerminalEvidence"
+field_tag = 0x0009
+stable_name = "terminal_disposition"
+exact_wire_type = "TimeAuthorityRegistryTransitionTerminalDisposition"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "closed union Applied|AlreadyApplied; the idempotent terminal outcome of one registry transition — both arms carry the identical receipt/head/version triple by design — lives/dies with the terminal evidence (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:portable-restore-source-lease-lineage-proof-lineage-basis"
+containing_schema = "PortableRestoreSourceLeaseLineageProof"
+field_tag = 0x0004
+stable_name = "lineage_basis"
+exact_wire_type = "PortableRestoreSourceLeaseLineageBasis"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "closed union Genesis|Checkpointed; the lineage root this portable proof is anchored at, lives/dies with the lineage proof (a16:2235)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union]]
 slice_id = "a01"
 row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
@@ -6612,6 +6676,62 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a16"
+row_id = "a16:union:time-validation-classification-6798a4bd41eeabae"
+union_name = "TimeValidationClassification"
+containing_schema = "TimeValidationEvidence"
+union_path = "TimeValidationEvidence.classification"
+field_tag = 0x0005
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TimeValidationEvidence"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a16"
+row_id = "a16:union:offline-macaroon-issuer-epoch-state-ecf143473fd2e0be"
+union_name = "OfflineMacaroonIssuerEpochState"
+containing_schema = "OfflineMacaroonIssuerEpochFenceReceipt"
+union_path = "OfflineMacaroonIssuerEpochFenceReceipt.issuer_epoch_state"
+field_tag = 0x0009
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["OfflineMacaroonIssuerEpochFenceReceipt"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a16"
+row_id = "a16:union:time-authority-registry-transition-terminal-disposition-198fc9f208dd7760"
+union_name = "TimeAuthorityRegistryTransitionTerminalDisposition"
+containing_schema = "PortableTimeAuthorityRegistryTransitionTerminalEvidence"
+union_path = "PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition"
+field_tag = 0x0009
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableTimeAuthorityRegistryTransitionTerminalEvidence"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a16"
+row_id = "a16:union:portable-restore-source-lease-lineage-basis-dbb85aa223e27112"
+union_name = "PortableRestoreSourceLeaseLineageBasis"
+containing_schema = "PortableRestoreSourceLeaseLineageProof"
+union_path = "PortableRestoreSourceLeaseLineageProof.lineage_basis"
+field_tag = 0x0004
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableRestoreSourceLeaseLineageProof"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a20"
 row_id = "a20:union-arm:service-promotion-external-operation-kind-catalog-reserve-hidden-cb21b33f2418f561"
@@ -7144,6 +7264,138 @@ source_arm_name = "ClonedFreshIdentity"
 stable_name = "cloned_fresh_identity"
 payload_kind = "inline-record"
 payload_sha256 = "4cd7c384b7cfc8ab7d155fb909a39c2890268891070bc6016d99659177fd85af"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-validation-classification-usable-1f20aec6cbfcee35"
+union_name = "TimeValidationClassification"
+containing_schema = "TimeValidationEvidence"
+union_path = "TimeValidationEvidence.classification"
+arm_tag = 0x0001
+source_arm_name = "Usable"
+stable_name = "usable"
+payload_kind = "inline-record"
+payload_sha256 = "281266647a387489f86c415b46220b5db732cdcd0ce08984e540faa9d3f88c47"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-validation-classification-not-yet-valid-bae207e2b3bf5431"
+union_name = "TimeValidationClassification"
+containing_schema = "TimeValidationEvidence"
+union_path = "TimeValidationEvidence.classification"
+arm_tag = 0x0002
+source_arm_name = "NotYetValid"
+stable_name = "not_yet_valid"
+payload_kind = "inline-record"
+payload_sha256 = "c7c6f927267eba0536df651c835769a72cd1cb27eca35e937f43af180c0334cb"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-validation-classification-expired-f8f29e6b713f93b5"
+union_name = "TimeValidationClassification"
+containing_schema = "TimeValidationEvidence"
+union_path = "TimeValidationEvidence.classification"
+arm_tag = 0x0003
+source_arm_name = "Expired"
+stable_name = "expired"
+payload_kind = "inline-record"
+payload_sha256 = "a2d000e1977254b1f6671cf27654b07ff556c38c9f077ca7d6c768a5372acc47"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:offline-macaroon-issuer-epoch-state-verify-only-9620fb76f55a4214"
+union_name = "OfflineMacaroonIssuerEpochState"
+containing_schema = "OfflineMacaroonIssuerEpochFenceReceipt"
+union_path = "OfflineMacaroonIssuerEpochFenceReceipt.issuer_epoch_state"
+arm_tag = 0x0001
+source_arm_name = "VerifyOnly"
+stable_name = "verify_only"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:offline-macaroon-issuer-epoch-state-disabled-439493008dd632cf"
+union_name = "OfflineMacaroonIssuerEpochState"
+containing_schema = "OfflineMacaroonIssuerEpochFenceReceipt"
+union_path = "OfflineMacaroonIssuerEpochFenceReceipt.issuer_epoch_state"
+arm_tag = 0x0002
+source_arm_name = "Disabled"
+stable_name = "disabled"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-authority-registry-transition-terminal-disposition-applied-f2f6f34c6ae4ef14"
+union_name = "TimeAuthorityRegistryTransitionTerminalDisposition"
+containing_schema = "PortableTimeAuthorityRegistryTransitionTerminalEvidence"
+union_path = "PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition"
+arm_tag = 0x0001
+source_arm_name = "Applied"
+stable_name = "applied"
+payload_kind = "inline-record"
+payload_sha256 = "294d0a4f2910a324e15b8dc95e610bb0ac1a36b3f3e7845eb96b0966208565c5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-authority-registry-transition-terminal-disposition-already-applied-99168dc49bb5af5d"
+union_name = "TimeAuthorityRegistryTransitionTerminalDisposition"
+containing_schema = "PortableTimeAuthorityRegistryTransitionTerminalEvidence"
+union_path = "PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition"
+arm_tag = 0x0002
+source_arm_name = "AlreadyApplied"
+stable_name = "already_applied"
+payload_kind = "inline-record"
+payload_sha256 = "294d0a4f2910a324e15b8dc95e610bb0ac1a36b3f3e7845eb96b0966208565c5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:portable-restore-source-lease-lineage-basis-genesis-4ecd9faa0b8d6f8a"
+union_name = "PortableRestoreSourceLeaseLineageBasis"
+containing_schema = "PortableRestoreSourceLeaseLineageProof"
+union_path = "PortableRestoreSourceLeaseLineageProof.lineage_basis"
+arm_tag = 0x0001
+source_arm_name = "Genesis"
+stable_name = "genesis"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:portable-restore-source-lease-lineage-basis-checkpointed-44430fdeab3dad03"
+union_name = "PortableRestoreSourceLeaseLineageBasis"
+containing_schema = "PortableRestoreSourceLeaseLineageProof"
+union_path = "PortableRestoreSourceLeaseLineageProof.lineage_basis"
+arm_tag = 0x0002
+source_arm_name = "Checkpointed"
+stable_name = "checkpointed"
+payload_kind = "inline-record"
+payload_sha256 = "59ec368a8dc44afa3fe19ba51b406569eda42c02460bdb7c0564a2a4879f6436"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -30473,6 +30725,142 @@ slice_id = "a16"
 source_key = "top|TimeAuthorityRegistryTransitionReceipt"
 target_kind = "logical-kind"
 definition_status = "declared"
+[[target]]
+row_id = "a16:target:field-time-validation-evidence-classification"
+target_row_id = "a16:field:time-validation-evidence-classification"
+slice_id = "a16"
+source_key = "field|TimeValidationEvidence|TimeValidationEvidence.classification|classification"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-time-validation-classification-6798a4bd41eeabae"
+target_row_id = "a16:union:time-validation-classification-6798a4bd41eeabae"
+slice_id = "a16"
+source_key = "union|TimeValidationEvidence|TimeValidationEvidence.classification"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-validation-classification-usable-1f20aec6cbfcee35"
+target_row_id = "a16:union-arm:time-validation-classification-usable-1f20aec6cbfcee35"
+slice_id = "a16"
+source_key = "arm|TimeValidationEvidence|TimeValidationEvidence.classification|Usable"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-validation-classification-not-yet-valid-bae207e2b3bf5431"
+target_row_id = "a16:union-arm:time-validation-classification-not-yet-valid-bae207e2b3bf5431"
+slice_id = "a16"
+source_key = "arm|TimeValidationEvidence|TimeValidationEvidence.classification|NotYetValid"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-validation-classification-expired-f8f29e6b713f93b5"
+target_row_id = "a16:union-arm:time-validation-classification-expired-f8f29e6b713f93b5"
+slice_id = "a16"
+source_key = "arm|TimeValidationEvidence|TimeValidationEvidence.classification|Expired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-offline-macaroon-issuer-epoch-fence-receipt-issuer-epoch-state"
+target_row_id = "a16:field:offline-macaroon-issuer-epoch-fence-receipt-issuer-epoch-state"
+slice_id = "a16"
+source_key = "field|OfflineMacaroonIssuerEpochFenceReceipt|OfflineMacaroonIssuerEpochFenceReceipt.issuer_epoch_state|issuer_epoch_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-offline-macaroon-issuer-epoch-state-ecf143473fd2e0be"
+target_row_id = "a16:union:offline-macaroon-issuer-epoch-state-ecf143473fd2e0be"
+slice_id = "a16"
+source_key = "union|OfflineMacaroonIssuerEpochFenceReceipt|OfflineMacaroonIssuerEpochFenceReceipt.issuer_epoch_state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-offline-macaroon-issuer-epoch-state-verify-only-9620fb76f55a4214"
+target_row_id = "a16:union-arm:offline-macaroon-issuer-epoch-state-verify-only-9620fb76f55a4214"
+slice_id = "a16"
+source_key = "arm|OfflineMacaroonIssuerEpochFenceReceipt|OfflineMacaroonIssuerEpochFenceReceipt.issuer_epoch_state|VerifyOnly"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-offline-macaroon-issuer-epoch-state-disabled-439493008dd632cf"
+target_row_id = "a16:union-arm:offline-macaroon-issuer-epoch-state-disabled-439493008dd632cf"
+slice_id = "a16"
+source_key = "arm|OfflineMacaroonIssuerEpochFenceReceipt|OfflineMacaroonIssuerEpochFenceReceipt.issuer_epoch_state|Disabled"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-portable-time-authority-registry-transition-terminal-evidence-terminal-disposition"
+target_row_id = "a16:field:portable-time-authority-registry-transition-terminal-evidence-terminal-disposition"
+slice_id = "a16"
+source_key = "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition|terminal_disposition"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-time-authority-registry-transition-terminal-disposition-198fc9f208dd7760"
+target_row_id = "a16:union:time-authority-registry-transition-terminal-disposition-198fc9f208dd7760"
+slice_id = "a16"
+source_key = "union|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-authority-registry-transition-terminal-disposition-applied-f2f6f34c6ae4ef14"
+target_row_id = "a16:union-arm:time-authority-registry-transition-terminal-disposition-applied-f2f6f34c6ae4ef14"
+slice_id = "a16"
+source_key = "arm|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition|Applied"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-authority-registry-transition-terminal-disposition-already-applied-99168dc49bb5af5d"
+target_row_id = "a16:union-arm:time-authority-registry-transition-terminal-disposition-already-applied-99168dc49bb5af5d"
+slice_id = "a16"
+source_key = "arm|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition|AlreadyApplied"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-portable-restore-source-lease-lineage-proof-lineage-basis"
+target_row_id = "a16:field:portable-restore-source-lease-lineage-proof-lineage-basis"
+slice_id = "a16"
+source_key = "field|PortableRestoreSourceLeaseLineageProof|PortableRestoreSourceLeaseLineageProof.lineage_basis|lineage_basis"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-portable-restore-source-lease-lineage-basis-dbb85aa223e27112"
+target_row_id = "a16:union:portable-restore-source-lease-lineage-basis-dbb85aa223e27112"
+slice_id = "a16"
+source_key = "union|PortableRestoreSourceLeaseLineageProof|PortableRestoreSourceLeaseLineageProof.lineage_basis"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-portable-restore-source-lease-lineage-basis-genesis-4ecd9faa0b8d6f8a"
+target_row_id = "a16:union-arm:portable-restore-source-lease-lineage-basis-genesis-4ecd9faa0b8d6f8a"
+slice_id = "a16"
+source_key = "arm|PortableRestoreSourceLeaseLineageProof|PortableRestoreSourceLeaseLineageProof.lineage_basis|Genesis"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-portable-restore-source-lease-lineage-basis-checkpointed-44430fdeab3dad03"
+target_row_id = "a16:union-arm:portable-restore-source-lease-lineage-basis-checkpointed-44430fdeab3dad03"
+slice_id = "a16"
+source_key = "arm|PortableRestoreSourceLeaseLineageProof|PortableRestoreSourceLeaseLineageProof.lineage_basis|Checkpointed"
+target_kind = "union-arm"
+definition_status = "declared"
+
 [[source_symbol_disposition]]
 row_id = "a01:source-symbol-disposition:export-leaf"
 slice_id = "a01"
