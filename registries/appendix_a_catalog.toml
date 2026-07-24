@@ -39081,3 +39081,111 @@ source_locations = ["a16:2197"]
 resolution = "maps-to-source"
 resolved_source_keys = ["top|ShardTimeBoundSubjectInventoryCertificate"]
 rationale = "a16:2197: the leading `SameGroupCertificateHeader` item is a named closed sub-schema (compact-phrase law, a01:1412) embedded in the shard inventory-certificate body; it belongs to the `top|ShardTimeBoundSubjectInventoryCertificate` candidate."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:e4cd82413f511826adaebd47c79e439c7cf26a366db7682136e3e70085ec8902"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|ambiguous-schema-owner|CrossLogTransparencyFreshness|CrossLogTransparencyFreshness|e6fd8551273da0e02996a19f76ba9b4c3837a35abec5cc962bb5043ee49ecd93|1|f6dfde41644028fec673fa4fb518aaa8f7b2aac8e44c9e1d07afc01778375316|leading named record has no explicit top-level ownership cue"
+source_locations = ["a16:2171"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|CrossLogTransparencyFreshness"]
+rationale = "a16:2171: `CrossLogTransparencyFreshness {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|CrossLogTransparencyFreshness` itself, not an alias, enumeration, or citation."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:b9347cd7b769ace4ffbb1db74e730bbdbb736dccd01fa43aabc5f762322d4d2b"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|ambiguous-schema-owner|GroupTimeIssuanceQuiescenceCertificate|GroupTimeIssuanceQuiescenceCertificate|36f0884a28b9eeb213bbb37f209bef91784d68945130271a87f52761d4965079|1|579645ce8221ef09d5878e1545199e33baca205ee9dc323d9e78f18e9c664a1b|leading named record has no explicit top-level ownership cue"
+source_locations = ["a16:2193"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|GroupTimeIssuanceQuiescenceCertificate"]
+rationale = "a16:2193: `GroupTimeIssuanceQuiescenceCertificate {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|GroupTimeIssuanceQuiescenceCertificate` itself, not an alias, enumeration, or citation."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:bbeb7610f005f870af91589e584a196b7b10d4898f7da64f0d8edc78dc7dbbdf"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|ambiguous-schema-owner|KeyEnvelopeGrantWindow|KeyEnvelopeGrantWindow<Role>|792a3cc43524383ab9cf5694b4105e048e6cc697c0f0472593386767ddb0fdfe|1|423c54c076440f11ceaef6a3e478ee849e95cf1ea107caad42d9c2d63cf77333|leading named record has no explicit top-level ownership cue"
+source_locations = ["a16:2171"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|KeyEnvelopeGrantWindow<Role>"]
+rationale = "a16:2171: `KeyEnvelopeGrantWindow<Role> {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|KeyEnvelopeGrantWindow<Role>` itself, not an alias, enumeration, or citation."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:994a81b46f241832d3170159b4c71dd7083d9fefe89aa659273a1c4426970fab"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|ambiguous-schema-owner|PayloadReceiptProposalFreshnessBasis|PayloadReceiptProposalFreshnessBasis|f9743bcf9ae4e8a7f495f1b426f349e741b09141ccc8109f9e2febe9910350ec|1|bc84453d9e9f74e49df700727f384cddcf4dda6566f11c1549bcdcb7653a2197|leading named record has no explicit top-level ownership cue"
+source_locations = ["a16:2171"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|PayloadReceiptProposalFreshnessBasis"]
+rationale = "a16:2171: `PayloadReceiptProposalFreshnessBasis {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|PayloadReceiptProposalFreshnessBasis` itself, not an alias, enumeration, or citation."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:9c6c718123cf055dc9a456ace50120d2beaf8d0ba42cd7aabab639de7ecf9fd6"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|ambiguous-schema-owner|PriorIncarnationLeaseCohortWindow|PriorIncarnationLeaseCohortWindow|c75ca267ed4bae2e83ad03b73e40f06d59ecd716247848c9439e1580ad838f00|1|fc378d29f3624ee31ed9148d7b87aafc3d73105bb026754800e914248b204881|leading named record has no explicit top-level ownership cue"
+source_locations = ["a16:2171"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|PriorIncarnationLeaseCohortWindow"]
+rationale = "a16:2171: `PriorIncarnationLeaseCohortWindow {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|PriorIncarnationLeaseCohortWindow` itself, not an alias, enumeration, or citation."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:40b07c775488fa9786d84a11088f6f57e4b9a5c95299ad4ffc143fc696574286"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|ambiguous-schema-owner|ProtectedErrorReplayTimeBasis|ProtectedErrorReplayTimeBasis<Role>|26cf9349bc9b17363be804bcd25303ab48c9f23a7218ec98001aca86bf238e0e|1|87378e87ae67e1d42904291d0b6ea6d6cc3b86cc3e481e7cba34cfd0c0173442|leading named record has no explicit top-level ownership cue"
+source_locations = ["a16:2171"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|ProtectedErrorReplayTimeBasis<Role>"]
+rationale = "a16:2171: `ProtectedErrorReplayTimeBasis<Role> {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|ProtectedErrorReplayTimeBasis<Role>` itself, not an alias, enumeration, or citation."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:eaa26b8f61958eeabd97319a5546c82f57bad2e255e80e863d3dcd1900482f97"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|ambiguous-schema-owner|TimeAuthorityIssuanceClosingReceipt|TimeAuthorityIssuanceClosingReceipt|76b81cdccf5723b11cf8d0fc37509f46605f86c67fe959a8b9bea1e2db9dca33|1|14d3f3f51ab2c3281374103f749f68477594b8196b5ae47f0b2ad9c0885b5368|leading named record has no explicit top-level ownership cue"
+source_locations = ["a16:2185"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|TimeAuthorityIssuanceClosingReceipt"]
+rationale = "a16:2185: `TimeAuthorityIssuanceClosingReceipt {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|TimeAuthorityIssuanceClosingReceipt` itself, not an alias, enumeration, or citation."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:8f06d57bcaee0a663a16812a9981d7bd2478b69706dd7c042f70ed8b137e8231"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|ambiguous-schema-owner|TimeAuthorityRegistryTransitionReceipt|TimeAuthorityRegistryTransitionReceipt|15cf30b4ba38da786924cab471d0556463ee03b4d39c5fec4382a625ca9e0bc2|1|41ef94c7e6eeeae332d601613c6ddfd7b4c3c9aeb90cdb2668eb9c726f03e90e|leading named record has no explicit top-level ownership cue"
+source_locations = ["a16:2217"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|TimeAuthorityRegistryTransitionReceipt"]
+rationale = "a16:2217: `TimeAuthorityRegistryTransitionReceipt {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|TimeAuthorityRegistryTransitionReceipt` itself, not an alias, enumeration, or citation."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:5e71fa28a812b04cefab757b906e8af5e8d201fff5137a2e345789c0015f6cb6"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|ambiguous-schema-owner|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>|d81027816ba38a6cc4676ad6f6301fe68fdc41e6d486ada722261c2c964b7251|1|e98890295559e48247c398bdd64f7f6491a446e4a49fef5cc0cfd5dae7f7c634|leading named record has no explicit top-level ownership cue"
+source_locations = ["a16:2191"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|TimeSubjectIssuanceReservation<Role>"]
+rationale = "a16:2191: `TimeSubjectIssuanceReservation<Role> {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|TimeSubjectIssuanceReservation<Role>` itself, not an alias, enumeration, or citation."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:a0148dfd5ecafa3bd5cdb3dbc1e191d682e5eeb8d6023b8bcd9e504b33ed85f6"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|ambiguous-schema-owner|TransparencyCheckpointFreshnessBasis|TransparencyCheckpointFreshnessBasis|50f716c3af5a611d94a39836045bfa9def062b77dce0d713a77ee24c05b38907|1|6c6fc662da2ca59132b5ffdef77364102448622cb5be904e9f731e86d2d7a955|leading named record has no explicit top-level ownership cue"
+source_locations = ["a16:2171"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|TransparencyCheckpointFreshnessBasis"]
+rationale = "a16:2171: `TransparencyCheckpointFreshnessBasis {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|TransparencyCheckpointFreshnessBasis` itself, not an alias, enumeration, or citation."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:f1c6073209ca7d229ae3f22e6b388d4775edd7625e3c0d7a08492cd3b091968d"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|conflicting-candidate-evidence|PriorIncarnationLeaseCohortWindow|PriorIncarnationLeaseCohortWindow|c75ca267ed4bae2e83ad03b73e40f06d59ecd716247848c9439e1580ad838f00|1|fc378d29f3624ee31ed9148d7b87aafc3d73105bb026754800e914248b204881|the same schema source key has divergent structural bodies"
+source_locations = ["a16:2171"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|PriorIncarnationLeaseCohortWindow"]
+rationale = "a16:2171: the flagged span is the top candidate `top|PriorIncarnationLeaseCohortWindow` itself — the a16:2171 rendering is the full sixteen-member definition and the a19:2465 rendering is the ten-member restatement its lease-barrier bootstrap import quotes (adding `time_authority_profile_oid`); the divergence is for the catalog's structural rows to reconcile, not a second schema."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:d0fbe5b2a75940c2e66ca399d38b8efa3ca39e33d44bf639a2c965fba6ef4e0b"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|unparsed-record-item|GroupTimeIssuanceQuiescenceCertificate|GroupTimeIssuanceQuiescenceCertificate|dec1da9246adf963002710d7196c7ac12701ceb27c317b96f62bdf586e7e16a4|1|579645ce8221ef09d5878e1545199e33baca205ee9dc323d9e78f18e9c664a1b|record item does not begin with a lowercase stable field name"
+source_locations = ["a16:2193"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|GroupTimeIssuanceQuiescenceCertificate"]
+rationale = "a16:2193: the leading `SameGroupCertificateHeader` item is a named closed sub-schema (compact-phrase law, a01:1412) embedded in the group quiescence-certificate body; it belongs to the `top|GroupTimeIssuanceQuiescenceCertificate` candidate."
