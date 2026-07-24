@@ -14,8 +14,8 @@ use core::slice;
 
 pub use crate::probe::CONTROL_GROUP_WIDTH;
 use crate::probe::{
-    ControlGroup, ControlTag, DELETED_CONTROL as DELETED, EMPTY_CONTROL as EMPTY,
-    SCALAR_CONTROL_GROUP_DISPATCH,
+    ControlGroup, ControlGroupDispatch, ControlTag, DELETED_CONTROL as DELETED,
+    EMPTY_CONTROL as EMPTY, SCALAR_CONTROL_GROUP_DISPATCH,
 };
 
 const MIN_BUCKETS: usize = CONTROL_GROUP_WIDTH;
@@ -158,6 +158,7 @@ struct Entry<K, V> {
 #[derive(Clone, Debug)]
 pub struct DeterministicHashTable<K, V> {
     seed: u64,
+    control_group_dispatch: ControlGroupDispatch,
     controls: Vec<u8>,
     entries: Vec<Option<Entry<K, V>>>,
     len: usize,
@@ -168,8 +169,24 @@ impl<K, V> DeterministicHashTable<K, V> {
     /// Creates an empty, allocation-free table with an explicit seed.
     #[must_use]
     pub const fn new(seed: u64) -> Self {
+        Self::with_control_group_dispatch(seed, SCALAR_CONTROL_GROUP_DISPATCH)
+    }
+
+    /// Creates an empty table with an explicit answer-equivalent probe
+    /// classifier.
+    ///
+    /// Alternate dispatches must obey [`ControlGroupDispatch`]'s lane-mask
+    /// contract exactly. Keeping selection explicit makes kernel choice
+    /// replayable and lets callers prove physical-order equivalence before a
+    /// target-specific backend becomes the default.
+    #[must_use]
+    pub const fn with_control_group_dispatch(
+        seed: u64,
+        control_group_dispatch: ControlGroupDispatch,
+    ) -> Self {
         Self {
             seed,
+            control_group_dispatch,
             controls: Vec::new(),
             entries: Vec::new(),
             len: 0,
@@ -179,13 +196,30 @@ impl<K, V> DeterministicHashTable<K, V> {
 
     /// Creates a table that can hold at least `min_entries` without growth.
     pub fn try_with_capacity(seed: u64, min_entries: usize) -> Result<Self, HashTableError> {
-        let buckets = required_bucket_count(min_entries)?;
-        Self::allocate(seed, buckets)
+        Self::try_with_capacity_and_dispatch(seed, min_entries, SCALAR_CONTROL_GROUP_DISPATCH)
     }
 
-    fn allocate(seed: u64, buckets: usize) -> Result<Self, HashTableError> {
+    /// Creates a preallocated table with an explicit answer-equivalent probe
+    /// classifier.
+    pub fn try_with_capacity_and_dispatch(
+        seed: u64,
+        min_entries: usize,
+        control_group_dispatch: ControlGroupDispatch,
+    ) -> Result<Self, HashTableError> {
+        let buckets = required_bucket_count(min_entries)?;
+        Self::allocate(seed, buckets, control_group_dispatch)
+    }
+
+    fn allocate(
+        seed: u64,
+        buckets: usize,
+        control_group_dispatch: ControlGroupDispatch,
+    ) -> Result<Self, HashTableError> {
         if buckets == 0 {
-            return Ok(Self::new(seed));
+            return Ok(Self::with_control_group_dispatch(
+                seed,
+                control_group_dispatch,
+            ));
         }
         if buckets < MIN_BUCKETS
             || !buckets.is_power_of_two()
@@ -208,6 +242,7 @@ impl<K, V> DeterministicHashTable<K, V> {
 
         Ok(Self {
             seed,
+            control_group_dispatch,
             controls,
             entries,
             len: 0,
@@ -302,14 +337,18 @@ impl<K, V> DeterministicHashTable<K, V> {
             return Err(HashTableError::CapacityOverflow);
         }
 
-        let mut replacement = Self::allocate(self.seed, buckets)?;
+        let mut replacement = Self::allocate(self.seed, buckets, self.control_group_dispatch)?;
         let mut planned_indexes = Vec::new();
         planned_indexes
             .try_reserve_exact(self.len)
             .map_err(|_| HashTableError::AllocationFailed)?;
         for entry in self.entries.iter().flatten() {
-            let index = first_empty_bucket(&replacement.controls, entry.hash)
-                .ok_or(HashTableError::InvariantViolation)?;
+            let index = first_empty_bucket(
+                &replacement.controls,
+                entry.hash,
+                replacement.control_group_dispatch,
+            )
+            .ok_or(HashTableError::InvariantViolation)?;
             replacement.controls[index] = ControlTag::from_hash(entry.hash).get();
             planned_indexes.push(index);
         }
@@ -441,7 +480,7 @@ impl<K: Hash + Eq, V> DeterministicHashTable<K, V> {
         while let Some(group_start) = probe.next_group() {
             let group = ControlGroup::gather_wrapping(&self.controls, group_start)
                 .ok_or(HashTableError::InvariantViolation)?;
-            let masks = SCALAR_CONTROL_GROUP_DISPATCH.classify(&group, tag);
+            let masks = self.control_group_dispatch.classify(&group, tag);
             let lanes_before_empty = masks.empty.first().unwrap_or(CONTROL_GROUP_WIDTH);
             for lane in 0..lanes_before_empty {
                 let index = (group_start + lane) & (self.bucket_count() - 1);
@@ -539,7 +578,7 @@ impl<K, V> DeterministicHashTable<K, V> {
         let mut probe = GroupProbe::new(hash, self.bucket_count());
         while let Some(group_start) = probe.next_group() {
             let group = ControlGroup::gather_wrapping(&self.controls, group_start)?;
-            let masks = SCALAR_CONTROL_GROUP_DISPATCH.classify(&group, tag);
+            let masks = self.control_group_dispatch.classify(&group, tag);
             let lanes_before_empty = masks.empty.first().unwrap_or(CONTROL_GROUP_WIDTH);
             for lane in 0..lanes_before_empty {
                 let index = (group_start + lane) & (self.bucket_count() - 1);
@@ -600,14 +639,18 @@ impl GroupProbe {
     }
 }
 
-fn first_empty_bucket(controls: &[u8], hash: u64) -> Option<usize> {
+fn first_empty_bucket(
+    controls: &[u8],
+    hash: u64,
+    control_group_dispatch: ControlGroupDispatch,
+) -> Option<usize> {
     if controls.is_empty() {
         return None;
     }
     let mut probe = GroupProbe::new(hash, controls.len());
     while let Some(group_start) = probe.next_group() {
         let group = ControlGroup::gather_wrapping(controls, group_start)?;
-        let masks = SCALAR_CONTROL_GROUP_DISPATCH.classify(&group, ControlTag::from_hash(hash));
+        let masks = control_group_dispatch.classify(&group, ControlTag::from_hash(hash));
         if let Some(lane) = masks.empty.first() {
             return Some((group_start + lane) & (controls.len() - 1));
         }
@@ -675,6 +718,9 @@ mod tests {
     use super::{
         CONTROL_GROUP_WIDTH, DeterministicHashTable, EMPTY, GroupProbe, HashTableError,
         MIN_BUCKETS, SeededHasher,
+    };
+    use crate::probe::{
+        ControlGroupDispatch, SCALAR_CONTROL_GROUP_DISPATCH, SWAR_CONTROL_GROUP_DISPATCH,
     };
     use core::hash::{Hash, Hasher};
     use std::collections::{BTreeMap, HashMap};
@@ -972,9 +1018,9 @@ mod tests {
     }
 
     #[test]
-    fn identical_seed_and_operations_have_identical_physical_iteration() {
-        fn exercise(seed: u64) -> DeterministicHashTable<u64, u64> {
-            let mut table = DeterministicHashTable::new(seed);
+    fn identical_seed_and_operations_have_identical_physical_iteration_across_dispatches() {
+        fn exercise(seed: u64, dispatch: ControlGroupDispatch) -> DeterministicHashTable<u64, u64> {
+            let mut table = DeterministicHashTable::with_control_group_dispatch(seed, dispatch);
             for key in 0_u64..300 {
                 assert_eq!(table.insert(key, key.rotate_left(7)), Ok(None));
             }
@@ -992,8 +1038,9 @@ mod tests {
             table
         }
 
-        let first = exercise(0x0123_4567_89ab_cdef);
-        let second = exercise(0x0123_4567_89ab_cdef);
+        let first = exercise(0x0123_4567_89ab_cdef, SCALAR_CONTROL_GROUP_DISPATCH);
+        let second = exercise(0x0123_4567_89ab_cdef, SCALAR_CONTROL_GROUP_DISPATCH);
+        let swar = exercise(0x0123_4567_89ab_cdef, SWAR_CONTROL_GROUP_DISPATCH);
         assert_eq!(first.bucket_count(), second.bucket_count());
         assert_eq!(
             first
@@ -1006,8 +1053,19 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(first.controls, second.controls);
+        assert_eq!(first.bucket_count(), swar.bucket_count());
+        assert_eq!(
+            first
+                .iter()
+                .map(|(&key, &value)| (key, value))
+                .collect::<Vec<_>>(),
+            swar.iter()
+                .map(|(&key, &value)| (key, value))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(first.controls, swar.controls);
 
-        let different_seed = exercise(0xfedc_ba98_7654_3210);
+        let different_seed = exercise(0xfedc_ba98_7654_3210, SWAR_CONTROL_GROUP_DISPATCH);
         assert_ne!(
             first.iter().map(|(&key, _)| key).collect::<Vec<_>>(),
             different_seed

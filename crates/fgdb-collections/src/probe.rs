@@ -16,6 +16,11 @@ pub const EMPTY_CONTROL: u8 = 0x80;
 /// Control byte denoting a removed entry whose probe chain remains live.
 pub const DELETED_CONTROL: u8 = 0xfe;
 
+const BYTE_BROADCAST: u128 = 0x0101_0101_0101_0101_0101_0101_0101_0101;
+const LOW_SEVEN_BITS_PER_BYTE: u128 = 0x7f7f_7f7f_7f7f_7f7f_7f7f_7f7f_7f7f_7f7f;
+const HIGH_BIT_PER_BYTE: u128 = 0x8080_8080_8080_8080_8080_8080_8080_8080;
+const PACK_BYTE_HIGH_BITS: u64 = 0x0102_0408_1020_4080;
+
 /// Seven-bit fingerprint stored in an occupied control lane.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ControlTag(u8);
@@ -238,6 +243,56 @@ pub fn scalar_classify(group: &ControlGroup, tag: ControlTag) -> ControlGroupMas
     }
 }
 
+/// Portable safe SWAR classifier.
+///
+/// The implementation compares all sixteen control bytes with word-level
+/// integer operations. It is not an unsafe SIMD island: it exists as a second
+/// portable implementation so dispatch integration can be differential-tested
+/// before a target-specific vector backend is admitted.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SwarControlGroupClassifier;
+
+impl ControlGroupClassifier for SwarControlGroupClassifier {
+    fn classify(&self, group: &ControlGroup, tag: ControlTag) -> ControlGroupMasks {
+        swar_classify(group, tag)
+    }
+}
+
+/// Classifies a group with portable safe SWAR operations.
+///
+/// `u128::from_le_bytes` fixes lane zero as the low byte on every target. The
+/// exact zero-byte detector cannot borrow or carry between lanes: every masked
+/// seven-bit lane plus `0x7f` is at most `0xfe`.
+#[must_use]
+#[inline]
+pub fn swar_classify(group: &ControlGroup, tag: ControlTag) -> ControlGroupMasks {
+    let packed = u128::from_le_bytes(*group.lanes());
+    ControlGroupMasks {
+        matching: compress_byte_high_bits(equal_byte_high_bits(packed, tag.get())),
+        empty: compress_byte_high_bits(equal_byte_high_bits(packed, EMPTY_CONTROL)),
+        deleted: compress_byte_high_bits(equal_byte_high_bits(packed, DELETED_CONTROL)),
+    }
+}
+
+#[inline]
+fn equal_byte_high_bits(packed: u128, expected: u8) -> u128 {
+    let different = packed ^ (u128::from(expected) * BYTE_BROADCAST);
+    let low_sum = (different & LOW_SEVEN_BITS_PER_BYTE) + LOW_SEVEN_BITS_PER_BYTE;
+    !(low_sum | different | LOW_SEVEN_BITS_PER_BYTE) & HIGH_BIT_PER_BYTE
+}
+
+#[inline]
+fn compress_byte_high_bits(high_bits: u128) -> LaneMask {
+    let low = compress_eight_byte_high_bits(high_bits as u64);
+    let high = compress_eight_byte_high_bits((high_bits >> 64) as u64);
+    LaneMask::from_bits(u16::from(low) | (u16::from(high) << 8))
+}
+
+#[inline]
+fn compress_eight_byte_high_bits(high_bits: u64) -> u8 {
+    (((high_bits >> 7).wrapping_mul(PACK_BYTE_HIGH_BITS)) >> 56) as u8
+}
+
 /// Function signature used by runtime-selected control-group backends.
 pub type ControlGroupClassifyFn = fn(&ControlGroup, ControlTag) -> ControlGroupMasks;
 
@@ -277,12 +332,17 @@ impl fmt::Debug for ControlGroupDispatch {
 pub const SCALAR_CONTROL_GROUP_DISPATCH: ControlGroupDispatch =
     ControlGroupDispatch::new(scalar_classify);
 
+/// Dispatch for the portable safe SWAR backend.
+pub const SWAR_CONTROL_GROUP_DISPATCH: ControlGroupDispatch =
+    ControlGroupDispatch::new(swar_classify);
+
 #[cfg(test)]
 mod tests {
     use super::{
         CONTROL_GROUP_WIDTH, ControlGroup, ControlGroupClassifier, ControlGroupMasks, ControlTag,
         DELETED_CONTROL, EMPTY_CONTROL, LaneMask, SCALAR_CONTROL_GROUP_DISPATCH,
-        ScalarControlGroupClassifier, scalar_classify,
+        SWAR_CONTROL_GROUP_DISPATCH, ScalarControlGroupClassifier, SwarControlGroupClassifier,
+        scalar_classify, swar_classify,
     };
 
     fn direct_reference(group: &ControlGroup, tag: ControlTag) -> ControlGroupMasks {
@@ -355,6 +415,7 @@ mod tests {
     #[test]
     fn scalar_trait_and_dispatch_are_directly_equivalent() {
         let classifier = ScalarControlGroupClassifier;
+        let swar_classifier = SwarControlGroupClassifier;
         let mut state = 0x243f_6a88_85a3_08d3_u64;
         for _ in 0..4_096 {
             let controls = core::array::from_fn(|_| {
@@ -372,6 +433,9 @@ mod tests {
                 SCALAR_CONTROL_GROUP_DISPATCH.classify(&group, tag),
                 expected
             );
+            assert_eq!(swar_classify(&group, tag), expected);
+            assert_eq!(swar_classifier.classify(&group, tag), expected);
+            assert_eq!(SWAR_CONTROL_GROUP_DISPATCH.classify(&group, tag), expected);
         }
     }
 
@@ -387,7 +451,27 @@ mod tests {
                     SCALAR_CONTROL_GROUP_DISPATCH.classify(&group, tag),
                     expected
                 );
+                assert_eq!(swar_classify(&group, tag), expected);
+                assert_eq!(SWAR_CONTROL_GROUP_DISPATCH.classify(&group, tag), expected);
             }
+        }
+    }
+
+    #[test]
+    fn swar_compression_preserves_every_sixteen_lane_mask() {
+        let tag = ControlTag::new(0x2a).expect("test tag is occupied");
+        for expected in u16::MIN..=u16::MAX {
+            let controls = core::array::from_fn(|lane| {
+                if expected & (1_u16 << lane) == 0 {
+                    0x11
+                } else {
+                    tag.get()
+                }
+            });
+            let masks = swar_classify(&ControlGroup::new(controls), tag);
+            assert_eq!(masks.matching.bits(), expected);
+            assert!(masks.empty.is_empty());
+            assert!(masks.deleted.is_empty());
         }
     }
 }
