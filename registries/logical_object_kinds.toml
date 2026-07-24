@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 6
+registry_epoch = 7
 
 [[kind]]
 object_kind = 0x0001
@@ -270,6 +270,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/continuity_authority_observation_import/"
 
 [[kind]]
+object_kind = 0x0282
+name = "CrossLogTransparencyFreshness"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/cross_log_transparency_freshness/"
+
+[[kind]]
 object_kind = 0x0295
 name = "ExportLeaf"
 status = "reserved"
@@ -277,6 +286,24 @@ construction_order = 16
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/export_leaf/"
+
+[[kind]]
+object_kind = 0x02d4
+name = "GroupTimeIssuanceQuiescenceCertificate"
+status = "reserved"
+construction_order = 39
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/group_time_issuance_quiescence_certificate/"
+
+[[kind]]
+object_kind = 0x02e0
+name = "KeyEnvelopeGrantWindow"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_grant_window/"
 
 [[kind]]
 object_kind = 0x02ea
@@ -351,6 +378,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/payload_availability_certificate/"
 
 [[kind]]
+object_kind = 0x037d
+name = "PayloadReceiptProposalFreshnessBasis"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/payload_receipt_proposal_freshness_basis/"
+
+[[kind]]
 object_kind = 0x0382
 name = "PortableArchiveGrantLineageProof"
 status = "reserved"
@@ -412,6 +448,15 @@ construction_order = 27
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/pre_bootstrap_portable_time_expiry_attestation/"
+
+[[kind]]
+object_kind = 0x039c
+name = "PriorIncarnationLeaseCohortWindow"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_cohort_window/"
 
 [[kind]]
 object_kind = 0x03ad
@@ -693,6 +738,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/time_authority_epoch_transition_record/"
 
 [[kind]]
+object_kind = 0x0497
+name = "TimeAuthorityIssuanceClosingReceipt"
+status = "reserved"
+construction_order = 19
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_issuance_closing_receipt/"
+
+[[kind]]
 object_kind = 0x0498
 name = "TimeAuthorityIssuanceFence"
 status = "reserved"
@@ -727,6 +781,15 @@ construction_order = 21
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/time_authority_registry/"
+
+[[kind]]
+object_kind = 0x049c
+name = "TimeAuthorityRegistryTransitionReceipt"
+status = "reserved"
+construction_order = 57
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_registry_transition_receipt/"
 
 [[kind]]
 object_kind = 0x049e
@@ -774,6 +837,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/time_bound_subject_retirement_proof/"
 
 [[kind]]
+object_kind = 0x04a4
+name = "TimeSubjectIssuanceReservation"
+status = "reserved"
+construction_order = 19
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_subject_issuance_reservation/"
+
+[[kind]]
 object_kind = 0x04a6
 name = "TimeValidationEvidence"
 status = "reserved"
@@ -783,6 +855,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/time_validation_evidence/"
 
 [[kind]]
+object_kind = 0x04af
+name = "TransparencyCheckpointFreshnessBasis"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_checkpoint_freshness_basis/"
+
+[[kind]]
 object_kind = 0x04b8
 name = "VerifierKeyRetirementFloor"
 status = "reserved"
@@ -790,6 +871,15 @@ construction_order = 62
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/verifier_key_retirement_floor/"
+
+[[kind]]
+object_kind = 0x04fc
+name = "ProtectedErrorReplayTimeBasis"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/protected_error_replay_time_basis/"
 
 [[kind]]
 object_kind = 0x051e

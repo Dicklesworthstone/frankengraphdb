@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 455
+target_count = 465
 projection_fallback_count = 83
-target_source_assignment_sha256 = "9e7c97be64bbc9bca0a8f2b7ecb3ca398ce8c4449ad5d7c34d1d53326eeb2c3f"
+target_source_assignment_sha256 = "48a5547a579c7e20d72394414ceea9bc50a561b468adca208ea530bf2f1da30a"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -580,7 +580,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 6
+registry_epoch = 7
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -1668,6 +1668,115 @@ role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/time_authority_transition_terminal_summary/"
 
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:cross-log-transparency-freshness"
+object_kind = 0x0282
+name = "CrossLogTransparencyFreshness"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/cross_log_transparency_freshness/"
+
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:key-envelope-grant-window"
+object_kind = 0x02e0
+name = "KeyEnvelopeGrantWindow"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_grant_window/"
+
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:payload-receipt-proposal-freshness-basis"
+object_kind = 0x037d
+name = "PayloadReceiptProposalFreshnessBasis"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/payload_receipt_proposal_freshness_basis/"
+
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:prior-incarnation-lease-cohort-window"
+object_kind = 0x039c
+name = "PriorIncarnationLeaseCohortWindow"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_cohort_window/"
+
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:protected-error-replay-time-basis"
+object_kind = 0x04fc
+name = "ProtectedErrorReplayTimeBasis"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/protected_error_replay_time_basis/"
+
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:transparency-checkpoint-freshness-basis"
+object_kind = 0x04af
+name = "TransparencyCheckpointFreshnessBasis"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_checkpoint_freshness_basis/"
+
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:time-authority-issuance-closing-receipt"
+object_kind = 0x0497
+name = "TimeAuthorityIssuanceClosingReceipt"
+status = "reserved"
+construction_order = 19
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_issuance_closing_receipt/"
+
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:time-subject-issuance-reservation"
+object_kind = 0x04a4
+name = "TimeSubjectIssuanceReservation"
+status = "reserved"
+construction_order = 19
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_subject_issuance_reservation/"
+
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:group-time-issuance-quiescence-certificate"
+object_kind = 0x02d4
+name = "GroupTimeIssuanceQuiescenceCertificate"
+status = "reserved"
+construction_order = 39
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/group_time_issuance_quiescence_certificate/"
+
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:time-authority-registry-transition-receipt"
+object_kind = 0x049c
+name = "TimeAuthorityRegistryTransitionReceipt"
+status = "reserved"
+construction_order = 57
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/time_authority_registry_transition_receipt/"
 [[physical_kind]]
 slice_id = "a02"
 row_id = "a02:physical-kind:ciphertext-record"
@@ -8423,7 +8532,7 @@ symbol = "CrossLogTransparencyFreshness"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0282"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:cumulative-read-witness-root"
@@ -9404,7 +9513,7 @@ symbol = "GroupTimeIssuanceQuiescenceCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02d4"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a09:reservation:id-range-lease"
@@ -9512,7 +9621,7 @@ symbol = "KeyEnvelopeGrantWindow"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02e0"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a13:reservation:key-envelope-node"
@@ -10979,7 +11088,7 @@ symbol = "PayloadReceiptProposalFreshnessBasis"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x037d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:pending-attempt-compaction-root"
@@ -11321,7 +11430,7 @@ symbol = "PriorIncarnationLeaseCohortWindow"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x039c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:prior-incarnation-lease-issuer-fence-receipt"
@@ -11456,7 +11565,7 @@ symbol = "ProtectedErrorReplayTimeBasis"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04fc"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:protected-error-send-completion-record"
@@ -13958,7 +14067,7 @@ symbol = "TimeAuthorityIssuanceClosingReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0497"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:time-authority-issuance-fence"
@@ -14003,7 +14112,7 @@ symbol = "TimeAuthorityRegistryTransitionReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x049c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:time-authority-rotation-intent-record"
@@ -14075,7 +14184,7 @@ symbol = "TimeSubjectIssuanceReservation"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04a4"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:time-subject-issuance-reservation-index"
@@ -14174,7 +14283,7 @@ symbol = "TransparencyCheckpointFreshnessBasis"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04af"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:transparency-cross-log-receipt"
@@ -16883,7 +16992,7 @@ symbol = "CrossLogTransparencyFreshness"
 generic_signature = ""
 source_key = "top|CrossLogTransparencyFreshness"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2171"]
 
 [[top_level_candidate]]
@@ -18463,7 +18572,7 @@ symbol = "GroupTimeIssuanceQuiescenceCertificate"
 generic_signature = ""
 source_key = "top|GroupTimeIssuanceQuiescenceCertificate"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2193"]
 
 [[top_level_candidate]]
@@ -18783,7 +18892,7 @@ symbol = "KeyEnvelopeGrantWindow"
 generic_signature = "<Role>"
 source_key = "top|KeyEnvelopeGrantWindow<Role>"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2171"]
 
 [[top_level_candidate]]
@@ -20503,7 +20612,7 @@ symbol = "PayloadReceiptProposalFreshnessBasis"
 generic_signature = ""
 source_key = "top|PayloadReceiptProposalFreshnessBasis"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2171"]
 
 [[top_level_candidate]]
@@ -21393,7 +21502,7 @@ symbol = "PriorIncarnationLeaseCohortWindow"
 generic_signature = ""
 source_key = "top|PriorIncarnationLeaseCohortWindow"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2171", "a19:2465"]
 
 [[top_level_candidate]]
@@ -21463,7 +21572,7 @@ symbol = "ProtectedErrorReplayTimeBasis"
 generic_signature = "<Role>"
 source_key = "top|ProtectedErrorReplayTimeBasis<Role>"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2171"]
 
 [[top_level_candidate]]
@@ -25963,7 +26072,7 @@ symbol = "TimeAuthorityIssuanceClosingReceipt"
 generic_signature = ""
 source_key = "top|TimeAuthorityIssuanceClosingReceipt"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2185"]
 
 [[top_level_candidate]]
@@ -26033,7 +26142,7 @@ symbol = "TimeAuthorityRegistryTransitionReceipt"
 generic_signature = ""
 source_key = "top|TimeAuthorityRegistryTransitionReceipt"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2217"]
 
 [[top_level_candidate]]
@@ -26163,7 +26272,7 @@ symbol = "TimeSubjectIssuanceReservation"
 generic_signature = "<Role>"
 source_key = "top|TimeSubjectIssuanceReservation<Role>"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2191"]
 
 [[top_level_candidate]]
@@ -26313,7 +26422,7 @@ symbol = "TransparencyCheckpointFreshnessBasis"
 generic_signature = ""
 source_key = "top|TransparencyCheckpointFreshnessBasis"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2171"]
 
 [[top_level_candidate]]
@@ -30285,6 +30394,85 @@ source_key = "top|TimeAuthorityTransitionTerminalSummary<Role:AuthorityOwningRol
 target_kind = "logical-kind"
 definition_status = "declared"
 
+[[target]]
+row_id = "a16:target:logical-kind-cross-log-transparency-freshness"
+target_row_id = "a16:logical-kind:cross-log-transparency-freshness"
+slice_id = "a16"
+source_key = "top|CrossLogTransparencyFreshness"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:logical-kind-key-envelope-grant-window"
+target_row_id = "a16:logical-kind:key-envelope-grant-window"
+slice_id = "a16"
+source_key = "top|KeyEnvelopeGrantWindow<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:logical-kind-payload-receipt-proposal-freshness-basis"
+target_row_id = "a16:logical-kind:payload-receipt-proposal-freshness-basis"
+slice_id = "a16"
+source_key = "top|PayloadReceiptProposalFreshnessBasis"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:logical-kind-prior-incarnation-lease-cohort-window"
+target_row_id = "a16:logical-kind:prior-incarnation-lease-cohort-window"
+slice_id = "a16"
+source_key = "top|PriorIncarnationLeaseCohortWindow"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:logical-kind-protected-error-replay-time-basis"
+target_row_id = "a16:logical-kind:protected-error-replay-time-basis"
+slice_id = "a16"
+source_key = "top|ProtectedErrorReplayTimeBasis<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:logical-kind-transparency-checkpoint-freshness-basis"
+target_row_id = "a16:logical-kind:transparency-checkpoint-freshness-basis"
+slice_id = "a16"
+source_key = "top|TransparencyCheckpointFreshnessBasis"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:logical-kind-time-authority-issuance-closing-receipt"
+target_row_id = "a16:logical-kind:time-authority-issuance-closing-receipt"
+slice_id = "a16"
+source_key = "top|TimeAuthorityIssuanceClosingReceipt"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:logical-kind-time-subject-issuance-reservation"
+target_row_id = "a16:logical-kind:time-subject-issuance-reservation"
+slice_id = "a16"
+source_key = "top|TimeSubjectIssuanceReservation<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:logical-kind-group-time-issuance-quiescence-certificate"
+target_row_id = "a16:logical-kind:group-time-issuance-quiescence-certificate"
+slice_id = "a16"
+source_key = "top|GroupTimeIssuanceQuiescenceCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:logical-kind-time-authority-registry-transition-receipt"
+target_row_id = "a16:logical-kind:time-authority-registry-transition-receipt"
+slice_id = "a16"
+source_key = "top|TimeAuthorityRegistryTransitionReceipt"
+target_kind = "logical-kind"
+definition_status = "declared"
 [[source_symbol_disposition]]
 row_id = "a01:source-symbol-disposition:export-leaf"
 slice_id = "a01"
