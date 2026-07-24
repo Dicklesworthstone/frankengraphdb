@@ -113,11 +113,7 @@ pub struct LabelCountsProfile {
 impl LabelCountsProfile {
     /// Creates a complete exact-count profile.
     #[must_use]
-    pub const fn new(
-        max_distinct_keys: usize,
-        max_key_bytes: usize,
-        max_total_count: u64,
-    ) -> Self {
+    pub const fn new(max_distinct_keys: usize, max_key_bytes: usize, max_total_count: u64) -> Self {
         Self {
             max_distinct_keys,
             max_key_bytes,
@@ -810,12 +806,12 @@ impl LabelCounts {
         let plan = self.plan_merge(other)?;
 
         let mut merged = Vec::new();
-        merged.try_reserve_exact(plan.entry_count).map_err(
-            |_: TryReserveError| LabelCountsError::AllocationFailed {
+        merged
+            .try_reserve_exact(plan.entry_count)
+            .map_err(|_: TryReserveError| LabelCountsError::AllocationFailed {
                 target: LabelCountsAllocationTarget::MergeDirectory,
                 requested: plan.entry_count,
-            },
-        )?;
+            })?;
 
         let mut left = 0_usize;
         let mut right = 0_usize;
@@ -949,9 +945,11 @@ impl LabelCounts {
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(layout.encoded_len)
-            .map_err(|_: TryReserveError| LabelCountsCodecError::AllocationFailed {
-                requested: layout.encoded_len,
-            })?;
+            .map_err(
+                |_: TryReserveError| LabelCountsCodecError::AllocationFailed {
+                    requested: layout.encoded_len,
+                },
+            )?;
         bytes.extend_from_slice(&CANONICAL_MAGIC);
         push_u16(&mut bytes, CANONICAL_VERSION);
         push_u64(&mut bytes, layout.max_distinct_keys);
@@ -982,11 +980,13 @@ impl LabelCounts {
         decoder.take(CANONICAL_HEADER_BYTES)?;
 
         let mut entries = Vec::new();
-        entries.try_reserve_exact(header.entry_count).map_err(
-            |_: TryReserveError| LabelCountsCodecError::AllocationFailed {
-                requested: header.entry_count,
-            },
-        )?;
+        entries
+            .try_reserve_exact(header.entry_count)
+            .map_err(
+                |_: TryReserveError| LabelCountsCodecError::AllocationFailed {
+                    requested: header.entry_count,
+                },
+            )?;
         for _ in 0..header.entry_count {
             let domain = LabelCountsDomain::from_tag(decoder.read_u8()?)?;
             let name_bytes = decoded_usize(decoder.read_u64()?)?;
@@ -1327,9 +1327,8 @@ fn canonical_usize(value: usize) -> Result<u64, LabelCountsCodecError> {
 }
 
 fn decoded_usize(value: u64) -> Result<usize, LabelCountsCodecError> {
-    usize::try_from(value).map_err(|_| LabelCountsCodecError::IntegerUnrepresentable {
-        actual: value,
-    })
+    usize::try_from(value)
+        .map_err(|_| LabelCountsCodecError::IntegerUnrepresentable { actual: value })
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
@@ -1834,15 +1833,16 @@ mod tests {
 
     #[test]
     fn decoding_rejects_noncanonical_entry_sequences() {
-        let counts = counts_with(&[(vertex(b"Alpha"), 1), (vertex(b"Beta"), 1)]);
+        let counts = counts_with(&[(vertex(b"Alpha"), 1), (vertex(b"Bravo"), 1)]);
         let encoded = counts.try_to_canonical_bytes().expect("state encodes");
 
-        // Both names are five bytes, so swapping the payloads reverses order
-        // without disturbing any length or aggregate field.
+        // Both names are five bytes and both counts are one, so swapping the
+        // payloads reverses key order without disturbing any length, count, or
+        // aggregate field: the sequence alone is what the decoder rejects.
         let first_name = CANONICAL_HEADER_BYTES + 17;
         let second_name = first_name + b"Alpha".len() + 17;
         let mut reversed = encoded.clone();
-        reversed[first_name..first_name + 5].copy_from_slice(b"Beta\0");
+        reversed[first_name..first_name + 5].copy_from_slice(b"Bravo");
         reversed[second_name..second_name + 5].copy_from_slice(b"Alpha");
         assert_eq!(
             LabelCounts::try_from_canonical_bytes(&reversed, PROFILE, limits()),
@@ -1904,7 +1904,7 @@ mod tests {
             LabelCounts::try_from_canonical_bytes(&encoded, PROFILE, tiny),
             Err(LabelCountsCodecError::DecodeLimitExceeded {
                 resource: LabelCountsDecodeResource::EncodedBytes,
-                actual: encoded.len() as u64,
+                actual: u64::try_from(encoded.len()).expect("canonical length fits"),
                 maximum: 8,
             })
         );
@@ -1948,7 +1948,11 @@ mod tests {
                     .or_default() += 1;
             }
             for &(left, right) in &fixture.edges {
-                let name: &[u8] = if left < right { b"FORWARD" } else { b"BACKWARD" };
+                let name: &[u8] = if left < right {
+                    b"FORWARD"
+                } else {
+                    b"BACKWARD"
+                };
                 counts.try_observe(edge(name), 1).expect("edge type fits");
                 *expected
                     .entry((LabelCountsDomain::EdgeType, name.to_vec()))
@@ -1999,10 +2003,7 @@ mod tests {
     fn diagnostics_name_the_domain_resource_and_allocation_target() {
         assert_eq!(LabelCountsDomain::VertexLabel.as_str(), "vertex-label");
         assert_eq!(LabelCountsDomain::EdgeType.to_string(), "edge-type");
-        assert_eq!(
-            LabelCountsDecodeResource::KeyBytes.to_string(),
-            "key bytes"
-        );
+        assert_eq!(LabelCountsDecodeResource::KeyBytes.to_string(), "key bytes");
         assert_eq!(
             LabelCountsAllocationTarget::MergeDirectory.to_string(),
             "merge directory"
