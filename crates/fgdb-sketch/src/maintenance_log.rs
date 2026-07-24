@@ -694,6 +694,50 @@ mod tests {
     }
 
     #[test]
+    fn every_maintained_family_tag_round_trips() {
+        // The closed vocabulary must cover every family this crate implements;
+        // an unregistered family cannot record its merges at all.
+        const FAMILIES: [SketchFamily; 8] = [
+            SketchFamily::ExactQuantiles,
+            SketchFamily::DegreeHistogram,
+            SketchFamily::CountMin,
+            SketchFamily::BottomK,
+            SketchFamily::Distinct,
+            SketchFamily::ZoneMap,
+            SketchFamily::PathCorrelation,
+            SketchFamily::LabelCounts,
+        ];
+
+        for (index, family) in FAMILIES.into_iter().enumerate() {
+            let tag = u8::try_from(index + 1).expect("closed vocabulary is small");
+            assert_eq!(family as u8, tag);
+            assert_eq!(SketchFamily::from_tag(tag), Ok(family));
+
+            let record = SketchMaintenanceRecord::merged(
+                index as u64,
+                family,
+                PROFILE_OID,
+                MERGE_OID,
+                b"canonical-before",
+                b"canonical-operand",
+                b"canonical-after",
+            );
+            assert_eq!(
+                SketchMaintenanceRecord::from_canonical_bytes(&record.to_canonical_bytes())
+                    .expect("strict record read")
+                    .family,
+                family
+            );
+        }
+
+        let unregistered = u8::try_from(FAMILIES.len() + 1).expect("closed vocabulary is small");
+        assert_eq!(
+            SketchFamily::from_tag(unregistered),
+            Err(SketchMaintenanceCodecError::UnknownSketchFamily { tag: unregistered })
+        );
+    }
+
+    #[test]
     fn rebuild_required_structurally_preserves_state() {
         let record = SketchMaintenanceRecord::rebuild_required(
             0,
