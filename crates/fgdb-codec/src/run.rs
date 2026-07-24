@@ -594,8 +594,9 @@ impl SealedNeighborRun {
     ///
     /// The two runs may use different neighbor-codec arms and different
     /// resolver implementations. Equality covers stable source/destination/EID
-    /// tuples, order, multiplicity, and row boundaries only; it does not claim
-    /// visibility, security projection, properties, or `AnswerContract`.
+    /// tuples, row boundaries, multiplicity, and every aligned immutable
+    /// [`OriginBirthOrder`]. It does not claim visibility, security projection,
+    /// properties, or `AnswerContract`.
     pub fn validate_logical_substitution<ExistingResolver, ReplacementResolver>(
         &self,
         existing_resolver: &ExistingResolver,
@@ -614,14 +615,40 @@ impl SealedNeighborRun {
         let replacement_edges = replacement.collect_edge_ids()?;
         let existing_rows = self.borrowed_digest_rows(&existing_edges)?;
         let replacement_rows = replacement.borrowed_digest_rows(&replacement_edges)?;
-        validate_codec_substitution(
+        let logical_digest = validate_codec_substitution(
             &existing_rows,
             existing_resolver,
             &replacement_rows,
             replacement_resolver,
             logical_limits,
         )
-        .map_err(|source| SealedRunError::CodecSubstitution { source })
+        .map_err(|source| SealedRunError::CodecSubstitution { source })?;
+        self.validate_origin_order_substitution(replacement)?;
+        Ok(logical_digest)
+    }
+
+    fn validate_origin_order_substitution(&self, replacement: &Self) -> Result<(), SealedRunError> {
+        if self.origin_birth_orders.len() != replacement.origin_birth_orders.len() {
+            return Err(SealedRunError::OriginOrderCountMismatch {
+                existing: self.origin_birth_orders.len(),
+                replacement: replacement.origin_birth_orders.len(),
+            });
+        }
+        for (entry_index, (&existing, &replacement)) in self
+            .origin_birth_orders
+            .iter()
+            .zip(&replacement.origin_birth_orders)
+            .enumerate()
+        {
+            if existing != replacement {
+                return Err(SealedRunError::OriginOrderMismatch {
+                    entry_index,
+                    existing,
+                    replacement,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn offset_range(&self, row_index: usize) -> Result<(usize, usize), SealedRunError> {
@@ -1204,6 +1231,22 @@ pub enum SealedRunError {
         /// Typed validator failure.
         source: CodecSubstitutionError,
     },
+    /// Two logically equal runs retain different origin-order column lengths.
+    OriginOrderCountMismatch {
+        /// Existing flattened origin-order count.
+        existing: usize,
+        /// Replacement flattened origin-order count.
+        replacement: usize,
+    },
+    /// A replacement changes one immutable origin-order tuple.
+    OriginOrderMismatch {
+        /// Flattened incidence position.
+        entry_index: usize,
+        /// Existing immutable origin order.
+        existing: OriginBirthOrder<EId>,
+        /// Proposed replacement origin order.
+        replacement: OriginBirthOrder<EId>,
+    },
     /// Existing structured evidence construction failed.
     Evidence {
         /// Typed evidence failure.
@@ -1325,6 +1368,23 @@ impl fmt::Display for SealedRunError {
             Self::CodecSubstitution { source } => {
                 write!(formatter, "sealed run codec substitution: {source}")
             }
+            Self::OriginOrderCountMismatch {
+                existing,
+                replacement,
+            } => write!(
+                formatter,
+                "sealed run substitution changes origin-order count from \
+                 {existing} to {replacement}"
+            ),
+            Self::OriginOrderMismatch {
+                entry_index,
+                existing,
+                replacement,
+            } => write!(
+                formatter,
+                "sealed run substitution changes origin order at flattened \
+                 entry {entry_index}: {existing:?} to {replacement:?}"
+            ),
             Self::Evidence { source } => write!(formatter, "sealed run evidence: {source}"),
             Self::RowOutOfBounds { row_index, rows } => {
                 write!(
@@ -1368,6 +1428,8 @@ impl std::error::Error for SealedRunError {
             | Self::AllocationFailed { .. }
             | Self::OffsetStorageLimitExceeded { .. }
             | Self::LogicalDigestMismatch { .. }
+            | Self::OriginOrderCountMismatch { .. }
+            | Self::OriginOrderMismatch { .. }
             | Self::RowOutOfBounds { .. }
             | Self::CorruptRun { .. } => None,
         }
@@ -1513,7 +1575,11 @@ mod tests {
     }
 
     fn birth(edge: EId, ordinal: u64) -> OriginBirthOrder<EId> {
-        OriginBirthOrder::new(CommitSeq(7), ordinal, 0, edge)
+        birth_at(7, edge, ordinal)
+    }
+
+    fn birth_at(commit_seq: u64, edge: EId, ordinal: u64) -> OriginBirthOrder<EId> {
+        OriginBirthOrder::new(CommitSeq(commit_seq), ordinal, 0, edge)
     }
 
     fn resolver(_row: usize, encoded: u64) -> Option<VId> {
@@ -1655,6 +1721,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn substitution_rejects_origin_order_drift_after_stable_digest_match() {
+        let destinations = [2, 4, 8];
+        let edges = [EId(101), EId(102), EId(103)];
+        let existing_births = [birth(edges[0], 0), birth(edges[1], 1), birth(edges[2], 2)];
+        let replacement_births = [
+            birth(edges[0], 0),
+            birth_at(8, edges[1], 1),
+            birth(edges[2], 2),
+        ];
+        let existing_row = SealedNeighborRowInput::new(
+            VId(10),
+            &destinations,
+            &edges,
+            &existing_births,
+            NeighborCodec::EliasFano,
+        );
+        let replacement_row = SealedNeighborRowInput::new(
+            VId(10),
+            &destinations,
+            &edges,
+            &replacement_births,
+            NeighborCodec::DenseIntervals,
+        );
+        let existing = SealedNeighborRun::try_seal(&[existing_row], &resolver, limits())
+            .expect("existing run seals");
+        let replacement = SealedNeighborRun::try_seal(&[replacement_row], &resolver, limits())
+            .expect("replacement run seals");
+
+        existing
+            .validate_integrity(&resolver, limits().logical_digest())
+            .expect("existing run is independently valid");
+        replacement
+            .validate_integrity(&resolver, limits().logical_digest())
+            .expect("replacement run is independently valid");
+        assert_eq!(existing.logical_digest(), replacement.logical_digest());
+        assert_eq!(
+            existing.validate_logical_substitution(
+                &resolver,
+                &replacement,
+                &resolver,
+                limits().logical_digest(),
+            ),
+            Err(SealedRunError::OriginOrderMismatch {
+                entry_index: 1,
+                existing: existing_births[1],
+                replacement: replacement_births[1],
+            })
+        );
     }
 
     #[test]
