@@ -776,7 +776,7 @@ impl EvidenceEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fgdb_claim::RefinementStatus;
+    use fgdb_claim::{RefinementStatus, StatisticalErrorControl};
 
     fn oid(fill: u8) -> ObjectId {
         ObjectId([fill; 32])
@@ -1259,7 +1259,7 @@ mod tests {
         EvidenceClaim::StatisticalClaim {
             population: "hedged reads on fixture L".into(),
             sampling_rule: "every admission".into(),
-            alpha: 0.01,
+            error_control: StatisticalErrorControl::try_alpha(0.01).unwrap(),
             power_or_effective_sample_size: "n_eff=52_000".into(),
             assumptions: vec!["per-epoch exchangeability".into()],
         }

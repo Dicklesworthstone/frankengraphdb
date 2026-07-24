@@ -31,6 +31,12 @@ pub const COMBINED_REGIME_SIGNAL_VERSION: u32 = 1;
 /// Number of foundation detectors in the version-1 combined signal.
 pub const COMBINED_DETECTOR_COUNT: usize = 3;
 
+/// Domain separator for canonical persisted regime-signal evidence.
+pub const REGIME_SIGNAL_EVIDENCE_ENCODING_DOMAIN: &[u8] = b"fgdb:regime-signal-evidence";
+
+/// Current canonical regime-signal evidence encoding version.
+pub const REGIME_SIGNAL_EVIDENCE_ENCODING_VERSION: u16 = 1;
+
 const COMBINED_DETECTOR_SLOTS: [RegimeDetectorKind; COMBINED_DETECTOR_COUNT] = [
     RegimeDetectorKind::PageHinkley,
     RegimeDetectorKind::UpwardCusum,
@@ -45,6 +51,149 @@ pub const MAX_REGIME_OBSERVATIONS: usize = 1_048_576;
 
 /// Absolute retained-receipt ceiling for one regime-signal window.
 pub const MAX_RETAINED_REGIME_RECEIPTS: usize = 4_096;
+
+const OBJECT_ID_BYTES: usize = 32;
+const BUILTIN_SERIES_PAYLOAD: u16 = 0;
+
+/// Strict canonical regime-evidence encoding or decoding failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegimeSignalEvidenceCodecError {
+    /// Canonical length arithmetic overflowed.
+    LengthOverflow,
+    /// The canonical byte buffer could not be allocated.
+    AllocationFailed,
+    /// The input ended before a complete value could be read.
+    Truncated {
+        /// Byte offset at which the read began.
+        offset: usize,
+        /// Number of bytes requested.
+        needed: usize,
+        /// Number of bytes still available.
+        remaining: usize,
+    },
+    /// The domain separator length was not canonical.
+    DomainLengthMismatch {
+        /// Encoded domain length.
+        actual: usize,
+    },
+    /// The domain separator did not match this evidence type.
+    DomainMismatch,
+    /// The encoding version is not supported.
+    UnsupportedVersion {
+        /// Version found in the input.
+        actual: u16,
+    },
+    /// A bounded vector or string length exceeded its canonical ceiling.
+    LengthLimitExceeded {
+        /// Name of the bounded component.
+        component: &'static str,
+        /// Encoded length.
+        actual: usize,
+        /// Maximum accepted length.
+        maximum: usize,
+    },
+    /// A canonical string was not UTF-8.
+    InvalidUtf8,
+    /// A discriminant or canonical boolean was unknown.
+    InvalidTag {
+        /// Name of the tagged component.
+        component: &'static str,
+        /// Rejected tag.
+        actual: u8,
+    },
+    /// A built-in metric-series tag carried a non-zero custom payload.
+    NonCanonicalSeriesPayload {
+        /// Built-in metric-series tag.
+        tag: u8,
+        /// Rejected payload.
+        payload: u16,
+    },
+    /// Reconstructing the validated immutable identity or profile failed.
+    Build(RegimeBuildError),
+    /// Decoded dynamic evidence violated a canonical state invariant.
+    InvalidState {
+        /// Stable invariant diagnostic.
+        reason: &'static str,
+    },
+    /// Bytes remained after one complete canonical evidence record.
+    TrailingBytes {
+        /// Number of unconsumed bytes.
+        remaining: usize,
+    },
+}
+
+impl fmt::Display for RegimeSignalEvidenceCodecError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::LengthOverflow => {
+                formatter.write_str("canonical regime evidence length overflowed")
+            }
+            Self::AllocationFailed => {
+                formatter.write_str("could not allocate canonical regime evidence")
+            }
+            Self::Truncated {
+                offset,
+                needed,
+                remaining,
+            } => write!(
+                formatter,
+                "canonical regime evidence is truncated at {offset}: need {needed} bytes, have {remaining}"
+            ),
+            Self::DomainLengthMismatch { actual } => write!(
+                formatter,
+                "canonical regime evidence domain length {actual} is invalid"
+            ),
+            Self::DomainMismatch => {
+                formatter.write_str("canonical regime evidence domain does not match")
+            }
+            Self::UnsupportedVersion { actual } => write!(
+                formatter,
+                "canonical regime evidence version {actual} is unsupported"
+            ),
+            Self::LengthLimitExceeded {
+                component,
+                actual,
+                maximum,
+            } => write!(
+                formatter,
+                "canonical regime evidence {component} length {actual} exceeds {maximum}"
+            ),
+            Self::InvalidUtf8 => {
+                formatter.write_str("canonical regime evidence string is not UTF-8")
+            }
+            Self::InvalidTag { component, actual } => write!(
+                formatter,
+                "canonical regime evidence {component} tag {actual} is invalid"
+            ),
+            Self::NonCanonicalSeriesPayload { tag, payload } => write!(
+                formatter,
+                "canonical regime evidence series tag {tag} has non-zero payload {payload}"
+            ),
+            Self::Build(error) => write!(
+                formatter,
+                "canonical regime evidence identity or profile is invalid: {error}"
+            ),
+            Self::InvalidState { reason } => {
+                write!(
+                    formatter,
+                    "canonical regime evidence state is invalid: {reason}"
+                )
+            }
+            Self::TrailingBytes { remaining } => write!(
+                formatter,
+                "canonical regime evidence has {remaining} trailing bytes"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RegimeSignalEvidenceCodecError {}
+
+impl From<RegimeBuildError> for RegimeSignalEvidenceCodecError {
+    fn from(error: RegimeBuildError) -> Self {
+        Self::Build(error)
+    }
+}
 
 /// A finite inclusive source-stream sequence window.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1013,10 +1162,840 @@ impl RegimeSignalEvidence {
         &self.retained_receipts
     }
 
+    /// Encodes every immutable and dynamic evidence field in one strict,
+    /// versioned canonical representation.
+    pub fn try_to_canonical_bytes(&self) -> Result<Vec<u8>, RegimeSignalEvidenceCodecError> {
+        validate_regime_evidence_state(self)?;
+        let capacity = regime_evidence_encoded_len(self)?;
+        let mut encoder = RegimeEvidenceEncoder::with_capacity(capacity)?;
+        encoder.write_u16(
+            u16::try_from(REGIME_SIGNAL_EVIDENCE_ENCODING_DOMAIN.len())
+                .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?,
+        );
+        encoder.write_bytes(REGIME_SIGNAL_EVIDENCE_ENCODING_DOMAIN);
+        encoder.write_u16(REGIME_SIGNAL_EVIDENCE_ENCODING_VERSION);
+        encode_regime_identity(&mut encoder, &self.identity)?;
+        encode_regime_profile(&mut encoder, &self.profile)?;
+        encoder.write_optional_u64(self.through_sequence);
+        encoder.write_u64(self.observation_count);
+        encoder.write_u64(self.detection_count);
+        encoder.write_u64(self.dropped_receipt_count);
+        encoder.write_optional_u64(self.fallback_sequence);
+        encoder.write_u8(encode_regime_status(self.status));
+        encoder.write_u8(encode_regime_selection(self.selection));
+        encoder.write_u32(
+            u32::try_from(self.detector_snapshots.len())
+                .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?,
+        );
+        for snapshot in &self.detector_snapshots {
+            encode_regime_snapshot(&mut encoder, *snapshot);
+        }
+        encoder.write_u32(
+            u32::try_from(self.retained_receipts.len())
+                .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?,
+        );
+        for receipt in &self.retained_receipts {
+            encode_regime_receipt(&mut encoder, *receipt);
+        }
+        debug_assert_eq!(encoder.len(), capacity);
+        Ok(encoder.finish())
+    }
+
+    /// Decodes one complete canonical representation and rejects unknown
+    /// versions, non-canonical tags, trailing bytes, and impossible state.
+    pub fn try_from_canonical_bytes(bytes: &[u8]) -> Result<Self, RegimeSignalEvidenceCodecError> {
+        let mut decoder = RegimeEvidenceDecoder::new(bytes);
+        let domain_len = usize::from(decoder.read_u16()?);
+        if domain_len != REGIME_SIGNAL_EVIDENCE_ENCODING_DOMAIN.len() {
+            return Err(RegimeSignalEvidenceCodecError::DomainLengthMismatch {
+                actual: domain_len,
+            });
+        }
+        if decoder.read_bytes(domain_len)? != REGIME_SIGNAL_EVIDENCE_ENCODING_DOMAIN {
+            return Err(RegimeSignalEvidenceCodecError::DomainMismatch);
+        }
+        let version = decoder.read_u16()?;
+        if version != REGIME_SIGNAL_EVIDENCE_ENCODING_VERSION {
+            return Err(RegimeSignalEvidenceCodecError::UnsupportedVersion { actual: version });
+        }
+
+        let identity = decode_regime_identity(&mut decoder)?;
+        let profile = decode_regime_profile(&mut decoder)?;
+        let through_sequence = decoder.read_optional_u64("through-sequence")?;
+        let observation_count = decoder.read_u64()?;
+        let detection_count = decoder.read_u64()?;
+        let dropped_receipt_count = decoder.read_u64()?;
+        let fallback_sequence = decoder.read_optional_u64("fallback-sequence")?;
+        let status = decode_regime_status(decoder.read_u8()?)?;
+        let selection = decode_regime_selection(decoder.read_u8()?)?;
+
+        let snapshot_count = usize::try_from(decoder.read_u32()?)
+            .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?;
+        if snapshot_count != COMBINED_DETECTOR_COUNT {
+            return Err(RegimeSignalEvidenceCodecError::LengthLimitExceeded {
+                component: "detector-snapshot",
+                actual: snapshot_count,
+                maximum: COMBINED_DETECTOR_COUNT,
+            });
+        }
+        let mut detector_snapshots = Vec::new();
+        detector_snapshots
+            .try_reserve_exact(snapshot_count)
+            .map_err(|_| RegimeSignalEvidenceCodecError::AllocationFailed)?;
+        for _ in 0..snapshot_count {
+            detector_snapshots.push(decode_regime_snapshot(&mut decoder)?);
+        }
+
+        let receipt_count = usize::try_from(decoder.read_u32()?)
+            .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?;
+        if receipt_count > MAX_RETAINED_REGIME_RECEIPTS {
+            return Err(RegimeSignalEvidenceCodecError::LengthLimitExceeded {
+                component: "retained-receipt",
+                actual: receipt_count,
+                maximum: MAX_RETAINED_REGIME_RECEIPTS,
+            });
+        }
+        let mut retained_receipts = Vec::new();
+        retained_receipts
+            .try_reserve_exact(receipt_count)
+            .map_err(|_| RegimeSignalEvidenceCodecError::AllocationFailed)?;
+        for _ in 0..receipt_count {
+            retained_receipts.push(decode_regime_receipt(&mut decoder)?);
+        }
+        if decoder.remaining() != 0 {
+            return Err(RegimeSignalEvidenceCodecError::TrailingBytes {
+                remaining: decoder.remaining(),
+            });
+        }
+
+        let evidence = Self {
+            identity,
+            profile,
+            through_sequence,
+            observation_count,
+            detection_count,
+            dropped_receipt_count,
+            fallback_sequence,
+            status,
+            selection,
+            detector_snapshots,
+            retained_receipts,
+        };
+        validate_regime_evidence_state(&evidence)?;
+        Ok(evidence)
+    }
+
     /// This evidence remains an advisory signal, never ground truth.
     #[must_use]
     pub const fn is_ground_truth(&self) -> bool {
         false
+    }
+}
+
+fn regime_evidence_encoded_len(
+    evidence: &RegimeSignalEvidence,
+) -> Result<usize, RegimeSignalEvidenceCodecError> {
+    let identity_len = 5_usize
+        .checked_mul(OBJECT_ID_BYTES)
+        .and_then(|length| length.checked_add(2))
+        .and_then(|length| length.checked_add(evidence.identity.detector_id.len()))
+        .and_then(|length| length.checked_add(4 + 8 + 8 + 8))
+        .ok_or(RegimeSignalEvidenceCodecError::LengthOverflow)?;
+    let profile_len = OBJECT_ID_BYTES
+        .checked_add(2)
+        .and_then(|length| length.checked_add(evidence.profile.detector_id.len()))
+        .and_then(|length| length.checked_add(4 + 3))
+        .and_then(|length| length.checked_add(7 * 8 + 3 + 2 * 8))
+        .ok_or(RegimeSignalEvidenceCodecError::LengthOverflow)?;
+    let dynamic_header_len = optional_u64_encoded_len(evidence.through_sequence)
+        .checked_add(3 * 8)
+        .and_then(|length| length.checked_add(optional_u64_encoded_len(evidence.fallback_sequence)))
+        .and_then(|length| length.checked_add(2 + 4))
+        .ok_or(RegimeSignalEvidenceCodecError::LengthOverflow)?;
+    let snapshots_len = evidence
+        .detector_snapshots
+        .len()
+        .checked_mul(3 + 1 + 4 * 8)
+        .ok_or(RegimeSignalEvidenceCodecError::LengthOverflow)?;
+    let receipts_len = evidence
+        .retained_receipts
+        .len()
+        .checked_mul(2 * 8 + 3 + 1 + 1 + 3 * 8)
+        .ok_or(RegimeSignalEvidenceCodecError::LengthOverflow)?;
+
+    2_usize
+        .checked_add(REGIME_SIGNAL_EVIDENCE_ENCODING_DOMAIN.len())
+        .and_then(|length| length.checked_add(2))
+        .and_then(|length| length.checked_add(identity_len))
+        .and_then(|length| length.checked_add(profile_len))
+        .and_then(|length| length.checked_add(dynamic_header_len))
+        .and_then(|length| length.checked_add(snapshots_len))
+        .and_then(|length| length.checked_add(4))
+        .and_then(|length| length.checked_add(receipts_len))
+        .ok_or(RegimeSignalEvidenceCodecError::LengthOverflow)
+}
+
+const fn optional_u64_encoded_len(value: Option<u64>) -> usize {
+    if value.is_some() { 1 + 8 } else { 1 }
+}
+
+fn encode_regime_identity(
+    encoder: &mut RegimeEvidenceEncoder,
+    identity: &RegimeSignalIdentity,
+) -> Result<(), RegimeSignalEvidenceCodecError> {
+    encoder.write_oid(identity.signal_oid);
+    encoder.write_oid(identity.metric_stream_oid);
+    encoder.write_oid(identity.detector_profile_oid);
+    encoder.write_string(&identity.detector_id)?;
+    encoder.write_u32(identity.detector_version);
+    encoder.write_u64(identity.window.first);
+    encoder.write_u64(identity.window.last);
+    encoder.write_u64(identity.regime_epoch);
+    encoder.write_oid(identity.candidate_decision_oid);
+    encoder.write_oid(identity.pinned_fallback_oid);
+    Ok(())
+}
+
+fn decode_regime_identity(
+    decoder: &mut RegimeEvidenceDecoder<'_>,
+) -> Result<RegimeSignalIdentity, RegimeSignalEvidenceCodecError> {
+    let signal_oid = decoder.read_oid()?;
+    let metric_stream_oid = decoder.read_oid()?;
+    let detector_profile_oid = decoder.read_oid()?;
+    let detector_id = decoder.read_string("identity-detector-id", MAX_DETECTOR_ID_BYTES)?;
+    let detector_version = decoder.read_u32()?;
+    let first = decoder.read_u64()?;
+    let last = decoder.read_u64()?;
+    let regime_epoch = decoder.read_u64()?;
+    let candidate_decision_oid = decoder.read_oid()?;
+    let pinned_fallback_oid = decoder.read_oid()?;
+    let window = RegimeSequenceWindow::try_new(first, last)?;
+    RegimeSignalIdentity::try_new(
+        signal_oid,
+        metric_stream_oid,
+        detector_profile_oid,
+        detector_id,
+        detector_version,
+        window,
+        regime_epoch,
+        candidate_decision_oid,
+        pinned_fallback_oid,
+    )
+    .map_err(Into::into)
+}
+
+fn encode_regime_profile(
+    encoder: &mut RegimeEvidenceEncoder,
+    profile: &RegimeSignalProfile,
+) -> Result<(), RegimeSignalEvidenceCodecError> {
+    encoder.write_oid(profile.detector_profile_oid);
+    encoder.write_string(&profile.detector_id)?;
+    encoder.write_u32(profile.detector_version);
+    encoder.write_series(profile.series);
+    encoder.write_i64(profile.page_hinkley_tolerance_micro_units);
+    encoder.write_i64(profile.page_hinkley_threshold);
+    encoder.write_bool(profile.page_hinkley_reset_after_detection);
+    encoder.write_i64(profile.cusum_baseline_micro_units);
+    encoder.write_i64(profile.upward_cusum_drift_micro_units);
+    encoder.write_i64(profile.upward_cusum_threshold);
+    encoder.write_bool(profile.upward_cusum_reset_after_detection);
+    encoder.write_i64(profile.downward_cusum_drift_micro_units);
+    encoder.write_i64(profile.downward_cusum_threshold);
+    encoder.write_bool(profile.downward_cusum_reset_after_detection);
+    encoder.write_u64(
+        u64::try_from(profile.max_observations)
+            .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?,
+    );
+    encoder.write_u64(
+        u64::try_from(profile.max_retained_receipts)
+            .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?,
+    );
+    Ok(())
+}
+
+fn decode_regime_profile(
+    decoder: &mut RegimeEvidenceDecoder<'_>,
+) -> Result<RegimeSignalProfile, RegimeSignalEvidenceCodecError> {
+    let detector_profile_oid = decoder.read_oid()?;
+    let detector_id = decoder.read_string("profile-detector-id", MAX_DETECTOR_ID_BYTES)?;
+    let detector_version = decoder.read_u32()?;
+    if detector_id != COMBINED_REGIME_SIGNAL_ID {
+        return Err(RegimeSignalEvidenceCodecError::InvalidState {
+            reason: "profile detector identity is not the versioned combined signal",
+        });
+    }
+    if detector_version != COMBINED_REGIME_SIGNAL_VERSION {
+        return Err(RegimeSignalEvidenceCodecError::InvalidState {
+            reason: "profile detector version is not supported",
+        });
+    }
+    let series = decoder.read_series()?;
+    let page_hinkley = PageHinkleyConfig {
+        tolerance: MetricSample::from_micro_units(decoder.read_i64()?),
+        threshold: decoder.read_i64()?,
+        reset_after_detection: decoder.read_bool("page-hinkley-reset")?,
+    };
+    let cusum_baseline = MetricSample::from_micro_units(decoder.read_i64()?);
+    let upward_cusum = CusumConfig {
+        baseline: cusum_baseline,
+        drift: MetricSample::from_micro_units(decoder.read_i64()?),
+        threshold: decoder.read_i64()?,
+        direction: FoundationDirection::Increase,
+        reset_after_detection: decoder.read_bool("upward-cusum-reset")?,
+    };
+    let downward_cusum = CusumConfig {
+        baseline: cusum_baseline,
+        drift: MetricSample::from_micro_units(decoder.read_i64()?),
+        threshold: decoder.read_i64()?,
+        direction: FoundationDirection::Decrease,
+        reset_after_detection: decoder.read_bool("downward-cusum-reset")?,
+    };
+    let max_observations = usize::try_from(decoder.read_u64()?)
+        .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?;
+    let max_retained_receipts = usize::try_from(decoder.read_u64()?)
+        .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?;
+    RegimeSignalProfile::try_new(
+        detector_profile_oid,
+        series,
+        page_hinkley,
+        upward_cusum,
+        downward_cusum,
+        max_observations,
+        max_retained_receipts,
+    )
+    .map_err(Into::into)
+}
+
+fn encode_regime_snapshot(encoder: &mut RegimeEvidenceEncoder, snapshot: RegimeDetectorSnapshot) {
+    encoder.write_series(snapshot.series);
+    encoder.write_u8(encode_detector_kind(snapshot.detector));
+    encoder.write_u64(snapshot.sample_count);
+    encoder.write_i64(snapshot.mean_micro_units);
+    encoder.write_i64(snapshot.statistic);
+    encoder.write_i64(snapshot.threshold);
+}
+
+fn decode_regime_snapshot(
+    decoder: &mut RegimeEvidenceDecoder<'_>,
+) -> Result<RegimeDetectorSnapshot, RegimeSignalEvidenceCodecError> {
+    Ok(RegimeDetectorSnapshot {
+        series: decoder.read_series()?,
+        detector: decode_detector_kind(decoder.read_u8()?)?,
+        sample_count: decoder.read_u64()?,
+        mean_micro_units: decoder.read_i64()?,
+        statistic: decoder.read_i64()?,
+        threshold: decoder.read_i64()?,
+    })
+}
+
+fn encode_regime_receipt(encoder: &mut RegimeEvidenceEncoder, receipt: RegimeDetectionReceipt) {
+    encoder.write_u64(receipt.stream_sequence);
+    encoder.write_u64(receipt.detector_sample_index);
+    encoder.write_series(receipt.series);
+    encoder.write_u8(encode_detector_kind(receipt.detector));
+    encoder.write_u8(encode_regime_direction(receipt.direction));
+    encoder.write_i64(receipt.sample_micro_units);
+    encoder.write_i64(receipt.statistic);
+    encoder.write_i64(receipt.threshold);
+}
+
+fn decode_regime_receipt(
+    decoder: &mut RegimeEvidenceDecoder<'_>,
+) -> Result<RegimeDetectionReceipt, RegimeSignalEvidenceCodecError> {
+    Ok(RegimeDetectionReceipt {
+        stream_sequence: decoder.read_u64()?,
+        detector_sample_index: decoder.read_u64()?,
+        series: decoder.read_series()?,
+        detector: decode_detector_kind(decoder.read_u8()?)?,
+        direction: decode_regime_direction(decoder.read_u8()?)?,
+        sample_micro_units: decoder.read_i64()?,
+        statistic: decoder.read_i64()?,
+        threshold: decoder.read_i64()?,
+    })
+}
+
+fn validate_regime_evidence_state(
+    evidence: &RegimeSignalEvidence,
+) -> Result<(), RegimeSignalEvidenceCodecError> {
+    let identity = &evidence.identity;
+    let profile = &evidence.profile;
+    if identity.detector_profile_oid != profile.detector_profile_oid {
+        return Err(RegimeBuildError::IdentityProfileOidMismatch {
+            identity: identity.detector_profile_oid,
+            profile: profile.detector_profile_oid,
+        }
+        .into());
+    }
+    if identity.detector_id != profile.detector_id {
+        return Err(RegimeBuildError::IdentityDetectorIdMismatch.into());
+    }
+    if identity.detector_version != profile.detector_version {
+        return Err(RegimeBuildError::IdentityDetectorVersionMismatch {
+            identity: identity.detector_version,
+            profile: profile.detector_version,
+        }
+        .into());
+    }
+    let maximum = u64::try_from(profile.max_observations)
+        .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?;
+    if maximum > identity.window.length {
+        return Err(RegimeBuildError::ObservationLimitExceedsWindow {
+            maximum: profile.max_observations,
+            window: identity.window.length,
+        }
+        .into());
+    }
+    if evidence.observation_count > maximum {
+        return invalid_regime_state("observation count exceeds the profile limit");
+    }
+    let expected_through_sequence = if evidence.observation_count == 0 {
+        None
+    } else {
+        Some(
+            identity
+                .window
+                .first
+                .checked_add(evidence.observation_count - 1)
+                .ok_or(RegimeSignalEvidenceCodecError::LengthOverflow)?,
+        )
+    };
+    if evidence.through_sequence != expected_through_sequence {
+        return invalid_regime_state(
+            "through sequence does not match the contiguous observation count",
+        );
+    }
+
+    if evidence.detector_snapshots.len() != COMBINED_DETECTOR_COUNT {
+        return invalid_regime_state("detector snapshot inventory is incomplete");
+    }
+    for (snapshot, expected_detector) in evidence
+        .detector_snapshots
+        .iter()
+        .zip(COMBINED_DETECTOR_SLOTS)
+    {
+        if snapshot.series != profile.series {
+            return invalid_regime_state("detector snapshot names the wrong metric series");
+        }
+        if snapshot.detector != expected_detector {
+            return invalid_regime_state("detector snapshots are not in registration order");
+        }
+        if snapshot.sample_count != evidence.observation_count {
+            return invalid_regime_state("detector snapshot sample count is inconsistent");
+        }
+        let expected_threshold = detector_threshold(profile, expected_detector);
+        if snapshot.threshold != expected_threshold {
+            return invalid_regime_state("detector snapshot threshold is inconsistent");
+        }
+        if expected_detector != RegimeDetectorKind::PageHinkley
+            && snapshot.mean_micro_units != profile.cusum_baseline_micro_units
+        {
+            return invalid_regime_state("CUSUM snapshot baseline is inconsistent");
+        }
+        if snapshot.statistic < 0 {
+            return invalid_regime_state("detector snapshot statistic is negative");
+        }
+    }
+
+    if evidence.retained_receipts.len() > profile.max_retained_receipts {
+        return invalid_regime_state("retained receipt inventory exceeds the profile limit");
+    }
+    let retained_count = u64::try_from(evidence.retained_receipts.len())
+        .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?;
+    if evidence.dropped_receipt_count.checked_add(retained_count) != Some(evidence.detection_count)
+    {
+        return invalid_regime_state("detection, dropped, and retained counts do not reconcile");
+    }
+    if evidence.detection_count > evidence.observation_count {
+        return invalid_regime_state("detection count exceeds observation count");
+    }
+
+    match evidence.detection_count {
+        0 => {
+            if evidence.fallback_sequence.is_some()
+                || evidence.status != RegimeSignalStatus::NoChangeDetected
+                || evidence.selection != RegimePolicySelection::CandidateDecision
+                || evidence.dropped_receipt_count != 0
+                || !evidence.retained_receipts.is_empty()
+            {
+                return invalid_regime_state("quiet signal carries fallback state");
+            }
+        }
+        _ => {
+            if evidence.fallback_sequence.is_none()
+                || evidence.status != RegimeSignalStatus::ChangeDetected
+                || evidence.selection != RegimePolicySelection::PinnedFallback
+                || evidence.retained_receipts.is_empty()
+            {
+                return invalid_regime_state("detected signal does not carry fallback state");
+            }
+        }
+    }
+
+    let mut previous_sequence = None;
+    for receipt in &evidence.retained_receipts {
+        let Some(through_sequence) = evidence.through_sequence else {
+            return invalid_regime_state("receipt exists without an accepted observation");
+        };
+        if receipt.stream_sequence < identity.window.first
+            || receipt.stream_sequence > through_sequence
+        {
+            return invalid_regime_state("receipt sequence is outside the observed prefix");
+        }
+        if previous_sequence.is_some_and(|previous| receipt.stream_sequence <= previous) {
+            return invalid_regime_state("retained receipts are not strictly sequenced");
+        }
+        previous_sequence = Some(receipt.stream_sequence);
+        let expected_sample_index = receipt
+            .stream_sequence
+            .checked_sub(identity.window.first)
+            .and_then(|offset| offset.checked_add(1))
+            .ok_or(RegimeSignalEvidenceCodecError::LengthOverflow)?;
+        if receipt.detector_sample_index != expected_sample_index {
+            return invalid_regime_state("receipt sample index is inconsistent");
+        }
+        if receipt.series != profile.series {
+            return invalid_regime_state("receipt names the wrong metric series");
+        }
+        if receipt.threshold != detector_threshold(profile, receipt.detector) {
+            return invalid_regime_state("receipt threshold is inconsistent");
+        }
+        if receipt.statistic < receipt.threshold {
+            return invalid_regime_state("receipt statistic did not cross its threshold");
+        }
+        let expected_direction = match receipt.detector {
+            RegimeDetectorKind::PageHinkley | RegimeDetectorKind::UpwardCusum => {
+                RegimeDirection::Increase
+            }
+            RegimeDetectorKind::DownwardCusum => RegimeDirection::Decrease,
+        };
+        if receipt.direction != expected_direction {
+            return invalid_regime_state("receipt direction is inconsistent with its detector");
+        }
+    }
+
+    if let Some(fallback_sequence) = evidence.fallback_sequence {
+        let Some(through_sequence) = evidence.through_sequence else {
+            return invalid_regime_state("fallback exists without an accepted observation");
+        };
+        if fallback_sequence < identity.window.first || fallback_sequence > through_sequence {
+            return invalid_regime_state("fallback sequence is outside the observed prefix");
+        }
+        let first_retained = evidence
+            .retained_receipts
+            .first()
+            .ok_or(RegimeSignalEvidenceCodecError::InvalidState {
+                reason: "fallback exists without a retained receipt",
+            })?
+            .stream_sequence;
+        if evidence.dropped_receipt_count == 0 && fallback_sequence != first_retained {
+            return invalid_regime_state("fallback sequence is not the first detection");
+        }
+        if evidence.dropped_receipt_count > 0 && fallback_sequence >= first_retained {
+            return invalid_regime_state("dropped receipts do not precede retained receipts");
+        }
+    }
+    Ok(())
+}
+
+const fn detector_threshold(profile: &RegimeSignalProfile, detector: RegimeDetectorKind) -> i64 {
+    match detector {
+        RegimeDetectorKind::PageHinkley => profile.page_hinkley_threshold,
+        RegimeDetectorKind::UpwardCusum => profile.upward_cusum_threshold,
+        RegimeDetectorKind::DownwardCusum => profile.downward_cusum_threshold,
+    }
+}
+
+fn invalid_regime_state<T>(reason: &'static str) -> Result<T, RegimeSignalEvidenceCodecError> {
+    Err(RegimeSignalEvidenceCodecError::InvalidState { reason })
+}
+
+const fn encode_detector_kind(kind: RegimeDetectorKind) -> u8 {
+    match kind {
+        RegimeDetectorKind::PageHinkley => 0,
+        RegimeDetectorKind::UpwardCusum => 1,
+        RegimeDetectorKind::DownwardCusum => 2,
+    }
+}
+
+fn decode_detector_kind(tag: u8) -> Result<RegimeDetectorKind, RegimeSignalEvidenceCodecError> {
+    match tag {
+        0 => Ok(RegimeDetectorKind::PageHinkley),
+        1 => Ok(RegimeDetectorKind::UpwardCusum),
+        2 => Ok(RegimeDetectorKind::DownwardCusum),
+        actual => Err(RegimeSignalEvidenceCodecError::InvalidTag {
+            component: "detector-kind",
+            actual,
+        }),
+    }
+}
+
+const fn encode_regime_direction(direction: RegimeDirection) -> u8 {
+    match direction {
+        RegimeDirection::Increase => 0,
+        RegimeDirection::Decrease => 1,
+    }
+}
+
+fn decode_regime_direction(tag: u8) -> Result<RegimeDirection, RegimeSignalEvidenceCodecError> {
+    match tag {
+        0 => Ok(RegimeDirection::Increase),
+        1 => Ok(RegimeDirection::Decrease),
+        actual => Err(RegimeSignalEvidenceCodecError::InvalidTag {
+            component: "regime-direction",
+            actual,
+        }),
+    }
+}
+
+const fn encode_regime_status(status: RegimeSignalStatus) -> u8 {
+    match status {
+        RegimeSignalStatus::NoChangeDetected => 0,
+        RegimeSignalStatus::ChangeDetected => 1,
+    }
+}
+
+fn decode_regime_status(tag: u8) -> Result<RegimeSignalStatus, RegimeSignalEvidenceCodecError> {
+    match tag {
+        0 => Ok(RegimeSignalStatus::NoChangeDetected),
+        1 => Ok(RegimeSignalStatus::ChangeDetected),
+        actual => Err(RegimeSignalEvidenceCodecError::InvalidTag {
+            component: "regime-status",
+            actual,
+        }),
+    }
+}
+
+const fn encode_regime_selection(selection: RegimePolicySelection) -> u8 {
+    match selection {
+        RegimePolicySelection::CandidateDecision => 0,
+        RegimePolicySelection::PinnedFallback => 1,
+    }
+}
+
+fn decode_regime_selection(
+    tag: u8,
+) -> Result<RegimePolicySelection, RegimeSignalEvidenceCodecError> {
+    match tag {
+        0 => Ok(RegimePolicySelection::CandidateDecision),
+        1 => Ok(RegimePolicySelection::PinnedFallback),
+        actual => Err(RegimeSignalEvidenceCodecError::InvalidTag {
+            component: "regime-selection",
+            actual,
+        }),
+    }
+}
+
+struct RegimeEvidenceEncoder {
+    bytes: Vec<u8>,
+}
+
+impl RegimeEvidenceEncoder {
+    fn with_capacity(capacity: usize) -> Result<Self, RegimeSignalEvidenceCodecError> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| RegimeSignalEvidenceCodecError::AllocationFailed)?;
+        Ok(Self { bytes })
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+
+    fn write_bool(&mut self, value: bool) {
+        self.write_u8(u8::from(value));
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    fn write_i64(&mut self, value: i64) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    fn write_oid(&mut self, value: ObjectId) {
+        self.write_bytes(&value.0);
+    }
+
+    fn write_string(&mut self, value: &str) -> Result<(), RegimeSignalEvidenceCodecError> {
+        let length = u16::try_from(value.len())
+            .map_err(|_| RegimeSignalEvidenceCodecError::LengthOverflow)?;
+        self.write_u16(length);
+        self.write_bytes(value.as_bytes());
+        Ok(())
+    }
+
+    fn write_optional_u64(&mut self, value: Option<u64>) {
+        match value {
+            None => self.write_u8(0),
+            Some(value) => {
+                self.write_u8(1);
+                self.write_u64(value);
+            }
+        }
+    }
+
+    fn write_series(&mut self, series: RuntimeMetricSeries) {
+        let (tag, payload) = match series {
+            RuntimeMetricSeries::ReadyQueueDepth => (0, BUILTIN_SERIES_PAYLOAD),
+            RuntimeMetricSeries::WakeToRunLatencyMicros => (1, BUILTIN_SERIES_PAYLOAD),
+            RuntimeMetricSeries::CancelStreakReward => (2, BUILTIN_SERIES_PAYLOAD),
+            RuntimeMetricSeries::DrainRate => (3, BUILTIN_SERIES_PAYLOAD),
+            RuntimeMetricSeries::Custom(payload) => (4, payload),
+        };
+        self.write_u8(tag);
+        self.write_u16(payload);
+    }
+}
+
+struct RegimeEvidenceDecoder<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> RegimeEvidenceDecoder<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.offset)
+    }
+
+    fn read_bytes(&mut self, length: usize) -> Result<&'a [u8], RegimeSignalEvidenceCodecError> {
+        let remaining = self.remaining();
+        if remaining < length {
+            return Err(RegimeSignalEvidenceCodecError::Truncated {
+                offset: self.offset,
+                needed: length,
+                remaining,
+            });
+        }
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(RegimeSignalEvidenceCodecError::LengthOverflow)?;
+        let value =
+            self.bytes
+                .get(self.offset..end)
+                .ok_or(RegimeSignalEvidenceCodecError::Truncated {
+                    offset: self.offset,
+                    needed: length,
+                    remaining,
+                })?;
+        self.offset = end;
+        Ok(value)
+    }
+
+    fn read_array<const LENGTH: usize>(
+        &mut self,
+    ) -> Result<[u8; LENGTH], RegimeSignalEvidenceCodecError> {
+        let mut value = [0_u8; LENGTH];
+        value.copy_from_slice(self.read_bytes(LENGTH)?);
+        Ok(value)
+    }
+
+    fn read_u8(&mut self) -> Result<u8, RegimeSignalEvidenceCodecError> {
+        Ok(self.read_array::<1>()?[0])
+    }
+
+    fn read_bool(
+        &mut self,
+        component: &'static str,
+    ) -> Result<bool, RegimeSignalEvidenceCodecError> {
+        match self.read_u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            actual => Err(RegimeSignalEvidenceCodecError::InvalidTag { component, actual }),
+        }
+    }
+
+    fn read_u16(&mut self) -> Result<u16, RegimeSignalEvidenceCodecError> {
+        Ok(u16::from_le_bytes(self.read_array()?))
+    }
+
+    fn read_u32(&mut self) -> Result<u32, RegimeSignalEvidenceCodecError> {
+        Ok(u32::from_le_bytes(self.read_array()?))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, RegimeSignalEvidenceCodecError> {
+        Ok(u64::from_le_bytes(self.read_array()?))
+    }
+
+    fn read_i64(&mut self) -> Result<i64, RegimeSignalEvidenceCodecError> {
+        Ok(i64::from_le_bytes(self.read_array()?))
+    }
+
+    fn read_oid(&mut self) -> Result<ObjectId, RegimeSignalEvidenceCodecError> {
+        Ok(ObjectId(self.read_array()?))
+    }
+
+    fn read_string(
+        &mut self,
+        component: &'static str,
+        maximum: usize,
+    ) -> Result<&'a str, RegimeSignalEvidenceCodecError> {
+        let length = usize::from(self.read_u16()?);
+        if length > maximum {
+            return Err(RegimeSignalEvidenceCodecError::LengthLimitExceeded {
+                component,
+                actual: length,
+                maximum,
+            });
+        }
+        core::str::from_utf8(self.read_bytes(length)?)
+            .map_err(|_| RegimeSignalEvidenceCodecError::InvalidUtf8)
+    }
+
+    fn read_optional_u64(
+        &mut self,
+        component: &'static str,
+    ) -> Result<Option<u64>, RegimeSignalEvidenceCodecError> {
+        match self.read_u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_u64()?)),
+            actual => Err(RegimeSignalEvidenceCodecError::InvalidTag { component, actual }),
+        }
+    }
+
+    fn read_series(&mut self) -> Result<RuntimeMetricSeries, RegimeSignalEvidenceCodecError> {
+        let tag = self.read_u8()?;
+        let payload = self.read_u16()?;
+        match tag {
+            0..=3 if payload != BUILTIN_SERIES_PAYLOAD => {
+                Err(RegimeSignalEvidenceCodecError::NonCanonicalSeriesPayload { tag, payload })
+            }
+            0 => Ok(RuntimeMetricSeries::ReadyQueueDepth),
+            1 => Ok(RuntimeMetricSeries::WakeToRunLatencyMicros),
+            2 => Ok(RuntimeMetricSeries::CancelStreakReward),
+            3 => Ok(RuntimeMetricSeries::DrainRate),
+            4 => Ok(RuntimeMetricSeries::Custom(payload)),
+            actual => Err(RegimeSignalEvidenceCodecError::InvalidTag {
+                component: "runtime-metric-series",
+                actual,
+            }),
+        }
     }
 }
 
@@ -1609,6 +2588,69 @@ mod tests {
         }
 
         assert_eq!(run()?, run()?);
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_evidence_round_trips_and_rejects_noncanonical_state() -> TestResult {
+        let mut value = monitor()?;
+        for (offset, units) in [10, 10, 10, 10, 10, 30].into_iter().enumerate() {
+            value.observe(input(100 + u64::try_from(offset)?, units)?)?;
+        }
+        let evidence = value.evidence();
+        let encoded = evidence.try_to_canonical_bytes()?;
+        assert_eq!(
+            RegimeSignalEvidence::try_from_canonical_bytes(&encoded)?,
+            evidence
+        );
+
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(matches!(
+            RegimeSignalEvidence::try_from_canonical_bytes(&trailing),
+            Err(RegimeSignalEvidenceCodecError::TrailingBytes { remaining: 1 })
+        ));
+
+        let version_offset = 2 + REGIME_SIGNAL_EVIDENCE_ENCODING_DOMAIN.len();
+        let mut wrong_version = encoded.clone();
+        wrong_version[version_offset..version_offset + 2].copy_from_slice(&2_u16.to_le_bytes());
+        assert_eq!(
+            RegimeSignalEvidence::try_from_canonical_bytes(&wrong_version),
+            Err(RegimeSignalEvidenceCodecError::UnsupportedVersion { actual: 2 })
+        );
+
+        let mut decoder = RegimeEvidenceDecoder::new(&encoded);
+        let domain_len = usize::from(decoder.read_u16()?);
+        let _ = decoder.read_bytes(domain_len)?;
+        let _ = decoder.read_u16()?;
+        let _ = decode_regime_identity(&mut decoder)?;
+        let _ = decode_regime_profile(&mut decoder)?;
+        let _ = decoder.read_optional_u64("through-sequence")?;
+        let _ = decoder.read_u64()?;
+        let _ = decoder.read_u64()?;
+        let _ = decoder.read_u64()?;
+        let _ = decoder.read_optional_u64("fallback-sequence")?;
+        let status_offset = decoder.offset;
+        let mut inconsistent_status = encoded;
+        inconsistent_status[status_offset] =
+            encode_regime_status(RegimeSignalStatus::NoChangeDetected);
+        assert!(matches!(
+            RegimeSignalEvidence::try_from_canonical_bytes(&inconsistent_status),
+            Err(RegimeSignalEvidenceCodecError::InvalidState { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_evidence_rejects_truncation_at_every_boundary() -> TestResult {
+        let evidence = monitor()?.evidence();
+        let encoded = evidence.try_to_canonical_bytes()?;
+        for length in 0..encoded.len() {
+            assert!(
+                RegimeSignalEvidence::try_from_canonical_bytes(&encoded[..length]).is_err(),
+                "accepted truncated canonical evidence at length {length}"
+            );
+        }
         Ok(())
     }
 

@@ -1541,6 +1541,7 @@ mod tests {
         RegimeSignalProfile, RuntimeMetricSeries, SequencedRegimeSample,
     };
     use asupersync::runtime::changepoint::ChangeDirection;
+    use fgdb_claim::StatisticalErrorControl;
     use fgdb_evidence::CalibrationWindow;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -1596,7 +1597,7 @@ mod tests {
         EvidenceClaim::StatisticalClaim {
             population: "named-policy-stream".into(),
             sampling_rule: "every-stream-event".into(),
-            alpha: 0.01,
+            error_control: StatisticalErrorControl::try_alpha(0.01).unwrap(),
             power_or_effective_sample_size: "n_eff=4096".into(),
             assumptions: vec!["registered-null-and-filtration".into()],
         }

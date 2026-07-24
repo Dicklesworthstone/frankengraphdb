@@ -6,11 +6,13 @@
 //! immutable FrankenGraphDB trial identities. It does not implement a second
 //! statistical engine.
 
+pub mod ann_recall;
 pub mod conformal;
 pub mod eprocess;
 pub mod exploration;
 pub mod log;
 pub mod lyapunov;
+pub mod no_regret;
 pub mod ope;
 pub mod policy_epoch;
 pub mod progress;

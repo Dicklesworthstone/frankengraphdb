@@ -225,6 +225,107 @@ where
 /// Marker alias: a statically checked justification value.
 pub type Justified = Justification;
 
+/// A validated statistical type-I error probability.
+///
+/// The value is always finite and lies strictly inside `(0, 1)`. Keeping the
+/// field private prevents a statistical claim from carrying a sentinel,
+/// `NaN`, or an unchecked probability.
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
+pub struct StatisticalAlpha(f64);
+
+impl StatisticalAlpha {
+    /// Validates a finite type-I error probability in the open unit interval.
+    pub fn try_new(value: f64) -> Result<Self, InvalidStatisticalAlpha> {
+        if !value.is_finite() {
+            return Err(InvalidStatisticalAlpha::NonFinite {
+                supplied_bits: value.to_bits(),
+            });
+        }
+        if value <= 0.0 || value >= 1.0 {
+            return Err(InvalidStatisticalAlpha::OutsideOpenUnitInterval {
+                supplied_bits: value.to_bits(),
+            });
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated probability.
+    #[must_use]
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
+/// Whether a statistical claim declares type-I error control.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum StatisticalErrorControl {
+    /// The claim is evaluated at this validated type-I error probability.
+    Alpha(StatisticalAlpha),
+    /// Type-I error probability does not apply to the claim being made.
+    NotApplicable,
+}
+
+impl StatisticalErrorControl {
+    /// Validates and wraps an applicable type-I error probability.
+    pub fn try_alpha(value: f64) -> Result<Self, InvalidStatisticalAlpha> {
+        StatisticalAlpha::try_new(value).map(Self::Alpha)
+    }
+
+    /// Returns the declared alpha, or `None` when alpha does not apply.
+    #[must_use]
+    pub const fn alpha(self) -> Option<StatisticalAlpha> {
+        match self {
+            Self::Alpha(alpha) => Some(alpha),
+            Self::NotApplicable => None,
+        }
+    }
+}
+
+/// Typed rejection of an invalid statistical alpha.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InvalidStatisticalAlpha {
+    /// The supplied value was a NaN or infinity.
+    NonFinite {
+        /// Exact IEEE-754 payload supplied by the caller.
+        supplied_bits: u64,
+    },
+    /// The supplied finite value was not strictly between zero and one.
+    OutsideOpenUnitInterval {
+        /// Exact IEEE-754 payload supplied by the caller.
+        supplied_bits: u64,
+    },
+}
+
+impl InvalidStatisticalAlpha {
+    /// Recovers the rejected IEEE-754 value for diagnostics.
+    #[must_use]
+    pub const fn supplied(self) -> f64 {
+        match self {
+            Self::NonFinite { supplied_bits } | Self::OutsideOpenUnitInterval { supplied_bits } => {
+                f64::from_bits(supplied_bits)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for InvalidStatisticalAlpha {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonFinite { supplied_bits } => write!(
+                formatter,
+                "statistical alpha 0x{supplied_bits:016x} is not finite"
+            ),
+            Self::OutsideOpenUnitInterval { supplied_bits } => write!(
+                formatter,
+                "statistical alpha {} is outside the open interval (0, 1)",
+                f64::from_bits(*supplied_bits)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InvalidStatisticalAlpha {}
+
 /// §15.0 evidence claim classes: what kind of statement an evidence envelope
 /// makes, with the context each kind must declare. String/OID fields are the
 /// immutable declared identities; interpretation belongs to `fgdb-evidence`
@@ -247,7 +348,7 @@ pub enum EvidenceClaim {
     StatisticalClaim {
         population: String,
         sampling_rule: String,
-        alpha: f64,
+        error_control: StatisticalErrorControl,
         power_or_effective_sample_size: String,
         assumptions: Vec<String>,
     },
@@ -395,7 +496,7 @@ mod tests {
         let stat = EvidenceClaim::StatisticalClaim {
             population: "all commits on fixture L".into(),
             sampling_rule: "every commit".into(),
-            alpha: 0.05,
+            error_control: StatisticalErrorControl::try_alpha(0.05).unwrap(),
             power_or_effective_sample_size: "n=10_000".into(),
             assumptions: vec!["stationarity within a policy epoch".into()],
         };
@@ -439,5 +540,37 @@ mod tests {
             comparison_rule: "p99 <= baseline*1.05".into(),
         };
         assert_eq!(gate.max_registry_class(), RegistryClaimClass::Benchmark);
+    }
+
+    #[test]
+    fn statistical_alpha_rejects_sentinels_and_invalid_probabilities() {
+        for invalid in [
+            0.0,
+            -0.0,
+            -0.01,
+            1.0,
+            1.01,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ] {
+            assert!(
+                StatisticalErrorControl::try_alpha(invalid).is_err(),
+                "accepted invalid alpha with bits 0x{:016x}",
+                invalid.to_bits()
+            );
+        }
+
+        let alpha = StatisticalErrorControl::try_alpha(0.05).unwrap();
+        assert_eq!(alpha.alpha().map(StatisticalAlpha::get), Some(0.05));
+        assert_eq!(StatisticalErrorControl::NotApplicable.alpha(), None);
+        assert!(matches!(
+            StatisticalErrorControl::try_alpha(f64::NAN),
+            Err(InvalidStatisticalAlpha::NonFinite { .. })
+        ));
+        assert!(matches!(
+            StatisticalErrorControl::try_alpha(0.0),
+            Err(InvalidStatisticalAlpha::OutsideOpenUnitInterval { .. })
+        ));
     }
 }

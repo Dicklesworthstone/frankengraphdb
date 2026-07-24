@@ -500,6 +500,7 @@ dependencies = [
  "asupersync",
  "fgdb-claim",
  "fgdb-evidence",
+ "fgdb-sketch",
  "fgdb-types",
 ]
 
@@ -548,7 +549,9 @@ version = "0.0.1"
 name = "fgdb-sketch"
 version = "0.0.1"
 dependencies = [
+ "asupersync",
  "fgdb-collections",
+ "fgdb-types",
 ]
 
 [[package]]

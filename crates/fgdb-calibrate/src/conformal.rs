@@ -8,9 +8,7 @@
 use std::fmt;
 
 use asupersync::lab::conformal::{HealthThresholdCalibrator, HealthThresholdConfig, ThresholdMode};
-
-/// Maximum byte length accepted for a stable identity component.
-pub const MAX_ID_BYTES: usize = 256;
+use fgdb_types::ObjectId;
 
 /// Absolute resource ceiling for one exact calibration set.
 ///
@@ -24,54 +22,14 @@ pub const MAX_CALIBRATION_SAMPLES: usize = 1_048_576;
 /// counter exactly representable as `f64` when projecting the diagnostic rate.
 pub const MAX_CONFORMAL_TRIAL_OBSERVATIONS: usize = 2_097_152;
 
-/// Names an identity component that failed validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum IdentityField {
-    /// Graph metric identity.
-    Metric,
-    /// Population over which the metric is interpreted.
-    Population,
-    /// Selection policy used to form the calibration stream.
-    Selection,
-    /// Candidate decision-policy identity.
-    CandidateDecision,
-    /// Pinned deterministic fallback-policy identity.
-    PinnedFallback,
-}
-
-impl fmt::Display for IdentityField {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Metric => "metric",
-            Self::Population => "population",
-            Self::Selection => "selection",
-            Self::CandidateDecision => "candidate decision",
-            Self::PinnedFallback => "pinned fallback",
-        })
-    }
-}
+// Each wrapper owns exactly one foundation calibrator, so the foundation's
+// string-keyed map needs only a private slot. Durable identity remains solely
+// in the ObjectId-bound wrapper.
+const FOUNDATION_METRIC_SLOT: &str = "metric";
 
 /// Construction failures for conformal identities, profiles, and trials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildError {
-    /// An identity component was empty.
-    EmptyIdentity(IdentityField),
-    /// An identity component exceeded [`MAX_ID_BYTES`].
-    IdentityTooLong {
-        /// Component that exceeded the limit.
-        field: IdentityField,
-        /// Actual byte length.
-        actual: usize,
-        /// Maximum accepted byte length.
-        maximum: usize,
-    },
-    /// An identity component contained a byte outside canonical printable ASCII.
-    NonCanonicalIdentity {
-        /// Component containing the invalid byte.
-        field: IdentityField,
-        /// Offset of the first invalid byte.
-        offset: usize,
-    },
     /// Candidate and fallback identities were equal.
     CandidateEqualsFallback,
     /// A sequence window ended before it began.
@@ -135,26 +93,11 @@ pub enum BuildError {
         /// Absolute supported number of observations.
         maximum: usize,
     },
-    /// Space for an owned identity component could not be reserved.
-    IdentityAllocationFailed(IdentityField),
 }
 
 impl fmt::Display for BuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EmptyIdentity(field) => write!(formatter, "{field} identity must not be empty"),
-            Self::IdentityTooLong {
-                field,
-                actual,
-                maximum,
-            } => write!(
-                formatter,
-                "{field} identity is {actual} bytes; maximum is {maximum}"
-            ),
-            Self::NonCanonicalIdentity { field, offset } => write!(
-                formatter,
-                "{field} identity contains a non-canonical byte at offset {offset}"
-            ),
             Self::CandidateEqualsFallback => {
                 formatter.write_str("candidate and pinned fallback identities must differ")
             }
@@ -201,9 +144,6 @@ impl fmt::Display for BuildError {
                 formatter,
                 "conformal trial window {actual} exceeds resource ceiling {maximum}"
             ),
-            Self::IdentityAllocationFailed(field) => {
-                write!(formatter, "could not allocate the {field} identity")
-            }
         }
     }
 }
@@ -260,90 +200,93 @@ impl SequenceWindow {
 }
 
 /// Complete immutable identity of one graph-metric calibration trial.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GraphMetricIdentity {
-    metric_id: String,
-    population_id: String,
-    selection_id: String,
+    metric_oid: ObjectId,
+    population_oid: ObjectId,
+    selection_oid: ObjectId,
+    window_oid: ObjectId,
     window: SequenceWindow,
     regime_epoch: u64,
-    candidate_decision_id: String,
-    pinned_fallback_id: String,
+    candidate_decision_oid: ObjectId,
+    pinned_fallback_oid: ObjectId,
 }
 
 impl GraphMetricIdentity {
-    /// Validates and owns a complete trial identity.
+    /// Validates a complete trial identity.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
-        metric_id: &str,
-        population_id: &str,
-        selection_id: &str,
+        metric_oid: ObjectId,
+        population_oid: ObjectId,
+        selection_oid: ObjectId,
+        window_oid: ObjectId,
         window: SequenceWindow,
         regime_epoch: u64,
-        candidate_decision_id: &str,
-        pinned_fallback_id: &str,
+        candidate_decision_oid: ObjectId,
+        pinned_fallback_oid: ObjectId,
     ) -> Result<Self, BuildError> {
-        let metric_id = copy_identity(IdentityField::Metric, metric_id)?;
-        let population_id = copy_identity(IdentityField::Population, population_id)?;
-        let selection_id = copy_identity(IdentityField::Selection, selection_id)?;
-        let candidate_decision_id =
-            copy_identity(IdentityField::CandidateDecision, candidate_decision_id)?;
-        let pinned_fallback_id = copy_identity(IdentityField::PinnedFallback, pinned_fallback_id)?;
-        if candidate_decision_id == pinned_fallback_id {
+        if candidate_decision_oid == pinned_fallback_oid {
             return Err(BuildError::CandidateEqualsFallback);
         }
 
         Ok(Self {
-            metric_id,
-            population_id,
-            selection_id,
+            metric_oid,
+            population_oid,
+            selection_oid,
+            window_oid,
             window,
             regime_epoch,
-            candidate_decision_id,
-            pinned_fallback_id,
+            candidate_decision_oid,
+            pinned_fallback_oid,
         })
     }
 
     /// Returns the graph metric identity.
     #[must_use]
-    pub fn metric_id(&self) -> &str {
-        &self.metric_id
+    pub const fn metric_oid(self) -> ObjectId {
+        self.metric_oid
     }
 
     /// Returns the population identity.
     #[must_use]
-    pub fn population_id(&self) -> &str {
-        &self.population_id
+    pub const fn population_oid(self) -> ObjectId {
+        self.population_oid
     }
 
     /// Returns the calibration-selection identity.
     #[must_use]
-    pub fn selection_id(&self) -> &str {
-        &self.selection_id
+    pub const fn selection_oid(self) -> ObjectId {
+        self.selection_oid
+    }
+
+    /// Returns the fixed source-window identity.
+    #[must_use]
+    pub const fn window_oid(self) -> ObjectId {
+        self.window_oid
     }
 
     /// Returns the complete source-stream window.
     #[must_use]
-    pub const fn window(&self) -> SequenceWindow {
+    pub const fn window(self) -> SequenceWindow {
         self.window
     }
 
     /// Returns the measured regime epoch.
     #[must_use]
-    pub const fn regime_epoch(&self) -> u64 {
+    pub const fn regime_epoch(self) -> u64 {
         self.regime_epoch
     }
 
     /// Returns the candidate decision identity.
     #[must_use]
-    pub fn candidate_decision_id(&self) -> &str {
-        &self.candidate_decision_id
+    pub const fn candidate_decision_oid(self) -> ObjectId {
+        self.candidate_decision_oid
     }
 
     /// Returns the pinned deterministic fallback identity.
     #[must_use]
-    pub fn pinned_fallback_id(&self) -> &str {
-        &self.pinned_fallback_id
+    pub const fn pinned_fallback_oid(self) -> ObjectId {
+        self.pinned_fallback_oid
     }
 }
 
@@ -366,8 +309,9 @@ impl MetricThresholdMode {
 }
 
 /// Immutable conformal profile with a canonical floating-point identity.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConformalProfile {
+    profile_oid: ObjectId,
     alpha_bits: u64,
     mode: MetricThresholdMode,
     minimum_calibration_samples: usize,
@@ -377,6 +321,7 @@ pub struct ConformalProfile {
 impl ConformalProfile {
     /// Validates a graph-metric conformal profile.
     pub fn try_new(
+        profile_oid: ObjectId,
         alpha: f64,
         mode: MetricThresholdMode,
         minimum_calibration_samples: usize,
@@ -405,11 +350,18 @@ impl ConformalProfile {
         }
 
         Ok(Self {
+            profile_oid,
             alpha_bits: alpha.to_bits(),
             mode,
             minimum_calibration_samples,
             maximum_calibration_samples,
         })
+    }
+
+    /// Returns the immutable configuration-profile identity.
+    #[must_use]
+    pub const fn profile_oid(self) -> ObjectId {
+        self.profile_oid
     }
 
     /// Returns alpha's exact canonical IEEE-754 bits.
@@ -719,10 +671,10 @@ impl AssessmentEvidence {
 
     /// Returns the selected immutable policy identity.
     #[must_use]
-    pub fn selected_policy_id(&self) -> &str {
+    pub const fn selected_policy_oid(&self) -> ObjectId {
         match self.selection {
-            PolicySelection::CandidateDecision => self.identity.candidate_decision_id(),
-            PolicySelection::PinnedFallback => self.identity.pinned_fallback_id(),
+            PolicySelection::CandidateDecision => self.identity.candidate_decision_oid,
+            PolicySelection::PinnedFallback => self.identity.pinned_fallback_oid,
         }
     }
 }
@@ -915,7 +867,7 @@ impl GraphMetricConformal {
     /// Returns whether the foundation has reached the profile's minimum count.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.core.is_metric_calibrated(self.identity.metric_id())
+        self.core.is_metric_calibrated(FOUNDATION_METRIC_SLOT)
     }
 
     /// Returns whether calibration values may still be accepted.
@@ -955,7 +907,7 @@ impl GraphMetricConformal {
         let stream_sequence = sample.stream_sequence;
         let next_sequence = sequence_after(stream_sequence, self.identity.window.last());
 
-        self.core.calibrate(self.identity.metric_id(), value);
+        self.core.calibrate(FOUNDATION_METRIC_SLOT, value);
         self.calibration_samples = next_count;
         self.calibration_through_sequence = Some(stream_sequence);
         self.next_sequence = next_sequence;
@@ -1009,7 +961,7 @@ impl GraphMetricConformal {
                 PolicySelection::PinnedFallback,
             )
         } else {
-            match self.core.check(self.identity.metric_id(), value) {
+            match self.core.check(FOUNDATION_METRIC_SLOT, value) {
                 Some(check) => {
                     let next_ready = self
                         .ready_assessments
@@ -1155,39 +1107,15 @@ fn sequence_after(current: u64, last: u64) -> Option<u64> {
     }
 }
 
-fn copy_identity(field: IdentityField, value: &str) -> Result<String, BuildError> {
-    if value.is_empty() {
-        return Err(BuildError::EmptyIdentity(field));
-    }
-    if value.len() > MAX_ID_BYTES {
-        return Err(BuildError::IdentityTooLong {
-            field,
-            actual: value.len(),
-            maximum: MAX_ID_BYTES,
-        });
-    }
-    if let Some((offset, _)) = value
-        .as_bytes()
-        .iter()
-        .enumerate()
-        .find(|(_, byte)| !(0x21..=0x7e).contains(*byte))
-    {
-        return Err(BuildError::NonCanonicalIdentity { field, offset });
-    }
-
-    let mut owned = String::new();
-    owned
-        .try_reserve_exact(value.len())
-        .map_err(|_| BuildError::IdentityAllocationFailed(field))?;
-    owned.push_str(value);
-    Ok(owned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    const fn oid(fill: u8) -> ObjectId {
+        ObjectId([fill; 32])
+    }
 
     fn window() -> Result<SequenceWindow, BuildError> {
         SequenceWindow::try_new(100, 120)
@@ -1195,18 +1123,19 @@ mod tests {
 
     fn identity() -> Result<GraphMetricIdentity, BuildError> {
         GraphMetricIdentity::try_new(
-            "metric:authorized-degree-p99",
-            "population:tenant-7-vertices",
-            "selection:keyed-snapshot-v1",
+            oid(1),
+            oid(2),
+            oid(3),
+            oid(4),
             window()?,
             12,
-            "decision:csr-parallel-v4",
-            "fallback:scalar-stable-v2",
+            oid(5),
+            oid(6),
         )
     }
 
     fn profile() -> Result<ConformalProfile, BuildError> {
-        ConformalProfile::try_new(0.2, MetricThresholdMode::Upper, 5, 10)
+        ConformalProfile::try_new(oid(7), 0.2, MetricThresholdMode::Upper, 5, 10)
     }
 
     fn trial() -> Result<GraphMetricConformal, BuildError> {
@@ -1259,31 +1188,29 @@ mod tests {
                 last: u64::MAX
             })
         );
-        assert!(matches!(
-            GraphMetricIdentity::try_new("", "p", "s", window()?, 0, "c", "f"),
-            Err(BuildError::EmptyIdentity(IdentityField::Metric))
-        ));
-        assert!(matches!(
-            GraphMetricIdentity::try_new("m", "bad population", "s", window()?, 0, "c", "f"),
-            Err(BuildError::NonCanonicalIdentity {
-                field: IdentityField::Population,
-                ..
-            })
-        ));
         assert_eq!(
-            GraphMetricIdentity::try_new("m", "p", "s", window()?, 0, "same", "same"),
+            GraphMetricIdentity::try_new(
+                oid(1),
+                oid(2),
+                oid(3),
+                oid(4),
+                window()?,
+                0,
+                oid(5),
+                oid(5)
+            ),
             Err(BuildError::CandidateEqualsFallback)
         );
         assert!(matches!(
-            ConformalProfile::try_new(f64::NAN, MetricThresholdMode::Upper, 1, 2),
+            ConformalProfile::try_new(oid(7), f64::NAN, MetricThresholdMode::Upper, 1, 2),
             Err(BuildError::InvalidAlpha { .. })
         ));
         assert_eq!(
-            ConformalProfile::try_new(0.2, MetricThresholdMode::Upper, 0, 2),
+            ConformalProfile::try_new(oid(7), 0.2, MetricThresholdMode::Upper, 0, 2),
             Err(BuildError::ZeroMinimumCalibrationSamples)
         );
         assert_eq!(
-            ConformalProfile::try_new(0.2, MetricThresholdMode::Upper, 3, 2),
+            ConformalProfile::try_new(oid(7), 0.2, MetricThresholdMode::Upper, 3, 2),
             Err(BuildError::MaximumBelowMinimum {
                 minimum: 3,
                 maximum: 2
@@ -1291,6 +1218,7 @@ mod tests {
         );
         assert_eq!(
             ConformalProfile::try_new(
+                oid(7),
                 0.2,
                 MetricThresholdMode::Upper,
                 1,
@@ -1302,7 +1230,7 @@ mod tests {
             })
         );
 
-        let too_large = ConformalProfile::try_new(0.2, MetricThresholdMode::Upper, 1, 22)?;
+        let too_large = ConformalProfile::try_new(oid(7), 0.2, MetricThresholdMode::Upper, 1, 22)?;
         assert!(matches!(
             GraphMetricConformal::try_new(identity()?, too_large),
             Err(BuildError::CalibrationBoundExceedsWindow {
@@ -1313,9 +1241,18 @@ mod tests {
 
         let maximum_trial = u64::try_from(MAX_CONFORMAL_TRIAL_OBSERVATIONS)?;
         let oversized_window = SequenceWindow::try_new(0, maximum_trial)?;
-        let oversized_identity =
-            GraphMetricIdentity::try_new("m", "p", "s", oversized_window, 0, "c", "f")?;
-        let small_profile = ConformalProfile::try_new(0.2, MetricThresholdMode::Upper, 1, 1)?;
+        let oversized_identity = GraphMetricIdentity::try_new(
+            oid(1),
+            oid(2),
+            oid(3),
+            oid(4),
+            oversized_window,
+            0,
+            oid(5),
+            oid(6),
+        )?;
+        let small_profile =
+            ConformalProfile::try_new(oid(7), 0.2, MetricThresholdMode::Upper, 1, 1)?;
         assert!(matches!(
             GraphMetricConformal::try_new(oversized_identity, small_profile),
             Err(BuildError::TrialWindowTooLarge {
@@ -1325,9 +1262,17 @@ mod tests {
         ));
 
         let one_event = SequenceWindow::try_new(7, 7)?;
-        let no_assessment_identity =
-            GraphMetricIdentity::try_new("m", "p", "s", one_event, 0, "c", "f")?;
-        let one_sample = ConformalProfile::try_new(0.2, MetricThresholdMode::Upper, 1, 1)?;
+        let no_assessment_identity = GraphMetricIdentity::try_new(
+            oid(1),
+            oid(2),
+            oid(3),
+            oid(4),
+            one_event,
+            0,
+            oid(5),
+            oid(6),
+        )?;
+        let one_sample = ConformalProfile::try_new(oid(7), 0.2, MetricThresholdMode::Upper, 1, 1)?;
         assert!(matches!(
             GraphMetricConformal::try_new(no_assessment_identity, one_sample),
             Err(BuildError::NoAssessmentCapacity {
@@ -1335,6 +1280,21 @@ mod tests {
                 window_length: 1
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn identity_and_profile_expose_exact_registered_object_ids() -> TestResult {
+        let identity = identity()?;
+        assert_eq!(identity.metric_oid(), oid(1));
+        assert_eq!(identity.population_oid(), oid(2));
+        assert_eq!(identity.selection_oid(), oid(3));
+        assert_eq!(identity.window_oid(), oid(4));
+        assert_eq!(identity.window(), window()?);
+        assert_eq!(identity.regime_epoch(), 12);
+        assert_eq!(identity.candidate_decision_oid(), oid(5));
+        assert_eq!(identity.pinned_fallback_oid(), oid(6));
+        assert_eq!(profile()?.profile_oid(), oid(7));
         Ok(())
     }
 
@@ -1402,8 +1362,8 @@ mod tests {
         );
         assert_eq!(evidence.selection(), PolicySelection::PinnedFallback);
         assert_eq!(
-            evidence.selected_policy_id(),
-            identity()?.pinned_fallback_id()
+            evidence.selected_policy_oid(),
+            identity()?.pinned_fallback_oid()
         );
         assert_eq!(evidence.ready_assessments(), 0);
         assert_eq!(evidence.covered_ready_assessments(), 0);
@@ -1441,8 +1401,8 @@ mod tests {
         );
         assert_eq!(evidence.selection(), PolicySelection::PinnedFallback);
         assert_eq!(
-            evidence.selected_policy_id(),
-            identity()?.pinned_fallback_id()
+            evidence.selected_policy_oid(),
+            identity()?.pinned_fallback_oid()
         );
         assert_eq!(evidence.conforming(), Some(false));
         assert!(evidence.threshold_bits().is_some());
@@ -1467,12 +1427,12 @@ mod tests {
     #[test]
     fn vacuous_foundation_threshold_cannot_select_the_candidate() -> TestResult {
         let conservative_profile =
-            ConformalProfile::try_new(0.05, MetricThresholdMode::Upper, 5, 5)?;
-        let mut trial = GraphMetricConformal::try_new(identity()?, conservative_profile.clone())?;
+            ConformalProfile::try_new(oid(8), 0.05, MetricThresholdMode::Upper, 5, 5)?;
+        let mut trial = GraphMetricConformal::try_new(identity()?, conservative_profile)?;
         for offset in 0_u64..5 {
             let envelope = SequencedMetricValue::new(
                 identity()?,
-                conservative_profile.clone(),
+                conservative_profile,
                 100 + offset,
                 (offset + 1) as f64,
             );
@@ -1488,8 +1448,8 @@ mod tests {
         );
         assert_eq!(evidence.selection(), PolicySelection::PinnedFallback);
         assert_eq!(
-            evidence.selected_policy_id(),
-            identity()?.pinned_fallback_id()
+            evidence.selected_policy_oid(),
+            identity()?.pinned_fallback_oid()
         );
         assert_eq!(evidence.threshold_bits(), Some(f64::INFINITY.to_bits()));
         Ok(())
@@ -1543,6 +1503,10 @@ mod tests {
         assert_eq!(evidence.threshold_bits(), Some(0.0_f64.to_bits()));
         assert_eq!(evidence.nonconformity_score_bits(), Some(0.0_f64.to_bits()));
         assert_eq!(evidence.selection(), PolicySelection::CandidateDecision);
+        assert_eq!(
+            evidence.selected_policy_oid(),
+            identity()?.candidate_decision_oid()
+        );
         Ok(())
     }
 
@@ -1606,25 +1570,24 @@ mod tests {
 
     #[test]
     fn measured_regime_change_returns_to_the_pinned_fallback() -> TestResult {
-        let two_sided = ConformalProfile::try_new(0.2, MetricThresholdMode::TwoSided, 5, 10)?;
-        let mut trial = GraphMetricConformal::try_new(identity()?, two_sided.clone())?;
+        let two_sided =
+            ConformalProfile::try_new(oid(8), 0.2, MetricThresholdMode::TwoSided, 5, 10)?;
+        let mut trial = GraphMetricConformal::try_new(identity()?, two_sided)?;
         let baseline = [
             98.0, 100.0, 102.0, 99.0, 101.0, 100.0, 98.0, 102.0, 99.0, 101.0,
         ];
         for (offset, value) in baseline.into_iter().enumerate() {
             let sequence = 100_u64 + u64::try_from(offset)?;
-            let envelope =
-                SequencedMetricValue::new(identity()?, two_sided.clone(), sequence, value);
+            let envelope = SequencedMetricValue::new(identity()?, two_sided, sequence, value);
             let _ = trial.calibrate(envelope)?;
         }
 
-        let stable = SequencedMetricValue::new(identity()?, two_sided.clone(), 110, 100.0);
+        let stable = SequencedMetricValue::new(identity()?, two_sided, 110, 100.0);
         let stable = trial.assess(stable)?;
         assert_eq!(stable.selection(), PolicySelection::CandidateDecision);
 
         for (sequence, shifted) in [(111, 500.0), (112, 520.0), (113, 540.0)] {
-            let envelope =
-                SequencedMetricValue::new(identity()?, two_sided.clone(), sequence, shifted);
+            let envelope = SequencedMetricValue::new(identity()?, two_sided, sequence, shifted);
             let evidence = trial.assess(envelope)?;
             assert_eq!(
                 evidence.disposition(),
@@ -1632,8 +1595,8 @@ mod tests {
             );
             assert_eq!(evidence.selection(), PolicySelection::PinnedFallback);
             assert_eq!(
-                evidence.selected_policy_id(),
-                identity()?.pinned_fallback_id()
+                evidence.selected_policy_oid(),
+                identity()?.pinned_fallback_oid()
             );
         }
         Ok(())
@@ -1643,13 +1606,14 @@ mod tests {
     fn identity_and_profile_mismatches_are_non_mutating() -> TestResult {
         let mut trial = trial()?;
         let alternate_identity = GraphMetricIdentity::try_new(
-            "metric:authorized-degree-p99",
-            "population:tenant-8-vertices",
-            "selection:keyed-snapshot-v1",
+            oid(1),
+            oid(9),
+            oid(3),
+            oid(4),
             window()?,
             12,
-            "decision:csr-parallel-v4",
-            "fallback:scalar-stable-v2",
+            oid(5),
+            oid(6),
         )?;
         let wrong_identity = SequencedMetricValue::new(alternate_identity, profile()?, 100, 1.0);
         assert_eq!(
@@ -1657,7 +1621,8 @@ mod tests {
             Err(InputError::IdentityMismatch)
         );
 
-        let alternate_profile = ConformalProfile::try_new(0.1, MetricThresholdMode::Upper, 5, 10)?;
+        let alternate_profile =
+            ConformalProfile::try_new(oid(8), 0.1, MetricThresholdMode::Upper, 5, 10)?;
         let wrong_profile = SequencedMetricValue::new(identity()?, alternate_profile, 100, 1.0);
         assert_eq!(
             trial.calibrate(wrong_profile),
@@ -1670,17 +1635,24 @@ mod tests {
 
     #[test]
     fn calibration_bound_and_window_end_are_enforced() -> TestResult {
-        let bounded_profile = ConformalProfile::try_new(0.2, MetricThresholdMode::Upper, 1, 1)?;
+        let bounded_profile =
+            ConformalProfile::try_new(oid(8), 0.2, MetricThresholdMode::Upper, 1, 1)?;
         let one_window = SequenceWindow::try_new(7, 8)?;
-        let one_identity =
-            GraphMetricIdentity::try_new("m", "p", "s", one_window, 1, "candidate", "fallback")?;
-        let mut one = GraphMetricConformal::try_new(one_identity.clone(), bounded_profile.clone())?;
-        let first =
-            SequencedMetricValue::new(one_identity.clone(), bounded_profile.clone(), 7, 1.0);
+        let one_identity = GraphMetricIdentity::try_new(
+            oid(1),
+            oid(2),
+            oid(3),
+            oid(4),
+            one_window,
+            1,
+            oid(5),
+            oid(6),
+        )?;
+        let mut one = GraphMetricConformal::try_new(one_identity, bounded_profile)?;
+        let first = SequencedMetricValue::new(one_identity, bounded_profile, 7, 1.0);
         assert!(one.calibrate(first).is_ok());
         assert_eq!(one.next_sequence(), Some(8));
-        let assessment =
-            SequencedMetricValue::new(one_identity.clone(), bounded_profile.clone(), 8, 2.0);
+        let assessment = SequencedMetricValue::new(one_identity, bounded_profile, 8, 2.0);
         assert!(one.assess(assessment).is_ok());
         assert_eq!(one.next_sequence(), None);
         let after = SequencedMetricValue::new(one_identity, bounded_profile, 9, 2.0);

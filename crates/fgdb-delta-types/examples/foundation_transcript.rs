@@ -19,7 +19,9 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_bigint::{BigInt, LimbLimit};
-use fgdb_claim::{EvidenceClaim, RefinementStatus, RegistryClaimClass, class, justify};
+use fgdb_claim::{
+    EvidenceClaim, RefinementStatus, RegistryClaimClass, StatisticalErrorControl, class, justify,
+};
 use fgdb_delta_types::{
     CommittedMarker, DeltaRow, DeltaTemplateKey, ElementId, EscrowDomainId, LabelId,
     LogicalDeltaBatch, LogicalDeltaTemplate, OperationKey, PropertyKeyId, RelationId, SchemaEpoch,
@@ -172,14 +174,17 @@ fn main() {
         "foundation lab oracle failed: {report:?}"
     );
     for invariant in ["obligation_leak", "quiescence"] {
-        let entry = report
-            .oracle_report
-            .entry(invariant)
-            .unwrap_or_else(|| panic!("foundation lab report omitted {invariant}: {report:?}"));
+        let entry = report.oracle_report.entry(invariant);
         assert!(
-            entry.passed,
-            "foundation lab oracle {invariant} failed: {report:?}"
+            entry.is_some(),
+            "foundation lab report omitted {invariant}: {report:?}"
         );
+        if let Some(entry) = entry {
+            assert!(
+                entry.passed,
+                "foundation lab oracle {invariant} failed: {report:?}"
+            );
+        }
     }
     assert!(
         report.invariant_violations.is_empty(),
@@ -462,7 +467,8 @@ fn run_transcript(root: &asupersync::Cx) {
             EvidenceClaim::StatisticalClaim {
                 population: "fixture L admissions".into(),
                 sampling_rule: "every admission".into(),
-                alpha: 0.01,
+                error_control: StatisticalErrorControl::try_alpha(0.01)
+                    .expect("fixture alpha is valid"),
                 power_or_effective_sample_size: "n_eff=52_000".into(),
                 assumptions: vec!["per-epoch exchangeability".into()],
             },

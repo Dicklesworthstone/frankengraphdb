@@ -12,58 +12,13 @@ use std::fmt;
 
 use asupersync::lab::oracle::eprocess::EProcess;
 pub use asupersync::lab::oracle::eprocess::EProcessConfig;
+use fgdb_types::ObjectId;
 
-/// Maximum byte length accepted for one stable identity component.
-pub const MAX_ID_BYTES: usize = 256;
-
-/// Names the component of a trial or profile identity that failed validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdentityField {
-    /// Identity of the registered e-process monitor and its null contract.
-    Monitor,
-    /// Identity of the registered filtration.
-    Filtration,
-    /// Identity of the candidate decision policy.
-    Decision,
-    /// Identity of the deterministic fallback policy.
-    Fallback,
-    /// Identity of the e-process configuration profile.
-    Profile,
-}
-
-impl fmt::Display for IdentityField {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Monitor => "monitor",
-            Self::Filtration => "filtration",
-            Self::Decision => "decision",
-            Self::Fallback => "fallback",
-            Self::Profile => "profile",
-        })
-    }
-}
+const FOUNDATION_MONITOR_LABEL: &str = "fgdb-calibrate:eprocess";
 
 /// Stable construction failures for trial identities and profiles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildError {
-    /// An identity component was empty.
-    EmptyIdentity(IdentityField),
-    /// An identity component exceeded [`MAX_ID_BYTES`].
-    IdentityTooLong {
-        /// Component that exceeded the limit.
-        field: IdentityField,
-        /// Actual byte length supplied by the caller.
-        actual: usize,
-        /// Maximum accepted byte length.
-        maximum: usize,
-    },
-    /// An identity component was not canonical printable ASCII.
-    NonCanonicalIdentity {
-        /// Component containing the invalid byte.
-        field: IdentityField,
-        /// Byte offset of the first invalid byte.
-        offset: usize,
-    },
     /// The candidate decision and fallback policy had the same identity.
     DecisionEqualsFallback,
     /// A sequence window's inclusive end preceded its start.
@@ -87,26 +42,11 @@ pub enum BuildError {
     },
     /// The foundation rejected the supplied e-process configuration.
     InvalidEProcessConfig,
-    /// Space for an owned identity component could not be reserved.
-    IdentityAllocationFailed(IdentityField),
 }
 
 impl fmt::Display for BuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EmptyIdentity(field) => write!(formatter, "{field} identity must not be empty"),
-            Self::IdentityTooLong {
-                field,
-                actual,
-                maximum,
-            } => write!(
-                formatter,
-                "{field} identity is {actual} bytes; maximum is {maximum}"
-            ),
-            Self::NonCanonicalIdentity { field, offset } => write!(
-                formatter,
-                "{field} identity contains a non-canonical byte at offset {offset}"
-            ),
             Self::DecisionEqualsFallback => {
                 formatter.write_str("decision and fallback identities must differ")
             }
@@ -123,9 +63,6 @@ impl fmt::Display for BuildError {
             ),
             Self::InvalidEProcessConfig => {
                 formatter.write_str("asupersync rejected the e-process configuration")
-            }
-            Self::IdentityAllocationFailed(field) => {
-                write!(formatter, "could not allocate the {field} identity")
             }
         }
     }
@@ -187,78 +124,74 @@ impl SequenceWindow {
 /// Identity includes the monitor, filtration, fixed stream window, regime
 /// epoch, candidate decision, and deterministic fallback. None of these
 /// components can be replaced after construction.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TrialIdentity {
-    monitor_id: String,
-    filtration_id: String,
+    monitor_oid: ObjectId,
+    filtration_oid: ObjectId,
     window: SequenceWindow,
     regime_epoch: u64,
-    decision_id: String,
-    fallback_id: String,
+    candidate_decision_oid: ObjectId,
+    pinned_fallback_oid: ObjectId,
 }
 
 impl TrialIdentity {
     /// Builds a complete trial identity.
     pub fn try_new(
-        monitor_id: &str,
-        filtration_id: &str,
+        monitor_oid: ObjectId,
+        filtration_oid: ObjectId,
         window: SequenceWindow,
         regime_epoch: u64,
-        decision_id: &str,
-        fallback_id: &str,
+        candidate_decision_oid: ObjectId,
+        pinned_fallback_oid: ObjectId,
     ) -> Result<Self, BuildError> {
-        let monitor_id = copy_identity(IdentityField::Monitor, monitor_id)?;
-        let filtration_id = copy_identity(IdentityField::Filtration, filtration_id)?;
-        let decision_id = copy_identity(IdentityField::Decision, decision_id)?;
-        let fallback_id = copy_identity(IdentityField::Fallback, fallback_id)?;
-        if decision_id == fallback_id {
+        if candidate_decision_oid == pinned_fallback_oid {
             return Err(BuildError::DecisionEqualsFallback);
         }
 
         Ok(Self {
-            monitor_id,
-            filtration_id,
+            monitor_oid,
+            filtration_oid,
             window,
             regime_epoch,
-            decision_id,
-            fallback_id,
+            candidate_decision_oid,
+            pinned_fallback_oid,
         })
     }
 
-    /// Returns the registered monitor and null-contract identity.
+    /// Returns the registered monitor and null-contract OID.
     #[must_use]
-    pub fn monitor_id(&self) -> &str {
-        &self.monitor_id
+    pub const fn monitor_oid(self) -> ObjectId {
+        self.monitor_oid
     }
 
-    /// Returns the registered filtration identity.
+    /// Returns the registered filtration/window OID.
     #[must_use]
-    pub fn filtration_id(&self) -> &str {
-        &self.filtration_id
+    pub const fn filtration_oid(self) -> ObjectId {
+        self.filtration_oid
     }
 
     /// Returns the fixed source-stream window.
     #[must_use]
-    pub const fn window(&self) -> SequenceWindow {
+    pub const fn window(self) -> SequenceWindow {
         self.window
     }
 
     /// Returns the regime epoch.
     #[must_use]
-    pub const fn regime_epoch(&self) -> u64 {
+    pub const fn regime_epoch(self) -> u64 {
         self.regime_epoch
     }
 
-    /// Returns the candidate decision-policy identity.
+    /// Returns the candidate decision-policy OID.
     #[must_use]
-    pub fn decision_id(&self) -> &str {
-        &self.decision_id
+    pub const fn candidate_decision_oid(self) -> ObjectId {
+        self.candidate_decision_oid
     }
 
-    /// Returns the pinned deterministic fallback-policy identity.
+    /// Returns the pinned deterministic fallback-policy OID.
     #[must_use]
-    pub fn fallback_id(&self) -> &str {
-        &self.fallback_id
+    pub const fn pinned_fallback_oid(self) -> ObjectId {
+        self.pinned_fallback_oid
     }
 }
 
@@ -266,9 +199,9 @@ impl TrialIdentity {
 ///
 /// Floating-point configuration is retained as IEEE-754 bits, making equality
 /// and emitted records exact rather than dependent on textual formatting.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EProcessProfile {
-    profile_id: String,
+    profile_oid: ObjectId,
     p0_bits: u64,
     lambda_bits: u64,
     alpha_bits: u64,
@@ -277,13 +210,13 @@ pub struct EProcessProfile {
 
 impl EProcessProfile {
     /// Validates and canonicalizes a foundation configuration.
-    pub fn try_new(profile_id: &str, config: EProcessConfig) -> Result<Self, BuildError> {
+    pub fn try_new(profile_oid: ObjectId, config: EProcessConfig) -> Result<Self, BuildError> {
         config
             .validate()
             .map_err(|_| BuildError::InvalidEProcessConfig)?;
 
         Ok(Self {
-            profile_id: copy_identity(IdentityField::Profile, profile_id)?,
+            profile_oid,
             p0_bits: canonical_float_bits(config.p0),
             lambda_bits: canonical_float_bits(config.lambda),
             alpha_bits: canonical_float_bits(config.alpha),
@@ -291,10 +224,10 @@ impl EProcessProfile {
         })
     }
 
-    /// Returns the stable configuration-profile identity.
+    /// Returns the stable configuration-profile OID.
     #[must_use]
-    pub fn profile_id(&self) -> &str {
-        &self.profile_id
+    pub const fn profile_oid(self) -> ObjectId {
+        self.profile_oid
     }
 
     /// Returns the exact canonical IEEE-754 bits of `p0`.
@@ -414,11 +347,11 @@ pub enum PolicyOutcomeKind {
 ///
 /// Fields are private so callers cannot attach an outcome to different policy
 /// identities after the trial emitted it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PolicyOutcome {
     kind: PolicyOutcomeKind,
-    decision_id: String,
-    fallback_id: String,
+    candidate_decision_oid: ObjectId,
+    pinned_fallback_oid: ObjectId,
 }
 
 impl PolicyOutcome {
@@ -428,24 +361,24 @@ impl PolicyOutcome {
         self.kind
     }
 
-    /// Returns the candidate decision-policy identity.
+    /// Returns the candidate decision-policy OID.
     #[must_use]
-    pub fn decision_id(&self) -> &str {
-        &self.decision_id
+    pub const fn candidate_decision_oid(self) -> ObjectId {
+        self.candidate_decision_oid
     }
 
-    /// Returns the pinned fallback-policy identity.
+    /// Returns the pinned fallback-policy OID.
     #[must_use]
-    pub fn fallback_id(&self) -> &str {
-        &self.fallback_id
+    pub const fn pinned_fallback_oid(self) -> ObjectId {
+        self.pinned_fallback_oid
     }
 
-    /// Returns the selected policy identity.
+    /// Returns the selected policy OID.
     #[must_use]
-    pub fn selected_policy_id(&self) -> &str {
+    pub const fn selected_policy_oid(self) -> ObjectId {
         match self.kind {
-            PolicyOutcomeKind::RetainPinnedFallback => &self.fallback_id,
-            PolicyOutcomeKind::PromoteCandidateAgainstPinnedFallback => &self.decision_id,
+            PolicyOutcomeKind::RetainPinnedFallback => self.pinned_fallback_oid,
+            PolicyOutcomeKind::PromoteCandidateAgainstPinnedFallback => self.candidate_decision_oid,
         }
     }
 }
@@ -510,6 +443,42 @@ impl EvidenceRecord {
     #[must_use]
     pub const fn profile(&self) -> &EProcessProfile {
         &self.profile
+    }
+
+    /// Returns the registered monitor and null-contract OID.
+    #[must_use]
+    pub const fn monitor_oid(&self) -> ObjectId {
+        self.identity.monitor_oid
+    }
+
+    /// Returns the registered filtration/window OID.
+    #[must_use]
+    pub const fn filtration_oid(&self) -> ObjectId {
+        self.identity.filtration_oid
+    }
+
+    /// Returns the exact e-process configuration-profile OID.
+    #[must_use]
+    pub const fn profile_oid(&self) -> ObjectId {
+        self.profile.profile_oid
+    }
+
+    /// Returns the candidate decision-policy OID.
+    #[must_use]
+    pub const fn candidate_decision_oid(&self) -> ObjectId {
+        self.outcome.candidate_decision_oid
+    }
+
+    /// Returns the pinned deterministic fallback-policy OID.
+    #[must_use]
+    pub const fn pinned_fallback_oid(&self) -> ObjectId {
+        self.outcome.pinned_fallback_oid
+    }
+
+    /// Returns the policy OID selected by this evidence prefix.
+    #[must_use]
+    pub const fn selected_policy_oid(&self) -> ObjectId {
+        self.outcome.selected_policy_oid()
     }
 
     /// Returns the last accepted source-stream sequence, if any.
@@ -646,7 +615,9 @@ impl EProcessTrial {
             }
         })?;
         let first_sequence = identity.window.first();
-        let core = EProcess::new_without_history(identity.monitor_id(), config);
+        // Asupersync requires a diagnostic string, but FrankenGraphDB's
+        // authoritative monitor identity is the bound `monitor_oid`.
+        let core = EProcess::new_without_history(FOUNDATION_MONITOR_LABEL, config);
 
         Ok(Self {
             identity,
@@ -764,8 +735,8 @@ impl EProcessTrial {
             PolicyOutcomeKind::RetainPinnedFallback
         };
         EvidenceRecord {
-            identity: self.identity.clone(),
-            profile: self.profile.clone(),
+            identity: self.identity,
+            profile: self.profile,
             through_sequence: self.through_sequence,
             observations: self.observations,
             one_observations: self.one_observations,
@@ -774,8 +745,8 @@ impl EProcessTrial {
             first_rejection_sequence: self.first_rejection_sequence,
             outcome: PolicyOutcome {
                 kind,
-                decision_id: self.identity.decision_id.clone(),
-                fallback_id: self.identity.fallback_id.clone(),
+                candidate_decision_oid: self.identity.candidate_decision_oid,
+                pinned_fallback_oid: self.identity.pinned_fallback_oid,
             },
         }
     }
@@ -790,39 +761,15 @@ fn canonical_float_bits(value: f64) -> u64 {
     }
 }
 
-fn copy_identity(field: IdentityField, value: &str) -> Result<String, BuildError> {
-    if value.is_empty() {
-        return Err(BuildError::EmptyIdentity(field));
-    }
-    if value.len() > MAX_ID_BYTES {
-        return Err(BuildError::IdentityTooLong {
-            field,
-            actual: value.len(),
-            maximum: MAX_ID_BYTES,
-        });
-    }
-    if let Some((offset, _)) = value
-        .as_bytes()
-        .iter()
-        .enumerate()
-        .find(|(_, byte)| !(0x21..=0x7e).contains(*byte))
-    {
-        return Err(BuildError::NonCanonicalIdentity { field, offset });
-    }
-
-    let mut owned = String::new();
-    owned
-        .try_reserve_exact(value.len())
-        .map_err(|_| BuildError::IdentityAllocationFailed(field))?;
-    owned.push_str(value);
-    Ok(owned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    const fn oid(seed: u8) -> ObjectId {
+        ObjectId([seed; 32])
+    }
 
     fn config() -> EProcessConfig {
         EProcessConfig {
@@ -838,18 +785,11 @@ mod tests {
     }
 
     fn identity() -> Result<TrialIdentity, BuildError> {
-        TrialIdentity::try_new(
-            "monitor:latency",
-            "filtration:commit-seq",
-            window()?,
-            7,
-            "decision:fast-path-v3",
-            "fallback:analytic-v1",
-        )
+        TrialIdentity::try_new(oid(1), oid(2), window()?, 7, oid(3), oid(4))
     }
 
     fn profile() -> Result<EProcessProfile, BuildError> {
-        EProcessProfile::try_new("profile:eprocess-v1", config())
+        EProcessProfile::try_new(oid(5), config())
     }
 
     fn trial() -> Result<EProcessTrial, BuildError> {
@@ -866,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn construction_validates_identity_window_and_foundation_config() -> TestResult {
+    fn construction_validates_window_policy_identity_and_foundation_config() -> TestResult {
         assert_eq!(
             SequenceWindow::try_new(9, 8),
             Err(BuildError::ReversedWindow { first: 9, last: 8 })
@@ -878,19 +818,8 @@ mod tests {
                 last: u64::MAX
             })
         );
-        assert!(matches!(
-            TrialIdentity::try_new("", "f", window()?, 0, "d", "b"),
-            Err(BuildError::EmptyIdentity(IdentityField::Monitor))
-        ));
-        assert!(matches!(
-            TrialIdentity::try_new("m", "bad id", window()?, 0, "d", "b"),
-            Err(BuildError::NonCanonicalIdentity {
-                field: IdentityField::Filtration,
-                ..
-            })
-        ));
         assert_eq!(
-            TrialIdentity::try_new("m", "f", window()?, 0, "same", "same"),
+            TrialIdentity::try_new(oid(1), oid(2), window()?, 0, oid(3), oid(3)),
             Err(BuildError::DecisionEqualsFallback)
         );
 
@@ -899,7 +828,7 @@ mod tests {
             ..config()
         };
         assert_eq!(
-            EProcessProfile::try_new("profile:bad", invalid),
+            EProcessProfile::try_new(oid(5), invalid),
             Err(BuildError::InvalidEProcessConfig)
         );
         let impossible_threshold = EProcessConfig {
@@ -908,7 +837,7 @@ mod tests {
             ..config()
         };
         assert_eq!(
-            EProcessProfile::try_new("profile:bad-threshold", impossible_threshold),
+            EProcessProfile::try_new(oid(5), impossible_threshold),
             Err(BuildError::InvalidEProcessConfig)
         );
         Ok(())
@@ -918,10 +847,10 @@ mod tests {
     fn profile_uses_canonical_float_bits() -> TestResult {
         let mut negative_zero = config();
         negative_zero.lambda = -0.0;
-        let left = EProcessProfile::try_new("profile:zero", negative_zero)?;
+        let left = EProcessProfile::try_new(oid(5), negative_zero)?;
         let mut positive_zero = config();
         positive_zero.lambda = 0.0;
-        let right = EProcessProfile::try_new("profile:zero", positive_zero)?;
+        let right = EProcessProfile::try_new(oid(5), positive_zero)?;
         assert_eq!(left, right);
         assert_eq!(left.lambda_bits(), 0.0_f64.to_bits());
         Ok(())
@@ -935,7 +864,7 @@ mod tests {
             alpha: 0.25,
             max_evalue: 1_000.0,
         };
-        let profile = EProcessProfile::try_new("profile:negative-valid", valid)?;
+        let profile = EProcessProfile::try_new(oid(5), valid)?;
         assert_eq!(f64::from_bits(profile.lambda_bits()), -4.0);
 
         let lower_boundary = EProcessConfig {
@@ -945,7 +874,7 @@ mod tests {
             max_evalue: 1_000.0,
         };
         assert_eq!(
-            EProcessProfile::try_new("profile:negative-boundary", lower_boundary),
+            EProcessProfile::try_new(oid(5), lower_boundary),
             Err(BuildError::InvalidEProcessConfig)
         );
         let upper_boundary = EProcessConfig {
@@ -955,7 +884,7 @@ mod tests {
             max_evalue: 1_000.0,
         };
         assert_eq!(
-            EProcessProfile::try_new("profile:positive-boundary", upper_boundary),
+            EProcessProfile::try_new(oid(5), upper_boundary),
             Err(BuildError::InvalidEProcessConfig)
         );
         Ok(())
@@ -970,15 +899,15 @@ mod tests {
             alpha: 0.25,
             max_evalue: 1_000.0,
         };
-        let negative_profile =
-            EProcessProfile::try_new("profile:negative-bet", negative_config.clone())?;
-        let mut trial = EProcessTrial::try_new(identity.clone(), negative_profile.clone())?;
-        let mut foundation = EProcess::new_without_history("monitor:latency", negative_config);
+        let negative_profile = EProcessProfile::try_new(oid(6), negative_config.clone())?;
+        let mut trial = EProcessTrial::try_new(identity, negative_profile)?;
+        let mut foundation =
+            EProcess::new_without_history(FOUNDATION_MONITOR_LABEL, negative_config);
 
         for sequence in 40..=42 {
             let observation = SequencedObservation::new(
-                identity.clone(),
-                negative_profile.clone(),
+                identity,
+                negative_profile,
                 sequence,
                 BinaryObservation::Zero,
             );
@@ -1010,13 +939,19 @@ mod tests {
     fn identity_and_profile_records_retain_every_pinned_component() -> TestResult {
         let trial = trial()?;
         let evidence = trial.evidence();
-        assert_eq!(evidence.identity().monitor_id(), "monitor:latency");
-        assert_eq!(evidence.identity().filtration_id(), "filtration:commit-seq");
+        assert_eq!(evidence.identity().monitor_oid(), oid(1));
+        assert_eq!(evidence.identity().filtration_oid(), oid(2));
         assert_eq!(evidence.identity().window(), window()?);
         assert_eq!(evidence.identity().regime_epoch(), 7);
-        assert_eq!(evidence.identity().decision_id(), "decision:fast-path-v3");
-        assert_eq!(evidence.identity().fallback_id(), "fallback:analytic-v1");
-        assert_eq!(evidence.profile().profile_id(), "profile:eprocess-v1");
+        assert_eq!(evidence.identity().candidate_decision_oid(), oid(3));
+        assert_eq!(evidence.identity().pinned_fallback_oid(), oid(4));
+        assert_eq!(evidence.profile().profile_oid(), oid(5));
+        assert_eq!(evidence.monitor_oid(), oid(1));
+        assert_eq!(evidence.filtration_oid(), oid(2));
+        assert_eq!(evidence.profile_oid(), oid(5));
+        assert_eq!(evidence.candidate_decision_oid(), oid(3));
+        assert_eq!(evidence.pinned_fallback_oid(), oid(4));
+        assert_eq!(evidence.selected_policy_oid(), oid(4));
         assert_eq!(evidence.profile().p0_bits(), config().p0.to_bits());
         assert_eq!(evidence.profile().lambda_bits(), config().lambda.to_bits());
         assert_eq!(evidence.profile().alpha_bits(), config().alpha.to_bits());
@@ -1108,8 +1043,8 @@ mod tests {
             PolicyOutcomeKind::RetainPinnedFallback
         );
         assert_eq!(
-            initial.outcome().selected_policy_id(),
-            identity()?.fallback_id()
+            initial.outcome().selected_policy_oid(),
+            identity()?.pinned_fallback_oid()
         );
 
         let first = accept(&mut trial, 40, BinaryObservation::One)?;
@@ -1125,12 +1060,12 @@ mod tests {
             PolicyOutcomeKind::PromoteCandidateAgainstPinnedFallback
         );
         assert_eq!(
-            third.evidence.outcome().selected_policy_id(),
-            identity()?.decision_id()
+            third.evidence.outcome().selected_policy_oid(),
+            identity()?.candidate_decision_oid()
         );
         assert_eq!(
-            third.evidence.outcome().fallback_id(),
-            identity()?.fallback_id()
+            third.evidence.outcome().pinned_fallback_oid(),
+            identity()?.pinned_fallback_oid()
         );
         assert_eq!(third.evidence.first_rejection_sequence(), Some(42));
         assert_eq!(third.evidence.observations(), 3);
@@ -1158,23 +1093,32 @@ mod tests {
     fn identity_and_profile_mismatches_are_immutable_failures() -> TestResult {
         let mut trial = trial()?;
         let before = trial.evidence();
-        let other_identity = TrialIdentity::try_new(
-            "monitor:latency",
-            "filtration:commit-seq",
-            window()?,
-            8,
-            "decision:fast-path-v3",
-            "fallback:analytic-v1",
-        )?;
-        let wrong_identity =
-            SequencedObservation::new(other_identity, profile()?, 40, BinaryObservation::One);
-        assert_eq!(
-            trial.observe(wrong_identity),
-            Err(ObserveError::TrialIdentityMismatch)
-        );
-        assert_eq!(trial.evidence(), before);
+        let mismatched_identities = [
+            TrialIdentity::try_new(oid(9), oid(2), window()?, 7, oid(3), oid(4))?,
+            TrialIdentity::try_new(oid(1), oid(9), window()?, 7, oid(3), oid(4))?,
+            TrialIdentity::try_new(
+                oid(1),
+                oid(2),
+                SequenceWindow::try_new(40, 48)?,
+                7,
+                oid(3),
+                oid(4),
+            )?,
+            TrialIdentity::try_new(oid(1), oid(2), window()?, 8, oid(3), oid(4))?,
+            TrialIdentity::try_new(oid(1), oid(2), window()?, 7, oid(9), oid(4))?,
+            TrialIdentity::try_new(oid(1), oid(2), window()?, 7, oid(3), oid(9))?,
+        ];
+        for other_identity in mismatched_identities {
+            let wrong_identity =
+                SequencedObservation::new(other_identity, profile()?, 40, BinaryObservation::One);
+            assert_eq!(
+                trial.observe(wrong_identity),
+                Err(ObserveError::TrialIdentityMismatch)
+            );
+            assert_eq!(trial.evidence(), before);
+        }
 
-        let other_profile_identity = EProcessProfile::try_new("profile:eprocess-v2", config())?;
+        let other_profile_identity = EProcessProfile::try_new(oid(6), config())?;
         let wrong_profile_identity = SequencedObservation::new(
             identity()?,
             other_profile_identity,
@@ -1189,7 +1133,7 @@ mod tests {
 
         let mut alternate_config = config();
         alternate_config.lambda = 1.5;
-        let other_profile = EProcessProfile::try_new("profile:eprocess-v1", alternate_config)?;
+        let other_profile = EProcessProfile::try_new(oid(5), alternate_config)?;
         let wrong_profile =
             SequencedObservation::new(identity()?, other_profile, 40, BinaryObservation::One);
         assert_eq!(
@@ -1204,15 +1148,11 @@ mod tests {
     #[test]
     fn fixed_window_rejects_observations_after_its_end() -> TestResult {
         let one = SequenceWindow::try_new(9, 9)?;
-        let one_identity = TrialIdentity::try_new("m", "f", one, 1, "candidate", "fallback")?;
+        let one_identity = TrialIdentity::try_new(oid(1), oid(2), one, 1, oid(3), oid(4))?;
         let one_profile = profile()?;
-        let mut trial = EProcessTrial::try_new(one_identity.clone(), one_profile.clone())?;
-        let first = SequencedObservation::new(
-            one_identity.clone(),
-            one_profile.clone(),
-            9,
-            BinaryObservation::Zero,
-        );
+        let mut trial = EProcessTrial::try_new(one_identity, one_profile)?;
+        let first =
+            SequencedObservation::new(one_identity, one_profile, 9, BinaryObservation::Zero);
         assert!(trial.observe(first).is_ok());
         assert_eq!(trial.next_sequence(), None);
         let after =
@@ -1227,15 +1167,14 @@ mod tests {
     #[test]
     fn window_ending_at_maximum_sequence_completes_without_increment_overflow() -> TestResult {
         let edge_window = SequenceWindow::try_new(u64::MAX - 1, u64::MAX)?;
-        let edge_identity =
-            TrialIdentity::try_new("m", "f", edge_window, 1, "candidate", "fallback")?;
+        let edge_identity = TrialIdentity::try_new(oid(1), oid(2), edge_window, 1, oid(3), oid(4))?;
         let edge_profile = profile()?;
-        let mut trial = EProcessTrial::try_new(edge_identity.clone(), edge_profile.clone())?;
+        let mut trial = EProcessTrial::try_new(edge_identity, edge_profile)?;
 
         for sequence in [u64::MAX - 1, u64::MAX] {
             trial.observe(SequencedObservation::new(
-                edge_identity.clone(),
-                edge_profile.clone(),
+                edge_identity,
+                edge_profile,
                 sequence,
                 BinaryObservation::Zero,
             ))?;
