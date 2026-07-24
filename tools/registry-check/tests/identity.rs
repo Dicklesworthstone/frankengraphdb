@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 12
+registry_epoch = 14
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 12);
+    assert_eq!(epoch, 14);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3034,6 +3034,70 @@ fn idr_ordinary_union_embedded_field_requires_exact_anchor() {
     );
 }
 
+/// The generic-free family amendment: a field row may host in a generic
+/// expansion of a registered kind, because one registered row commits every
+/// expansion of its family.  The relaxation is a *lookup* only — an unregistered
+/// family still fails, the family symbol itself is never accepted as a
+/// substitute for a real registration, and the construction-order equality that
+/// previously skipped generic hosts now applies to them.
+#[test]
+fn idr_field_containing_schema_resolves_by_generic_free_family() {
+    let host = real_identity().logical[0].clone();
+    let expansion = format!("{}<Role:Local|Meta>", host.name);
+
+    let mut resolved = real_identity();
+    resolved.fields.push(FieldRow {
+        containing_schema: expansion.clone(),
+        field_tag: 0x7ffd,
+        stable_name: "family_fixture".into(),
+        exact_wire_type: "u64".into(),
+        cardinality: "one".into(),
+        identity_class: "scalar".into(),
+        reference_semantics: "none".into(),
+        target_schema_id: None,
+        construction_order: host.construction_order,
+        role_predicate: "true".into(),
+        retention_and_cut_rule: "family-fixture".into(),
+        version_status: "active".into(),
+        max_size_bytes: 8,
+        digest_class: None,
+        transcript_recipe: None,
+        bd_domain_separator: None,
+        bd_schema_major: None,
+        bd_included_field_tags: None,
+        bd_excluded_field_tags: None,
+        recipe_pin: None,
+    });
+    let anchor_index = resolved.fields.len() - 1;
+    assert_eq!(
+        codes_without_assignment_drift(&resolved),
+        Vec::<String>::new(),
+        "a generic expansion of a registered kind is a resolvable field host"
+    );
+
+    // The family is a lookup, not an escape hatch: an unregistered family is
+    // still unresolved, exactly as a bare unregistered symbol would be.
+    let mut unregistered = resolved.clone();
+    unregistered.fields[anchor_index].containing_schema =
+        "MissingFixtureFamily<Role:Local|Meta>".into();
+    assert_eq!(
+        codes_without_assignment_drift(&unregistered),
+        vec!["field_unresolved_schema".to_owned()],
+        "a generic signature must not launder an unregistered containing family"
+    );
+
+    // Resolving through the family makes the containing kind visible, so the
+    // construction-order equality that silently skipped generic hosts before
+    // the amendment now binds them.
+    let mut drifted_order = resolved;
+    drifted_order.fields[anchor_index].construction_order = host.construction_order + 1;
+    assert_eq!(
+        codes_without_assignment_drift(&drifted_order),
+        vec!["bad_field".to_owned()],
+        "a generic-hosted field must share its family's construction order"
+    );
+}
+
 #[test]
 fn idr_ordinary_union_arm_bound_must_fit_union_bound() {
     let mut identity = ordinary_top_level_union_fixture();
@@ -3128,6 +3192,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "OfflineMacaroonIssuerEpochState"
                 | "TimeAuthorityRegistryTransitionTerminalDisposition"
                 | "PortableRestoreSourceLeaseLineageBasis"
+                | "TimeSubjectIssuanceReservationState"
+                | "MacaroonRootIssuanceState"
+                | "RestoreSourceLeasePredecessor"
+                | "RestoreSourceLeaseRecordKind"
+                | "RestoreSourceLeaseLineageBasis"
         )
     };
     pre_erratum
@@ -3137,12 +3206,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         .fields
         .retain(|field| !post_erratum_union(&field.exact_wire_type));
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 22,
+        pre_erratum.ordinary_unions.len() + 27,
         current_union_count,
         "the historical witness must remove exactly the post-erratum A15, A01, and A16 unions"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 4,
+        pre_erratum.fields.len() + 9,
         current_field_count,
         "the historical witness must remove exactly the post-erratum embedded-union anchor fields"
     );

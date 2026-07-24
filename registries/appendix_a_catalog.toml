@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 482
+target_count = 504
 projection_fallback_count = 83
-target_source_assignment_sha256 = "4d72118c1a5b4b381e69357fa3537be3b245281719e43031c650b61d986c961c"
+target_source_assignment_sha256 = "f90c82deb65f769f60146616e89c5afb86ef220d5349afe3f092bcb7eebbf90b"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -600,7 +600,7 @@ registry_epoch = 8
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 13
+registry_epoch = 14
 
 [[logical_kind]]
 slice_id = "a03"
@@ -5960,6 +5960,86 @@ retention_and_cut_rule = "closed union Genesis|Checkpointed; the lineage root th
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-subject-issuance-reservation-role-state"
+containing_schema = "TimeSubjectIssuanceReservation<Role>"
+field_tag = 0x0008
+stable_name = "state"
+exact_wire_type = "TimeSubjectIssuanceReservationState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 19
+role_predicate = "true"
+retention_and_cut_rule = "closed union Reserved|Published|Burned; the reservation's whole lifecycle position — a reservation is never both published and burned — lives/dies with the reservation object (a16:2191)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:macaroon-root-issuance-record-role-authority-owning-role-state"
+containing_schema = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0013
+stable_name = "state"
+exact_wire_type = "MacaroonRootIssuanceState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "closed union Live|Revoked|Expired; the issuance record's current standing, carrying the revocation or time-validation evidence that selected it, lives/dies with the issuance record (a16:2173)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-predecessor"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "predecessor"
+exact_wire_type = "RestoreSourceLeasePredecessor"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 45
+role_predicate = "true"
+retention_and_cut_rule = "closed union Genesis|Prior; the imported lease record's predecessor link, weak-digest-bound in the Prior arm so an imported chain never becomes a retaining edge, lives/dies with the lease record (a16:2237)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-record-kind"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "record_kind"
+exact_wire_type = "RestoreSourceLeaseRecordKind"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 45
+role_predicate = "true"
+retention_and_cut_rule = "closed union AcquireImported|RenewImported; which import produced this lease record, each arm committing its own receipt evidence, lives/dies with the lease record (a16:2237)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-lineage-basis"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "lineage_basis"
+exact_wire_type = "RestoreSourceLeaseLineageBasis"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 45
+role_predicate = "true"
+retention_and_cut_rule = "closed union Genesis|Checkpointed; the lineage root this lease record is anchored at, lives/dies with the lease record (a16:2237)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union]]
 slice_id = "a01"
 row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
@@ -6732,6 +6812,76 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a16"
+row_id = "a16:union:time-subject-issuance-reservation-state-ee73dc0b3a17afea"
+union_name = "TimeSubjectIssuanceReservationState"
+containing_schema = "TimeSubjectIssuanceReservation<Role>"
+union_path = "TimeSubjectIssuanceReservation<Role>.state"
+field_tag = 0x0008
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TimeSubjectIssuanceReservation<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a16"
+row_id = "a16:union:macaroon-root-issuance-state-897eb7902860797c"
+union_name = "MacaroonRootIssuanceState"
+containing_schema = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
+union_path = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state"
+field_tag = 0x0013
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a16"
+row_id = "a16:union:restore-source-lease-predecessor-89c1d7115309cfaa"
+union_name = "RestoreSourceLeasePredecessor"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.predecessor"
+field_tag = 0x0005
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a16"
+row_id = "a16:union:restore-source-lease-record-kind-d2dabe7c950c07fe"
+union_name = "RestoreSourceLeaseRecordKind"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind"
+field_tag = 0x0006
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a16"
+row_id = "a16:union:restore-source-lease-lineage-basis-f58f7050dbc452c9"
+union_name = "RestoreSourceLeaseLineageBasis"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.lineage_basis"
+field_tag = 0x000b
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a20"
 row_id = "a20:union-arm:service-promotion-external-operation-kind-catalog-reserve-hidden-cb21b33f2418f561"
@@ -7396,6 +7546,182 @@ source_arm_name = "Checkpointed"
 stable_name = "checkpointed"
 payload_kind = "inline-record"
 payload_sha256 = "59ec368a8dc44afa3fe19ba51b406569eda42c02460bdb7c0564a2a4879f6436"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-subject-issuance-reservation-state-reserved-5925c5aa17d4533e"
+union_name = "TimeSubjectIssuanceReservationState"
+containing_schema = "TimeSubjectIssuanceReservation<Role>"
+union_path = "TimeSubjectIssuanceReservation<Role>.state"
+arm_tag = 0x0001
+source_arm_name = "Reserved"
+stable_name = "reserved"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-subject-issuance-reservation-state-published-1f4372fd84ae8214"
+union_name = "TimeSubjectIssuanceReservationState"
+containing_schema = "TimeSubjectIssuanceReservation<Role>"
+union_path = "TimeSubjectIssuanceReservation<Role>.state"
+arm_tag = 0x0002
+source_arm_name = "Published"
+stable_name = "published"
+payload_kind = "inline-record"
+payload_sha256 = "7a818403bb70013868209cbf4663cea3962d26ff1579dbf41d36eabaa6a88f18"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-subject-issuance-reservation-state-burned-946f7f31a719ac14"
+union_name = "TimeSubjectIssuanceReservationState"
+containing_schema = "TimeSubjectIssuanceReservation<Role>"
+union_path = "TimeSubjectIssuanceReservation<Role>.state"
+arm_tag = 0x0003
+source_arm_name = "Burned"
+stable_name = "burned"
+payload_kind = "inline-record"
+payload_sha256 = "ee56aecfb1b4e9f2209c71f97b8c7b0c9f90b1004bad7a2242a8f8d3e4210c68"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:macaroon-root-issuance-state-live-d30ae73c19673633"
+union_name = "MacaroonRootIssuanceState"
+containing_schema = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
+union_path = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state"
+arm_tag = 0x0001
+source_arm_name = "Live"
+stable_name = "live"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:macaroon-root-issuance-state-revoked-cbc38afc3a5c55ec"
+union_name = "MacaroonRootIssuanceState"
+containing_schema = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
+union_path = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state"
+arm_tag = 0x0002
+source_arm_name = "Revoked"
+stable_name = "revoked"
+payload_kind = "inline-record"
+payload_sha256 = "2fa228f026a9a831a9353e564a92726f6f9557538dafd535de64350017f7b4d6"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:macaroon-root-issuance-state-expired-b13b5aa7f0c15de1"
+union_name = "MacaroonRootIssuanceState"
+containing_schema = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
+union_path = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state"
+arm_tag = 0x0003
+source_arm_name = "Expired"
+stable_name = "expired"
+payload_kind = "inline-record"
+payload_sha256 = "9b178669e1dc7f0c6d2955cbafb2c8e40e0bd2350b1dd724bbaa6d8d1c2ff9a8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:restore-source-lease-predecessor-genesis-cedcc9ac2eedfdf9"
+union_name = "RestoreSourceLeasePredecessor"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.predecessor"
+arm_tag = 0x0001
+source_arm_name = "Genesis"
+stable_name = "genesis"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:restore-source-lease-predecessor-prior-54f36af607218bab"
+union_name = "RestoreSourceLeasePredecessor"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.predecessor"
+arm_tag = 0x0002
+source_arm_name = "Prior"
+stable_name = "prior"
+payload_kind = "inline-record"
+payload_sha256 = "7236acf5dd9fb7de06dbe6e4b5c2b0ae91a2c391edeea59890f7a373cbc986ad"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:restore-source-lease-record-kind-acquire-imported-7f188f62c71ffecb"
+union_name = "RestoreSourceLeaseRecordKind"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind"
+arm_tag = 0x0001
+source_arm_name = "AcquireImported"
+stable_name = "acquire_imported"
+payload_kind = "inline-record"
+payload_sha256 = "d60c22951856bb58553befb22936cd8f8425af4887e2ad1a8290acf501e10e62"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:restore-source-lease-record-kind-renew-imported-cf0d749f1ec88678"
+union_name = "RestoreSourceLeaseRecordKind"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind"
+arm_tag = 0x0002
+source_arm_name = "RenewImported"
+stable_name = "renew_imported"
+payload_kind = "inline-record"
+payload_sha256 = "d958e9f3235734c2be454bf2e0095b21e5d46810220284f9a0d7eaeaab045ec2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:restore-source-lease-lineage-basis-genesis-8a62f403494ffb74"
+union_name = "RestoreSourceLeaseLineageBasis"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.lineage_basis"
+arm_tag = 0x0001
+source_arm_name = "Genesis"
+stable_name = "genesis"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:restore-source-lease-lineage-basis-checkpointed-555d5ae95f75c22c"
+union_name = "RestoreSourceLeaseLineageBasis"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.lineage_basis"
+arm_tag = 0x0002
+source_arm_name = "Checkpointed"
+stable_name = "checkpointed"
+payload_kind = "inline-record"
+payload_sha256 = "a4af8477aec1a4482f9f553e499bf13db10bcd879ea044fd267bc5d97c4a029f"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -30858,6 +31184,182 @@ row_id = "a16:target:union-arm-portable-restore-source-lease-lineage-basis-check
 target_row_id = "a16:union-arm:portable-restore-source-lease-lineage-basis-checkpointed-44430fdeab3dad03"
 slice_id = "a16"
 source_key = "arm|PortableRestoreSourceLeaseLineageProof|PortableRestoreSourceLeaseLineageProof.lineage_basis|Checkpointed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-subject-issuance-reservation-role-state"
+target_row_id = "a16:field:time-subject-issuance-reservation-role-state"
+slice_id = "a16"
+source_key = "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state|state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-time-subject-issuance-reservation-state-ee73dc0b3a17afea"
+target_row_id = "a16:union:time-subject-issuance-reservation-state-ee73dc0b3a17afea"
+slice_id = "a16"
+source_key = "union|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-subject-issuance-reservation-state-reserved-5925c5aa17d4533e"
+target_row_id = "a16:union-arm:time-subject-issuance-reservation-state-reserved-5925c5aa17d4533e"
+slice_id = "a16"
+source_key = "arm|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state|Reserved"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-subject-issuance-reservation-state-published-1f4372fd84ae8214"
+target_row_id = "a16:union-arm:time-subject-issuance-reservation-state-published-1f4372fd84ae8214"
+slice_id = "a16"
+source_key = "arm|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state|Published"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-subject-issuance-reservation-state-burned-946f7f31a719ac14"
+target_row_id = "a16:union-arm:time-subject-issuance-reservation-state-burned-946f7f31a719ac14"
+slice_id = "a16"
+source_key = "arm|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state|Burned"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-macaroon-root-issuance-record-role-authority-owning-role-state"
+target_row_id = "a16:field:macaroon-root-issuance-record-role-authority-owning-role-state"
+slice_id = "a16"
+source_key = "field|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state|state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-macaroon-root-issuance-state-897eb7902860797c"
+target_row_id = "a16:union:macaroon-root-issuance-state-897eb7902860797c"
+slice_id = "a16"
+source_key = "union|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-macaroon-root-issuance-state-live-d30ae73c19673633"
+target_row_id = "a16:union-arm:macaroon-root-issuance-state-live-d30ae73c19673633"
+slice_id = "a16"
+source_key = "arm|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state|Live"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-macaroon-root-issuance-state-revoked-cbc38afc3a5c55ec"
+target_row_id = "a16:union-arm:macaroon-root-issuance-state-revoked-cbc38afc3a5c55ec"
+slice_id = "a16"
+source_key = "arm|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state|Revoked"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-macaroon-root-issuance-state-expired-b13b5aa7f0c15de1"
+target_row_id = "a16:union-arm:macaroon-root-issuance-state-expired-b13b5aa7f0c15de1"
+slice_id = "a16"
+source_key = "arm|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state|Expired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-restore-source-lease-record-role-authority-owning-role-predecessor"
+target_row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-predecessor"
+slice_id = "a16"
+source_key = "field|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.predecessor|predecessor"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-restore-source-lease-predecessor-89c1d7115309cfaa"
+target_row_id = "a16:union:restore-source-lease-predecessor-89c1d7115309cfaa"
+slice_id = "a16"
+source_key = "union|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.predecessor"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-restore-source-lease-predecessor-genesis-cedcc9ac2eedfdf9"
+target_row_id = "a16:union-arm:restore-source-lease-predecessor-genesis-cedcc9ac2eedfdf9"
+slice_id = "a16"
+source_key = "arm|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.predecessor|Genesis"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-restore-source-lease-predecessor-prior-54f36af607218bab"
+target_row_id = "a16:union-arm:restore-source-lease-predecessor-prior-54f36af607218bab"
+slice_id = "a16"
+source_key = "arm|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.predecessor|Prior"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-restore-source-lease-record-role-authority-owning-role-record-kind"
+target_row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-record-kind"
+slice_id = "a16"
+source_key = "field|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind|record_kind"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-restore-source-lease-record-kind-d2dabe7c950c07fe"
+target_row_id = "a16:union:restore-source-lease-record-kind-d2dabe7c950c07fe"
+slice_id = "a16"
+source_key = "union|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-restore-source-lease-record-kind-acquire-imported-7f188f62c71ffecb"
+target_row_id = "a16:union-arm:restore-source-lease-record-kind-acquire-imported-7f188f62c71ffecb"
+slice_id = "a16"
+source_key = "arm|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind|AcquireImported"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-restore-source-lease-record-kind-renew-imported-cf0d749f1ec88678"
+target_row_id = "a16:union-arm:restore-source-lease-record-kind-renew-imported-cf0d749f1ec88678"
+slice_id = "a16"
+source_key = "arm|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind|RenewImported"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-restore-source-lease-record-role-authority-owning-role-lineage-basis"
+target_row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-lineage-basis"
+slice_id = "a16"
+source_key = "field|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.lineage_basis|lineage_basis"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-restore-source-lease-lineage-basis-f58f7050dbc452c9"
+target_row_id = "a16:union:restore-source-lease-lineage-basis-f58f7050dbc452c9"
+slice_id = "a16"
+source_key = "union|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.lineage_basis"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-restore-source-lease-lineage-basis-genesis-8a62f403494ffb74"
+target_row_id = "a16:union-arm:restore-source-lease-lineage-basis-genesis-8a62f403494ffb74"
+slice_id = "a16"
+source_key = "arm|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.lineage_basis|Genesis"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-restore-source-lease-lineage-basis-checkpointed-555d5ae95f75c22c"
+target_row_id = "a16:union-arm:restore-source-lease-lineage-basis-checkpointed-555d5ae95f75c22c"
+slice_id = "a16"
+source_key = "arm|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.lineage_basis|Checkpointed"
 target_kind = "union-arm"
 definition_status = "declared"
 

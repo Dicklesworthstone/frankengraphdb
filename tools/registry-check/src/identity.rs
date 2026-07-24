@@ -1068,7 +1068,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
     const WIRE: &str = "fnv1a64:0f02a754916d418a";
-    const FIELDS: &str = "fnv1a64:2e309fc2ee6e8502";
+    const FIELDS: &str = "fnv1a64:1ed8534b45083649";
 
     let logical = rows_pin(
         r.logical
@@ -1225,7 +1225,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 13,
+            expected_epoch: 14,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,
@@ -1545,12 +1545,20 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
 
     for f in &r.fields {
         let row_id = format!("{}#{}", f.containing_schema, f.stable_name);
-        // Containing schema must resolve in one identity class.
-        let containing_logical = logical_by_name.get(f.containing_schema.as_str());
+        // Containing schema must resolve in one identity class.  Resolution is
+        // by generic-free family, the same law ordinary-union hosts already
+        // use: one registered kind row commits every expansion of its family,
+        // so a member of `RestoreSourceLeaseRecord<Role:AuthorityOwningRole>`
+        // resolves through the registered `RestoreSourceLeaseRecord` row.  The
+        // family is only a *lookup*; every downstream contract (tag
+        // uniqueness, anchor matching, BodyDigest recipes) still keys on the
+        // exact signed `containing_schema`, so two expansions never merge.
+        let containing_family = generic_free_family(f.containing_schema.as_str());
+        let containing_logical = logical_by_name.get(containing_family);
         let resolves = containing_logical.is_some()
-            || bootstrap_names.contains(f.containing_schema.as_str())
-            || physical_names.contains(f.containing_schema.as_str())
-            || prebootstrap_names.contains(f.containing_schema.as_str());
+            || bootstrap_names.contains(containing_family)
+            || physical_names.contains(containing_family)
+            || prebootstrap_names.contains(containing_family);
         if !resolves {
             out.push(v(
                 "field_unresolved_schema",
@@ -1700,7 +1708,7 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             "strong" | "conditional" | "external_root"
         );
         if is_retaining {
-            let in_frame = bootstrap_names.contains(f.containing_schema.as_str());
+            let in_frame = bootstrap_names.contains(containing_family);
             if f.reference_semantics == "external_root" {
                 if !in_frame {
                     out.push(v(
