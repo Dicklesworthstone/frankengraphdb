@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 549
-projection_fallback_count = 83
-target_source_assignment_sha256 = "93a521c352a43f04db23a8cf1501301ff9d76e3b3efa00ad4c26a84ed4511fc6"
+target_count = 550
+projection_fallback_count = 84
+target_source_assignment_sha256 = "e9412093e4d314d45831fe01c2ddcf23d4cf1a5f1b11dbb089e0fd970e1fb36c"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -596,7 +596,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 11
+registry_epoch = 12
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -2447,6 +2447,17 @@ name = "FilesystemInstanceRecord"
 kind = "record"
 status = "reserved"
 encoding_context = "local probe result binding one mount to one durability profile: profile ID, probe-suite OID, mount ID, filesystem type, canonical mount options, device-chain digest, directory and manifest device/inode pairs, checked-at, result digest; it is diagnostic evidence only and is never a transferable proof or a semantic root"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a02"
+row_id = "a02:wire-type:segment-trailer"
+wire_type_id = 0x003f
+name = "SegmentTrailer"
+kind = "record"
+status = "reserved"
+encoding_context = "immutable segment trailer recorded by every sealed segment: database security namespace ID, cluster incarnation, local writer fence epoch, segment ID, sealed length, inventory digest, trailer checksum; the fence epoch is the stale-writer fencing commitment the local VFS checks before any seal, prepared-root update, receipt signature, Raft append acknowledgement or root publication, and the source names this record in prose rather than in CamelCase"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 65536
 
@@ -28546,6 +28557,14 @@ row_id = "a02:target:wire-type-filesystem-instance-record"
 target_row_id = "a02:wire-type:filesystem-instance-record"
 slice_id = "a02"
 source_key = "top|FilesystemInstanceRecord"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:wire-type-segment-trailer"
+target_row_id = "a02:wire-type:segment-trailer"
+slice_id = "a02"
+source_key = "projection|wire_types|SegmentTrailer"
 target_kind = "wire-type"
 definition_status = "declared"
 

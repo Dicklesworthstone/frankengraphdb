@@ -139,9 +139,9 @@ else
 fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
-    '"target_count":549' \
-    '"projection_fallback_count":83' \
-    '"target_source_assignment_sha256":"93a521c352a43f04db23a8cf1501301ff9d76e3b3efa00ad4c26a84ed4511fc6"' \
+    '"target_count":550' \
+    '"projection_fallback_count":84' \
+    '"target_source_assignment_sha256":"e9412093e4d314d45831fe01c2ddcf23d4cf1a5f1b11dbb089e0fd970e1fb36c"' \
     '"outcome":"pass"'; then
   ok "Appendix A target/source assignments are release-pinned"
 else
@@ -170,7 +170,7 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"reserved_reservations":727' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":549' \
+    '"targets":550' \
     '"semantic_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \
@@ -186,12 +186,12 @@ fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_completed"' \
     '"slices":21' \
-    '"projection_rows":549' \
+    '"projection_rows":550' \
     '"projection_files":6' \
     '"reservations":813' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":549' \
+    '"targets":550' \
     '"semantic_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \
