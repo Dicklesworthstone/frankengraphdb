@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 28
+registry_epoch = 29
 
 [[kind]]
 object_kind = 0x0001
@@ -2005,3 +2005,12 @@ construction_order = 45
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/meta_checkpoint_certificate/"
+
+[[kind]]
+object_kind = 0x0533
+name = "ShardConstraintStateRoot"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_constraint_state_root/"
