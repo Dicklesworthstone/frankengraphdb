@@ -1446,7 +1446,7 @@ max_size_bytes = 16777216
 [[type]]
 wire_type_id = 0x0096
 name = "CheckpointBasis"
-kind = "record"
+kind = "union"
 status = "reserved"
 encoding_context = "canonical W12 genesis/role-transition record"
 allowed_containing_schemas = ["CheckpointBasis"]
@@ -1455,7 +1455,7 @@ max_size_bytes = 16777216
 [[type]]
 wire_type_id = 0x0097
 name = "GlobalControlOrigin"
-kind = "record"
+kind = "union"
 status = "reserved"
 encoding_context = "canonical W12 genesis/role-transition record"
 allowed_containing_schemas = ["GlobalControlOrigin"]
@@ -1464,7 +1464,7 @@ max_size_bytes = 16777216
 [[type]]
 wire_type_id = 0x0098
 name = "GlobalOutcomeDirectoryValue"
-kind = "record"
+kind = "union"
 status = "reserved"
 encoding_context = "canonical W12 genesis/role-transition record"
 allowed_containing_schemas = ["GlobalOutcomeDirectoryValue"]
@@ -1473,7 +1473,7 @@ max_size_bytes = 16777216
 [[type]]
 wire_type_id = 0x0099
 name = "LegacyDispositionRef"
-kind = "record"
+kind = "union"
 status = "reserved"
 encoding_context = "canonical W12 genesis/role-transition record"
 allowed_containing_schemas = ["LegacyDispositionRef"]
@@ -1482,7 +1482,7 @@ max_size_bytes = 16777216
 [[type]]
 wire_type_id = 0x009a
 name = "LegacyTransferEvidenceRef"
-kind = "record"
+kind = "union"
 status = "reserved"
 encoding_context = "canonical W12 genesis/role-transition record"
 allowed_containing_schemas = ["LegacyTransferEvidenceRef"]
@@ -1491,7 +1491,7 @@ max_size_bytes = 16777216
 [[type]]
 wire_type_id = 0x009b
 name = "PostActivationCapabilityMigrationInitialSubject"
-kind = "record"
+kind = "union"
 status = "reserved"
 encoding_context = "canonical W12 genesis/role-transition record"
 allowed_containing_schemas = ["PostActivationCapabilityMigrationInitialSubject"]
@@ -1500,7 +1500,7 @@ max_size_bytes = 16777216
 [[type]]
 wire_type_id = 0x009c
 name = "PostActivationCapabilityMigrationSpec"
-kind = "record"
+kind = "union"
 status = "reserved"
 encoding_context = "canonical W12 genesis/role-transition record"
 allowed_containing_schemas = ["PostActivationCapabilityMigrationSpec"]
@@ -1509,7 +1509,7 @@ max_size_bytes = 16777216
 [[type]]
 wire_type_id = 0x009d
 name = "PublicTerminalProgressProjection"
-kind = "record"
+kind = "union"
 status = "reserved"
 encoding_context = "canonical W12 genesis/role-transition record"
 allowed_containing_schemas = ["PublicTerminalProgressProjection"]
@@ -1527,7 +1527,7 @@ max_size_bytes = 16777216
 [[type]]
 wire_type_id = 0x009f
 name = "RetirementReadinessRef"
-kind = "record"
+kind = "union"
 status = "reserved"
 encoding_context = "canonical W12 genesis/role-transition record"
 allowed_containing_schemas = ["RetirementReadinessRef"]
@@ -1536,8 +1536,371 @@ max_size_bytes = 16777216
 [[type]]
 wire_type_id = 0x00a0
 name = "TerminalPublicOutcome"
-kind = "record"
+kind = "union"
 status = "reserved"
 encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["TerminalPublicOutcome"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00a1
+name = "CheckpointBasis.genesis"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CheckpointBasis"
+wire_tag = 0x0001
+encoding_context = "arm Genesis of closed union CheckpointBasis"
+allowed_containing_schemas = ["CheckpointBasis"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00a2
+name = "CheckpointBasis.global"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CheckpointBasis"
+wire_tag = 0x0002
+encoding_context = "arm Global of closed union CheckpointBasis"
+allowed_containing_schemas = ["CheckpointBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00a3
+name = "CheckpointBasis.local_activation"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CheckpointBasis"
+wire_tag = 0x0003
+encoding_context = "arm LocalActivation of closed union CheckpointBasis"
+allowed_containing_schemas = ["CheckpointBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00a4
+name = "GlobalControlOrigin.prior"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalControlOrigin"
+wire_tag = 0x0001
+encoding_context = "arm Prior of closed union GlobalControlOrigin"
+allowed_containing_schemas = ["GlobalControlOrigin"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00a5
+name = "GlobalControlOrigin.local_activation_bridge"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalControlOrigin"
+wire_tag = 0x0002
+encoding_context = "arm LocalActivationBridge of closed union GlobalControlOrigin"
+allowed_containing_schemas = ["GlobalControlOrigin"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00a6
+name = "GlobalControlOrigin.recovery_bridge"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalControlOrigin"
+wire_tag = 0x0003
+encoding_context = "arm RecoveryBridge of closed union GlobalControlOrigin"
+allowed_containing_schemas = ["GlobalControlOrigin"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00a7
+name = "GlobalOutcomeDirectoryValue.begin_staging"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalOutcomeDirectoryValue"
+wire_tag = 0x0001
+encoding_context = "arm BeginStaging of closed union GlobalOutcomeDirectoryValue"
+allowed_containing_schemas = ["GlobalOutcomeDirectoryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00a8
+name = "GlobalOutcomeDirectoryValue.never_registered_detailed"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalOutcomeDirectoryValue"
+wire_tag = 0x0002
+encoding_context = "arm NeverRegisteredDetailed of closed union GlobalOutcomeDirectoryValue"
+allowed_containing_schemas = ["GlobalOutcomeDirectoryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00a9
+name = "GlobalOutcomeDirectoryValue.never_registered_compacted"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalOutcomeDirectoryValue"
+wire_tag = 0x0003
+encoding_context = "arm NeverRegisteredCompacted of closed union GlobalOutcomeDirectoryValue"
+allowed_containing_schemas = ["GlobalOutcomeDirectoryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00aa
+name = "GlobalOutcomeDirectoryValue.compacted_terminal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalOutcomeDirectoryValue"
+wire_tag = 0x0004
+encoding_context = "arm CompactedTerminal of closed union GlobalOutcomeDirectoryValue"
+allowed_containing_schemas = ["GlobalOutcomeDirectoryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00ab
+name = "GlobalOutcomeDirectoryValue.expired_tombstone"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalOutcomeDirectoryValue"
+wire_tag = 0x0005
+encoding_context = "arm ExpiredTombstone of closed union GlobalOutcomeDirectoryValue"
+allowed_containing_schemas = ["GlobalOutcomeDirectoryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00ac
+name = "GlobalOutcomeDirectoryValue.legacy_local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalOutcomeDirectoryValue"
+wire_tag = 0x0006
+encoding_context = "arm LegacyLocal of closed union GlobalOutcomeDirectoryValue"
+allowed_containing_schemas = ["GlobalOutcomeDirectoryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00ad
+name = "GlobalOutcomeDirectoryValue.w_12"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalOutcomeDirectoryValue"
+wire_tag = 0x0007
+encoding_context = "arm W12 of closed union GlobalOutcomeDirectoryValue"
+allowed_containing_schemas = ["GlobalOutcomeDirectoryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00ae
+name = "LegacyDispositionRef.transfer_adoption"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LegacyDispositionRef"
+wire_tag = 0x0001
+encoding_context = "arm TransferAdoption of closed union LegacyDispositionRef"
+allowed_containing_schemas = ["LegacyDispositionRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00af
+name = "LegacyDispositionRef.meta_terminal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LegacyDispositionRef"
+wire_tag = 0x0002
+encoding_context = "arm MetaTerminal of closed union LegacyDispositionRef"
+allowed_containing_schemas = ["LegacyDispositionRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00b0
+name = "LegacyDispositionRef.shard_terminal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LegacyDispositionRef"
+wire_tag = 0x0003
+encoding_context = "arm ShardTerminal of closed union LegacyDispositionRef"
+allowed_containing_schemas = ["LegacyDispositionRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00b1
+name = "LegacyDispositionRef.archived"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LegacyDispositionRef"
+wire_tag = 0x0004
+encoding_context = "arm Archived of closed union LegacyDispositionRef"
+allowed_containing_schemas = ["LegacyDispositionRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00b2
+name = "LegacyTransferEvidenceRef.meta_local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LegacyTransferEvidenceRef"
+wire_tag = 0x0001
+encoding_context = "arm MetaLocal of closed union LegacyTransferEvidenceRef"
+allowed_containing_schemas = ["LegacyTransferEvidenceRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00b3
+name = "LegacyTransferEvidenceRef.imported_meta"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LegacyTransferEvidenceRef"
+wire_tag = 0x0002
+encoding_context = "arm ImportedMeta of closed union LegacyTransferEvidenceRef"
+allowed_containing_schemas = ["LegacyTransferEvidenceRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00b4
+name = "PostActivationCapabilityMigrationInitialSubject.0x0001_terminal_txn_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PostActivationCapabilityMigrationInitialSubject"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 TerminalTxnOutcome of closed union PostActivationCapabilityMigrationInitialSubject"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationInitialSubject"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00b5
+name = "PostActivationCapabilityMigrationInitialSubject.0x0002_terminal_merge_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PostActivationCapabilityMigrationInitialSubject"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 TerminalMergeOutcome of closed union PostActivationCapabilityMigrationInitialSubject"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationInitialSubject"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00b6
+name = "PostActivationCapabilityMigrationInitialSubject.0x0003_read_your_writes"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PostActivationCapabilityMigrationInitialSubject"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 ReadYourWrites of closed union PostActivationCapabilityMigrationInitialSubject"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationInitialSubject"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00b7
+name = "PostActivationCapabilityMigrationInitialSubject.0x0004_buffered_result"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PostActivationCapabilityMigrationInitialSubject"
+wire_tag = 0x0004
+encoding_context = "arm 0x0004 BufferedResult of closed union PostActivationCapabilityMigrationInitialSubject"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationInitialSubject"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00b8
+name = "PostActivationCapabilityMigrationInitialSubject.0x0005_subscription_cursor"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PostActivationCapabilityMigrationInitialSubject"
+wire_tag = 0x0005
+encoding_context = "arm 0x0005 SubscriptionCursor of closed union PostActivationCapabilityMigrationInitialSubject"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationInitialSubject"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00b9
+name = "PostActivationCapabilityMigrationInitialSubject.0x0006_durable_artifact_output"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PostActivationCapabilityMigrationInitialSubject"
+wire_tag = 0x0006
+encoding_context = "arm 0x0006 DurableArtifactOutput of closed union PostActivationCapabilityMigrationInitialSubject"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationInitialSubject"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00ba
+name = "PostActivationCapabilityMigrationSpec.0x0001_initial"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PostActivationCapabilityMigrationSpec"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 Initial of closed union PostActivationCapabilityMigrationSpec"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00bb
+name = "PostActivationCapabilityMigrationSpec.0x0002_exact_live_successor_retry"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PostActivationCapabilityMigrationSpec"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 ExactLiveSuccessorRetry of closed union PostActivationCapabilityMigrationSpec"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00bc
+name = "PublicTerminalProgressProjection.local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PublicTerminalProgressProjection"
+wire_tag = 0x0001
+encoding_context = "arm Local of closed union PublicTerminalProgressProjection"
+allowed_containing_schemas = ["PublicTerminalProgressProjection"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00bd
+name = "PublicTerminalProgressProjection.sharded"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PublicTerminalProgressProjection"
+wire_tag = 0x0002
+encoding_context = "arm Sharded of closed union PublicTerminalProgressProjection"
+allowed_containing_schemas = ["PublicTerminalProgressProjection"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00be
+name = "RetirementReadinessRef.meta_local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RetirementReadinessRef"
+wire_tag = 0x0001
+encoding_context = "arm MetaLocal of closed union RetirementReadinessRef"
+allowed_containing_schemas = ["RetirementReadinessRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00bf
+name = "RetirementReadinessRef.shard_remote"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RetirementReadinessRef"
+wire_tag = 0x0002
+encoding_context = "arm ShardRemote of closed union RetirementReadinessRef"
+allowed_containing_schemas = ["RetirementReadinessRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00c0
+name = "TerminalPublicOutcome.local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "TerminalPublicOutcome"
+wire_tag = 0x0001
+encoding_context = "arm Local of closed union TerminalPublicOutcome"
+allowed_containing_schemas = ["TerminalPublicOutcome"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00c1
+name = "TerminalPublicOutcome.sharded"
+kind = "union_variant"
+status = "reserved"
+containing_union = "TerminalPublicOutcome"
+wire_tag = 0x0002
+encoding_context = "arm Sharded of closed union TerminalPublicOutcome"
 allowed_containing_schemas = ["TerminalPublicOutcome"]
 max_size_bytes = 16777216
