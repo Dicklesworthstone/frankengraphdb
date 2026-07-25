@@ -56,9 +56,9 @@ pub const EXPECTED_EXPANSION_BINDING_SHA256: &str =
 pub const EXPECTED_EVIDENCE_BINDING_COUNT: usize = 0;
 pub const EXPECTED_EVIDENCE_BINDING_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 328;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 329;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "0b0240f0a272c8e60442fe2951fbc265e85c9a9b44da7e14fa747980025b3666";
+    "ed43606662341af5e66dc3e4c4851de7200ef131fb3a91aab7dd4ada405c98bc";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 84;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 729;
@@ -203,7 +203,7 @@ struct AmbiguityAdjudicationContractPin {
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
-static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 328] = [
+static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 329] = [
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:99a87928b4e9051fadedb901f4799986579d307add86f64e1c8848d530e53adf",
         slice_id: "a01",
@@ -230,6 +230,15 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 328] 
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ConditionalGlobalTxnInputRef"],
         rationale: "a01:1406: `ConditionalGlobalTxnInputRef {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|ConditionalGlobalTxnInputRef` itself, not an alias, enumeration, or citation.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a01:ambiguity-adjudication:c1de29a1f04f3d29608d42035d829d168499200bf1449172de752428a74f6ba4",
+        slice_id: "a01",
+        ambiguity_source_key: "ambiguity|unparsed-trailing-tokens|ConditionalMarkerRef|ConditionalMarkerRef.axis.Branch|432cef30c5ade11e7f90c50e8dc1cbb9de5b48248640ae73638235160159ea5d|1|d3c6d14c50bec6f204c2f7e4935cb8a075836aa77c10910db544f330ae064655|tokens after a union arm name are not part of the closed source grammar",
+        source_locations: &["a01:1394"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &["arm|ConditionalMarkerRef|ConditionalMarkerRef.axis|Branch"],
+        rationale: "a01:1394: `ConditionalMarkerRef{marker_ref,axis:Global|Branch(graph,branch)}` renders the `Branch` axis payload in tuple form rather than the brace form the closed source grammar expects, so the parenthesised `(graph,branch)` is flagged as trailing tokens; those tokens are that arm's own payload, not stray text, and the arm and its interior are committed byte-exactly by the exact ConditionalMarkerRef wire envelope contract. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e5067c1188355a4aeedc045cd474f780b8f80e01a0e129dcfd0569e5dbf960c0",

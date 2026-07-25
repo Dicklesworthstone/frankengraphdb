@@ -37538,6 +37538,15 @@ resolved_source_keys = ["top|ConditionalGlobalTxnInputRef"]
 rationale = "a01:1406: `ConditionalGlobalTxnInputRef {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|ConditionalGlobalTxnInputRef` itself, not an alias, enumeration, or citation."
 
 [[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:c1de29a1f04f3d29608d42035d829d168499200bf1449172de752428a74f6ba4"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|unparsed-trailing-tokens|ConditionalMarkerRef|ConditionalMarkerRef.axis.Branch|432cef30c5ade11e7f90c50e8dc1cbb9de5b48248640ae73638235160159ea5d|1|d3c6d14c50bec6f204c2f7e4935cb8a075836aa77c10910db544f330ae064655|tokens after a union arm name are not part of the closed source grammar"
+source_locations = ["a01:1394"]
+resolution = "maps-to-source"
+resolved_source_keys = ["arm|ConditionalMarkerRef|ConditionalMarkerRef.axis|Branch"]
+rationale = "a01:1394: `ConditionalMarkerRef{marker_ref,axis:Global|Branch(graph,branch)}` renders the `Branch` axis payload in tuple form rather than the brace form the closed source grammar expects, so the parenthesised `(graph,branch)` is flagged as trailing tokens; those tokens are that arm's own payload, not stray text, and the arm and its interior are committed byte-exactly by the exact ConditionalMarkerRef wire envelope contract. The single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
 row_id = "a01:ambiguity-adjudication:e5067c1188355a4aeedc045cd474f780b8f80e01a0e129dcfd0569e5dbf960c0"
 slice_id = "a01"
 ambiguity_source_key = "ambiguity|ambiguous-schema-owner|ConditionalShardCommandRef|ConditionalShardCommandRef|6c093c951aaa6a1f6ac0d7c10df11df3f43dd684da1a7e7dfc26d3b848f95137|1|a43c710d12c846a7f45f8d5d43b5b8ff208be33d1601089bc6afd3248b01a353|leading named record has no explicit top-level ownership cue"
