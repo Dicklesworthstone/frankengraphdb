@@ -2677,7 +2677,14 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         ) {
             continue;
         }
-        let Some(containing) = logical_by_name.get(f.containing_schema.as_str()) else {
+        // Resolve the owner through its generic-free family, exactly as the
+        // field-resolution law above does. A row whose containing_schema
+        // carries a generic signature (`Foo<Role>`) is registered under the
+        // bare family, so an exact-name lookup would skip it and drop its
+        // edges out of the DAG entirely -- self-edges and future results
+        // included.
+        let containing_family = generic_free_family(f.containing_schema.as_str());
+        let Some(containing) = logical_by_name.get(containing_family) else {
             continue;
         };
         let mut targets: Vec<&str> = Vec::new();
@@ -2691,12 +2698,14 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 continue;
             };
             let row_id = format!("{}#{}", f.containing_schema, f.stable_name);
-            if target == f.containing_schema {
+            if target == containing_family {
                 out.push(v(
                     "dag_self_edge",
                     "durable_fields",
                     &row_id,
-                    "a schema may not strongly reference itself",
+                    "a schema may not reference itself: strong, conditional and weak_digest \
+                     alike require an already-constructed target, so a lineage \
+                     predecessor is compared, never traversed",
                 ));
                 continue;
             }

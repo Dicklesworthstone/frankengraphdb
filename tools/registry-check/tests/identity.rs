@@ -3624,6 +3624,49 @@ fn idr_neg_mutual_edge() {
 }
 
 #[test]
+fn idr_neg_self_edge_through_generic_family() {
+    // The two hosts that carry a `predecessor_ref` lineage member in the source
+    // (PreparedCommitRecord at a10:1922 and TimeSubjectIssuanceReservation at
+    // a16:2210) are registered under their bare families while the census owns
+    // them under a generic signature. A field row therefore names `Foo<Role>`
+    // as its containing schema, and the DAG law must still see the self-edge:
+    // resolving the owner by exact name skips every generic-signed row, so a
+    // lineage link modelled as a retaining reference would escape the law.
+    let mut r = real_identity();
+    let mut f = field(
+        "TimeSubjectIssuanceReservation<Role>",
+        90,
+        "predecessor_ref",
+        19,
+    );
+    f.target_schema_id = Some("TimeSubjectIssuanceReservation".into());
+    r.fields.push(f);
+    let codes = codes(&r);
+    assert!(
+        codes.contains(&"dag_self_edge".to_string()),
+        "a generic-signed containing schema must not hide a self-edge, got {codes:?}"
+    );
+}
+
+#[test]
+fn idr_neg_generic_target_cannot_create_an_unchecked_edge() {
+    // The mirror end of the same hazard. A generic-signed *target* is closed by
+    // a different law -- `ref_target_unresolved` -- because target_schema_id is
+    // resolved by exact name. Asserted here so the DAG law above is known to
+    // need normalization on the containing side only: no generic target can
+    // reach the DAG loop and quietly contribute an unchecked edge.
+    let mut r = real_identity();
+    let mut f = field("PreparedCommitRecord", 90, "predecessor_ref", 12);
+    f.target_schema_id = Some("PreparedCommitRecord<Local>".into());
+    r.fields.push(f);
+    let codes = codes(&r);
+    assert!(
+        codes.contains(&"ref_target_unresolved".to_string()),
+        "a generic-signed target must be refused outright, got {codes:?}"
+    );
+}
+
+#[test]
 fn idr_neg_future_result_edge() {
     let mut r = real_identity();
     // A command input naming its own future applied record: the canonical
