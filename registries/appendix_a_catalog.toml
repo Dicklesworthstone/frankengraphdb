@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1030
+target_count = 1032
 projection_fallback_count = 88
-target_source_assignment_sha256 = "c9b58fc5704c4535318bd510ace5845d76c2a40f8be68132102474fc918cc012"
+target_source_assignment_sha256 = "855f7d766a6fdf9d948063257b69eb9c34c6702e6a5e741864cbdd9462f8e67b"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 23
+registry_epoch = 24
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -2602,6 +2602,28 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/sharding_migration_retention_floor/"
+
+[[logical_kind]]
+slice_id = "a11"
+row_id = "a11:logical-kind:delta-delivery-envelope"
+object_kind = 0x04d5
+name = "DeltaDeliveryEnvelope"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delta_delivery_envelope/"
+
+[[logical_kind]]
+slice_id = "a11"
+row_id = "a11:logical-kind:subscription-delivery-transition-spec"
+object_kind = 0x052e
+name = "SubscriptionDeliveryTransitionSpec"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/subscription_delivery_transition_spec/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -16787,7 +16809,7 @@ symbol = "DeltaDeliveryEnvelope"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04d5"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:derived-generation-registry"
@@ -25228,7 +25250,7 @@ symbol = "DeltaDeliveryEnvelope"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a11:1934"]
 
 [[top_level_candidate]]
@@ -33988,7 +34010,7 @@ symbol = "SubscriptionDeliveryTransitionSpec"
 generic_signature = "<Role>"
 source_key = "top|SubscriptionDeliveryTransitionSpec<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a11:1936"]
 
 [[top_level_candidate]]
@@ -43658,6 +43680,22 @@ target_row_id = "a05:wire-type:terminal-public-outcome-sharded"
 slice_id = "a05"
 source_key = "arm|TerminalPublicOutcome|TerminalPublicOutcome|Sharded"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:logical-kind-delta-delivery-envelope"
+target_row_id = "a11:logical-kind:delta-delivery-envelope"
+slice_id = "a11"
+source_key = "top|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:logical-kind-subscription-delivery-transition-spec"
+target_row_id = "a11:logical-kind:subscription-delivery-transition-spec"
+slice_id = "a11"
+source_key = "top|SubscriptionDeliveryTransitionSpec<Role>"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

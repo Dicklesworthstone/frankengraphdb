@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 23
+registry_epoch = 24
 
 [[kind]]
 object_kind = 0x0001
@@ -1440,6 +1440,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/delivered_baseline_payload/"
 
 [[kind]]
+object_kind = 0x04d5
+name = "DeltaDeliveryEnvelope"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delta_delivery_envelope/"
+
+[[kind]]
 object_kind = 0x04e0
 name = "EmbeddedResultFullyConsumedRecord"
 status = "reserved"
@@ -1609,3 +1618,12 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_derived_component/"
+
+[[kind]]
+object_kind = 0x052e
+name = "SubscriptionDeliveryTransitionSpec"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/subscription_delivery_transition_spec/"
