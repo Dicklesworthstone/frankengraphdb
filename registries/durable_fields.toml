@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 25
+registry_epoch = 26
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -3588,6 +3588,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "AllocationValueKind"
+containing_schema = "AllocationValueKind"
+union_path = "AllocationValueKind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AllocationValueKind"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "AuthenticatedClientResultAckReceiptPostureAndRole"
 containing_schema = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
 union_path = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.posture_and_role"
@@ -3663,6 +3674,17 @@ allowed_containing_schemas = ["EmbeddedResultFullyConsumedRecord<Role:AuthorityO
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union]]
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union]]
 union_name = "KeyDestroyExternalAckRef"
@@ -4480,6 +4502,45 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "AllocationValueKind"
+containing_schema = "AllocationValueKind"
+union_path = "AllocationValueKind"
+arm_tag = 0x0001
+source_arm_name = "VertexId"
+stable_name = "vertex_id"
+payload_kind = "inline-record"
+payload_sha256 = "dc5a9d116623d41bbd568c103784c621f75a6736a7ffb2701611f4e1358a6433"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AllocationValueKind"
+containing_schema = "AllocationValueKind"
+union_path = "AllocationValueKind"
+arm_tag = 0x0002
+source_arm_name = "EdgeId"
+stable_name = "edge_id"
+payload_kind = "inline-record"
+payload_sha256 = "dc5a9d116623d41bbd568c103784c621f75a6736a7ffb2701611f4e1358a6433"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AllocationValueKind"
+containing_schema = "AllocationValueKind"
+union_path = "AllocationValueKind"
+arm_tag = 0x0003
+source_arm_name = "GeneratedKey"
+stable_name = "generated_key"
+payload_kind = "inline-record"
+payload_sha256 = "00adcec125894a2643f70f2644bba2037e7155f648f7d32bfb3a8f2dfeed75f3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "AuthenticatedClientResultAckReceiptPostureAndRole"
 containing_schema = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
 union_path = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.posture_and_role"
@@ -4673,6 +4734,66 @@ union_path = "EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>.comple
 arm_tag = 0x0002
 source_arm_name = "IteratorExhaustion"
 stable_name = "iterator_exhaustion"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+arm_tag = 0x0001
+source_arm_name = "PublishedStatementResult"
+stable_name = "published_statement_result"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+arm_tag = 0x0002
+source_arm_name = "LaterStatementWorkspace"
+stable_name = "later_statement_workspace"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+arm_tag = 0x0003
+source_arm_name = "ProcedureOrUdfBoundary"
+stable_name = "procedure_or_udf_boundary"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+arm_tag = 0x0004
+source_arm_name = "DurableProvenanceOrAudit"
+stable_name = "durable_provenance_or_audit"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+arm_tag = 0x0005
+source_arm_name = "TerminalResultPreparation"
+stable_name = "terminal_result_preparation"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"

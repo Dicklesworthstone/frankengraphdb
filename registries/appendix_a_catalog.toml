@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 831
+target_count = 851
 projection_fallback_count = 84
-target_source_assignment_sha256 = "83d3aba272cbd84b966d848ccdc6ef73cc4c118cc7473cef4104909da94f1924"
+target_source_assignment_sha256 = "92ebf4634c09d90445982e99488b49d46f1ba727c6f7ef0caa622cc3f1381ba1"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 17
+registry_epoch = 18
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 25
+registry_epoch = 26
 
 [[logical_kind]]
 slice_id = "a03"
@@ -3946,6 +3946,132 @@ status = "reserved"
 encoding_context = "canonical Local transaction-plane record"
 allowed_containing_schemas = ["TxnAbortSpec"]
 max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:allocation-value-kind"
+wire_type_id = 0x007a
+name = "AllocationValueKind"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: EdgeId | GeneratedKey | VertexId"
+allowed_containing_schemas = ["AllocationValueKind"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:allocation-value-kind-vertex-id"
+wire_type_id = 0x007b
+name = "AllocationValueKind.vertex_id"
+kind = "union_variant"
+containing_union = "AllocationValueKind"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm VertexId of closed union AllocationValueKind"
+allowed_containing_schemas = ["AllocationValueKind"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:allocation-value-kind-edge-id"
+wire_type_id = 0x007c
+name = "AllocationValueKind.edge_id"
+kind = "union_variant"
+containing_union = "AllocationValueKind"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm EdgeId of closed union AllocationValueKind"
+allowed_containing_schemas = ["AllocationValueKind"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:allocation-value-kind-generated-key"
+wire_type_id = 0x007d
+name = "AllocationValueKind.generated_key"
+kind = "union_variant"
+containing_union = "AllocationValueKind"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm GeneratedKey of closed union AllocationValueKind"
+allowed_containing_schemas = ["AllocationValueKind"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:escaping-allocation-cause"
+wire_type_id = 0x007e
+name = "EscapingAllocationCause"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "closed u8 tag: PublishedStatementResult | LaterStatementWorkspace | ProcedureOrUdfBoundary | DurableProvenanceOrAudit | TerminalResultPreparation; the TerminalResultPreparation arm is optional because a terminal-only value may instead be assigned in finalization before publication"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:escaping-allocation-cause-published-statement-result"
+wire_type_id = 0x007f
+name = "EscapingAllocationCause.published_statement_result"
+kind = "union_variant"
+containing_union = "EscapingAllocationCause"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "unit discriminant for an identity escaping through a published statement result"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:escaping-allocation-cause-later-statement-workspace"
+wire_type_id = 0x0080
+name = "EscapingAllocationCause.later_statement_workspace"
+kind = "union_variant"
+containing_union = "EscapingAllocationCause"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "unit discriminant for an identity escaping into a later statement workspace"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:escaping-allocation-cause-procedure-or-udf-boundary"
+wire_type_id = 0x0081
+name = "EscapingAllocationCause.procedure_or_udf_boundary"
+kind = "union_variant"
+containing_union = "EscapingAllocationCause"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "unit discriminant for an identity escaping across a procedure or UDF boundary"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:escaping-allocation-cause-durable-provenance-or-audit"
+wire_type_id = 0x0082
+name = "EscapingAllocationCause.durable_provenance_or_audit"
+kind = "union_variant"
+containing_union = "EscapingAllocationCause"
+wire_tag = 0x0004
+status = "reserved"
+encoding_context = "unit discriminant for an identity escaping into durable provenance or audit bytes"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:escaping-allocation-cause-terminal-result-preparation"
+wire_type_id = 0x0083
+name = "EscapingAllocationCause.terminal_result_preparation"
+kind = "union_variant"
+containing_union = "EscapingAllocationCause"
+wire_tag = 0x0005
+status = "reserved"
+encoding_context = "unit discriminant for an identity escaping during terminal result preparation"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
 
 [[field]]
 slice_id = "a03"
@@ -12464,6 +12590,147 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
 
+[[union]]
+slice_id = "a09"
+row_id = "a09:union:allocation-value-kind-9f75f938928fb076"
+union_name = "AllocationValueKind"
+containing_schema = "AllocationValueKind"
+union_path = "AllocationValueKind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AllocationValueKind"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:allocation-value-kind-vertex-id-f3595fa4e735f1fc"
+union_name = "AllocationValueKind"
+containing_schema = "AllocationValueKind"
+union_path = "AllocationValueKind"
+arm_tag = 0x0001
+source_arm_name = "VertexId"
+stable_name = "vertex_id"
+payload_kind = "inline-record"
+payload_sha256 = "dc5a9d116623d41bbd568c103784c621f75a6736a7ffb2701611f4e1358a6433"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:allocation-value-kind-edge-id-d5a260069cd887d4"
+union_name = "AllocationValueKind"
+containing_schema = "AllocationValueKind"
+union_path = "AllocationValueKind"
+arm_tag = 0x0002
+source_arm_name = "EdgeId"
+stable_name = "edge_id"
+payload_kind = "inline-record"
+payload_sha256 = "dc5a9d116623d41bbd568c103784c621f75a6736a7ffb2701611f4e1358a6433"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:allocation-value-kind-generated-key-395f76d50b7c264c"
+union_name = "AllocationValueKind"
+containing_schema = "AllocationValueKind"
+union_path = "AllocationValueKind"
+arm_tag = 0x0003
+source_arm_name = "GeneratedKey"
+stable_name = "generated_key"
+payload_kind = "inline-record"
+payload_sha256 = "00adcec125894a2643f70f2644bba2037e7155f648f7d32bfb3a8f2dfeed75f3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a09"
+row_id = "a09:union:escaping-allocation-cause-6f6f9b6b40176a9c"
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:escaping-allocation-cause-published-statement-result-f5c26519fa874337"
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+arm_tag = 0x0001
+source_arm_name = "PublishedStatementResult"
+stable_name = "published_statement_result"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:escaping-allocation-cause-later-statement-workspace-907ca3f2359743d1"
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+arm_tag = 0x0002
+source_arm_name = "LaterStatementWorkspace"
+stable_name = "later_statement_workspace"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:escaping-allocation-cause-procedure-or-udf-boundary-a808d969f413a309"
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+arm_tag = 0x0003
+source_arm_name = "ProcedureOrUdfBoundary"
+stable_name = "procedure_or_udf_boundary"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:escaping-allocation-cause-durable-provenance-or-audit-3aa9b066701d206d"
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+arm_tag = 0x0004
+source_arm_name = "DurableProvenanceOrAudit"
+stable_name = "durable_provenance_or_audit"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:escaping-allocation-cause-terminal-result-preparation-e8fd9f98bb59be7c"
+union_name = "EscapingAllocationCause"
+containing_schema = "EscapingAllocationCause"
+union_path = "EscapingAllocationCause"
+arm_tag = 0x0005
+source_arm_name = "TerminalResultPreparation"
+stable_name = "terminal_result_preparation"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
 slice_id = "a10"
@@ -19968,7 +20235,7 @@ symbol = "AllocationValueKind"
 generic_signature = ""
 source_key = "top|AllocationValueKind"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a09:1894"]
 
 [[top_level_candidate]]
@@ -22738,7 +23005,7 @@ symbol = "EscapingAllocationCause"
 generic_signature = ""
 source_key = "top|EscapingAllocationCause"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a09:1894"]
 
 [[top_level_candidate]]
@@ -39011,6 +39278,166 @@ target_row_id = "a03:union-arm:txn-outcome-record-state-read-closed-0d4de39d1aa0
 slice_id = "a03"
 source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.state|ReadClosed"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:wire-type-allocation-value-kind"
+target_row_id = "a09:wire-type:allocation-value-kind"
+slice_id = "a09"
+source_key = "top|AllocationValueKind"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-allocation-value-kind-9f75f938928fb076"
+target_row_id = "a09:union:allocation-value-kind-9f75f938928fb076"
+slice_id = "a09"
+source_key = "union|AllocationValueKind|AllocationValueKind"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-allocation-value-kind-vertex-id-f3595fa4e735f1fc"
+target_row_id = "a09:union-arm:allocation-value-kind-vertex-id-f3595fa4e735f1fc"
+slice_id = "a09"
+source_key = "arm|AllocationValueKind|AllocationValueKind|VertexId"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:wire-type-allocation-value-kind-vertex-id"
+target_row_id = "a09:wire-type:allocation-value-kind-vertex-id"
+slice_id = "a09"
+source_key = "arm|AllocationValueKind|AllocationValueKind|VertexId"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-allocation-value-kind-edge-id-d5a260069cd887d4"
+target_row_id = "a09:union-arm:allocation-value-kind-edge-id-d5a260069cd887d4"
+slice_id = "a09"
+source_key = "arm|AllocationValueKind|AllocationValueKind|EdgeId"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:wire-type-allocation-value-kind-edge-id"
+target_row_id = "a09:wire-type:allocation-value-kind-edge-id"
+slice_id = "a09"
+source_key = "arm|AllocationValueKind|AllocationValueKind|EdgeId"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-allocation-value-kind-generated-key-395f76d50b7c264c"
+target_row_id = "a09:union-arm:allocation-value-kind-generated-key-395f76d50b7c264c"
+slice_id = "a09"
+source_key = "arm|AllocationValueKind|AllocationValueKind|GeneratedKey"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:wire-type-allocation-value-kind-generated-key"
+target_row_id = "a09:wire-type:allocation-value-kind-generated-key"
+slice_id = "a09"
+source_key = "arm|AllocationValueKind|AllocationValueKind|GeneratedKey"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:wire-type-escaping-allocation-cause"
+target_row_id = "a09:wire-type:escaping-allocation-cause"
+slice_id = "a09"
+source_key = "top|EscapingAllocationCause"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-escaping-allocation-cause-6f6f9b6b40176a9c"
+target_row_id = "a09:union:escaping-allocation-cause-6f6f9b6b40176a9c"
+slice_id = "a09"
+source_key = "union|EscapingAllocationCause|EscapingAllocationCause"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-escaping-allocation-cause-published-statement-result-f5c26519fa874337"
+target_row_id = "a09:union-arm:escaping-allocation-cause-published-statement-result-f5c26519fa874337"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationCause|EscapingAllocationCause|PublishedStatementResult"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:wire-type-escaping-allocation-cause-published-statement-result"
+target_row_id = "a09:wire-type:escaping-allocation-cause-published-statement-result"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationCause|EscapingAllocationCause|PublishedStatementResult"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-escaping-allocation-cause-later-statement-workspace-907ca3f2359743d1"
+target_row_id = "a09:union-arm:escaping-allocation-cause-later-statement-workspace-907ca3f2359743d1"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationCause|EscapingAllocationCause|LaterStatementWorkspace"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:wire-type-escaping-allocation-cause-later-statement-workspace"
+target_row_id = "a09:wire-type:escaping-allocation-cause-later-statement-workspace"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationCause|EscapingAllocationCause|LaterStatementWorkspace"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-escaping-allocation-cause-procedure-or-udf-boundary-a808d969f413a309"
+target_row_id = "a09:union-arm:escaping-allocation-cause-procedure-or-udf-boundary-a808d969f413a309"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationCause|EscapingAllocationCause|ProcedureOrUdfBoundary"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:wire-type-escaping-allocation-cause-procedure-or-udf-boundary"
+target_row_id = "a09:wire-type:escaping-allocation-cause-procedure-or-udf-boundary"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationCause|EscapingAllocationCause|ProcedureOrUdfBoundary"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-escaping-allocation-cause-durable-provenance-or-audit-3aa9b066701d206d"
+target_row_id = "a09:union-arm:escaping-allocation-cause-durable-provenance-or-audit-3aa9b066701d206d"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationCause|EscapingAllocationCause|DurableProvenanceOrAudit"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:wire-type-escaping-allocation-cause-durable-provenance-or-audit"
+target_row_id = "a09:wire-type:escaping-allocation-cause-durable-provenance-or-audit"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationCause|EscapingAllocationCause|DurableProvenanceOrAudit"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-escaping-allocation-cause-terminal-result-preparation-e8fd9f98bb59be7c"
+target_row_id = "a09:union-arm:escaping-allocation-cause-terminal-result-preparation-e8fd9f98bb59be7c"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationCause|EscapingAllocationCause|TerminalResultPreparation"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:wire-type-escaping-allocation-cause-terminal-result-preparation"
+target_row_id = "a09:wire-type:escaping-allocation-cause-terminal-result-preparation"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationCause|EscapingAllocationCause|TerminalResultPreparation"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

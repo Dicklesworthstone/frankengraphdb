@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 17
+registry_epoch = 18
 
 [[type]]
 wire_type_id = 0x0001
@@ -1166,3 +1166,109 @@ status = "reserved"
 encoding_context = "canonical Local transaction-plane record"
 allowed_containing_schemas = ["TxnAbortSpec"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x007a
+name = "AllocationValueKind"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: EdgeId | GeneratedKey | VertexId"
+allowed_containing_schemas = ["AllocationValueKind"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x007b
+name = "AllocationValueKind.vertex_id"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AllocationValueKind"
+wire_tag = 0x0001
+encoding_context = "arm VertexId of closed union AllocationValueKind"
+allowed_containing_schemas = ["AllocationValueKind"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x007c
+name = "AllocationValueKind.edge_id"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AllocationValueKind"
+wire_tag = 0x0002
+encoding_context = "arm EdgeId of closed union AllocationValueKind"
+allowed_containing_schemas = ["AllocationValueKind"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x007d
+name = "AllocationValueKind.generated_key"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AllocationValueKind"
+wire_tag = 0x0003
+encoding_context = "arm GeneratedKey of closed union AllocationValueKind"
+allowed_containing_schemas = ["AllocationValueKind"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x007e
+name = "EscapingAllocationCause"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "closed u8 tag: PublishedStatementResult | LaterStatementWorkspace | ProcedureOrUdfBoundary | DurableProvenanceOrAudit | TerminalResultPreparation; the TerminalResultPreparation arm is optional because a terminal-only value may instead be assigned in finalization before publication"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x007f
+name = "EscapingAllocationCause.published_statement_result"
+kind = "union_variant"
+status = "reserved"
+containing_union = "EscapingAllocationCause"
+wire_tag = 0x0001
+encoding_context = "unit discriminant for an identity escaping through a published statement result"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0080
+name = "EscapingAllocationCause.later_statement_workspace"
+kind = "union_variant"
+status = "reserved"
+containing_union = "EscapingAllocationCause"
+wire_tag = 0x0002
+encoding_context = "unit discriminant for an identity escaping into a later statement workspace"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0081
+name = "EscapingAllocationCause.procedure_or_udf_boundary"
+kind = "union_variant"
+status = "reserved"
+containing_union = "EscapingAllocationCause"
+wire_tag = 0x0003
+encoding_context = "unit discriminant for an identity escaping across a procedure or UDF boundary"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0082
+name = "EscapingAllocationCause.durable_provenance_or_audit"
+kind = "union_variant"
+status = "reserved"
+containing_union = "EscapingAllocationCause"
+wire_tag = 0x0004
+encoding_context = "unit discriminant for an identity escaping into durable provenance or audit bytes"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0083
+name = "EscapingAllocationCause.terminal_result_preparation"
+kind = "union_variant"
+status = "reserved"
+containing_union = "EscapingAllocationCause"
+wire_tag = 0x0005
+encoding_context = "unit discriminant for an identity escaping during terminal result preparation"
+allowed_containing_schemas = ["EscapingAllocationCause"]
+max_size_bytes = 1
