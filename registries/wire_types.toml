@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 23
+registry_epoch = 24
 
 [[type]]
 wire_type_id = 0x0001
@@ -1903,4 +1903,194 @@ containing_union = "TerminalPublicOutcome"
 wire_tag = 0x0002
 encoding_context = "arm Sharded of closed union TerminalPublicOutcome"
 allowed_containing_schemas = ["TerminalPublicOutcome"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00c2
+name = "ShardCommandOrigin"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Prior | RecoveryBridge"
+allowed_containing_schemas = ["ShardCommandOrigin"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00c3
+name = "ShardCommandOrigin.prior"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ShardCommandOrigin"
+wire_tag = 0x0001
+encoding_context = "arm Prior of closed union ShardCommandOrigin"
+allowed_containing_schemas = ["ShardCommandOrigin"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00c4
+name = "ShardCommandOrigin.recovery_bridge"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ShardCommandOrigin"
+wire_tag = 0x0002
+encoding_context = "arm RecoveryBridge of closed union ShardCommandOrigin"
+allowed_containing_schemas = ["ShardCommandOrigin"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00c5
+name = "GlobalKeyDestroyAckRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Backup | LegalHold | RemoteConsumer"
+allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00c6
+name = "GlobalKeyDestroyAckRef.backup"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalKeyDestroyAckRef"
+wire_tag = 0x0001
+encoding_context = "arm Backup of closed union GlobalKeyDestroyAckRef"
+allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00c7
+name = "GlobalKeyDestroyAckRef.legal_hold"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalKeyDestroyAckRef"
+wire_tag = 0x0002
+encoding_context = "arm LegalHold of closed union GlobalKeyDestroyAckRef"
+allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00c8
+name = "GlobalKeyDestroyAckRef.remote_consumer"
+kind = "union_variant"
+status = "reserved"
+containing_union = "GlobalKeyDestroyAckRef"
+wire_tag = 0x0003
+encoding_context = "arm RemoteConsumer of closed union GlobalKeyDestroyAckRef"
+allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00c9
+name = "CheckpointFieldRecipe"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "closed u8 tag: CopiedStrong | ProjectedSnapshot | ResetByCheckpointInstall | SelfExcluded | InstallProvisionalCut | ApplyActivationProjection"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00ca
+name = "CheckpointFieldRecipe.copied_strong"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0001
+encoding_context = "arm CopiedStrong of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00cb
+name = "CheckpointFieldRecipe.projected_snapshot"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0002
+encoding_context = "arm ProjectedSnapshot of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00cc
+name = "CheckpointFieldRecipe.reset_by_checkpoint_install"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0003
+encoding_context = "arm ResetByCheckpointInstall of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00cd
+name = "CheckpointFieldRecipe.self_excluded"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0004
+encoding_context = "arm SelfExcluded of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00ce
+name = "CheckpointFieldRecipe.install_provisional_cut"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0005
+encoding_context = "arm InstallProvisionalCut of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00cf
+name = "CheckpointFieldRecipe.apply_activation_projection"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0006
+encoding_context = "arm ApplyActivationProjection of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00d0
+name = "LocalPreparedRootEntry"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Owned | Transferring | Transferred"
+allowed_containing_schemas = ["LocalPreparedRootEntry"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00d1
+name = "LocalPreparedRootEntry.owned"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalPreparedRootEntry"
+wire_tag = 0x0001
+encoding_context = "arm Owned of closed union LocalPreparedRootEntry"
+allowed_containing_schemas = ["LocalPreparedRootEntry"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00d2
+name = "LocalPreparedRootEntry.transferring"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalPreparedRootEntry"
+wire_tag = 0x0002
+encoding_context = "arm Transferring of closed union LocalPreparedRootEntry"
+allowed_containing_schemas = ["LocalPreparedRootEntry"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00d3
+name = "LocalPreparedRootEntry.transferred"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalPreparedRootEntry"
+wire_tag = 0x0003
+encoding_context = "arm Transferred of closed union LocalPreparedRootEntry"
+allowed_containing_schemas = ["LocalPreparedRootEntry"]
 max_size_bytes = 16777216

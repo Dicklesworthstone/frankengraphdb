@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1051
+target_count = 1087
 projection_fallback_count = 89
-target_source_assignment_sha256 = "5c26f1980a4d16a37f7899c6d223a1a3e76a5d825b2fd58f1ea5ae2b7b2a74af"
+target_source_assignment_sha256 = "5671fdef115d2e1a649a2f298f8ca5a92c59f22766f69926bbf186796b8f87d1"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 23
+registry_epoch = 24
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 30
+registry_epoch = 31
 
 [[logical_kind]]
 slice_id = "a03"
@@ -5374,6 +5374,232 @@ wire_tag = 0x0002
 status = "reserved"
 encoding_context = "arm Sharded of closed union TerminalPublicOutcome"
 allowed_containing_schemas = ["TerminalPublicOutcome"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:shard-command-origin"
+wire_type_id = 0x00c2
+name = "ShardCommandOrigin"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Prior | RecoveryBridge"
+allowed_containing_schemas = ["ShardCommandOrigin"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:shard-command-origin-prior"
+wire_type_id = 0x00c3
+name = "ShardCommandOrigin.prior"
+kind = "union_variant"
+containing_union = "ShardCommandOrigin"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm Prior of closed union ShardCommandOrigin"
+allowed_containing_schemas = ["ShardCommandOrigin"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:shard-command-origin-recovery-bridge"
+wire_type_id = 0x00c4
+name = "ShardCommandOrigin.recovery_bridge"
+kind = "union_variant"
+containing_union = "ShardCommandOrigin"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm RecoveryBridge of closed union ShardCommandOrigin"
+allowed_containing_schemas = ["ShardCommandOrigin"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:global-key-destroy-ack-ref"
+wire_type_id = 0x00c5
+name = "GlobalKeyDestroyAckRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Backup | LegalHold | RemoteConsumer"
+allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:global-key-destroy-ack-ref-backup"
+wire_type_id = 0x00c6
+name = "GlobalKeyDestroyAckRef.backup"
+kind = "union_variant"
+containing_union = "GlobalKeyDestroyAckRef"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm Backup of closed union GlobalKeyDestroyAckRef"
+allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:global-key-destroy-ack-ref-legal-hold"
+wire_type_id = 0x00c7
+name = "GlobalKeyDestroyAckRef.legal_hold"
+kind = "union_variant"
+containing_union = "GlobalKeyDestroyAckRef"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm LegalHold of closed union GlobalKeyDestroyAckRef"
+allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:global-key-destroy-ack-ref-remote-consumer"
+wire_type_id = 0x00c8
+name = "GlobalKeyDestroyAckRef.remote_consumer"
+kind = "union_variant"
+containing_union = "GlobalKeyDestroyAckRef"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm RemoteConsumer of closed union GlobalKeyDestroyAckRef"
+allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:checkpoint-field-recipe"
+wire_type_id = 0x00c9
+name = "CheckpointFieldRecipe"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "closed u8 tag: CopiedStrong | ProjectedSnapshot | ResetByCheckpointInstall | SelfExcluded | InstallProvisionalCut | ApplyActivationProjection"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:checkpoint-field-recipe-copied-strong"
+wire_type_id = 0x00ca
+name = "CheckpointFieldRecipe.copied_strong"
+kind = "union_variant"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm CopiedStrong of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:checkpoint-field-recipe-projected-snapshot"
+wire_type_id = 0x00cb
+name = "CheckpointFieldRecipe.projected_snapshot"
+kind = "union_variant"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm ProjectedSnapshot of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:checkpoint-field-recipe-reset-by-checkpoint-install"
+wire_type_id = 0x00cc
+name = "CheckpointFieldRecipe.reset_by_checkpoint_install"
+kind = "union_variant"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm ResetByCheckpointInstall of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:checkpoint-field-recipe-self-excluded"
+wire_type_id = 0x00cd
+name = "CheckpointFieldRecipe.self_excluded"
+kind = "union_variant"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0004
+status = "reserved"
+encoding_context = "arm SelfExcluded of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:checkpoint-field-recipe-install-provisional-cut"
+wire_type_id = 0x00ce
+name = "CheckpointFieldRecipe.install_provisional_cut"
+kind = "union_variant"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0005
+status = "reserved"
+encoding_context = "arm InstallProvisionalCut of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:checkpoint-field-recipe-apply-activation-projection"
+wire_type_id = 0x00cf
+name = "CheckpointFieldRecipe.apply_activation_projection"
+kind = "union_variant"
+containing_union = "CheckpointFieldRecipe"
+wire_tag = 0x0006
+status = "reserved"
+encoding_context = "arm ApplyActivationProjection of closed union CheckpointFieldRecipe"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:local-prepared-root-entry"
+wire_type_id = 0x00d0
+name = "LocalPreparedRootEntry"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Owned | Transferring | Transferred"
+allowed_containing_schemas = ["LocalPreparedRootEntry"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:local-prepared-root-entry-owned"
+wire_type_id = 0x00d1
+name = "LocalPreparedRootEntry.owned"
+kind = "union_variant"
+containing_union = "LocalPreparedRootEntry"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm Owned of closed union LocalPreparedRootEntry"
+allowed_containing_schemas = ["LocalPreparedRootEntry"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:local-prepared-root-entry-transferring"
+wire_type_id = 0x00d2
+name = "LocalPreparedRootEntry.transferring"
+kind = "union_variant"
+containing_union = "LocalPreparedRootEntry"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm Transferring of closed union LocalPreparedRootEntry"
+allowed_containing_schemas = ["LocalPreparedRootEntry"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a06"
+row_id = "a06:wire-type:local-prepared-root-entry-transferred"
+wire_type_id = 0x00d3
+name = "LocalPreparedRootEntry.transferred"
+kind = "union_variant"
+containing_union = "LocalPreparedRootEntry"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm Transferred of closed union LocalPreparedRootEntry"
+allowed_containing_schemas = ["LocalPreparedRootEntry"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -15542,6 +15768,262 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a06"
+row_id = "a06:union:shard-command-origin-1009a3f0f7cb1cdc"
+union_name = "ShardCommandOrigin"
+containing_schema = "ShardCommandOrigin"
+union_path = "ShardCommandOrigin"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ShardCommandOrigin"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:shard-command-origin-prior-a26662dbd9d77c09"
+union_name = "ShardCommandOrigin"
+containing_schema = "ShardCommandOrigin"
+union_path = "ShardCommandOrigin"
+arm_tag = 0x0001
+source_arm_name = "Prior"
+stable_name = "prior"
+payload_kind = "inline-record"
+payload_sha256 = "cb6a3dbdb88c970e78da8a684b4e003cbc5d4dac397b4454ff8e5cd5d5b1e0c0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:shard-command-origin-recovery-bridge-d194b8c283696b16"
+union_name = "ShardCommandOrigin"
+containing_schema = "ShardCommandOrigin"
+union_path = "ShardCommandOrigin"
+arm_tag = 0x0002
+source_arm_name = "RecoveryBridge"
+stable_name = "recovery_bridge"
+payload_kind = "inline-record"
+payload_sha256 = "79989519b48154f0c9887ee7f430c5b0edb449c882a360115668225455e55bff"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a06"
+row_id = "a06:union:global-key-destroy-ack-ref-54c61ec031396b0c"
+union_name = "GlobalKeyDestroyAckRef"
+containing_schema = "GlobalKeyDestroyAckRef"
+union_path = "GlobalKeyDestroyAckRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GlobalKeyDestroyAckRef"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:global-key-destroy-ack-ref-backup-42d10f1a7bc17bb0"
+union_name = "GlobalKeyDestroyAckRef"
+containing_schema = "GlobalKeyDestroyAckRef"
+union_path = "GlobalKeyDestroyAckRef"
+arm_tag = 0x0001
+source_arm_name = "Backup"
+stable_name = "backup"
+payload_kind = "inline-record"
+payload_sha256 = "d61f1a2a077121b0c38d4ce90023946de48e34fe561673f5a234ac872cb4be0f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:global-key-destroy-ack-ref-legal-hold-c33a5f2f3e730687"
+union_name = "GlobalKeyDestroyAckRef"
+containing_schema = "GlobalKeyDestroyAckRef"
+union_path = "GlobalKeyDestroyAckRef"
+arm_tag = 0x0002
+source_arm_name = "LegalHold"
+stable_name = "legal_hold"
+payload_kind = "inline-record"
+payload_sha256 = "acdf80f23a5b38fdc05bb76794d1318c3f78ceb15e1a72ccab8e3dcb7db4702c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:global-key-destroy-ack-ref-remote-consumer-a1757980f097460f"
+union_name = "GlobalKeyDestroyAckRef"
+containing_schema = "GlobalKeyDestroyAckRef"
+union_path = "GlobalKeyDestroyAckRef"
+arm_tag = 0x0003
+source_arm_name = "RemoteConsumer"
+stable_name = "remote_consumer"
+payload_kind = "inline-record"
+payload_sha256 = "9173544b408ec4201373b1227160c6ae768b69351628159383d5b313b4b458a0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a06"
+row_id = "a06:union:checkpoint-field-recipe-520659f91f758888"
+union_name = "CheckpointFieldRecipe"
+containing_schema = "CheckpointFieldRecipe"
+union_path = "CheckpointFieldRecipe"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CheckpointFieldRecipe"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:checkpoint-field-recipe-copied-strong-89beb9274877f9ed"
+union_name = "CheckpointFieldRecipe"
+containing_schema = "CheckpointFieldRecipe"
+union_path = "CheckpointFieldRecipe"
+arm_tag = 0x0001
+source_arm_name = "CopiedStrong"
+stable_name = "copied_strong"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:checkpoint-field-recipe-projected-snapshot-6322beae86ba53d4"
+union_name = "CheckpointFieldRecipe"
+containing_schema = "CheckpointFieldRecipe"
+union_path = "CheckpointFieldRecipe"
+arm_tag = 0x0002
+source_arm_name = "ProjectedSnapshot"
+stable_name = "projected_snapshot"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:checkpoint-field-recipe-reset-by-checkpoint-install-659bbe6b8dff9a26"
+union_name = "CheckpointFieldRecipe"
+containing_schema = "CheckpointFieldRecipe"
+union_path = "CheckpointFieldRecipe"
+arm_tag = 0x0003
+source_arm_name = "ResetByCheckpointInstall"
+stable_name = "reset_by_checkpoint_install"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:checkpoint-field-recipe-self-excluded-ff7289fcf079a3a0"
+union_name = "CheckpointFieldRecipe"
+containing_schema = "CheckpointFieldRecipe"
+union_path = "CheckpointFieldRecipe"
+arm_tag = 0x0004
+source_arm_name = "SelfExcluded"
+stable_name = "self_excluded"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:checkpoint-field-recipe-install-provisional-cut-4e51df14c0a98d16"
+union_name = "CheckpointFieldRecipe"
+containing_schema = "CheckpointFieldRecipe"
+union_path = "CheckpointFieldRecipe"
+arm_tag = 0x0005
+source_arm_name = "InstallProvisionalCut"
+stable_name = "install_provisional_cut"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:checkpoint-field-recipe-apply-activation-projection-42688e9e812b097e"
+union_name = "CheckpointFieldRecipe"
+containing_schema = "CheckpointFieldRecipe"
+union_path = "CheckpointFieldRecipe"
+arm_tag = 0x0006
+source_arm_name = "ApplyActivationProjection"
+stable_name = "apply_activation_projection"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a06"
+row_id = "a06:union:local-prepared-root-entry-28f6ea5a3681154a"
+union_name = "LocalPreparedRootEntry"
+containing_schema = "LocalPreparedRootEntry"
+union_path = "LocalPreparedRootEntry"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalPreparedRootEntry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:local-prepared-root-entry-owned-2ed32136e7102fa5"
+union_name = "LocalPreparedRootEntry"
+containing_schema = "LocalPreparedRootEntry"
+union_path = "LocalPreparedRootEntry"
+arm_tag = 0x0001
+source_arm_name = "Owned"
+stable_name = "owned"
+payload_kind = "inline-record"
+payload_sha256 = "3e3119ebe446ca99d4f032a4e134b75fe11efb6bf2cc4cbbc2e1e772c5fe2efd"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:local-prepared-root-entry-transferring-7a4f0cee7c93ba01"
+union_name = "LocalPreparedRootEntry"
+containing_schema = "LocalPreparedRootEntry"
+union_path = "LocalPreparedRootEntry"
+arm_tag = 0x0002
+source_arm_name = "Transferring"
+stable_name = "transferring"
+payload_kind = "inline-record"
+payload_sha256 = "86397996064802cf34134e08048f2ceb9da944a555a595b023ad605f8b66a8ae"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a06"
+row_id = "a06:union-arm:local-prepared-root-entry-transferred-43d7b0e12de526ee"
+union_name = "LocalPreparedRootEntry"
+containing_schema = "LocalPreparedRootEntry"
+union_path = "LocalPreparedRootEntry"
+arm_tag = 0x0003
+source_arm_name = "Transferred"
+stable_name = "transferred"
+payload_kind = "inline-record"
+payload_sha256 = "8d0ceac902ad1135cc161797b937e02f212042442cc8f01070ae6856fb5b7068"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
 slice_id = "a10"
@@ -24836,7 +25318,7 @@ symbol = "CheckpointFieldRecipe"
 generic_signature = ""
 source_key = "top|CheckpointFieldRecipe"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a06:1678"]
 
 [[top_level_candidate]]
@@ -26546,7 +27028,7 @@ symbol = "GlobalKeyDestroyAckRef"
 generic_signature = ""
 source_key = "top|GlobalKeyDestroyAckRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a06:1670"]
 
 [[top_level_candidate]]
@@ -28006,7 +28488,7 @@ symbol = "LocalPreparedRootEntry"
 generic_signature = ""
 source_key = "top|LocalPreparedRootEntry"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a06:1694"]
 
 [[top_level_candidate]]
@@ -33156,7 +33638,7 @@ symbol = "ShardCommandOrigin"
 generic_signature = ""
 source_key = "top|ShardCommandOrigin"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a06:1660"]
 
 [[top_level_candidate]]
@@ -44064,6 +44546,294 @@ target_row_id = "a05:field:global-txn-record-resulting-global-state-payload-dige
 slice_id = "a05"
 source_key = "projection|durable_fields|GlobalTxnRecord.resulting_global_state_payload_digest"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-shard-command-origin"
+target_row_id = "a06:wire-type:shard-command-origin"
+slice_id = "a06"
+source_key = "top|ShardCommandOrigin"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-shard-command-origin-1009a3f0f7cb1cdc"
+target_row_id = "a06:union:shard-command-origin-1009a3f0f7cb1cdc"
+slice_id = "a06"
+source_key = "union|ShardCommandOrigin|ShardCommandOrigin"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-shard-command-origin-prior-a26662dbd9d77c09"
+target_row_id = "a06:union-arm:shard-command-origin-prior-a26662dbd9d77c09"
+slice_id = "a06"
+source_key = "arm|ShardCommandOrigin|ShardCommandOrigin|Prior"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-shard-command-origin-prior"
+target_row_id = "a06:wire-type:shard-command-origin-prior"
+slice_id = "a06"
+source_key = "arm|ShardCommandOrigin|ShardCommandOrigin|Prior"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-shard-command-origin-recovery-bridge-d194b8c283696b16"
+target_row_id = "a06:union-arm:shard-command-origin-recovery-bridge-d194b8c283696b16"
+slice_id = "a06"
+source_key = "arm|ShardCommandOrigin|ShardCommandOrigin|RecoveryBridge"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-shard-command-origin-recovery-bridge"
+target_row_id = "a06:wire-type:shard-command-origin-recovery-bridge"
+slice_id = "a06"
+source_key = "arm|ShardCommandOrigin|ShardCommandOrigin|RecoveryBridge"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-global-key-destroy-ack-ref"
+target_row_id = "a06:wire-type:global-key-destroy-ack-ref"
+slice_id = "a06"
+source_key = "top|GlobalKeyDestroyAckRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-global-key-destroy-ack-ref-54c61ec031396b0c"
+target_row_id = "a06:union:global-key-destroy-ack-ref-54c61ec031396b0c"
+slice_id = "a06"
+source_key = "union|GlobalKeyDestroyAckRef|GlobalKeyDestroyAckRef"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-global-key-destroy-ack-ref-backup-42d10f1a7bc17bb0"
+target_row_id = "a06:union-arm:global-key-destroy-ack-ref-backup-42d10f1a7bc17bb0"
+slice_id = "a06"
+source_key = "arm|GlobalKeyDestroyAckRef|GlobalKeyDestroyAckRef|Backup"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-global-key-destroy-ack-ref-backup"
+target_row_id = "a06:wire-type:global-key-destroy-ack-ref-backup"
+slice_id = "a06"
+source_key = "arm|GlobalKeyDestroyAckRef|GlobalKeyDestroyAckRef|Backup"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-global-key-destroy-ack-ref-legal-hold-c33a5f2f3e730687"
+target_row_id = "a06:union-arm:global-key-destroy-ack-ref-legal-hold-c33a5f2f3e730687"
+slice_id = "a06"
+source_key = "arm|GlobalKeyDestroyAckRef|GlobalKeyDestroyAckRef|LegalHold"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-global-key-destroy-ack-ref-legal-hold"
+target_row_id = "a06:wire-type:global-key-destroy-ack-ref-legal-hold"
+slice_id = "a06"
+source_key = "arm|GlobalKeyDestroyAckRef|GlobalKeyDestroyAckRef|LegalHold"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-global-key-destroy-ack-ref-remote-consumer-a1757980f097460f"
+target_row_id = "a06:union-arm:global-key-destroy-ack-ref-remote-consumer-a1757980f097460f"
+slice_id = "a06"
+source_key = "arm|GlobalKeyDestroyAckRef|GlobalKeyDestroyAckRef|RemoteConsumer"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-global-key-destroy-ack-ref-remote-consumer"
+target_row_id = "a06:wire-type:global-key-destroy-ack-ref-remote-consumer"
+slice_id = "a06"
+source_key = "arm|GlobalKeyDestroyAckRef|GlobalKeyDestroyAckRef|RemoteConsumer"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-checkpoint-field-recipe"
+target_row_id = "a06:wire-type:checkpoint-field-recipe"
+slice_id = "a06"
+source_key = "top|CheckpointFieldRecipe"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-checkpoint-field-recipe-520659f91f758888"
+target_row_id = "a06:union:checkpoint-field-recipe-520659f91f758888"
+slice_id = "a06"
+source_key = "union|CheckpointFieldRecipe|CheckpointFieldRecipe"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-checkpoint-field-recipe-copied-strong-89beb9274877f9ed"
+target_row_id = "a06:union-arm:checkpoint-field-recipe-copied-strong-89beb9274877f9ed"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|CopiedStrong"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-checkpoint-field-recipe-copied-strong"
+target_row_id = "a06:wire-type:checkpoint-field-recipe-copied-strong"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|CopiedStrong"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-checkpoint-field-recipe-projected-snapshot-6322beae86ba53d4"
+target_row_id = "a06:union-arm:checkpoint-field-recipe-projected-snapshot-6322beae86ba53d4"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|ProjectedSnapshot"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-checkpoint-field-recipe-projected-snapshot"
+target_row_id = "a06:wire-type:checkpoint-field-recipe-projected-snapshot"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|ProjectedSnapshot"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-checkpoint-field-recipe-reset-by-checkpoint-install-659bbe6b8dff9a26"
+target_row_id = "a06:union-arm:checkpoint-field-recipe-reset-by-checkpoint-install-659bbe6b8dff9a26"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|ResetByCheckpointInstall"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-checkpoint-field-recipe-reset-by-checkpoint-install"
+target_row_id = "a06:wire-type:checkpoint-field-recipe-reset-by-checkpoint-install"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|ResetByCheckpointInstall"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-checkpoint-field-recipe-self-excluded-ff7289fcf079a3a0"
+target_row_id = "a06:union-arm:checkpoint-field-recipe-self-excluded-ff7289fcf079a3a0"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|SelfExcluded"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-checkpoint-field-recipe-self-excluded"
+target_row_id = "a06:wire-type:checkpoint-field-recipe-self-excluded"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|SelfExcluded"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-checkpoint-field-recipe-install-provisional-cut-4e51df14c0a98d16"
+target_row_id = "a06:union-arm:checkpoint-field-recipe-install-provisional-cut-4e51df14c0a98d16"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|InstallProvisionalCut"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-checkpoint-field-recipe-install-provisional-cut"
+target_row_id = "a06:wire-type:checkpoint-field-recipe-install-provisional-cut"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|InstallProvisionalCut"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-checkpoint-field-recipe-apply-activation-projection-42688e9e812b097e"
+target_row_id = "a06:union-arm:checkpoint-field-recipe-apply-activation-projection-42688e9e812b097e"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|ApplyActivationProjection"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-checkpoint-field-recipe-apply-activation-projection"
+target_row_id = "a06:wire-type:checkpoint-field-recipe-apply-activation-projection"
+slice_id = "a06"
+source_key = "arm|CheckpointFieldRecipe|CheckpointFieldRecipe|ApplyActivationProjection"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-local-prepared-root-entry"
+target_row_id = "a06:wire-type:local-prepared-root-entry"
+slice_id = "a06"
+source_key = "top|LocalPreparedRootEntry"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-local-prepared-root-entry-28f6ea5a3681154a"
+target_row_id = "a06:union:local-prepared-root-entry-28f6ea5a3681154a"
+slice_id = "a06"
+source_key = "union|LocalPreparedRootEntry|LocalPreparedRootEntry"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-local-prepared-root-entry-owned-2ed32136e7102fa5"
+target_row_id = "a06:union-arm:local-prepared-root-entry-owned-2ed32136e7102fa5"
+slice_id = "a06"
+source_key = "arm|LocalPreparedRootEntry|LocalPreparedRootEntry|Owned"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-local-prepared-root-entry-owned"
+target_row_id = "a06:wire-type:local-prepared-root-entry-owned"
+slice_id = "a06"
+source_key = "arm|LocalPreparedRootEntry|LocalPreparedRootEntry|Owned"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-local-prepared-root-entry-transferring-7a4f0cee7c93ba01"
+target_row_id = "a06:union-arm:local-prepared-root-entry-transferring-7a4f0cee7c93ba01"
+slice_id = "a06"
+source_key = "arm|LocalPreparedRootEntry|LocalPreparedRootEntry|Transferring"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-local-prepared-root-entry-transferring"
+target_row_id = "a06:wire-type:local-prepared-root-entry-transferring"
+slice_id = "a06"
+source_key = "arm|LocalPreparedRootEntry|LocalPreparedRootEntry|Transferring"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:union-arm-local-prepared-root-entry-transferred-43d7b0e12de526ee"
+target_row_id = "a06:union-arm:local-prepared-root-entry-transferred-43d7b0e12de526ee"
+slice_id = "a06"
+source_key = "arm|LocalPreparedRootEntry|LocalPreparedRootEntry|Transferred"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:wire-type-local-prepared-root-entry-transferred"
+target_row_id = "a06:wire-type:local-prepared-root-entry-transferred"
+slice_id = "a06"
+source_key = "arm|LocalPreparedRootEntry|LocalPreparedRootEntry|Transferred"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
