@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 24
+registry_epoch = 25
 
 [[type]]
 wire_type_id = 0x0001
@@ -2093,4 +2093,130 @@ containing_union = "LocalPreparedRootEntry"
 wire_tag = 0x0003
 encoding_context = "arm Transferred of closed union LocalPreparedRootEntry"
 allowed_containing_schemas = ["LocalPreparedRootEntry"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00d4
+name = "BeginRoleTransitionSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["BeginRoleTransitionSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00d5
+name = "LegacyLocalRetirementAuthorizeSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["LegacyLocalRetirementAuthorizeSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00d6
+name = "MetaRoleTransitionReopenConfirmSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["MetaRoleTransitionReopenConfirmSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00d7
+name = "Operational"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["Operational"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00d8
+name = "RaftRoleTransitionSeal"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["RaftRoleTransitionSeal"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00d9
+name = "RetiredLocalManifestRecipe"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["RetiredLocalManifestRecipe"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00da
+name = "RetiredLocalReclamationPlan"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["RetiredLocalReclamationPlan"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00db
+name = "RoleTransitionReserved"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["RoleTransitionReserved"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00dc
+name = "RoleTransitionSignatureLock"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["RoleTransitionSignatureLock"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00dd
+name = "ShardRoleTransitionReopenConfirmSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["ShardRoleTransitionReopenConfirmSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00de
+name = "ShardingActivationSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["ShardingActivationSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00df
+name = "ShardingServiceCompletionSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["ShardingServiceCompletionSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00e0
+name = "ShardingServiceFinalizeSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["ShardingServiceFinalizeSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00e1
+name = "ShardingServicePrepareSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 role-transition/sharding spec record"
+allowed_containing_schemas = ["ShardingServicePrepareSpec"]
 max_size_bytes = 16777216

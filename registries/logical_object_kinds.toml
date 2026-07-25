@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 26
+registry_epoch = 27
 
 [[kind]]
 object_kind = 0x0001
@@ -261,6 +261,15 @@ max_size_bytes = 1048576
 golden_corpus = "corpus/logical/backup_manifest/"
 
 [[kind]]
+object_kind = 0x0203
+name = "ActivationMetaProjectionPayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/activation_meta_projection_payload/"
+
+[[kind]]
 object_kind = 0x0204
 name = "ActiveMetaProjectionRoot"
 status = "reserved"
@@ -315,6 +324,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/canonical_restore_source_acquisition_plan_copy/"
 
 [[kind]]
+object_kind = 0x0261
+name = "CapabilityMigrationConsumedTombstone"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/capability_migration_consumed_tombstone/"
+
+[[kind]]
 object_kind = 0x0265
 name = "CertificateAttemptPlan"
 status = "reserved"
@@ -340,6 +358,24 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/certified_legacy_local_artifact_ref/"
+
+[[kind]]
+object_kind = 0x026c
+name = "CertifiedRoleTransitionRef"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certified_role_transition_ref/"
+
+[[kind]]
+object_kind = 0x026e
+name = "CertifiedTransitionArtifactRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certified_transition_artifact_ref/"
 
 [[kind]]
 object_kind = 0x0278
@@ -423,6 +459,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/external_key_destruction_provider_receipt/"
 
 [[kind]]
+object_kind = 0x02a2
+name = "GenesisMetaProjectionPayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/genesis_meta_projection_payload/"
+
+[[kind]]
 object_kind = 0x02ad
 name = "GlobalBranchKeyDistributionPlan"
 status = "reserved"
@@ -430,6 +475,15 @@ construction_order = 30
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_branch_key_distribution_plan/"
+
+[[kind]]
+object_kind = 0x02b2
+name = "GlobalControlRecord"
+status = "reserved"
+construction_order = 24
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_control_record/"
 
 [[kind]]
 object_kind = 0x02bd
@@ -457,6 +511,15 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_state_payload/"
+
+[[kind]]
+object_kind = 0x02ca
+name = "GlobalStateRoot"
+status = "reserved"
+construction_order = 31
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_state_root/"
 
 [[kind]]
 object_kind = 0x02d0
@@ -547,6 +610,33 @@ construction_order = 26
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/lease_window_successor_proof/"
+
+[[kind]]
+object_kind = 0x02f0
+name = "LegacyRetentionAuthorityTransferEvidence"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/legacy_retention_authority_transfer_evidence/"
+
+[[kind]]
+object_kind = 0x02f1
+name = "LegacyRetentionAuthorityTransferPlan"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/legacy_retention_authority_transfer_plan/"
+
+[[kind]]
+object_kind = 0x02f2
+name = "LegacyRetentionAuthorityTransferRecord"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/legacy_retention_authority_transfer_record/"
 
 [[kind]]
 object_kind = 0x02f5
@@ -664,6 +754,24 @@ construction_order = 15
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_statement_registration/"
+
+[[kind]]
+object_kind = 0x0329
+name = "LocalToGlobalProjection"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_to_global_projection/"
+
+[[kind]]
+object_kind = 0x032a
+name = "LocalToShardProjection"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_to_shard_projection/"
 
 [[kind]]
 object_kind = 0x032c
@@ -1107,6 +1215,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/result_resource_escrow/"
 
 [[kind]]
+object_kind = 0x0414
+name = "RetentionAuthorityTransferAdoptionSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/retention_authority_transfer_adoption_spec/"
+
+[[kind]]
 object_kind = 0x041c
 name = "RoleTimeBoundSubjectInventoryClosure"
 status = "reserved"
@@ -1132,6 +1249,24 @@ construction_order = 44
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/role_transition_activation_state/"
+
+[[kind]]
+object_kind = 0x0425
+name = "RoleTransitionPromotionRootSeal"
+status = "reserved"
+construction_order = 41
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_transition_promotion_root_seal/"
+
+[[kind]]
+object_kind = 0x0428
+name = "RoleTransitionServicePromotionManifest"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_transition_service_promotion_manifest/"
 
 [[kind]]
 object_kind = 0x042b
@@ -1305,6 +1440,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_restore_source_lease_projection/"
 
 [[kind]]
+object_kind = 0x0478
+name = "ShardRoleTransitionReadyBarrier"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_role_transition_ready_barrier/"
+
+[[kind]]
 object_kind = 0x047c
 name = "ShardTimeAuthorityProjection"
 status = "reserved"
@@ -1350,6 +1494,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_time_bound_subject_retirement_proof/"
 
 [[kind]]
+object_kind = 0x0484
+name = "ShardedGenesisCertificate"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharded_genesis_certificate/"
+
+[[kind]]
+object_kind = 0x0485
+name = "ShardingFreezeRecord"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_freeze_record/"
+
+[[kind]]
 object_kind = 0x0487
 name = "ShardingMigrationRetentionFloor"
 status = "reserved"
@@ -1366,6 +1528,15 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/sharding_migration_state/"
+
+[[kind]]
+object_kind = 0x0489
+name = "ShardingRoleTransitionPlan"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_role_transition_plan/"
 
 [[kind]]
 object_kind = 0x0493
