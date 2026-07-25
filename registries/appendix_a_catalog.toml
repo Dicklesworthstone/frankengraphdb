@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1421
+target_count = 1454
 projection_fallback_count = 89
-target_source_assignment_sha256 = "f3c3451cb1af997dad3f697b4fac6b4afce44fec89059b3ff72a309429f566de"
+target_source_assignment_sha256 = "036273b7b884bb70711746a61f77ba856ecfaef0b6aeb7d0b2867bb0dd0ba09e"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 28
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 34
+registry_epoch = 35
 
 [[logical_kind]]
 slice_id = "a03"
@@ -20447,6 +20447,466 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union]]
+slice_id = "a07"
+row_id = "a07:union:attempt-family-state-active-generation-35a3d207342c1c02"
+union_name = "AttemptFamilyStateActiveGeneration"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.active_generation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AttemptFamilyState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:attempt-family-state-active-generation-none-e258f886bf2f4f7c"
+union_name = "AttemptFamilyStateActiveGeneration"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.active_generation"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:attempt-family-state-active-generation-some-e9685a9438098770"
+union_name = "AttemptFamilyStateActiveGeneration"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.active_generation"
+arm_tag = 0x0002
+source_arm_name = "Some"
+stable_name = "some"
+payload_kind = "inline-record"
+payload_sha256 = "e661f4c935e8a5a83349afb5e347695c2e972e967b50efcd618f93b0b7b4c24b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a07"
+row_id = "a07:union:attempt-family-state-latest-state-83bbef3aba69b3f6"
+union_name = "AttemptFamilyStateLatestState"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.latest_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AttemptFamilyState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:attempt-family-state-latest-state-active-5cf8c982f8f71e94"
+union_name = "AttemptFamilyStateLatestState"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.latest_state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "inline-record"
+payload_sha256 = "5e6ea8a61d8bb24e9a5983ca0f0c3a094572327a84c73a99ce7116d57d26a159"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:attempt-family-state-latest-state-prepare-admitted-843946d2eead7fac"
+union_name = "AttemptFamilyStateLatestState"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.latest_state"
+arm_tag = 0x0002
+source_arm_name = "PrepareAdmitted"
+stable_name = "prepare_admitted"
+payload_kind = "inline-record"
+payload_sha256 = "4542d97bd867c30609aeb5a6d500e7f4d7dbc067230c6ae42326b4346f196002"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:attempt-family-state-latest-state-terminal-cd8cb214de857ca6"
+union_name = "AttemptFamilyStateLatestState"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.latest_state"
+arm_tag = 0x0003
+source_arm_name = "Terminal"
+stable_name = "terminal"
+payload_kind = "inline-record"
+payload_sha256 = "b3e3e77885db5c852a152a8e012ca1873c7619d7ea8327e3d0a6beeb9545c6b2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a07"
+row_id = "a07:union:global-attempt-index-e03364dc4e952147"
+union_name = "GlobalAttemptIndex"
+containing_schema = "GlobalAttemptIndex"
+union_path = "GlobalAttemptIndex"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GlobalAttemptIndex"]
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-attempt-index-active-3e29c3f2d23d4268"
+union_name = "GlobalAttemptIndex"
+containing_schema = "GlobalAttemptIndex"
+union_path = "GlobalAttemptIndex"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-attempt-index-prepare-admitted-60904dc5bb0abc0c"
+union_name = "GlobalAttemptIndex"
+containing_schema = "GlobalAttemptIndex"
+union_path = "GlobalAttemptIndex"
+arm_tag = 0x0002
+source_arm_name = "PrepareAdmitted"
+stable_name = "prepare_admitted"
+payload_kind = "unit"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-attempt-index-terminalizing-bb5f281882608ace"
+union_name = "GlobalAttemptIndex"
+containing_schema = "GlobalAttemptIndex"
+union_path = "GlobalAttemptIndex"
+arm_tag = 0x0003
+source_arm_name = "Terminalizing"
+stable_name = "terminalizing"
+payload_kind = "inline-record"
+payload_sha256 = "e336a0c1593e0a53d987a874813908ef54b710c6a627eec91cf8605d4b69a6b5"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:global-attempt-index-terminal-76de5159271c7f45"
+union_name = "GlobalAttemptIndex"
+containing_schema = "GlobalAttemptIndex"
+union_path = "GlobalAttemptIndex"
+arm_tag = 0x0004
+source_arm_name = "Terminal"
+stable_name = "terminal"
+payload_kind = "unit"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a07"
+row_id = "a07:union:meta-read-audit-evidence-d4077261a98d06d2"
+union_name = "MetaReadAuditEvidence"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaReadAuditEvidence"]
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:meta-read-audit-evidence-terminal-attempt-a159d51adf7090d6"
+union_name = "MetaReadAuditEvidence"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence"
+arm_tag = 0x0001
+source_arm_name = "TerminalAttempt"
+stable_name = "terminal_attempt"
+payload_kind = "inline-record"
+payload_sha256 = "7500f9d0d399d5d3607a02d7e80ac4f8b3ffc86ec0993528675e1b98dd6d5282"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:meta-read-audit-evidence-statement-2295222f0459211c"
+union_name = "MetaReadAuditEvidence"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence"
+arm_tag = 0x0002
+source_arm_name = "Statement"
+stable_name = "statement"
+payload_kind = "inline-record"
+payload_sha256 = "2202453a48ac29b486838062028a896689c1cfb1ef247b1eb6446a647689005a"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a07"
+row_id = "a07:union:meta-read-audit-evidence-statement-operation-27540136ee25e2fe"
+union_name = "MetaReadAuditEvidenceStatementOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.operation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaReadAuditEvidence"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:meta-read-audit-evidence-statement-operation-operation-audit-admission-claimed-ad4f84c8abc02a93"
+union_name = "MetaReadAuditEvidenceStatementOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.operation"
+arm_tag = 0x0001
+source_arm_name = "OperationAuditAdmission::Claimed"
+stable_name = "operation_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:meta-read-audit-evidence-statement-operation-not-required-96038d80daee08c4"
+union_name = "MetaReadAuditEvidenceStatementOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.operation"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a07"
+row_id = "a07:union:meta-read-audit-evidence-statement-statement-a57084335d84f764"
+union_name = "MetaReadAuditEvidenceStatementStatement"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.statement"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaReadAuditEvidence"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:meta-read-audit-evidence-statement-statement-statement-audit-admission-claimed-82d1a25aa6e46cd7"
+union_name = "MetaReadAuditEvidenceStatementStatement"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.statement"
+arm_tag = 0x0001
+source_arm_name = "StatementAuditAdmission::Claimed"
+stable_name = "statement_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:meta-read-audit-evidence-statement-statement-not-required-8f8069441d544d37"
+union_name = "MetaReadAuditEvidenceStatementStatement"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.statement"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a07"
+row_id = "a07:union:meta-read-audit-evidence-terminal-attempt-operation-a834ffb9c0502ae9"
+union_name = "MetaReadAuditEvidenceTerminalAttemptOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.TerminalAttempt.operation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaReadAuditEvidence"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:meta-read-audit-evidence-terminal-attempt-operation-operation-audit-admission-claimed-66933bad103f2f33"
+union_name = "MetaReadAuditEvidenceTerminalAttemptOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.TerminalAttempt.operation"
+arm_tag = 0x0001
+source_arm_name = "OperationAuditAdmission::Claimed"
+stable_name = "operation_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:meta-read-audit-evidence-terminal-attempt-operation-not-required-285abebb3bc4e5de"
+union_name = "MetaReadAuditEvidenceTerminalAttemptOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.TerminalAttempt.operation"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a07"
+row_id = "a07:union:no-terminal-plan-lock-share-or-order-proof-all-matching-order-attempt-dispositions-32cc9ac751daae08"
+union_name = "NoTerminalPlanLockShareOrOrderProofAllMatchingOrderAttemptDispositions"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.all_matching_order_attempt_dispositions"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["NoTerminalPlanLockShareOrOrderProof"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:no-terminal-plan-lock-share-or-order-proof-all-matching-order-attempt-dispositions-none-d45a624f02b38ac2"
+union_name = "NoTerminalPlanLockShareOrOrderProofAllMatchingOrderAttemptDispositions"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.all_matching_order_attempt_dispositions"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:no-terminal-plan-lock-share-or-order-proof-all-matching-order-attempt-dispositions-retired-stale-cb8e30c9f35a2ff8"
+union_name = "NoTerminalPlanLockShareOrOrderProofAllMatchingOrderAttemptDispositions"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.all_matching_order_attempt_dispositions"
+arm_tag = 0x0002
+source_arm_name = "RetiredStale"
+stable_name = "retired_stale"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a07"
+row_id = "a07:union:no-terminal-plan-lock-share-or-order-proof-role-5749d20627c81078"
+union_name = "NoTerminalPlanLockShareOrOrderProofRole"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.role"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["NoTerminalPlanLockShareOrOrderProof"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:no-terminal-plan-lock-share-or-order-proof-role-local-3b54503af0854dc9"
+union_name = "NoTerminalPlanLockShareOrOrderProofRole"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.role"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:no-terminal-plan-lock-share-or-order-proof-role-meta-f8e034f0cf7a44b0"
+union_name = "NoTerminalPlanLockShareOrOrderProofRole"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.role"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a07"
+row_id = "a07:union:result-delivery-state-0f06abacee44c3e2"
+union_name = "ResultDeliveryState"
+containing_schema = "ResultDeliveryState"
+union_path = "ResultDeliveryState"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ResultDeliveryState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:result-delivery-state-not-applicable-terminal-ccb5cb0b2e4ecdc3"
+union_name = "ResultDeliveryState"
+containing_schema = "ResultDeliveryState"
+union_path = "ResultDeliveryState"
+arm_tag = 0x0001
+source_arm_name = "NotApplicableTerminal"
+stable_name = "not_applicable_terminal"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a07"
+row_id = "a07:union-arm:result-delivery-state-detached-to-protocol-retention-ee2b27f09ae42a37"
+union_name = "ResultDeliveryState"
+containing_schema = "ResultDeliveryState"
+union_path = "ResultDeliveryState"
+arm_tag = 0x0002
+source_arm_name = "DetachedToProtocolRetention"
+stable_name = "detached_to_protocol_retention"
+payload_kind = "inline-record"
+payload_sha256 = "956f9197eec6303d51438cfbf7b68d9247ece73f9800378321a074a2d6d625ad"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
@@ -51929,6 +52389,270 @@ target_row_id = "a12:logical-kind:retention-map"
 slice_id = "a12"
 source_key = "top|RetentionMap"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-attempt-family-state-active-generation-35a3d207342c1c02"
+target_row_id = "a07:union:attempt-family-state-active-generation-35a3d207342c1c02"
+slice_id = "a07"
+source_key = "union|AttemptFamilyState|AttemptFamilyState.active_generation"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-attempt-family-state-active-generation-none-e258f886bf2f4f7c"
+target_row_id = "a07:union-arm:attempt-family-state-active-generation-none-e258f886bf2f4f7c"
+slice_id = "a07"
+source_key = "arm|AttemptFamilyState|AttemptFamilyState.active_generation|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-attempt-family-state-active-generation-some-e9685a9438098770"
+target_row_id = "a07:union-arm:attempt-family-state-active-generation-some-e9685a9438098770"
+slice_id = "a07"
+source_key = "arm|AttemptFamilyState|AttemptFamilyState.active_generation|Some"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-attempt-family-state-latest-state-83bbef3aba69b3f6"
+target_row_id = "a07:union:attempt-family-state-latest-state-83bbef3aba69b3f6"
+slice_id = "a07"
+source_key = "union|AttemptFamilyState|AttemptFamilyState.latest_state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-attempt-family-state-latest-state-active-5cf8c982f8f71e94"
+target_row_id = "a07:union-arm:attempt-family-state-latest-state-active-5cf8c982f8f71e94"
+slice_id = "a07"
+source_key = "arm|AttemptFamilyState|AttemptFamilyState.latest_state|Active"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-attempt-family-state-latest-state-prepare-admitted-843946d2eead7fac"
+target_row_id = "a07:union-arm:attempt-family-state-latest-state-prepare-admitted-843946d2eead7fac"
+slice_id = "a07"
+source_key = "arm|AttemptFamilyState|AttemptFamilyState.latest_state|PrepareAdmitted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-attempt-family-state-latest-state-terminal-cd8cb214de857ca6"
+target_row_id = "a07:union-arm:attempt-family-state-latest-state-terminal-cd8cb214de857ca6"
+slice_id = "a07"
+source_key = "arm|AttemptFamilyState|AttemptFamilyState.latest_state|Terminal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-global-attempt-index-e03364dc4e952147"
+target_row_id = "a07:union:global-attempt-index-e03364dc4e952147"
+slice_id = "a07"
+source_key = "union|GlobalAttemptIndex|GlobalAttemptIndex"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-global-attempt-index-active-3e29c3f2d23d4268"
+target_row_id = "a07:union-arm:global-attempt-index-active-3e29c3f2d23d4268"
+slice_id = "a07"
+source_key = "arm|GlobalAttemptIndex|GlobalAttemptIndex|Active"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-global-attempt-index-prepare-admitted-60904dc5bb0abc0c"
+target_row_id = "a07:union-arm:global-attempt-index-prepare-admitted-60904dc5bb0abc0c"
+slice_id = "a07"
+source_key = "arm|GlobalAttemptIndex|GlobalAttemptIndex|PrepareAdmitted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-global-attempt-index-terminalizing-bb5f281882608ace"
+target_row_id = "a07:union-arm:global-attempt-index-terminalizing-bb5f281882608ace"
+slice_id = "a07"
+source_key = "arm|GlobalAttemptIndex|GlobalAttemptIndex|Terminalizing"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-global-attempt-index-terminal-76de5159271c7f45"
+target_row_id = "a07:union-arm:global-attempt-index-terminal-76de5159271c7f45"
+slice_id = "a07"
+source_key = "arm|GlobalAttemptIndex|GlobalAttemptIndex|Terminal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-meta-read-audit-evidence-d4077261a98d06d2"
+target_row_id = "a07:union:meta-read-audit-evidence-d4077261a98d06d2"
+slice_id = "a07"
+source_key = "union|MetaReadAuditEvidence|MetaReadAuditEvidence"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-meta-read-audit-evidence-terminal-attempt-a159d51adf7090d6"
+target_row_id = "a07:union-arm:meta-read-audit-evidence-terminal-attempt-a159d51adf7090d6"
+slice_id = "a07"
+source_key = "arm|MetaReadAuditEvidence|MetaReadAuditEvidence|TerminalAttempt"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-meta-read-audit-evidence-statement-2295222f0459211c"
+target_row_id = "a07:union-arm:meta-read-audit-evidence-statement-2295222f0459211c"
+slice_id = "a07"
+source_key = "arm|MetaReadAuditEvidence|MetaReadAuditEvidence|Statement"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-meta-read-audit-evidence-statement-operation-27540136ee25e2fe"
+target_row_id = "a07:union:meta-read-audit-evidence-statement-operation-27540136ee25e2fe"
+slice_id = "a07"
+source_key = "union|MetaReadAuditEvidence|MetaReadAuditEvidence.Statement.operation"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-meta-read-audit-evidence-statement-operation-operation-audit-admission-claimed-ad4f84c8abc02a93"
+target_row_id = "a07:union-arm:meta-read-audit-evidence-statement-operation-operation-audit-admission-claimed-ad4f84c8abc02a93"
+slice_id = "a07"
+source_key = "arm|MetaReadAuditEvidence|MetaReadAuditEvidence.Statement.operation|OperationAuditAdmission::Claimed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-meta-read-audit-evidence-statement-operation-not-required-96038d80daee08c4"
+target_row_id = "a07:union-arm:meta-read-audit-evidence-statement-operation-not-required-96038d80daee08c4"
+slice_id = "a07"
+source_key = "arm|MetaReadAuditEvidence|MetaReadAuditEvidence.Statement.operation|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-meta-read-audit-evidence-statement-statement-a57084335d84f764"
+target_row_id = "a07:union:meta-read-audit-evidence-statement-statement-a57084335d84f764"
+slice_id = "a07"
+source_key = "union|MetaReadAuditEvidence|MetaReadAuditEvidence.Statement.statement"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-meta-read-audit-evidence-statement-statement-statement-audit-admission-claimed-82d1a25aa6e46cd7"
+target_row_id = "a07:union-arm:meta-read-audit-evidence-statement-statement-statement-audit-admission-claimed-82d1a25aa6e46cd7"
+slice_id = "a07"
+source_key = "arm|MetaReadAuditEvidence|MetaReadAuditEvidence.Statement.statement|StatementAuditAdmission::Claimed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-meta-read-audit-evidence-statement-statement-not-required-8f8069441d544d37"
+target_row_id = "a07:union-arm:meta-read-audit-evidence-statement-statement-not-required-8f8069441d544d37"
+slice_id = "a07"
+source_key = "arm|MetaReadAuditEvidence|MetaReadAuditEvidence.Statement.statement|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-meta-read-audit-evidence-terminal-attempt-operation-a834ffb9c0502ae9"
+target_row_id = "a07:union:meta-read-audit-evidence-terminal-attempt-operation-a834ffb9c0502ae9"
+slice_id = "a07"
+source_key = "union|MetaReadAuditEvidence|MetaReadAuditEvidence.TerminalAttempt.operation"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-meta-read-audit-evidence-terminal-attempt-operation-operation-audit-admission-claimed-66933bad103f2f33"
+target_row_id = "a07:union-arm:meta-read-audit-evidence-terminal-attempt-operation-operation-audit-admission-claimed-66933bad103f2f33"
+slice_id = "a07"
+source_key = "arm|MetaReadAuditEvidence|MetaReadAuditEvidence.TerminalAttempt.operation|OperationAuditAdmission::Claimed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-meta-read-audit-evidence-terminal-attempt-operation-not-required-285abebb3bc4e5de"
+target_row_id = "a07:union-arm:meta-read-audit-evidence-terminal-attempt-operation-not-required-285abebb3bc4e5de"
+slice_id = "a07"
+source_key = "arm|MetaReadAuditEvidence|MetaReadAuditEvidence.TerminalAttempt.operation|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-no-terminal-plan-lock-share-or-order-proof-all-matching-order-attempt-dispositions-32cc9ac751daae08"
+target_row_id = "a07:union:no-terminal-plan-lock-share-or-order-proof-all-matching-order-attempt-dispositions-32cc9ac751daae08"
+slice_id = "a07"
+source_key = "union|NoTerminalPlanLockShareOrOrderProof|NoTerminalPlanLockShareOrOrderProof.all_matching_order_attempt_dispositions"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-no-terminal-plan-lock-share-or-order-proof-all-matching-order-attempt-dispositions-none-d45a624f02b38ac2"
+target_row_id = "a07:union-arm:no-terminal-plan-lock-share-or-order-proof-all-matching-order-attempt-dispositions-none-d45a624f02b38ac2"
+slice_id = "a07"
+source_key = "arm|NoTerminalPlanLockShareOrOrderProof|NoTerminalPlanLockShareOrOrderProof.all_matching_order_attempt_dispositions|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-no-terminal-plan-lock-share-or-order-proof-all-matching-order-attempt-dispositions-retired-stale-cb8e30c9f35a2ff8"
+target_row_id = "a07:union-arm:no-terminal-plan-lock-share-or-order-proof-all-matching-order-attempt-dispositions-retired-stale-cb8e30c9f35a2ff8"
+slice_id = "a07"
+source_key = "arm|NoTerminalPlanLockShareOrOrderProof|NoTerminalPlanLockShareOrOrderProof.all_matching_order_attempt_dispositions|RetiredStale"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-no-terminal-plan-lock-share-or-order-proof-role-5749d20627c81078"
+target_row_id = "a07:union:no-terminal-plan-lock-share-or-order-proof-role-5749d20627c81078"
+slice_id = "a07"
+source_key = "union|NoTerminalPlanLockShareOrOrderProof|NoTerminalPlanLockShareOrOrderProof.role"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-no-terminal-plan-lock-share-or-order-proof-role-local-3b54503af0854dc9"
+target_row_id = "a07:union-arm:no-terminal-plan-lock-share-or-order-proof-role-local-3b54503af0854dc9"
+slice_id = "a07"
+source_key = "arm|NoTerminalPlanLockShareOrOrderProof|NoTerminalPlanLockShareOrOrderProof.role|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-no-terminal-plan-lock-share-or-order-proof-role-meta-f8e034f0cf7a44b0"
+target_row_id = "a07:union-arm:no-terminal-plan-lock-share-or-order-proof-role-meta-f8e034f0cf7a44b0"
+slice_id = "a07"
+source_key = "arm|NoTerminalPlanLockShareOrOrderProof|NoTerminalPlanLockShareOrOrderProof.role|Meta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-result-delivery-state-0f06abacee44c3e2"
+target_row_id = "a07:union:result-delivery-state-0f06abacee44c3e2"
+slice_id = "a07"
+source_key = "union|ResultDeliveryState|ResultDeliveryState"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-result-delivery-state-not-applicable-terminal-ccb5cb0b2e4ecdc3"
+target_row_id = "a07:union-arm:result-delivery-state-not-applicable-terminal-ccb5cb0b2e4ecdc3"
+slice_id = "a07"
+source_key = "arm|ResultDeliveryState|ResultDeliveryState|NotApplicableTerminal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:union-arm-result-delivery-state-detached-to-protocol-retention-ee2b27f09ae42a37"
+target_row_id = "a07:union-arm:result-delivery-state-detached-to-protocol-retention-ee2b27f09ae42a37"
+slice_id = "a07"
+source_key = "arm|ResultDeliveryState|ResultDeliveryState|DetachedToProtocolRetention"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 34
+registry_epoch = 35
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -3812,6 +3812,28 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "AttemptFamilyStateActiveGeneration"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.active_generation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AttemptFamilyState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "AttemptFamilyStateLatestState"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.latest_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AttemptFamilyState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "AuthenticatedClientResultAckReceiptPostureAndRole"
 containing_schema = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
 union_path = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.posture_and_role"
@@ -4108,6 +4130,17 @@ allowed_containing_schemas = ["EscapingAllocationCause"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union]]
+union_name = "GlobalAttemptIndex"
+containing_schema = "GlobalAttemptIndex"
+union_path = "GlobalAttemptIndex"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GlobalAttemptIndex"]
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union]]
 union_name = "GlobalBeginIdempotencyIndex"
@@ -4859,6 +4892,50 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "MetaReadAuditEvidence"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaReadAuditEvidence"]
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "MetaReadAuditEvidenceStatementOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.operation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaReadAuditEvidence"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "MetaReadAuditEvidenceStatementStatement"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.statement"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaReadAuditEvidence"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "MetaReadAuditEvidenceTerminalAttemptOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.TerminalAttempt.operation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaReadAuditEvidence"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "MetaRelevanceRangeProofSortedCommandEntriesRecordTerminalKind"
 containing_schema = "MetaRelevanceRangeProof"
 union_path = "MetaRelevanceRangeProof.sorted_command_entries.record.terminal_kind"
@@ -4879,6 +4956,28 @@ allowed_containing_schemas = ["NewDatabaseIdentityReservation"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
+
+[[union]]
+union_name = "NoTerminalPlanLockShareOrOrderProofAllMatchingOrderAttemptDispositions"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.all_matching_order_attempt_dispositions"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["NoTerminalPlanLockShareOrOrderProof"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "NoTerminalPlanLockShareOrOrderProofRole"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.role"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["NoTerminalPlanLockShareOrOrderProof"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union]]
 union_name = "OfflineMacaroonIssuerEpochState"
@@ -5169,6 +5268,17 @@ union_path = "ResultDeliveryServiceAuthority"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["ResultDeliveryServiceAuthority"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ResultDeliveryState"
+containing_schema = "ResultDeliveryState"
+union_path = "ResultDeliveryState"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ResultDeliveryState"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -5676,6 +5786,70 @@ source_arm_name = "GeneratedKey"
 stable_name = "generated_key"
 payload_kind = "inline-record"
 payload_sha256 = "00adcec125894a2643f70f2644bba2037e7155f648f7d32bfb3a8f2dfeed75f3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AttemptFamilyStateActiveGeneration"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.active_generation"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "AttemptFamilyStateActiveGeneration"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.active_generation"
+arm_tag = 0x0002
+source_arm_name = "Some"
+stable_name = "some"
+payload_kind = "inline-record"
+payload_sha256 = "e661f4c935e8a5a83349afb5e347695c2e972e967b50efcd618f93b0b7b4c24b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AttemptFamilyStateLatestState"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.latest_state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "inline-record"
+payload_sha256 = "5e6ea8a61d8bb24e9a5983ca0f0c3a094572327a84c73a99ce7116d57d26a159"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AttemptFamilyStateLatestState"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.latest_state"
+arm_tag = 0x0002
+source_arm_name = "PrepareAdmitted"
+stable_name = "prepare_admitted"
+payload_kind = "inline-record"
+payload_sha256 = "4542d97bd867c30609aeb5a6d500e7f4d7dbc067230c6ae42326b4346f196002"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AttemptFamilyStateLatestState"
+containing_schema = "AttemptFamilyState"
+union_path = "AttemptFamilyState.latest_state"
+arm_tag = 0x0003
+source_arm_name = "Terminal"
+stable_name = "terminal"
+payload_kind = "inline-record"
+payload_sha256 = "b3e3e77885db5c852a152a8e012ca1873c7619d7ea8327e3d0a6beeb9545c6b2"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -6577,6 +6751,55 @@ source_arm_name = "TerminalResultPreparation"
 stable_name = "terminal_result_preparation"
 payload_kind = "unit"
 role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GlobalAttemptIndex"
+containing_schema = "GlobalAttemptIndex"
+union_path = "GlobalAttemptIndex"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GlobalAttemptIndex"
+containing_schema = "GlobalAttemptIndex"
+union_path = "GlobalAttemptIndex"
+arm_tag = 0x0002
+source_arm_name = "PrepareAdmitted"
+stable_name = "prepare_admitted"
+payload_kind = "unit"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GlobalAttemptIndex"
+containing_schema = "GlobalAttemptIndex"
+union_path = "GlobalAttemptIndex"
+arm_tag = 0x0003
+source_arm_name = "Terminalizing"
+stable_name = "terminalizing"
+payload_kind = "inline-record"
+payload_sha256 = "e336a0c1593e0a53d987a874813908ef54b710c6a627eec91cf8605d4b69a6b5"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "GlobalAttemptIndex"
+containing_schema = "GlobalAttemptIndex"
+union_path = "GlobalAttemptIndex"
+arm_tag = 0x0004
+source_arm_name = "Terminal"
+stable_name = "terminal"
+payload_kind = "unit"
+role_predicate = "role-meta"
 version_status = "reserved"
 max_size_bytes = 1
 
@@ -8941,6 +9164,104 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "MetaReadAuditEvidence"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence"
+arm_tag = 0x0001
+source_arm_name = "TerminalAttempt"
+stable_name = "terminal_attempt"
+payload_kind = "inline-record"
+payload_sha256 = "7500f9d0d399d5d3607a02d7e80ac4f8b3ffc86ec0993528675e1b98dd6d5282"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaReadAuditEvidence"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence"
+arm_tag = 0x0002
+source_arm_name = "Statement"
+stable_name = "statement"
+payload_kind = "inline-record"
+payload_sha256 = "2202453a48ac29b486838062028a896689c1cfb1ef247b1eb6446a647689005a"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaReadAuditEvidenceStatementOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.operation"
+arm_tag = 0x0001
+source_arm_name = "OperationAuditAdmission::Claimed"
+stable_name = "operation_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "MetaReadAuditEvidenceStatementOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.operation"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "MetaReadAuditEvidenceStatementStatement"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.statement"
+arm_tag = 0x0001
+source_arm_name = "StatementAuditAdmission::Claimed"
+stable_name = "statement_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "MetaReadAuditEvidenceStatementStatement"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.Statement.statement"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "MetaReadAuditEvidenceTerminalAttemptOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.TerminalAttempt.operation"
+arm_tag = 0x0001
+source_arm_name = "OperationAuditAdmission::Claimed"
+stable_name = "operation_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "MetaReadAuditEvidenceTerminalAttemptOperation"
+containing_schema = "MetaReadAuditEvidence"
+union_path = "MetaReadAuditEvidence.TerminalAttempt.operation"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
 union_name = "MetaRelevanceRangeProofSortedCommandEntriesRecordTerminalKind"
 containing_schema = "MetaRelevanceRangeProof"
 union_path = "MetaRelevanceRangeProof.sorted_command_entries.record.terminal_kind"
@@ -9001,6 +9322,54 @@ payload_sha256 = "9a2e5500ed37de434f6779b593a266511aea44319fe27cb79cd03b0c819f75
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "NoTerminalPlanLockShareOrOrderProofAllMatchingOrderAttemptDispositions"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.all_matching_order_attempt_dispositions"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "NoTerminalPlanLockShareOrOrderProofAllMatchingOrderAttemptDispositions"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.all_matching_order_attempt_dispositions"
+arm_tag = 0x0002
+source_arm_name = "RetiredStale"
+stable_name = "retired_stale"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "NoTerminalPlanLockShareOrOrderProofRole"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.role"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "NoTerminalPlanLockShareOrOrderProofRole"
+containing_schema = "NoTerminalPlanLockShareOrOrderProof"
+union_path = "NoTerminalPlanLockShareOrOrderProof.role"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "OfflineMacaroonIssuerEpochState"
@@ -9870,6 +10239,31 @@ source_arm_name = "PromotionReceiptRequired"
 stable_name = "promotion_receipt_required"
 payload_kind = "inline-record"
 payload_sha256 = "a7f6f55fe37392dd29656c0d24a4454a3def8e5462b1242cf56fd8bec5d3765f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ResultDeliveryState"
+containing_schema = "ResultDeliveryState"
+union_path = "ResultDeliveryState"
+arm_tag = 0x0001
+source_arm_name = "NotApplicableTerminal"
+stable_name = "not_applicable_terminal"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ResultDeliveryState"
+containing_schema = "ResultDeliveryState"
+union_path = "ResultDeliveryState"
+arm_tag = 0x0002
+source_arm_name = "DetachedToProtocolRetention"
+stable_name = "detached_to_protocol_retention"
+payload_kind = "inline-record"
+payload_sha256 = "956f9197eec6303d51438cfbf7b68d9247ece73f9800378321a074a2d6d625ad"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
