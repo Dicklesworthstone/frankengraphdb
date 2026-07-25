@@ -3997,6 +3997,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "RestoreSourceLeaseLineageBasis"
                 | "TimeBoundOnlineMacaroonRootProjection"
                 | "DeliveryFrontier"
+                | "CommittedDeltaSourceRef"
                 | "DeliveryTransitionAppliedRef"
                 | "LocalAttemptRegistrationSpec"
                 | "LocalAuditTicketOwner"
@@ -4172,7 +4173,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a15_i7_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 81,
+        pre_erratum.ordinary_unions.len() + 82,
         current_union_count,
         "the historical witness must remove exactly the post-erratum A15, A01, A16, and A03 unions"
     );

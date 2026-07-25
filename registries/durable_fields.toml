@@ -3621,6 +3621,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "CommittedDeltaSourceRef"
+containing_schema = "CommittedDeltaSourceRef"
+union_path = "CommittedDeltaSourceRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CommittedDeltaSourceRef"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "ContinuityAuthorityCurrentBasis<Role>"
 containing_schema = "ContinuityAuthorityCurrentBasis<Role>"
 union_path = "ContinuityAuthorityCurrentBasis<Role>"
@@ -4620,6 +4631,32 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "CommittedDeltaSourceRef"
+containing_schema = "CommittedDeltaSourceRef"
+union_path = "CommittedDeltaSourceRef"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "24aef70bacd3a45a0fd7ace25d5e1d1d0cb4aa4882c026147f3ea896f5a05ff2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CommittedDeltaSourceRef"
+containing_schema = "CommittedDeltaSourceRef"
+union_path = "CommittedDeltaSourceRef"
+arm_tag = 0x0002
+source_arm_name = "Global"
+stable_name = "global"
+payload_kind = "inline-record"
+payload_sha256 = "0d76de718152db77b3c6e2aae639ff58e5aaae777b7bc0ed297243c762f1f89d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "ContinuityAuthorityCurrentBasis<Role>"

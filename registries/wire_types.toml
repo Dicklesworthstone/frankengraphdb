@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 21
+registry_epoch = 22
 
 [[type]]
 wire_type_id = 0x0001
@@ -1410,4 +1410,35 @@ kind = "record"
 status = "reserved"
 encoding_context = "inline binding record from one escaped allocation slot key to its permanent value (a09:1894)"
 allowed_containing_schemas = ["EscapingAllocationBinding"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0093
+name = "CommittedDeltaSourceRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Local | Global; Local names a shard LogicalDeltaBatch at its commit_seq, Global a Meta-published GlobalLogicalDeltaBatch at its global_commit_seq, and the two carry distinct internal tags (a11:1934)"
+allowed_containing_schemas = ["CommittedDeltaSourceRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0094
+name = "CommittedDeltaSourceRef.local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CommittedDeltaSourceRef"
+wire_tag = 0x0001
+encoding_context = "arm Local of closed union CommittedDeltaSourceRef"
+allowed_containing_schemas = ["CommittedDeltaSourceRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0095
+name = "CommittedDeltaSourceRef.global"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CommittedDeltaSourceRef"
+wire_tag = 0x0002
+encoding_context = "arm Global of closed union CommittedDeltaSourceRef"
+allowed_containing_schemas = ["CommittedDeltaSourceRef"]
 max_size_bytes = 16777216

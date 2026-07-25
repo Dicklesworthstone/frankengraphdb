@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 891
+target_count = 897
 projection_fallback_count = 85
-target_source_assignment_sha256 = "37b9acbda13a3ee33e99ef4026df6f65b138cb7776d1b412aaa2f5de208c2b80"
+target_source_assignment_sha256 = "6b91c2ecf1812409bddc3420faa4d9ebaa9a5529c7630e3add11082ff4c42a64"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,7 +641,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 21
+registry_epoch = 22
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -4415,6 +4415,43 @@ kind = "record"
 status = "reserved"
 encoding_context = "inline binding record from one escaped allocation slot key to its permanent value (a09:1894)"
 allowed_containing_schemas = ["EscapingAllocationBinding"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a11"
+row_id = "a11:wire-type:committed-delta-source-ref"
+wire_type_id = 0x0093
+name = "CommittedDeltaSourceRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Local | Global; Local names a shard LogicalDeltaBatch at its commit_seq, Global a Meta-published GlobalLogicalDeltaBatch at its global_commit_seq, and the two carry distinct internal tags (a11:1934)"
+allowed_containing_schemas = ["CommittedDeltaSourceRef"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a11"
+row_id = "a11:wire-type:committed-delta-source-ref-local"
+wire_type_id = 0x0094
+name = "CommittedDeltaSourceRef.local"
+kind = "union_variant"
+containing_union = "CommittedDeltaSourceRef"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm Local of closed union CommittedDeltaSourceRef"
+allowed_containing_schemas = ["CommittedDeltaSourceRef"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a11"
+row_id = "a11:wire-type:committed-delta-source-ref-global"
+wire_type_id = 0x0095
+name = "CommittedDeltaSourceRef.global"
+kind = "union_variant"
+containing_union = "CommittedDeltaSourceRef"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm Global of closed union CommittedDeltaSourceRef"
+allowed_containing_schemas = ["CommittedDeltaSourceRef"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -13172,6 +13209,19 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a11"
+row_id = "a11:union:committed-delta-source-ref-f1335d604b0c7f63"
+union_name = "CommittedDeltaSourceRef"
+containing_schema = "CommittedDeltaSourceRef"
+union_path = "CommittedDeltaSourceRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CommittedDeltaSourceRef"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a09"
 row_id = "a09:union-arm:escaping-allocation-binding-lease-ref-local-120a5688e2f71b5b"
@@ -13198,6 +13248,36 @@ source_arm_name = "Shard"
 stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "3bade59fc760ff4fbfb6f9abf72e7a8106980e12fd524e5e3c60b4a697e46df3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a11"
+row_id = "a11:union-arm:committed-delta-source-ref-local-bbed298d6f93703a"
+union_name = "CommittedDeltaSourceRef"
+containing_schema = "CommittedDeltaSourceRef"
+union_path = "CommittedDeltaSourceRef"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "24aef70bacd3a45a0fd7ace25d5e1d1d0cb4aa4882c026147f3ea896f5a05ff2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a11"
+row_id = "a11:union-arm:committed-delta-source-ref-global-bd56aa2b7fa07c50"
+union_name = "CommittedDeltaSourceRef"
+containing_schema = "CommittedDeltaSourceRef"
+union_path = "CommittedDeltaSourceRef"
+arm_tag = 0x0002
+source_arm_name = "Global"
+stable_name = "global"
+payload_kind = "inline-record"
+payload_sha256 = "0d76de718152db77b3c6e2aae639ff58e5aaae777b7bc0ed297243c762f1f89d"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -22706,7 +22786,7 @@ symbol = "CommittedDeltaSourceRef"
 generic_signature = ""
 source_key = "top|CommittedDeltaSourceRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a11:1934"]
 
 [[top_level_candidate]]
@@ -40228,6 +40308,54 @@ target_row_id = "a09:union-arm:escaping-allocation-binding-lease-ref-shard-32693
 slice_id = "a09"
 source_key = "arm|EscapingAllocationBinding|EscapingAllocationBinding.lease_ref|Shard"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:wire-type-committed-delta-source-ref"
+target_row_id = "a11:wire-type:committed-delta-source-ref"
+slice_id = "a11"
+source_key = "top|CommittedDeltaSourceRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-committed-delta-source-ref-f1335d604b0c7f63"
+target_row_id = "a11:union:committed-delta-source-ref-f1335d604b0c7f63"
+slice_id = "a11"
+source_key = "union|CommittedDeltaSourceRef|CommittedDeltaSourceRef"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-arm-committed-delta-source-ref-local-bbed298d6f93703a"
+target_row_id = "a11:union-arm:committed-delta-source-ref-local-bbed298d6f93703a"
+slice_id = "a11"
+source_key = "arm|CommittedDeltaSourceRef|CommittedDeltaSourceRef|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:wire-type-committed-delta-source-ref-local"
+target_row_id = "a11:wire-type:committed-delta-source-ref-local"
+slice_id = "a11"
+source_key = "arm|CommittedDeltaSourceRef|CommittedDeltaSourceRef|Local"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-arm-committed-delta-source-ref-global-bd56aa2b7fa07c50"
+target_row_id = "a11:union-arm:committed-delta-source-ref-global-bd56aa2b7fa07c50"
+slice_id = "a11"
+source_key = "arm|CommittedDeltaSourceRef|CommittedDeltaSourceRef|Global"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:wire-type-committed-delta-source-ref-global"
+target_row_id = "a11:wire-type:committed-delta-source-ref-global"
+slice_id = "a11"
+source_key = "arm|CommittedDeltaSourceRef|CommittedDeltaSourceRef|Global"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
