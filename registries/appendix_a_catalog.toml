@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 737
+target_count = 831
 projection_fallback_count = 84
-target_source_assignment_sha256 = "5b9dafb36898b30c8a4d3ff685e67570ffae506009878c09389cb6bdda048357"
+target_source_assignment_sha256 = "83d3aba272cbd84b966d848ccdc6ef73cc4c118cc7473cef4104909da94f1924"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 17
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 24
+registry_epoch = 25
 
 [[logical_kind]]
 slice_id = "a03"
@@ -11052,6 +11052,1413 @@ union_path = "LocalStatementRegistrationSpec.statement_audit_admission"
 arm_tag = 0x0002
 source_arm_name = "NotRequired"
 stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:authenticated-client-result-ack-receipt-posture-and-role-ed2bda25c055537d"
+union_name = "AuthenticatedClientResultAckReceiptPostureAndRole"
+containing_schema = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
+union_path = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.posture_and_role"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:authenticated-client-result-ack-receipt-posture-and-role-local-b15c3abcabed3daf"
+union_name = "AuthenticatedClientResultAckReceiptPostureAndRole"
+containing_schema = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
+union_path = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.posture_and_role"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:authenticated-client-result-ack-receipt-posture-and-role-meta-a9f0da54c34f64b9"
+union_name = "AuthenticatedClientResultAckReceiptPostureAndRole"
+containing_schema = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
+union_path = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.posture_and_role"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:authenticated-client-result-release-receipt-posture-and-role-2496ab9925999d4d"
+union_name = "AuthenticatedClientResultReleaseReceiptPostureAndRole"
+containing_schema = "AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>"
+union_path = "AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>.posture_and_role"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:authenticated-client-result-release-receipt-posture-and-role-local-ed31c991aeb219f0"
+union_name = "AuthenticatedClientResultReleaseReceiptPostureAndRole"
+containing_schema = "AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>"
+union_path = "AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>.posture_and_role"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:authenticated-client-result-release-receipt-posture-and-role-meta-05d48b72395b0735"
+union_name = "AuthenticatedClientResultReleaseReceiptPostureAndRole"
+containing_schema = "AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>"
+union_path = "AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>.posture_and_role"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:delivery-lease-expiry-evidence-lease-589956b3f09b8298"
+union_name = "DeliveryLeaseExpiryEvidenceLease"
+containing_schema = "DeliveryLeaseExpiryEvidence"
+union_path = "DeliveryLeaseExpiryEvidence.lease"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["DeliveryLeaseExpiryEvidence"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:delivery-lease-expiry-evidence-lease-local-0b9358e1838b5e94"
+union_name = "DeliveryLeaseExpiryEvidenceLease"
+containing_schema = "DeliveryLeaseExpiryEvidence"
+union_path = "DeliveryLeaseExpiryEvidence.lease"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "4a6653687c3725f01ec29976aac43104527d75765b7c036025c2b3b5ffd73f6d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:delivery-lease-expiry-evidence-lease-sharded-b91822b9a91dd005"
+union_name = "DeliveryLeaseExpiryEvidenceLease"
+containing_schema = "DeliveryLeaseExpiryEvidence"
+union_path = "DeliveryLeaseExpiryEvidence.lease"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "sharded"
+payload_kind = "inline-record"
+payload_sha256 = "ac6982c2b32a16ec606cadc1bae8d105518cf2bfb220a22bbdece80a0c9bc0a7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:derived-generation-registry-status-49634a7014a8ad82"
+union_name = "DerivedGenerationRegistryStatus"
+containing_schema = "DerivedGenerationRegistry"
+union_path = "DerivedGenerationRegistry.status"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["DerivedGenerationRegistry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:derived-generation-registry-status-building-d4c9f6214be12005"
+union_name = "DerivedGenerationRegistryStatus"
+containing_schema = "DerivedGenerationRegistry"
+union_path = "DerivedGenerationRegistry.status"
+arm_tag = 0x0001
+source_arm_name = "Building"
+stable_name = "building"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:derived-generation-registry-status-active-bdcaf198c0b31a59"
+union_name = "DerivedGenerationRegistryStatus"
+containing_schema = "DerivedGenerationRegistry"
+union_path = "DerivedGenerationRegistry.status"
+arm_tag = 0x0002
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:derived-generation-registry-status-retiring-08842e2ef6cd23c7"
+union_name = "DerivedGenerationRegistryStatus"
+containing_schema = "DerivedGenerationRegistry"
+union_path = "DerivedGenerationRegistry.status"
+arm_tag = 0x0003
+source_arm_name = "Retiring"
+stable_name = "retiring"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:embedded-result-fully-consumed-record-completion-source-713a8bd4e07e84a9"
+union_name = "EmbeddedResultFullyConsumedRecordCompletionSource"
+containing_schema = "EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>"
+union_path = "EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>.completion_source"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:embedded-result-fully-consumed-record-completion-source-explicit-finish-256863db1e4015a7"
+union_name = "EmbeddedResultFullyConsumedRecordCompletionSource"
+containing_schema = "EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>"
+union_path = "EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>.completion_source"
+arm_tag = 0x0001
+source_arm_name = "ExplicitFinish"
+stable_name = "explicit_finish"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:embedded-result-fully-consumed-record-completion-source-iterator-exhaustion-2948877a11e11270"
+union_name = "EmbeddedResultFullyConsumedRecordCompletionSource"
+containing_schema = "EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>"
+union_path = "EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>.completion_source"
+arm_tag = 0x0002
+source_arm_name = "IteratorExhaustion"
+stable_name = "iterator_exhaustion"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-attempt-registration-request-kind-73ac45b3d50bde88"
+union_name = "LocalAttemptRegistrationRequestKind"
+containing_schema = "LocalAttemptRegistration"
+union_path = "LocalAttemptRegistration.request_kind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalAttemptRegistration"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-attempt-registration-request-kind-explicit-begin-d16e0a4e0b4240a3"
+union_name = "LocalAttemptRegistrationRequestKind"
+containing_schema = "LocalAttemptRegistration"
+union_path = "LocalAttemptRegistration.request_kind"
+arm_tag = 0x0001
+source_arm_name = "ExplicitBegin"
+stable_name = "explicit_begin"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-attempt-registration-request-kind-autocommit-execute-61bd4c7e352d87da"
+union_name = "LocalAttemptRegistrationRequestKind"
+containing_schema = "LocalAttemptRegistration"
+union_path = "LocalAttemptRegistration.request_kind"
+arm_tag = 0x0002
+source_arm_name = "AutocommitExecute"
+stable_name = "autocommit_execute"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-attempt-registration-spec-read-your-writes-basis-4d50bc7f532fe88d"
+union_name = "LocalAttemptRegistrationSpecReadYourWritesBasis"
+containing_schema = "LocalAttemptRegistrationSpec"
+union_path = "LocalAttemptRegistrationSpec.Autocommit.read_your_writes_basis"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalAttemptRegistrationSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-attempt-registration-spec-read-your-writes-basis-none-b8b0b5eb3e115466"
+union_name = "LocalAttemptRegistrationSpecReadYourWritesBasis"
+containing_schema = "LocalAttemptRegistrationSpec"
+union_path = "LocalAttemptRegistrationSpec.Autocommit.read_your_writes_basis"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-attempt-registration-spec-read-your-writes-basis-validated-25123ae58d7df5f9"
+union_name = "LocalAttemptRegistrationSpecReadYourWritesBasis"
+containing_schema = "LocalAttemptRegistrationSpec"
+union_path = "LocalAttemptRegistrationSpec.Autocommit.read_your_writes_basis"
+arm_tag = 0x0002
+source_arm_name = "Validated"
+stable_name = "validated"
+payload_kind = "inline-record"
+payload_sha256 = "b0318fa8e604af435ff336105a3c58251bac1637436665267bcce661606e52a6"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-begin-reservation-spec-operation-class-7b33a21ca718dac3"
+union_name = "LocalBeginReservationSpecOperationClass"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.operation_class"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalBeginReservationSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-reservation-spec-operation-class-read-only-4a337b019c2346a5"
+union_name = "LocalBeginReservationSpecOperationClass"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.operation_class"
+arm_tag = 0x0001
+source_arm_name = "ReadOnly"
+stable_name = "read_only"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-reservation-spec-operation-class-read-write-b1bc682b0135d915"
+union_name = "LocalBeginReservationSpecOperationClass"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.operation_class"
+arm_tag = 0x0002
+source_arm_name = "ReadWrite"
+stable_name = "read_write"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-begin-reservation-spec-read-your-writes-basis-c0aa1ed770e6ea8c"
+union_name = "LocalBeginReservationSpecReadYourWritesBasis"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.read_your_writes_basis"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalBeginReservationSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-reservation-spec-read-your-writes-basis-none-76e1bbca146ce421"
+union_name = "LocalBeginReservationSpecReadYourWritesBasis"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.read_your_writes_basis"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-reservation-spec-read-your-writes-basis-validated-4ac1376344b8868a"
+union_name = "LocalBeginReservationSpecReadYourWritesBasis"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.read_your_writes_basis"
+arm_tag = 0x0002
+source_arm_name = "Validated"
+stable_name = "validated"
+payload_kind = "inline-record"
+payload_sha256 = "b0318fa8e604af435ff336105a3c58251bac1637436665267bcce661606e52a6"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-conflict-edge-kind-3b368254146def95"
+union_name = "LocalConflictEdgeKind"
+containing_schema = "LocalConflictEdge"
+union_path = "LocalConflictEdge.kind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalConflictEdge"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-conflict-edge-kind-wr-4833ceb7da75584f"
+union_name = "LocalConflictEdgeKind"
+containing_schema = "LocalConflictEdge"
+union_path = "LocalConflictEdge.kind"
+arm_tag = 0x0001
+source_arm_name = "wr"
+stable_name = "wr"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-conflict-edge-kind-ww-a7fc6918abe8377d"
+union_name = "LocalConflictEdgeKind"
+containing_schema = "LocalConflictEdge"
+union_path = "LocalConflictEdge.kind"
+arm_tag = 0x0002
+source_arm_name = "ww"
+stable_name = "ww"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-conflict-edge-kind-rw-01c466fec234ba78"
+union_name = "LocalConflictEdgeKind"
+containing_schema = "LocalConflictEdge"
+union_path = "LocalConflictEdge.kind"
+arm_tag = 0x0003
+source_arm_name = "rw"
+stable_name = "rw"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-conflict-entry-detail-state-f0a7511afb0c014e"
+union_name = "LocalConflictEntryDetailState"
+containing_schema = "LocalConflictEntry"
+union_path = "LocalConflictEntry.detail_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalConflictEntry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-conflict-entry-detail-state-detailed-417381df8b829e45"
+union_name = "LocalConflictEntryDetailState"
+containing_schema = "LocalConflictEntry"
+union_path = "LocalConflictEntry.detail_state"
+arm_tag = 0x0001
+source_arm_name = "Detailed"
+stable_name = "detailed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-conflict-entry-detail-state-compacted-9cd6c9ad5b4e8d4d"
+union_name = "LocalConflictEntryDetailState"
+containing_schema = "LocalConflictEntry"
+union_path = "LocalConflictEntry.detail_state"
+arm_tag = 0x0002
+source_arm_name = "Compacted"
+stable_name = "compacted"
+payload_kind = "inline-record"
+payload_sha256 = "ff25007b98ad007f338cb25ba12db922afe82e94d491bbf50a3c0f7b4c3f8f98"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-conflict-entry-state-b56bac76ba14a99f"
+union_name = "LocalConflictEntryState"
+containing_schema = "LocalConflictEntry"
+union_path = "LocalConflictEntry.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalConflictEntry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-conflict-entry-state-active-474ceaf8c40cb023"
+union_name = "LocalConflictEntryState"
+containing_schema = "LocalConflictEntry"
+union_path = "LocalConflictEntry.state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-conflict-entry-state-prepare-admitted-42a32b3511900825"
+union_name = "LocalConflictEntryState"
+containing_schema = "LocalConflictEntry"
+union_path = "LocalConflictEntry.state"
+arm_tag = 0x0002
+source_arm_name = "PrepareAdmitted"
+stable_name = "prepare_admitted"
+payload_kind = "inline-record"
+payload_sha256 = "6908593be7c3e2c326c32cbb3349a5b3e1ce95d892de61f98c8612d68a2613ed"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-conflict-entry-state-committed-f94109eac97808cb"
+union_name = "LocalConflictEntryState"
+containing_schema = "LocalConflictEntry"
+union_path = "LocalConflictEntry.state"
+arm_tag = 0x0003
+source_arm_name = "Committed"
+stable_name = "committed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-conflict-entry-state-aborted-7039e91fd02ac158"
+union_name = "LocalConflictEntryState"
+containing_schema = "LocalConflictEntry"
+union_path = "LocalConflictEntry.state"
+arm_tag = 0x0004
+source_arm_name = "Aborted"
+stable_name = "aborted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-conflict-entry-state-read-closed-0cf9d08cc9527506"
+union_name = "LocalConflictEntryState"
+containing_schema = "LocalConflictEntry"
+union_path = "LocalConflictEntry.state"
+arm_tag = 0x0005
+source_arm_name = "ReadClosed"
+stable_name = "read_closed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-outcome-expiry-spec-expected-begin-index-entry-a527b970ce878049"
+union_name = "LocalOutcomeExpirySpecExpectedBeginIndexEntry"
+containing_schema = "LocalOutcomeExpirySpec"
+union_path = "LocalOutcomeExpirySpec.expected_begin_index_entry"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalOutcomeExpirySpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-outcome-expiry-spec-expected-begin-index-entry-bound-compacted-4dd0b916e57fc9c7"
+union_name = "LocalOutcomeExpirySpecExpectedBeginIndexEntry"
+containing_schema = "LocalOutcomeExpirySpec"
+union_path = "LocalOutcomeExpirySpec.expected_begin_index_entry"
+arm_tag = 0x0001
+source_arm_name = "BoundCompacted"
+stable_name = "bound_compacted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-outcome-expiry-spec-expected-begin-index-entry-never-registered-compacted-60714bd895873eec"
+union_name = "LocalOutcomeExpirySpecExpectedBeginIndexEntry"
+containing_schema = "LocalOutcomeExpirySpec"
+union_path = "LocalOutcomeExpirySpec.expected_begin_index_entry"
+arm_tag = 0x0002
+source_arm_name = "NeverRegisteredCompacted"
+stable_name = "never_registered_compacted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-read-close-spec-mode-be63d6ec4ddc2834"
+union_name = "LocalReadCloseSpecMode"
+containing_schema = "LocalReadCloseSpec"
+union_path = "LocalReadCloseSpec.mode"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalReadCloseSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-read-close-spec-mode-autocommit-result-4cb8d973454dc685"
+union_name = "LocalReadCloseSpecMode"
+containing_schema = "LocalReadCloseSpec"
+union_path = "LocalReadCloseSpec.mode"
+arm_tag = 0x0001
+source_arm_name = "AutocommitResult"
+stable_name = "autocommit_result"
+payload_kind = "inline-record"
+payload_sha256 = "0e431e64125103d67888db862d3d75614334c304cf2bcf265a9f2475f6f25a5d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-read-close-spec-mode-explicit-close-1c14d1bbfe09fb58"
+union_name = "LocalReadCloseSpecMode"
+containing_schema = "LocalReadCloseSpec"
+union_path = "LocalReadCloseSpec.mode"
+arm_tag = 0x0002
+source_arm_name = "ExplicitClose"
+stable_name = "explicit_close"
+payload_kind = "inline-record"
+payload_sha256 = "0660c4af0238e129fa8d662d1d614a8999f667427c251182d156dc938bbf2c75"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-serialization-certificate-lifecycle-basis-398fb1863a227513"
+union_name = "LocalSerializationCertificateLifecycleBasis"
+containing_schema = "LocalSerializationCertificate"
+union_path = "LocalSerializationCertificate.lifecycle_basis"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalSerializationCertificate"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-serialization-certificate-lifecycle-basis-statement-73b6f50954494f8d"
+union_name = "LocalSerializationCertificateLifecycleBasis"
+containing_schema = "LocalSerializationCertificate"
+union_path = "LocalSerializationCertificate.lifecycle_basis"
+arm_tag = 0x0001
+source_arm_name = "Statement"
+stable_name = "statement"
+payload_kind = "inline-record"
+payload_sha256 = "f9b5b473abf904957eb244988fe6dcd7984025fa9e333be246c2f88a1bf56054"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-serialization-certificate-lifecycle-basis-prepare-90170d5798e20004"
+union_name = "LocalSerializationCertificateLifecycleBasis"
+containing_schema = "LocalSerializationCertificate"
+union_path = "LocalSerializationCertificate.lifecycle_basis"
+arm_tag = 0x0002
+source_arm_name = "Prepare"
+stable_name = "prepare"
+payload_kind = "inline-record"
+payload_sha256 = "d0cdcd24bdf0f911b7b65a1539c8d94eb5f33cdd7b291e0cf22aabc3d22c9f6b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-serialization-certificate-lifecycle-basis-read-close-bd6a73962a39a8ed"
+union_name = "LocalSerializationCertificateLifecycleBasis"
+containing_schema = "LocalSerializationCertificate"
+union_path = "LocalSerializationCertificate.lifecycle_basis"
+arm_tag = 0x0003
+source_arm_name = "ReadClose"
+stable_name = "read_close"
+payload_kind = "inline-record"
+payload_sha256 = "8802943941674334c5e6938a52a746be33e2f93b2045c01a8a6c84b9a380a378"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-terminal-completion-spec-prebuilt-read-your-writes-issuance-ref-fc68469d92072a79"
+union_name = "LocalTerminalCompletionSpecPrebuiltReadYourWritesIssuanceRef"
+containing_schema = "LocalTerminalCompletionSpec"
+union_path = "LocalTerminalCompletionSpec.prebuilt_read_your_writes_issuance_ref"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalTerminalCompletionSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-terminal-completion-spec-prebuilt-read-your-writes-issuance-ref-none-bc6e4d6bbda3dc6e"
+union_name = "LocalTerminalCompletionSpecPrebuiltReadYourWritesIssuanceRef"
+containing_schema = "LocalTerminalCompletionSpec"
+union_path = "LocalTerminalCompletionSpec.prebuilt_read_your_writes_issuance_ref"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-terminal-completion-spec-prebuilt-read-your-writes-issuance-ref-some-436f77cd48d18859"
+union_name = "LocalTerminalCompletionSpecPrebuiltReadYourWritesIssuanceRef"
+containing_schema = "LocalTerminalCompletionSpec"
+union_path = "LocalTerminalCompletionSpec.prebuilt_read_your_writes_issuance_ref"
+arm_tag = 0x0002
+source_arm_name = "Some"
+stable_name = "some"
+payload_kind = "inline-record"
+payload_sha256 = "19d7bb7be7705b44386463f3c767c52c0856073c08b8b6f1520371c3055eceec"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-terminal-completion-spec-result-disposition-e0211c9fac98b59d"
+union_name = "LocalTerminalCompletionSpecResultDisposition"
+containing_schema = "LocalTerminalCompletionSpec"
+union_path = "LocalTerminalCompletionSpec.result_disposition"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalTerminalCompletionSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-terminal-completion-spec-result-disposition-no-terminal-result-fca51002d30028f9"
+union_name = "LocalTerminalCompletionSpecResultDisposition"
+containing_schema = "LocalTerminalCompletionSpec"
+union_path = "LocalTerminalCompletionSpec.result_disposition"
+arm_tag = 0x0001
+source_arm_name = "NoTerminalResult"
+stable_name = "no_terminal_result"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-terminal-completion-spec-result-disposition-read-terminal-result-d4c341ed01561094"
+union_name = "LocalTerminalCompletionSpecResultDisposition"
+containing_schema = "LocalTerminalCompletionSpec"
+union_path = "LocalTerminalCompletionSpec.result_disposition"
+arm_tag = 0x0002
+source_arm_name = "ReadTerminalResult"
+stable_name = "read_terminal_result"
+payload_kind = "inline-record"
+payload_sha256 = "768ad95cb63ca5225847da5b70481fcaf99272a0ef02bd6a41c38d30f8936114"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-terminal-completion-spec-result-disposition-autocommit-write-returning-4404d5b6efa1d2a3"
+union_name = "LocalTerminalCompletionSpecResultDisposition"
+containing_schema = "LocalTerminalCompletionSpec"
+union_path = "LocalTerminalCompletionSpec.result_disposition"
+arm_tag = 0x0003
+source_arm_name = "AutocommitWriteReturning"
+stable_name = "autocommit_write_returning"
+payload_kind = "inline-record"
+payload_sha256 = "df4a0fe4837b31348d062c4b45c9a774300f4986b6350cb4661a08edcb61a0b4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-txn-workspace-generation-authority-relation-to-registration-8f9f0e25ba43b7a7"
+union_name = "LocalTxnWorkspaceGenerationAuthorityRelationToRegistration"
+containing_schema = "LocalTxnWorkspaceGeneration"
+union_path = "LocalTxnWorkspaceGeneration.authority_relation_to_registration"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalTxnWorkspaceGeneration"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-txn-workspace-generation-authority-relation-to-registration-exact-834c9be8be0ea6c0"
+union_name = "LocalTxnWorkspaceGenerationAuthorityRelationToRegistration"
+containing_schema = "LocalTxnWorkspaceGeneration"
+union_path = "LocalTxnWorkspaceGeneration.authority_relation_to_registration"
+arm_tag = 0x0001
+source_arm_name = "Exact"
+stable_name = "exact"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-txn-workspace-generation-authority-relation-to-registration-narrowed-a28ccca1571f109c"
+union_name = "LocalTxnWorkspaceGenerationAuthorityRelationToRegistration"
+containing_schema = "LocalTxnWorkspaceGeneration"
+union_path = "LocalTxnWorkspaceGeneration.authority_relation_to_registration"
+arm_tag = 0x0002
+source_arm_name = "Narrowed"
+stable_name = "narrowed"
+payload_kind = "inline-record"
+payload_sha256 = "f53b50e4446adbf4a41be75d3b9ce48033ed51036e059f9b6e7be144720083b5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:request-terminal-abort-stage-962bd888c2c93e14"
+union_name = "RequestTerminalAbortStage"
+containing_schema = "RequestTerminalAbort"
+union_path = "RequestTerminalAbort.stage"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RequestTerminalAbort"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:request-terminal-abort-stage-active-1c1d88db41870757"
+union_name = "RequestTerminalAbortStage"
+containing_schema = "RequestTerminalAbort"
+union_path = "RequestTerminalAbort.stage"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:request-terminal-abort-stage-prepare-admitted-f1095750c7a18e5e"
+union_name = "RequestTerminalAbortStage"
+containing_schema = "RequestTerminalAbort"
+union_path = "RequestTerminalAbort.stage"
+arm_tag = 0x0002
+source_arm_name = "PrepareAdmitted"
+stable_name = "prepare_admitted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:result-delivery-disposition-proof-disposition-63dca958d9a0a2e5"
+union_name = "ResultDeliveryDispositionProofDisposition"
+containing_schema = "ResultDeliveryDispositionProof"
+union_path = "ResultDeliveryDispositionProof.disposition"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ResultDeliveryDispositionProof"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:result-delivery-disposition-proof-disposition-pending-independent-c2ece07913c3d2a6"
+union_name = "ResultDeliveryDispositionProofDisposition"
+containing_schema = "ResultDeliveryDispositionProof"
+union_path = "ResultDeliveryDispositionProof.disposition"
+arm_tag = 0x0001
+source_arm_name = "PendingIndependent"
+stable_name = "pending_independent"
+payload_kind = "inline-record"
+payload_sha256 = "9228e88a6e3d501f67b1bc842e8c4d745353c82d408b863e0529865b6fdf9691"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:result-delivery-disposition-proof-disposition-released-independent-64706b0eaecd75ed"
+union_name = "ResultDeliveryDispositionProofDisposition"
+containing_schema = "ResultDeliveryDispositionProof"
+union_path = "ResultDeliveryDispositionProof.disposition"
+arm_tag = 0x0002
+source_arm_name = "ReleasedIndependent"
+stable_name = "released_independent"
+payload_kind = "inline-record"
+payload_sha256 = "26464f834c3b591753a9128ed57296010f89a8011083bfe4ba31c17d14d530b7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:result-delivery-disposition-proof-disposition-active-independent-ef353b6e77264c7c"
+union_name = "ResultDeliveryDispositionProofDisposition"
+containing_schema = "ResultDeliveryDispositionProof"
+union_path = "ResultDeliveryDispositionProof.disposition"
+arm_tag = 0x0003
+source_arm_name = "ActiveIndependent"
+stable_name = "active_independent"
+payload_kind = "inline-record"
+payload_sha256 = "26464f834c3b591753a9128ed57296010f89a8011083bfe4ba31c17d14d530b7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:result-delivery-disposition-proof-disposition-acknowledged-1bdd536693745a9c"
+union_name = "ResultDeliveryDispositionProofDisposition"
+containing_schema = "ResultDeliveryDispositionProof"
+union_path = "ResultDeliveryDispositionProof.disposition"
+arm_tag = 0x0004
+source_arm_name = "Acknowledged"
+stable_name = "acknowledged"
+payload_kind = "inline-record"
+payload_sha256 = "2b25f594e1752f89cc775add1125e5d9de1103a42f4decd924ea78c1737f3e4e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:result-delivery-disposition-proof-disposition-released-unacked-0ecc6cf2b695bdf3"
+union_name = "ResultDeliveryDispositionProofDisposition"
+containing_schema = "ResultDeliveryDispositionProof"
+union_path = "ResultDeliveryDispositionProof.disposition"
+arm_tag = 0x0005
+source_arm_name = "ReleasedUnacked"
+stable_name = "released_unacked"
+payload_kind = "inline-record"
+payload_sha256 = "bfce468a0eec8752f7c4a666b1d73488c9875e5152a0d139b91cc0f161ea183f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:result-end-send-completion-record-surface-c19934503df9ebbb"
+union_name = "ResultEndSendCompletionRecordSurface"
+containing_schema = "ResultEndSendCompletionRecord"
+union_path = "ResultEndSendCompletionRecord.surface"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ResultEndSendCompletionRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:result-end-send-completion-record-surface-native-fgp-cab66ceb36e8603e"
+union_name = "ResultEndSendCompletionRecordSurface"
+containing_schema = "ResultEndSendCompletionRecord"
+union_path = "ResultEndSendCompletionRecord.surface"
+arm_tag = 0x0001
+source_arm_name = "NativeFgp"
+stable_name = "native_fgp"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:result-end-send-completion-record-surface-http2-4f0b3bc0b72c0ed3"
+union_name = "ResultEndSendCompletionRecordSurface"
+containing_schema = "ResultEndSendCompletionRecord"
+union_path = "ResultEndSendCompletionRecord.surface"
+arm_tag = 0x0002
+source_arm_name = "Http2"
+stable_name = "http2"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:result-end-send-completion-record-surface-grpc-f4d78d10df85990e"
+union_name = "ResultEndSendCompletionRecordSurface"
+containing_schema = "ResultEndSendCompletionRecord"
+union_path = "ResultEndSendCompletionRecord.surface"
+arm_tag = 0x0003
+source_arm_name = "Grpc"
+stable_name = "grpc"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:result-end-send-completion-record-surface-web-socket-4d49267a64f45efc"
+union_name = "ResultEndSendCompletionRecordSurface"
+containing_schema = "ResultEndSendCompletionRecord"
+union_path = "ResultEndSendCompletionRecord.surface"
+arm_tag = 0x0004
+source_arm_name = "WebSocket"
+stable_name = "web_socket"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:session-region-close-receipt-posture-cc533428205d2543"
+union_name = "SessionRegionCloseReceiptPosture"
+containing_schema = "SessionRegionCloseReceipt"
+union_path = "SessionRegionCloseReceipt.posture"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["SessionRegionCloseReceipt"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:session-region-close-receipt-posture-local-cd3c7b26ae770e09"
+union_name = "SessionRegionCloseReceiptPosture"
+containing_schema = "SessionRegionCloseReceipt"
+union_path = "SessionRegionCloseReceipt.posture"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:session-region-close-receipt-posture-sharded-3075517ccfa8ebbb"
+union_name = "SessionRegionCloseReceiptPosture"
+containing_schema = "SessionRegionCloseReceipt"
+union_path = "SessionRegionCloseReceipt.posture"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "sharded"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:txn-abort-spec-required-abort-source-e4c7955d4bb9b0e4"
+union_name = "TxnAbortSpecRequiredAbortSource"
+containing_schema = "TxnAbortSpec"
+union_path = "TxnAbortSpec.required_abort_source"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TxnAbortSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-abort-spec-required-abort-source-client-requested-026eeeb9bbe8b12f"
+union_name = "TxnAbortSpecRequiredAbortSource"
+containing_schema = "TxnAbortSpec"
+union_path = "TxnAbortSpec.required_abort_source"
+arm_tag = 0x0001
+source_arm_name = "ClientRequested"
+stable_name = "client_requested"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-abort-spec-required-abort-source-administrative-27750c3c3a5c7e4d"
+union_name = "TxnAbortSpecRequiredAbortSource"
+containing_schema = "TxnAbortSpec"
+union_path = "TxnAbortSpec.required_abort_source"
+arm_tag = 0x0002
+source_arm_name = "Administrative"
+stable_name = "administrative"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:txn-outcome-record-audit-state-a707710d63dae109"
+union_name = "TxnOutcomeRecordAuditState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.audit_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TxnOutcomeRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-outcome-record-audit-state-not-required-7754db6de3c529c5"
+union_name = "TxnOutcomeRecordAuditState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.audit_state"
+arm_tag = 0x0001
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "inline-record"
+payload_sha256 = "27acef18721dfa1ec3a2bf2c4742c60a7aae1d17ac79ef1599ad68f6f0987966"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-outcome-record-audit-state-claimed-pending-013e5e7c74fe3762"
+union_name = "TxnOutcomeRecordAuditState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.audit_state"
+arm_tag = 0x0002
+source_arm_name = "ClaimedPending"
+stable_name = "claimed_pending"
+payload_kind = "inline-record"
+payload_sha256 = "6ac657d6e137d52753dd5c3ab1a30aa97866def6c4a24a0bc0fcdeb6b79028fa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-outcome-record-audit-state-terminal-gate-committed-4428fddae73fd73e"
+union_name = "TxnOutcomeRecordAuditState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.audit_state"
+arm_tag = 0x0003
+source_arm_name = "TerminalGateCommitted"
+stable_name = "terminal_gate_committed"
+payload_kind = "inline-record"
+payload_sha256 = "a5ff254866752edc586639b608a0b951ad9905ccb56e67cfb70cc588dde7d8e2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:txn-outcome-record-state-d5cdd5c4cc1edc7a"
+union_name = "TxnOutcomeRecordState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TxnOutcomeRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-outcome-record-state-begin-staging-863b7f5adacc8647"
+union_name = "TxnOutcomeRecordState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.state"
+arm_tag = 0x0001
+source_arm_name = "BeginStaging"
+stable_name = "begin_staging"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-outcome-record-state-never-registered-da182f009a232900"
+union_name = "TxnOutcomeRecordState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.state"
+arm_tag = 0x0002
+source_arm_name = "NeverRegistered"
+stable_name = "never_registered"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-outcome-record-state-registered-2b2ebe273f5d1cee"
+union_name = "TxnOutcomeRecordState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.state"
+arm_tag = 0x0003
+source_arm_name = "Registered"
+stable_name = "registered"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-outcome-record-state-prepare-admitted-fca42bb35eeea52c"
+union_name = "TxnOutcomeRecordState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.state"
+arm_tag = 0x0004
+source_arm_name = "PrepareAdmitted"
+stable_name = "prepare_admitted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-outcome-record-state-committed-pending-postconditions-def2ab2b28a06d3c"
+union_name = "TxnOutcomeRecordState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.state"
+arm_tag = 0x0005
+source_arm_name = "CommittedPendingPostconditions"
+stable_name = "committed_pending_postconditions"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-outcome-record-state-committed-49ccfc227970cfb3"
+union_name = "TxnOutcomeRecordState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.state"
+arm_tag = 0x0006
+source_arm_name = "Committed"
+stable_name = "committed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-outcome-record-state-aborted-1c1e75037b8a89a1"
+union_name = "TxnOutcomeRecordState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.state"
+arm_tag = 0x0007
+source_arm_name = "Aborted"
+stable_name = "aborted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:txn-outcome-record-state-read-closed-0d4de39d1aa0cfae"
+union_name = "TxnOutcomeRecordState"
+containing_schema = "TxnOutcomeRecord"
+union_path = "TxnOutcomeRecord.state"
+arm_tag = 0x0008
+source_arm_name = "ReadClosed"
+stable_name = "read_closed"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
@@ -36759,6 +38166,851 @@ target_row_id = "a03:wire-type:txn-abort-spec"
 slice_id = "a03"
 source_key = "top|TxnAbortSpec"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:union-authenticated-client-result-ack-receipt-posture-and-role-ed2bda25c055537d"
+target_row_id = "a03:union:authenticated-client-result-ack-receipt-posture-and-role-ed2bda25c055537d"
+slice_id = "a03"
+source_key = "union|AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>|AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.posture_and_role"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-authenticated-client-result-ack-receipt-posture-and-role-local-b15c3abcabed3daf"
+target_row_id = "a03:union-arm:authenticated-client-result-ack-receipt-posture-and-role-local-b15c3abcabed3daf"
+slice_id = "a03"
+source_key = "arm|AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>|AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.posture_and_role|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-authenticated-client-result-ack-receipt-posture-and-role-meta-a9f0da54c34f64b9"
+target_row_id = "a03:union-arm:authenticated-client-result-ack-receipt-posture-and-role-meta-a9f0da54c34f64b9"
+slice_id = "a03"
+source_key = "arm|AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>|AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.posture_and_role|Meta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-authenticated-client-result-release-receipt-posture-and-role-2496ab9925999d4d"
+target_row_id = "a03:union:authenticated-client-result-release-receipt-posture-and-role-2496ab9925999d4d"
+slice_id = "a03"
+source_key = "union|AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>|AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>.posture_and_role"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-authenticated-client-result-release-receipt-posture-and-role-local-ed31c991aeb219f0"
+target_row_id = "a03:union-arm:authenticated-client-result-release-receipt-posture-and-role-local-ed31c991aeb219f0"
+slice_id = "a03"
+source_key = "arm|AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>|AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>.posture_and_role|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-authenticated-client-result-release-receipt-posture-and-role-meta-05d48b72395b0735"
+target_row_id = "a03:union-arm:authenticated-client-result-release-receipt-posture-and-role-meta-05d48b72395b0735"
+slice_id = "a03"
+source_key = "arm|AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>|AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>.posture_and_role|Meta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-delivery-lease-expiry-evidence-lease-589956b3f09b8298"
+target_row_id = "a03:union:delivery-lease-expiry-evidence-lease-589956b3f09b8298"
+slice_id = "a03"
+source_key = "union|DeliveryLeaseExpiryEvidence|DeliveryLeaseExpiryEvidence.lease"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-delivery-lease-expiry-evidence-lease-local-0b9358e1838b5e94"
+target_row_id = "a03:union-arm:delivery-lease-expiry-evidence-lease-local-0b9358e1838b5e94"
+slice_id = "a03"
+source_key = "arm|DeliveryLeaseExpiryEvidence|DeliveryLeaseExpiryEvidence.lease|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-delivery-lease-expiry-evidence-lease-sharded-b91822b9a91dd005"
+target_row_id = "a03:union-arm:delivery-lease-expiry-evidence-lease-sharded-b91822b9a91dd005"
+slice_id = "a03"
+source_key = "arm|DeliveryLeaseExpiryEvidence|DeliveryLeaseExpiryEvidence.lease|Sharded"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-derived-generation-registry-status-49634a7014a8ad82"
+target_row_id = "a03:union:derived-generation-registry-status-49634a7014a8ad82"
+slice_id = "a03"
+source_key = "union|DerivedGenerationRegistry|DerivedGenerationRegistry.status"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-derived-generation-registry-status-building-d4c9f6214be12005"
+target_row_id = "a03:union-arm:derived-generation-registry-status-building-d4c9f6214be12005"
+slice_id = "a03"
+source_key = "arm|DerivedGenerationRegistry|DerivedGenerationRegistry.status|Building"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-derived-generation-registry-status-active-bdcaf198c0b31a59"
+target_row_id = "a03:union-arm:derived-generation-registry-status-active-bdcaf198c0b31a59"
+slice_id = "a03"
+source_key = "arm|DerivedGenerationRegistry|DerivedGenerationRegistry.status|Active"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-derived-generation-registry-status-retiring-08842e2ef6cd23c7"
+target_row_id = "a03:union-arm:derived-generation-registry-status-retiring-08842e2ef6cd23c7"
+slice_id = "a03"
+source_key = "arm|DerivedGenerationRegistry|DerivedGenerationRegistry.status|Retiring"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-embedded-result-fully-consumed-record-completion-source-713a8bd4e07e84a9"
+target_row_id = "a03:union:embedded-result-fully-consumed-record-completion-source-713a8bd4e07e84a9"
+slice_id = "a03"
+source_key = "union|EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>|EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>.completion_source"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-embedded-result-fully-consumed-record-completion-source-explicit-finish-256863db1e4015a7"
+target_row_id = "a03:union-arm:embedded-result-fully-consumed-record-completion-source-explicit-finish-256863db1e4015a7"
+slice_id = "a03"
+source_key = "arm|EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>|EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>.completion_source|ExplicitFinish"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-embedded-result-fully-consumed-record-completion-source-iterator-exhaustion-2948877a11e11270"
+target_row_id = "a03:union-arm:embedded-result-fully-consumed-record-completion-source-iterator-exhaustion-2948877a11e11270"
+slice_id = "a03"
+source_key = "arm|EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>|EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>.completion_source|IteratorExhaustion"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-attempt-registration-request-kind-73ac45b3d50bde88"
+target_row_id = "a03:union:local-attempt-registration-request-kind-73ac45b3d50bde88"
+slice_id = "a03"
+source_key = "union|LocalAttemptRegistration|LocalAttemptRegistration.request_kind"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-attempt-registration-request-kind-explicit-begin-d16e0a4e0b4240a3"
+target_row_id = "a03:union-arm:local-attempt-registration-request-kind-explicit-begin-d16e0a4e0b4240a3"
+slice_id = "a03"
+source_key = "arm|LocalAttemptRegistration|LocalAttemptRegistration.request_kind|ExplicitBegin"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-attempt-registration-request-kind-autocommit-execute-61bd4c7e352d87da"
+target_row_id = "a03:union-arm:local-attempt-registration-request-kind-autocommit-execute-61bd4c7e352d87da"
+slice_id = "a03"
+source_key = "arm|LocalAttemptRegistration|LocalAttemptRegistration.request_kind|AutocommitExecute"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-attempt-registration-spec-read-your-writes-basis-4d50bc7f532fe88d"
+target_row_id = "a03:union:local-attempt-registration-spec-read-your-writes-basis-4d50bc7f532fe88d"
+slice_id = "a03"
+source_key = "union|LocalAttemptRegistrationSpec|LocalAttemptRegistrationSpec.Autocommit.read_your_writes_basis"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-attempt-registration-spec-read-your-writes-basis-none-b8b0b5eb3e115466"
+target_row_id = "a03:union-arm:local-attempt-registration-spec-read-your-writes-basis-none-b8b0b5eb3e115466"
+slice_id = "a03"
+source_key = "arm|LocalAttemptRegistrationSpec|LocalAttemptRegistrationSpec.Autocommit.read_your_writes_basis|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-attempt-registration-spec-read-your-writes-basis-validated-25123ae58d7df5f9"
+target_row_id = "a03:union-arm:local-attempt-registration-spec-read-your-writes-basis-validated-25123ae58d7df5f9"
+slice_id = "a03"
+source_key = "arm|LocalAttemptRegistrationSpec|LocalAttemptRegistrationSpec.Autocommit.read_your_writes_basis|Validated"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-begin-reservation-spec-operation-class-7b33a21ca718dac3"
+target_row_id = "a03:union:local-begin-reservation-spec-operation-class-7b33a21ca718dac3"
+slice_id = "a03"
+source_key = "union|LocalBeginReservationSpec|LocalBeginReservationSpec.operation_class"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-reservation-spec-operation-class-read-only-4a337b019c2346a5"
+target_row_id = "a03:union-arm:local-begin-reservation-spec-operation-class-read-only-4a337b019c2346a5"
+slice_id = "a03"
+source_key = "arm|LocalBeginReservationSpec|LocalBeginReservationSpec.operation_class|ReadOnly"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-reservation-spec-operation-class-read-write-b1bc682b0135d915"
+target_row_id = "a03:union-arm:local-begin-reservation-spec-operation-class-read-write-b1bc682b0135d915"
+slice_id = "a03"
+source_key = "arm|LocalBeginReservationSpec|LocalBeginReservationSpec.operation_class|ReadWrite"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-begin-reservation-spec-read-your-writes-basis-c0aa1ed770e6ea8c"
+target_row_id = "a03:union:local-begin-reservation-spec-read-your-writes-basis-c0aa1ed770e6ea8c"
+slice_id = "a03"
+source_key = "union|LocalBeginReservationSpec|LocalBeginReservationSpec.read_your_writes_basis"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-reservation-spec-read-your-writes-basis-none-76e1bbca146ce421"
+target_row_id = "a03:union-arm:local-begin-reservation-spec-read-your-writes-basis-none-76e1bbca146ce421"
+slice_id = "a03"
+source_key = "arm|LocalBeginReservationSpec|LocalBeginReservationSpec.read_your_writes_basis|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-reservation-spec-read-your-writes-basis-validated-4ac1376344b8868a"
+target_row_id = "a03:union-arm:local-begin-reservation-spec-read-your-writes-basis-validated-4ac1376344b8868a"
+slice_id = "a03"
+source_key = "arm|LocalBeginReservationSpec|LocalBeginReservationSpec.read_your_writes_basis|Validated"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-conflict-edge-kind-3b368254146def95"
+target_row_id = "a03:union:local-conflict-edge-kind-3b368254146def95"
+slice_id = "a03"
+source_key = "union|LocalConflictEdge|LocalConflictEdge.kind"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-conflict-edge-kind-wr-4833ceb7da75584f"
+target_row_id = "a03:union-arm:local-conflict-edge-kind-wr-4833ceb7da75584f"
+slice_id = "a03"
+source_key = "arm|LocalConflictEdge|LocalConflictEdge.kind|wr"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-conflict-edge-kind-ww-a7fc6918abe8377d"
+target_row_id = "a03:union-arm:local-conflict-edge-kind-ww-a7fc6918abe8377d"
+slice_id = "a03"
+source_key = "arm|LocalConflictEdge|LocalConflictEdge.kind|ww"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-conflict-edge-kind-rw-01c466fec234ba78"
+target_row_id = "a03:union-arm:local-conflict-edge-kind-rw-01c466fec234ba78"
+slice_id = "a03"
+source_key = "arm|LocalConflictEdge|LocalConflictEdge.kind|rw"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-conflict-entry-detail-state-f0a7511afb0c014e"
+target_row_id = "a03:union:local-conflict-entry-detail-state-f0a7511afb0c014e"
+slice_id = "a03"
+source_key = "union|LocalConflictEntry|LocalConflictEntry.detail_state"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-conflict-entry-detail-state-detailed-417381df8b829e45"
+target_row_id = "a03:union-arm:local-conflict-entry-detail-state-detailed-417381df8b829e45"
+slice_id = "a03"
+source_key = "arm|LocalConflictEntry|LocalConflictEntry.detail_state|Detailed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-conflict-entry-detail-state-compacted-9cd6c9ad5b4e8d4d"
+target_row_id = "a03:union-arm:local-conflict-entry-detail-state-compacted-9cd6c9ad5b4e8d4d"
+slice_id = "a03"
+source_key = "arm|LocalConflictEntry|LocalConflictEntry.detail_state|Compacted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-conflict-entry-state-b56bac76ba14a99f"
+target_row_id = "a03:union:local-conflict-entry-state-b56bac76ba14a99f"
+slice_id = "a03"
+source_key = "union|LocalConflictEntry|LocalConflictEntry.state"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-conflict-entry-state-active-474ceaf8c40cb023"
+target_row_id = "a03:union-arm:local-conflict-entry-state-active-474ceaf8c40cb023"
+slice_id = "a03"
+source_key = "arm|LocalConflictEntry|LocalConflictEntry.state|Active"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-conflict-entry-state-prepare-admitted-42a32b3511900825"
+target_row_id = "a03:union-arm:local-conflict-entry-state-prepare-admitted-42a32b3511900825"
+slice_id = "a03"
+source_key = "arm|LocalConflictEntry|LocalConflictEntry.state|PrepareAdmitted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-conflict-entry-state-committed-f94109eac97808cb"
+target_row_id = "a03:union-arm:local-conflict-entry-state-committed-f94109eac97808cb"
+slice_id = "a03"
+source_key = "arm|LocalConflictEntry|LocalConflictEntry.state|Committed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-conflict-entry-state-aborted-7039e91fd02ac158"
+target_row_id = "a03:union-arm:local-conflict-entry-state-aborted-7039e91fd02ac158"
+slice_id = "a03"
+source_key = "arm|LocalConflictEntry|LocalConflictEntry.state|Aborted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-conflict-entry-state-read-closed-0cf9d08cc9527506"
+target_row_id = "a03:union-arm:local-conflict-entry-state-read-closed-0cf9d08cc9527506"
+slice_id = "a03"
+source_key = "arm|LocalConflictEntry|LocalConflictEntry.state|ReadClosed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-outcome-expiry-spec-expected-begin-index-entry-a527b970ce878049"
+target_row_id = "a03:union:local-outcome-expiry-spec-expected-begin-index-entry-a527b970ce878049"
+slice_id = "a03"
+source_key = "union|LocalOutcomeExpirySpec|LocalOutcomeExpirySpec.expected_begin_index_entry"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-outcome-expiry-spec-expected-begin-index-entry-bound-compacted-4dd0b916e57fc9c7"
+target_row_id = "a03:union-arm:local-outcome-expiry-spec-expected-begin-index-entry-bound-compacted-4dd0b916e57fc9c7"
+slice_id = "a03"
+source_key = "arm|LocalOutcomeExpirySpec|LocalOutcomeExpirySpec.expected_begin_index_entry|BoundCompacted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-outcome-expiry-spec-expected-begin-index-entry-never-registered-compacted-60714bd895873eec"
+target_row_id = "a03:union-arm:local-outcome-expiry-spec-expected-begin-index-entry-never-registered-compacted-60714bd895873eec"
+slice_id = "a03"
+source_key = "arm|LocalOutcomeExpirySpec|LocalOutcomeExpirySpec.expected_begin_index_entry|NeverRegisteredCompacted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-read-close-spec-mode-be63d6ec4ddc2834"
+target_row_id = "a03:union:local-read-close-spec-mode-be63d6ec4ddc2834"
+slice_id = "a03"
+source_key = "union|LocalReadCloseSpec|LocalReadCloseSpec.mode"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-read-close-spec-mode-autocommit-result-4cb8d973454dc685"
+target_row_id = "a03:union-arm:local-read-close-spec-mode-autocommit-result-4cb8d973454dc685"
+slice_id = "a03"
+source_key = "arm|LocalReadCloseSpec|LocalReadCloseSpec.mode|AutocommitResult"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-read-close-spec-mode-explicit-close-1c14d1bbfe09fb58"
+target_row_id = "a03:union-arm:local-read-close-spec-mode-explicit-close-1c14d1bbfe09fb58"
+slice_id = "a03"
+source_key = "arm|LocalReadCloseSpec|LocalReadCloseSpec.mode|ExplicitClose"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-serialization-certificate-lifecycle-basis-398fb1863a227513"
+target_row_id = "a03:union:local-serialization-certificate-lifecycle-basis-398fb1863a227513"
+slice_id = "a03"
+source_key = "union|LocalSerializationCertificate|LocalSerializationCertificate.lifecycle_basis"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-serialization-certificate-lifecycle-basis-statement-73b6f50954494f8d"
+target_row_id = "a03:union-arm:local-serialization-certificate-lifecycle-basis-statement-73b6f50954494f8d"
+slice_id = "a03"
+source_key = "arm|LocalSerializationCertificate|LocalSerializationCertificate.lifecycle_basis|Statement"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-serialization-certificate-lifecycle-basis-prepare-90170d5798e20004"
+target_row_id = "a03:union-arm:local-serialization-certificate-lifecycle-basis-prepare-90170d5798e20004"
+slice_id = "a03"
+source_key = "arm|LocalSerializationCertificate|LocalSerializationCertificate.lifecycle_basis|Prepare"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-serialization-certificate-lifecycle-basis-read-close-bd6a73962a39a8ed"
+target_row_id = "a03:union-arm:local-serialization-certificate-lifecycle-basis-read-close-bd6a73962a39a8ed"
+slice_id = "a03"
+source_key = "arm|LocalSerializationCertificate|LocalSerializationCertificate.lifecycle_basis|ReadClose"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-terminal-completion-spec-prebuilt-read-your-writes-issuance-ref-fc68469d92072a79"
+target_row_id = "a03:union:local-terminal-completion-spec-prebuilt-read-your-writes-issuance-ref-fc68469d92072a79"
+slice_id = "a03"
+source_key = "union|LocalTerminalCompletionSpec|LocalTerminalCompletionSpec.prebuilt_read_your_writes_issuance_ref"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-terminal-completion-spec-prebuilt-read-your-writes-issuance-ref-none-bc6e4d6bbda3dc6e"
+target_row_id = "a03:union-arm:local-terminal-completion-spec-prebuilt-read-your-writes-issuance-ref-none-bc6e4d6bbda3dc6e"
+slice_id = "a03"
+source_key = "arm|LocalTerminalCompletionSpec|LocalTerminalCompletionSpec.prebuilt_read_your_writes_issuance_ref|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-terminal-completion-spec-prebuilt-read-your-writes-issuance-ref-some-436f77cd48d18859"
+target_row_id = "a03:union-arm:local-terminal-completion-spec-prebuilt-read-your-writes-issuance-ref-some-436f77cd48d18859"
+slice_id = "a03"
+source_key = "arm|LocalTerminalCompletionSpec|LocalTerminalCompletionSpec.prebuilt_read_your_writes_issuance_ref|Some"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-terminal-completion-spec-result-disposition-e0211c9fac98b59d"
+target_row_id = "a03:union:local-terminal-completion-spec-result-disposition-e0211c9fac98b59d"
+slice_id = "a03"
+source_key = "union|LocalTerminalCompletionSpec|LocalTerminalCompletionSpec.result_disposition"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-terminal-completion-spec-result-disposition-no-terminal-result-fca51002d30028f9"
+target_row_id = "a03:union-arm:local-terminal-completion-spec-result-disposition-no-terminal-result-fca51002d30028f9"
+slice_id = "a03"
+source_key = "arm|LocalTerminalCompletionSpec|LocalTerminalCompletionSpec.result_disposition|NoTerminalResult"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-terminal-completion-spec-result-disposition-read-terminal-result-d4c341ed01561094"
+target_row_id = "a03:union-arm:local-terminal-completion-spec-result-disposition-read-terminal-result-d4c341ed01561094"
+slice_id = "a03"
+source_key = "arm|LocalTerminalCompletionSpec|LocalTerminalCompletionSpec.result_disposition|ReadTerminalResult"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-terminal-completion-spec-result-disposition-autocommit-write-returning-4404d5b6efa1d2a3"
+target_row_id = "a03:union-arm:local-terminal-completion-spec-result-disposition-autocommit-write-returning-4404d5b6efa1d2a3"
+slice_id = "a03"
+source_key = "arm|LocalTerminalCompletionSpec|LocalTerminalCompletionSpec.result_disposition|AutocommitWriteReturning"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-txn-workspace-generation-authority-relation-to-registration-8f9f0e25ba43b7a7"
+target_row_id = "a03:union:local-txn-workspace-generation-authority-relation-to-registration-8f9f0e25ba43b7a7"
+slice_id = "a03"
+source_key = "union|LocalTxnWorkspaceGeneration|LocalTxnWorkspaceGeneration.authority_relation_to_registration"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-txn-workspace-generation-authority-relation-to-registration-exact-834c9be8be0ea6c0"
+target_row_id = "a03:union-arm:local-txn-workspace-generation-authority-relation-to-registration-exact-834c9be8be0ea6c0"
+slice_id = "a03"
+source_key = "arm|LocalTxnWorkspaceGeneration|LocalTxnWorkspaceGeneration.authority_relation_to_registration|Exact"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-txn-workspace-generation-authority-relation-to-registration-narrowed-a28ccca1571f109c"
+target_row_id = "a03:union-arm:local-txn-workspace-generation-authority-relation-to-registration-narrowed-a28ccca1571f109c"
+slice_id = "a03"
+source_key = "arm|LocalTxnWorkspaceGeneration|LocalTxnWorkspaceGeneration.authority_relation_to_registration|Narrowed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-request-terminal-abort-stage-962bd888c2c93e14"
+target_row_id = "a03:union:request-terminal-abort-stage-962bd888c2c93e14"
+slice_id = "a03"
+source_key = "union|RequestTerminalAbort|RequestTerminalAbort.stage"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-request-terminal-abort-stage-active-1c1d88db41870757"
+target_row_id = "a03:union-arm:request-terminal-abort-stage-active-1c1d88db41870757"
+slice_id = "a03"
+source_key = "arm|RequestTerminalAbort|RequestTerminalAbort.stage|Active"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-request-terminal-abort-stage-prepare-admitted-f1095750c7a18e5e"
+target_row_id = "a03:union-arm:request-terminal-abort-stage-prepare-admitted-f1095750c7a18e5e"
+slice_id = "a03"
+source_key = "arm|RequestTerminalAbort|RequestTerminalAbort.stage|PrepareAdmitted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-result-delivery-disposition-proof-disposition-63dca958d9a0a2e5"
+target_row_id = "a03:union:result-delivery-disposition-proof-disposition-63dca958d9a0a2e5"
+slice_id = "a03"
+source_key = "union|ResultDeliveryDispositionProof|ResultDeliveryDispositionProof.disposition"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-result-delivery-disposition-proof-disposition-pending-independent-c2ece07913c3d2a6"
+target_row_id = "a03:union-arm:result-delivery-disposition-proof-disposition-pending-independent-c2ece07913c3d2a6"
+slice_id = "a03"
+source_key = "arm|ResultDeliveryDispositionProof|ResultDeliveryDispositionProof.disposition|PendingIndependent"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-result-delivery-disposition-proof-disposition-released-independent-64706b0eaecd75ed"
+target_row_id = "a03:union-arm:result-delivery-disposition-proof-disposition-released-independent-64706b0eaecd75ed"
+slice_id = "a03"
+source_key = "arm|ResultDeliveryDispositionProof|ResultDeliveryDispositionProof.disposition|ReleasedIndependent"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-result-delivery-disposition-proof-disposition-active-independent-ef353b6e77264c7c"
+target_row_id = "a03:union-arm:result-delivery-disposition-proof-disposition-active-independent-ef353b6e77264c7c"
+slice_id = "a03"
+source_key = "arm|ResultDeliveryDispositionProof|ResultDeliveryDispositionProof.disposition|ActiveIndependent"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-result-delivery-disposition-proof-disposition-acknowledged-1bdd536693745a9c"
+target_row_id = "a03:union-arm:result-delivery-disposition-proof-disposition-acknowledged-1bdd536693745a9c"
+slice_id = "a03"
+source_key = "arm|ResultDeliveryDispositionProof|ResultDeliveryDispositionProof.disposition|Acknowledged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-result-delivery-disposition-proof-disposition-released-unacked-0ecc6cf2b695bdf3"
+target_row_id = "a03:union-arm:result-delivery-disposition-proof-disposition-released-unacked-0ecc6cf2b695bdf3"
+slice_id = "a03"
+source_key = "arm|ResultDeliveryDispositionProof|ResultDeliveryDispositionProof.disposition|ReleasedUnacked"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-result-end-send-completion-record-surface-c19934503df9ebbb"
+target_row_id = "a03:union:result-end-send-completion-record-surface-c19934503df9ebbb"
+slice_id = "a03"
+source_key = "union|ResultEndSendCompletionRecord|ResultEndSendCompletionRecord.surface"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-result-end-send-completion-record-surface-native-fgp-cab66ceb36e8603e"
+target_row_id = "a03:union-arm:result-end-send-completion-record-surface-native-fgp-cab66ceb36e8603e"
+slice_id = "a03"
+source_key = "arm|ResultEndSendCompletionRecord|ResultEndSendCompletionRecord.surface|NativeFgp"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-result-end-send-completion-record-surface-http2-4f0b3bc0b72c0ed3"
+target_row_id = "a03:union-arm:result-end-send-completion-record-surface-http2-4f0b3bc0b72c0ed3"
+slice_id = "a03"
+source_key = "arm|ResultEndSendCompletionRecord|ResultEndSendCompletionRecord.surface|Http2"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-result-end-send-completion-record-surface-grpc-f4d78d10df85990e"
+target_row_id = "a03:union-arm:result-end-send-completion-record-surface-grpc-f4d78d10df85990e"
+slice_id = "a03"
+source_key = "arm|ResultEndSendCompletionRecord|ResultEndSendCompletionRecord.surface|Grpc"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-result-end-send-completion-record-surface-web-socket-4d49267a64f45efc"
+target_row_id = "a03:union-arm:result-end-send-completion-record-surface-web-socket-4d49267a64f45efc"
+slice_id = "a03"
+source_key = "arm|ResultEndSendCompletionRecord|ResultEndSendCompletionRecord.surface|WebSocket"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-session-region-close-receipt-posture-cc533428205d2543"
+target_row_id = "a03:union:session-region-close-receipt-posture-cc533428205d2543"
+slice_id = "a03"
+source_key = "union|SessionRegionCloseReceipt|SessionRegionCloseReceipt.posture"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-session-region-close-receipt-posture-local-cd3c7b26ae770e09"
+target_row_id = "a03:union-arm:session-region-close-receipt-posture-local-cd3c7b26ae770e09"
+slice_id = "a03"
+source_key = "arm|SessionRegionCloseReceipt|SessionRegionCloseReceipt.posture|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-session-region-close-receipt-posture-sharded-3075517ccfa8ebbb"
+target_row_id = "a03:union-arm:session-region-close-receipt-posture-sharded-3075517ccfa8ebbb"
+slice_id = "a03"
+source_key = "arm|SessionRegionCloseReceipt|SessionRegionCloseReceipt.posture|Sharded"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-txn-abort-spec-required-abort-source-e4c7955d4bb9b0e4"
+target_row_id = "a03:union:txn-abort-spec-required-abort-source-e4c7955d4bb9b0e4"
+slice_id = "a03"
+source_key = "union|TxnAbortSpec|TxnAbortSpec.required_abort_source"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-abort-spec-required-abort-source-client-requested-026eeeb9bbe8b12f"
+target_row_id = "a03:union-arm:txn-abort-spec-required-abort-source-client-requested-026eeeb9bbe8b12f"
+slice_id = "a03"
+source_key = "arm|TxnAbortSpec|TxnAbortSpec.required_abort_source|ClientRequested"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-abort-spec-required-abort-source-administrative-27750c3c3a5c7e4d"
+target_row_id = "a03:union-arm:txn-abort-spec-required-abort-source-administrative-27750c3c3a5c7e4d"
+slice_id = "a03"
+source_key = "arm|TxnAbortSpec|TxnAbortSpec.required_abort_source|Administrative"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-txn-outcome-record-audit-state-a707710d63dae109"
+target_row_id = "a03:union:txn-outcome-record-audit-state-a707710d63dae109"
+slice_id = "a03"
+source_key = "union|TxnOutcomeRecord|TxnOutcomeRecord.audit_state"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-outcome-record-audit-state-not-required-7754db6de3c529c5"
+target_row_id = "a03:union-arm:txn-outcome-record-audit-state-not-required-7754db6de3c529c5"
+slice_id = "a03"
+source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.audit_state|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-outcome-record-audit-state-claimed-pending-013e5e7c74fe3762"
+target_row_id = "a03:union-arm:txn-outcome-record-audit-state-claimed-pending-013e5e7c74fe3762"
+slice_id = "a03"
+source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.audit_state|ClaimedPending"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-outcome-record-audit-state-terminal-gate-committed-4428fddae73fd73e"
+target_row_id = "a03:union-arm:txn-outcome-record-audit-state-terminal-gate-committed-4428fddae73fd73e"
+slice_id = "a03"
+source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.audit_state|TerminalGateCommitted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-txn-outcome-record-state-d5cdd5c4cc1edc7a"
+target_row_id = "a03:union:txn-outcome-record-state-d5cdd5c4cc1edc7a"
+slice_id = "a03"
+source_key = "union|TxnOutcomeRecord|TxnOutcomeRecord.state"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-outcome-record-state-begin-staging-863b7f5adacc8647"
+target_row_id = "a03:union-arm:txn-outcome-record-state-begin-staging-863b7f5adacc8647"
+slice_id = "a03"
+source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.state|BeginStaging"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-outcome-record-state-never-registered-da182f009a232900"
+target_row_id = "a03:union-arm:txn-outcome-record-state-never-registered-da182f009a232900"
+slice_id = "a03"
+source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.state|NeverRegistered"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-outcome-record-state-registered-2b2ebe273f5d1cee"
+target_row_id = "a03:union-arm:txn-outcome-record-state-registered-2b2ebe273f5d1cee"
+slice_id = "a03"
+source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.state|Registered"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-outcome-record-state-prepare-admitted-fca42bb35eeea52c"
+target_row_id = "a03:union-arm:txn-outcome-record-state-prepare-admitted-fca42bb35eeea52c"
+slice_id = "a03"
+source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.state|PrepareAdmitted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-outcome-record-state-committed-pending-postconditions-def2ab2b28a06d3c"
+target_row_id = "a03:union-arm:txn-outcome-record-state-committed-pending-postconditions-def2ab2b28a06d3c"
+slice_id = "a03"
+source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.state|CommittedPendingPostconditions"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-outcome-record-state-committed-49ccfc227970cfb3"
+target_row_id = "a03:union-arm:txn-outcome-record-state-committed-49ccfc227970cfb3"
+slice_id = "a03"
+source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.state|Committed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-outcome-record-state-aborted-1c1e75037b8a89a1"
+target_row_id = "a03:union-arm:txn-outcome-record-state-aborted-1c1e75037b8a89a1"
+slice_id = "a03"
+source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.state|Aborted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-txn-outcome-record-state-read-closed-0d4de39d1aa0cfae"
+target_row_id = "a03:union-arm:txn-outcome-record-state-read-closed-0d4de39d1aa0cfae"
+slice_id = "a03"
+source_key = "arm|TxnOutcomeRecord|TxnOutcomeRecord.state|ReadClosed"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
