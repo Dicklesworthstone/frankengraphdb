@@ -6142,3 +6142,101 @@ fn idr_canonical_pre_bootstrap_evidence_reencryption_proof_reserved_logical_shel
         "shorthand ambiguities must remain open until exact field types are settled"
     );
 }
+
+#[test]
+fn idr_restore_journal_key_destruction_summary_reserved_logical_shell_is_exact() {
+    let identity = real_identity();
+    let summary = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "RestoreJournalKeyDestructionSummary")
+        .expect("RestoreJournalKeyDestructionSummary logical shell exists");
+    let reference_free_control = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "PortableRestoreArchiveAcquisitionReceipt")
+        .expect("known reference-free a17 control exists");
+    assert_eq!(summary.object_kind, 0x03d8);
+    assert_eq!(summary.status, "reserved");
+    assert_eq!(
+        summary.construction_order, reference_free_control.construction_order,
+        "the source declares no outgoing strong edge, so the compact summary shares the a17 reference-free leaf order"
+    );
+    assert_eq!(summary.construction_order, 6);
+    assert_eq!(summary.role_predicate, "true");
+    assert_eq!(summary.max_size_bytes, 16_777_216);
+    assert_eq!(
+        summary.golden_corpus,
+        "corpus/logical/restore_journal_key_destruction_summary/"
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|reservation| reservation.symbol == "RestoreJournalKeyDestructionSummary")
+        .expect("RestoreJournalKeyDestructionSummary permanent reservation exists");
+    assert_eq!(
+        reservation.row_id,
+        "a17:reservation:restore-journal-key-destruction-summary"
+    );
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x03d8");
+    assert_eq!(reservation.disposition, "existing");
+
+    let source_key = "top|RestoreJournalKeyDestructionSummary<Role>";
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == source_key)
+        .expect("RestoreJournalKeyDestructionSummary source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == source_key)
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "source candidate must map exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a17:target:logical-kind-restore-journal-key-destruction-summary"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a17:logical-kind:restore-journal-key-destruction-summary"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+    assert_eq!(targets[0].definition_status, "declared");
+
+    assert!(
+        !identity
+            .fields
+            .iter()
+            .any(|field| { field.containing_schema == "RestoreJournalKeyDestructionSummary" }),
+        "the shell increment must not preempt its field census"
+    );
+    assert!(
+        !identity.ordinary_unions.iter().any(|union| {
+            union.containing_schema == "RestoreJournalKeyDestructionSummary"
+                || union.union_name == "RestoreJournalKeyDestructionSummary"
+        }) && !identity.unions.iter().any(|union| {
+            union.containing_schema == "RestoreJournalKeyDestructionSummary"
+                || union.union_name == "RestoreJournalKeyDestructionSummary"
+        }),
+        "the compact record body is not a closed union and this shell must not invent one"
+    );
+    assert!(
+        !catalog.ambiguity_adjudications.iter().any(|row| {
+            row.ambiguity_source_key
+                .contains("|RestoreJournalKeyDestructionSummary|")
+                || row
+                    .resolved_source_keys
+                    .iter()
+                    .any(|resolved| resolved.contains("|RestoreJournalKeyDestructionSummary|"))
+        }),
+        "shorthand ambiguities must remain open until exact field types are settled"
+    );
+}

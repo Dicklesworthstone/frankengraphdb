@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2125
+target_count = 2126
 projection_fallback_count = 90
-target_source_assignment_sha256 = "41082cd03a26b667d72404242b6a9d408655b7d7e8be6f73ce8c4d6b652b41c5"
+target_source_assignment_sha256 = "b3c7b054ba3a40077a84c3bfda5dfdfb28047fd2940a6917ea37a83448535475"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 43
+registry_epoch = 44
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -3910,6 +3910,17 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_abandonment_receipt/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:restore-journal-key-destruction-summary"
+object_kind = 0x03d8
+name = "RestoreJournalKeyDestructionSummary"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_journal_key_destruction_summary/"
 
 [[logical_kind]]
 slice_id = "a18"
@@ -34888,7 +34899,7 @@ symbol = "RestoreJournalKeyDestructionSummary"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03d8"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a17:reservation:restore-journal-key-disposition"
@@ -45792,7 +45803,7 @@ symbol = "RestoreJournalKeyDestructionSummary"
 generic_signature = "<Role>"
 source_key = "top|RestoreJournalKeyDestructionSummary<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2299"]
 
 [[top_level_candidate]]
@@ -66981,6 +66992,14 @@ target_row_id = "a08:union-arm:typed-certified-meta-projection-payload-ordered-s
 slice_id = "a08"
 source_key = "arm|TypedCertifiedMetaProjectionPayload|TypedCertifiedMetaProjectionPayload.ordered_slot_deltas.record.after_value|StrongRef"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-restore-journal-key-destruction-summary"
+target_row_id = "a17:logical-kind:restore-journal-key-destruction-summary"
+slice_id = "a17"
+source_key = "top|RestoreJournalKeyDestructionSummary<Role>"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
