@@ -197,9 +197,9 @@ status = "live"
 # Owner: fgdb-w1-generated-parsers-i3k.
 [[checker]]
 symbol = "idr_generated_encoder_decoder_roundtrip"
-kind = "stub"
+kind = "cargo-test"
 artifact = "crates/fgdb-codec/tests/generated_durable_roundtrip.rs"
-status = "stub"
+status = "live"
 
 # Owner: fgdb-w1-format-test-corpora-lyf.
 [[checker]]

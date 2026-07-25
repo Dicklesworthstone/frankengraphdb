@@ -1698,7 +1698,12 @@ fn appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events() {
     );
 
     let mut stub_live = catalog.clone();
-    stub_live.evidence[0].checker_ids = vec!["idr_generated_encoder_decoder_roundtrip".to_owned()];
+    // Any registered STUB symbol proves the rule; this one is deliberately a
+    // deeply-blocked oracle checker (crates/fgdb-oracles does not exist), so it
+    // stays stub far longer than a checker whose subsystem is already in-tree.
+    // It previously cited idr_generated_encoder_decoder_roundtrip, which has
+    // since gone live now that its harness landed.
+    stub_live.evidence[0].checker_ids = vec!["fg_inv_01_core_checker".to_owned()];
     let violations = appendix_a::verify_repository_bindings(&root, &stub_live);
     assert!(
         violations
