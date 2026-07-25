@@ -931,7 +931,8 @@ mod tests {
     #[test]
     fn word_and_superblock_boundaries_match_naive_queries() {
         for len in [
-            1_usize, 2, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025,
+            0_usize, 1, 2, 63, 64, 65, 127, 128, 129, 510, 511, 512, 513, 514, 1023, 1024, 1025,
+            1535, 1536, 1537, 2047, 2048, 2049,
         ] {
             let patterns = [
                 make_bits(len, |_: usize| false),
@@ -1237,8 +1238,14 @@ mod tests {
                 bits.len()
             );
         }
-        assert_eq!(vector.rank1(bits.len().saturating_add(1)), None);
-        assert_eq!(vector.rank0(bits.len().saturating_add(1)), None);
+        for invalid_end in [
+            bits.len().saturating_add(1),
+            bits.len().saturating_add(SUPERBLOCK_BITS + 1),
+            usize::MAX,
+        ] {
+            assert_eq!(vector.rank1(invalid_end), None);
+            assert_eq!(vector.rank0(invalid_end), None);
+        }
 
         for (ordinal, &position) in expected_ones.iter().enumerate() {
             assert_eq!(
@@ -1248,7 +1255,14 @@ mod tests {
                 bits.len()
             );
         }
-        assert_eq!(vector.select1(expected_ones.len()), None);
+        for invalid_ordinal in [
+            expected_ones.len(),
+            expected_ones.len().saturating_add(1),
+            expected_ones.len().saturating_add(SUPERBLOCK_BITS + 1),
+            usize::MAX,
+        ] {
+            assert_eq!(vector.select1(invalid_ordinal), None);
+        }
 
         for (ordinal, &position) in expected_zeros.iter().enumerate() {
             assert_eq!(
@@ -1258,6 +1272,13 @@ mod tests {
                 bits.len()
             );
         }
-        assert_eq!(vector.select0(expected_zeros.len()), None);
+        for invalid_ordinal in [
+            expected_zeros.len(),
+            expected_zeros.len().saturating_add(1),
+            expected_zeros.len().saturating_add(SUPERBLOCK_BITS + 1),
+            usize::MAX,
+        ] {
+            assert_eq!(vector.select0(invalid_ordinal), None);
+        }
     }
 }
