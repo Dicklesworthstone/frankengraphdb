@@ -2526,6 +2526,67 @@ mod tests {
     }
 
     #[test]
+    fn stream_rejects_every_truncation_and_declared_count_mismatch() {
+        let mut values = (0..STREAM_BLOCK_ENTRIES as u64).collect::<Vec<_>>();
+        values.extend([1_u64 << 63, u64::MAX]);
+        let encoded =
+            StreamVByteNeighbors::try_new(&values, EntryLimit::new(values.len())).unwrap();
+        assert_eq!(encoded.fences.len(), 2);
+        assert_eq!(encoded.fences[0].entry_count(), STREAM_BLOCK_ENTRIES);
+        assert_eq!(encoded.fences[1].entry_count(), 2);
+        assert_eq!(encoded.select(values.len() - 1), Some(u64::MAX));
+
+        for cut in 0..encoded.bytes.len() {
+            let mut truncated = encoded.clone();
+            truncated.bytes.truncate(cut);
+            assert!(
+                matches!(
+                    truncated.validate(),
+                    Err(NeighborError::MalformedStream { .. })
+                ),
+                "proper byte prefix unexpectedly validated at cut {cut}"
+            );
+        }
+
+        for block_index in 0..encoded.fences.len() {
+            let actual = encoded.fences[block_index].entry_count();
+            for declared in 0..=STREAM_BLOCK_ENTRIES + 1 {
+                if declared == actual {
+                    continue;
+                }
+                let mut mismatched = encoded.clone();
+                mismatched.fences[block_index].entry_count =
+                    u16::try_from(declared).expect("bounded test count fits u16");
+                assert!(
+                    matches!(
+                        mismatched.validate(),
+                        Err(NeighborError::MalformedStream { .. })
+                    ),
+                    "block {block_index} accepted declared count {declared}"
+                );
+            }
+        }
+
+        for declared_len in 0..=values.len() + 1 {
+            if declared_len == values.len() {
+                continue;
+            }
+            let mut mismatched = encoded.clone();
+            mismatched.len = declared_len;
+            assert!(
+                matches!(
+                    mismatched.validate(),
+                    Err(NeighborError::MalformedStream {
+                        cause: MalformedStream::LogicalLength { .. },
+                        ..
+                    })
+                ),
+                "stream accepted declared logical length {declared_len}"
+            );
+        }
+    }
+
+    #[test]
     fn stream_validation_rejects_every_private_invariant_violation() {
         let valid = StreamVByteNeighbors::try_new(&[7], EntryLimit::new(1)).unwrap();
 
