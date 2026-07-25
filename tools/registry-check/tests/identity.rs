@@ -5285,3 +5285,120 @@ fn idr_canonical_restore_plan_availability_copy_reserved_logical_shell_is_exact(
         "a declared shell must not skip coverage-first sequencing with premature completion rows"
     );
 }
+
+#[test]
+fn idr_canonical_restore_source_acquisition_plan_copy_reserved_logical_shell_is_exact() {
+    let identity = real_identity();
+    let logical = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "CanonicalRestoreSourceAcquisitionPlanCopy")
+        .expect("CanonicalRestoreSourceAcquisitionPlanCopy logical shell exists");
+    assert_eq!(logical.object_kind, 0x025e);
+    assert_eq!(logical.status, "reserved");
+    assert_eq!(logical.construction_order, 7);
+    assert_eq!(logical.role_predicate, "true");
+    assert_eq!(logical.max_size_bytes, 16_777_216);
+    assert_eq!(
+        logical.golden_corpus,
+        "corpus/logical/canonical_restore_source_acquisition_plan_copy/"
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|reservation| reservation.symbol == "CanonicalRestoreSourceAcquisitionPlanCopy")
+        .expect("CanonicalRestoreSourceAcquisitionPlanCopy permanent reservation exists");
+    assert_eq!(
+        reservation.row_id,
+        "a17:reservation:canonical-restore-source-acquisition-plan-copy"
+    );
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x025e");
+    assert_eq!(reservation.disposition, "existing");
+
+    let source_key = "top|CanonicalRestoreSourceAcquisitionPlanCopy<Role>";
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == source_key)
+        .expect("CanonicalRestoreSourceAcquisitionPlanCopy source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == source_key)
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "source candidate must map exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a17:target:logical-kind-canonical-restore-source-acquisition-plan-copy"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a17:logical-kind:canonical-restore-source-acquisition-plan-copy"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+    assert_eq!(targets[0].definition_status, "declared");
+
+    assert!(
+        !identity.fields.iter().any(|field| {
+            field.containing_schema == "CanonicalRestoreSourceAcquisitionPlanCopy"
+        }),
+        "the shell increment must not preempt its field census"
+    );
+    assert!(
+        !identity.ordinary_unions.iter().any(|union| {
+            union.containing_schema == "CanonicalRestoreSourceAcquisitionPlanCopy"
+                || union.union_name == "CanonicalRestoreSourceAcquisitionPlanCopy"
+        }) && !identity.unions.iter().any(|union| {
+            union.containing_schema == "CanonicalRestoreSourceAcquisitionPlanCopy"
+                || union.union_name == "CanonicalRestoreSourceAcquisitionPlanCopy"
+        }),
+        "the shell increment must not preempt unions or arms"
+    );
+    assert!(
+        !catalog.ambiguity_adjudications.iter().any(|row| {
+            row.ambiguity_source_key
+                .contains("|CanonicalRestoreSourceAcquisitionPlanCopy|")
+                || row.resolved_source_keys.iter().any(|source_key| {
+                    source_key.contains("|CanonicalRestoreSourceAcquisitionPlanCopy|")
+                })
+        }),
+        "shorthand ambiguities must remain open until exact field types are settled"
+    );
+
+    let target_row_id = "a17:logical-kind:canonical-restore-source-acquisition-plan-copy";
+    let a17 = catalog
+        .slices
+        .iter()
+        .find(|slice| slice.id == "a17")
+        .expect("a17 slice exists");
+    assert_eq!(
+        a17.definition_status, "declared",
+        "coverage must close before completion-layer authoring"
+    );
+    assert!(
+        !catalog
+            .annotations
+            .iter()
+            .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .semantic_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .expansion_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .evidence
+                .iter()
+                .any(|row| row.target_row_id == target_row_id),
+        "a declared shell must not skip coverage-first sequencing with premature completion rows"
+    );
+}

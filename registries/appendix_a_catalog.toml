@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 853
+target_count = 854
 projection_fallback_count = 84
-target_source_assignment_sha256 = "1f41a0f800d2296dec57fe403ad4c8aa1a60faf36d4604780e9c87139e468b3b"
+target_source_assignment_sha256 = "4cace7a459967f911fe4603b8468653ef56ba014a7515c0d9c68a0f2c1535df9"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 18
+registry_epoch = 19
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -1943,6 +1943,17 @@ construction_order = 6
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/canonical_restore_plan_availability_copy/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:canonical-restore-source-acquisition-plan-copy"
+object_kind = 0x025e
+name = "CanonicalRestoreSourceAcquisitionPlanCopy"
+status = "reserved"
+construction_order = 7
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_restore_source_acquisition_plan_copy/"
 
 [[logical_kind]]
 slice_id = "a03"
@@ -13777,7 +13788,7 @@ symbol = "CanonicalRestoreSourceAcquisitionPlanCopy"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x025e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:canonical-statement-classification"
@@ -21767,7 +21778,7 @@ symbol = "CanonicalRestoreSourceAcquisitionPlanCopy"
 generic_signature = "<Role>"
 source_key = "top|CanonicalRestoreSourceAcquisitionPlanCopy<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2285"]
 
 [[top_level_candidate]]
@@ -33565,6 +33576,14 @@ row_id = "a17:target:logical-kind-canonical-restore-plan-availability-copy"
 target_row_id = "a17:logical-kind:canonical-restore-plan-availability-copy"
 slice_id = "a17"
 source_key = "top|CanonicalRestorePlanAvailabilityCopy<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-canonical-restore-source-acquisition-plan-copy"
+target_row_id = "a17:logical-kind:canonical-restore-source-acquisition-plan-copy"
+slice_id = "a17"
+source_key = "top|CanonicalRestoreSourceAcquisitionPlanCopy<Role>"
 target_kind = "logical-kind"
 definition_status = "declared"
 
