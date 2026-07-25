@@ -66,6 +66,26 @@ jsonl_line_has_all() {
   return 1
 }
 
+# Return the first event line for a failed exact-fragment assertion. Keeping the
+# observed event in the failure makes stale script-side pins distinguishable
+# from a missing checker event.
+jsonl_event_or_missing() {
+  local file="$1"
+  local event_name="$2"
+  awk -v needle="\"event\":\"$event_name\"" '
+    index($0, needle) {
+      print
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        print "<missing>"
+      }
+    }
+  ' "$file"
+}
+
 # Operational regeneration errors must retain one stable terminal envelope,
 # emitted before the CLI's generic error. Counts are explicit even when the
 # failure occurs before the projection-change census is available.
@@ -157,6 +177,9 @@ fi
 EXPECT_TARGET_COUNT="$(catalog_manifest_value target_count)"
 EXPECT_FALLBACK_COUNT="$(catalog_manifest_value projection_fallback_count)"
 EXPECT_TARGET_ASSIGNMENT_SHA="$(catalog_manifest_value target_source_assignment_sha256)"
+EXPECT_RESERVATION_COUNT=813
+EXPECT_EXISTING_RESERVATION_COUNT=188
+EXPECT_RESERVED_RESERVATION_COUNT=625
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
     '"target_count":'"$EXPECT_TARGET_COUNT" \
@@ -185,12 +208,12 @@ APPENDIX_PROJECTION_PASSES=$(awk '
   || die "expected six passing Appendix A projections, found $APPENDIX_PROJECTION_PASSES"
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_closure_checked"' \
-    '"reservations":813' \
-    '"existing_reservations":188' \
-    '"reserved_reservations":625' \
+    '"reservations":'"$EXPECT_RESERVATION_COUNT" \
+    '"existing_reservations":'"$EXPECT_EXISTING_RESERVATION_COUNT" \
+    '"reserved_reservations":'"$EXPECT_RESERVED_RESERVATION_COUNT" \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":1129' \
+    '"targets":'"$EXPECT_TARGET_COUNT" \
     '"completion_layer_schemas":4' \
     '"annotations":0' \
     '"semantic_bindings":0' \
@@ -204,17 +227,20 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"outcome":"pass"'; then
   ok "Appendix A source/target/owner/evidence scaffold closure is exact"
 else
-  die "Appendix A closure event is missing or drifted"
+  OBSERVED_APPENDIX_CLOSURE="$(
+    jsonl_event_or_missing "$WORK/appendix-baseline.jsonl" appendix_closure_checked
+  )"
+  die "Appendix A closure event is missing or drifted; expected reservations=$EXPECT_RESERVATION_COUNT existing=$EXPECT_EXISTING_RESERVATION_COUNT reserved=$EXPECT_RESERVED_RESERVATION_COUNT targets=$EXPECT_TARGET_COUNT; observed $OBSERVED_APPENDIX_CLOSURE"
 fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_completed"' \
     '"slices":21' \
-    '"projection_rows":1129' \
+    '"projection_rows":'"$EXPECT_TARGET_COUNT" \
     '"projection_files":6' \
-    '"reservations":813' \
+    '"reservations":'"$EXPECT_RESERVATION_COUNT" \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":1129' \
+    '"targets":'"$EXPECT_TARGET_COUNT" \
     '"completion_layer_schemas":4' \
     '"annotations":0' \
     '"semantic_bindings":0' \
@@ -225,7 +251,10 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"outcome":"pass"'; then
   ok "Appendix A catalog closure is exact"
 else
-  die "Appendix A completion event is missing or incomplete"
+  OBSERVED_APPENDIX_COMPLETION="$(
+    jsonl_event_or_missing "$WORK/appendix-baseline.jsonl" appendix_completed
+  )"
+  die "Appendix A completion event is missing or incomplete; expected projection_rows=$EXPECT_TARGET_COUNT reservations=$EXPECT_RESERVATION_COUNT targets=$EXPECT_TARGET_COUNT; observed $OBSERVED_APPENDIX_COMPLETION"
 fi
 if (cd "$ROOT" && cargo test -p registry-check hash::tests --lib --quiet); then
   ok "SHA-256 standard vectors pass"
