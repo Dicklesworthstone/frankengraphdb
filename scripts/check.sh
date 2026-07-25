@@ -9,7 +9,8 @@
 #   4. cargo test
 #   5. registry-check all  (the G0 claims-lint / registry-validation CI job)
 #   6. scripts/g0_identity_e2e.sh  (canonical Appendix A/identity hard gate)
-#   7. architecture-check  (frozen ADR + reciprocal provenance)
+#   7. scripts/g0_architecture_decisions_e2e.sh  (frozen ADR e2e + provenance)
+#   8. architecture-check  (frozen ADR + reciprocal provenance)
 #
 # When CI is added, wire this script as the CI test step rather than
 # duplicating the commands.
@@ -36,6 +37,9 @@ cargo run -p registry-check --quiet -- all --root "$ROOT" > /dev/null
 
 echo "==> G0 identity E2E (canonical Appendix A catalog + generated projections)"
 scripts/g0_identity_e2e.sh > /dev/null
+
+echo "==> G0 architecture-decisions E2E (frozen ADR + bead provenance)"
+scripts/g0_architecture_decisions_e2e.sh > /dev/null
 
 echo "==> architecture-check (frozen ADR + reciprocal provenance)"
 cargo run -p registry-check --quiet --bin architecture-check -- --root "$ROOT" > /dev/null

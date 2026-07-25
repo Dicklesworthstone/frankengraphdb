@@ -36,11 +36,29 @@ echo "==> validate the frozen ADR twice"
 "$BIN" --root "$ROOT" >"$SECOND"
 cmp "$FIRST" "$SECOND"
 
+# Bead-dependent expectations are DERIVED from the declared registry, not
+# hand-copied. Every bead filing moves them, and a hand-copied literal drifted
+# unnoticed for ~15 filings precisely because this script is not in check.sh.
+# The declared TOML is an artifact independent of the binary under test, so the
+# assertion still cross-checks two sources rather than comparing output to
+# itself. Values that do NOT move on a bead filing stay literal on purpose.
+ADR_TOML="$ROOT/registries/architecture_decisions.toml"
+bead_policy_value() {
+  awk -v key="$1" '
+    /^\[bead_provenance\]/ { inblock = 1; next }
+    /^\[/ { inblock = 0 }
+    inblock && $1 == key { gsub(/"/, "", $3); print $3; found = 1; exit }
+    END { if (!found) { print "bead_provenance key " key " not found" > "/dev/stderr"; exit 42 } }
+  ' "$ADR_TOML"
+}
+EXPECT_BEAD_COUNT="$(bead_policy_value bead_count)"
+EXPECT_BEAD_BINDING_HASH="$(bead_policy_value binding_hash)"
+
 echo "==> assert deterministic event and provenance coverage"
 test "$(rg -c '"event":"architecture_decision_checked"' "$FIRST")" -eq 256
 test "$(rg -c '"event":"source_block_checked"' "$FIRST")" -eq 2
-test "$(rg -c '"event":"architecture_bead_provenance_indexed"' "$FIRST")" -eq 299
-rg -q '"event":"architecture_registry_checked".*"decision_count":256.*"bead_count":299.*"bead_binding_hash":"fnv1a64:7ff10744115e68f5".*"violations":0.*"outcome":"pass"' "$FIRST"
+test "$(rg -c '"event":"architecture_bead_provenance_indexed"' "$FIRST")" -eq "$EXPECT_BEAD_COUNT"
+rg -q '"event":"architecture_registry_checked".*"decision_count":256.*"bead_count":'"$EXPECT_BEAD_COUNT"'.*"bead_binding_hash":"'"$EXPECT_BEAD_BINDING_HASH"'".*"violations":0.*"outcome":"pass"' "$FIRST"
 rg -q '"event":"source_block_checked".*"exact_match":true.*"outcome":"pass"' "$FIRST"
 rg -q '"event":"architecture_decision_checked".*"decision_id":"FG-ADR-BET-B1".*"owner_bead":"fgdb-w2-commit-protocol-9w3u".*"owner_crate":"fgdb-branch".*"profile_id":"FG-ADR-PROFILE-CONSTITUTIONAL".*"rationale":.*"contradiction_class":"none".*"replay_command":.*"outcome":"pass"' "$FIRST"
 for owner_kind in bead crate checker evidence; do
@@ -53,7 +71,7 @@ if rg -q '"event":"architecture_violation"' "$FIRST"; then
 fi
 
 echo "==> structurally parse every baseline NDJSON row"
-python3 - "$FIRST" <<'PY'
+python3 - "$FIRST" "$ADR_TOML" <<'PY'
 import collections
 import json
 import sys
@@ -65,6 +83,35 @@ def reject_duplicate_keys(pairs):
             raise ValueError(f"duplicate JSON key {key!r}")
         result[key] = value
     return result
+
+def bead_policy(path):
+    """Read the declared [bead_provenance] block; independent of the binary."""
+    policy, inblock = {}, False
+    with open(path, encoding="utf-8") as stream:
+        for raw in stream:
+            line = raw.strip()
+            if line == "[bead_provenance]":
+                inblock = True
+                continue
+            if line.startswith("["):
+                inblock = False
+                continue
+            if inblock and " = " in line:
+                key, _, value = line.partition(" = ")
+                policy[key.strip()] = value.strip().strip('"')
+    for required in (
+        "bead_count",
+        "binding_hash",
+        "direct_owner_count",
+        "bet_label_count",
+        "exact_override_count",
+        "family_rule_count",
+    ):
+        assert required in policy, f"bead_provenance is missing {required}"
+    return policy
+
+
+POLICY = bead_policy(sys.argv[2])
 
 events = []
 with open(sys.argv[1], encoding="utf-8") as stream:
@@ -78,22 +125,22 @@ counts = collections.Counter(event["event"] for event in events)
 assert counts["architecture_registry_checked"] == 1, counts
 assert counts["architecture_decision_checked"] == 256, counts
 assert counts["source_block_checked"] == 2, counts
-assert counts["architecture_bead_provenance_indexed"] == 299, counts
+assert counts["architecture_bead_provenance_indexed"] == int(POLICY["bead_count"]), counts
 assert counts["architecture_violation"] == 0, counts
 
 registry = next(event for event in events if event["event"] == "architecture_registry_checked")
 assert registry["decision_count"] == 256, registry
-assert registry["bead_count"] == 299, registry
-assert registry["bead_binding_hash"] == "fnv1a64:7ff10744115e68f5", registry
+assert registry["bead_count"] == int(POLICY["bead_count"]), registry
+assert registry["bead_binding_hash"] == POLICY["binding_hash"], registry
 assert registry["violations"] == 0 and registry["outcome"] == "pass", registry
 
 beads = [event for event in events if event["event"] == "architecture_bead_provenance_indexed"]
 class_counts = collections.Counter(event["resolution_class"] for event in beads)
 assert class_counts == {
-    "direct_owner": 98,
-    "bet_label": 156,
-    "exact_override": 12,
-    "family_rule": 33,
+    "direct_owner": int(POLICY["direct_owner_count"]),
+    "bet_label": int(POLICY["bet_label_count"]),
+    "exact_override": int(POLICY["exact_override_count"]),
+    "family_rule": int(POLICY["family_rule_count"]),
 }, class_counts
 for bead in beads:
     assert bead["bead_id"].startswith("fgdb-"), bead
