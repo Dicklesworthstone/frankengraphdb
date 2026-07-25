@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 709;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 737;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "dd52c721c60cf5ac45a38637903ff2bea711d007f836dc95388376f2b7db22b9";
+    "52daaf212b9c60913ed969ad64ad46a5abd968543e57615991ffc87aa4843ed6";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 84;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "d99378a08e4821dad10ba10391623ded679e16dd1d7971f755ba5b178b7ab88f";
+    "5b9dafb36898b30c8a4d3ff685e67570ffae506009878c09389cb6bdda048357";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -64,11 +64,11 @@ pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 389;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
     "78c2adede17da5eea90ffb344591c7292e7d093c8ef07175c906e7595219639d";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
-pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 117;
-pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 696;
+pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 127;
+pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 686;
 pub const EXPECTED_RESERVATION_HIGH_WATER: u16 = 0x051d;
 pub const EXPECTED_RESERVATION_ASSIGNMENT_SHA256: &str =
-    "9c108b879fac12df1ecdba3792f7a78e2a345fb33aafa1751bb592c57cdc158a";
+    "f957f9d41d68f216b993bbc3d297f3a27faebe045b547e5233eaeb9c9532a04a";
 pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
 pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_458;
@@ -15473,6 +15473,175 @@ stable_name = "Ready"
                     "{name} is a direct unreserved mint"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a04_embedded_wire_owner_shells_are_exact() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let expected = [
+            (
+                "AdvanceRemoteConfigurationEvidenceSpec",
+                "advance-remote-configuration-evidence-spec",
+                "top|AdvanceRemoteConfigurationEvidenceSpec",
+                0x0068,
+                "record",
+                "canonical role-valid remote configuration evidence CAS spec record",
+                &["AdvanceRemoteConfigurationEvidenceSpec"][..],
+                16_777_216,
+            ),
+            (
+                "AuthorityLocalCertificateHeader",
+                "authority-local-certificate-header",
+                "top|AuthorityLocalCertificateHeader",
+                0x0069,
+                "record",
+                "canonical authority-local certificate transcript header",
+                &["*"][..],
+                16_777_216,
+            ),
+            (
+                "CertificateAttemptAbandonSpec",
+                "certificate-attempt-abandon-spec",
+                "top|CertificateAttemptAbandonSpec",
+                0x006a,
+                "record",
+                "canonical certificate-attempt abandonment spec record",
+                &["CertificateAttemptAbandonSpec"][..],
+                16_777_216,
+            ),
+            (
+                "CertificateUnsignedBodyDigest",
+                "certificate-unsigned-body-digest",
+                "top|CertificateUnsignedBodyDigest<T>",
+                0x006b,
+                "record",
+                "canonical domain-separated certificate unsigned-body digest family",
+                &["*"][..],
+                32,
+            ),
+            (
+                "ImportedCertificateDomain",
+                "imported-certificate-domain",
+                "top|ImportedCertificateDomain",
+                0x006c,
+                "record",
+                "canonical imported certificate authority-domain header",
+                &["*"][..],
+                16_777_216,
+            ),
+            (
+                "RaftMaintenanceCommand",
+                "raft-maintenance-command",
+                "top|RaftMaintenanceCommand",
+                0x006d,
+                "union",
+                "canonical role-tagged Raft maintenance command union",
+                &["RaftMaintenanceCommand"][..],
+                16_777_216,
+            ),
+            (
+                "RemoteRetentionControlSpec",
+                "remote-retention-control-spec",
+                "top|RemoteRetentionControlSpec",
+                0x006e,
+                "union",
+                "canonical role-valid remote-retention control union",
+                &["RemoteRetentionControlSpec"][..],
+                16_777_216,
+            ),
+            (
+                "RetirementLeaseDescriptor",
+                "retirement-lease-descriptor",
+                "top|RetirementLeaseDescriptor",
+                0x006f,
+                "record",
+                "canonical retired-local physical-generation lease descriptor",
+                &["RootManifest"][..],
+                16_777_216,
+            ),
+            (
+                "ValidateRemoteConfigurationAnchorSpec",
+                "validate-remote-configuration-anchor-spec",
+                "top|ValidateRemoteConfigurationAnchorSpec",
+                0x0070,
+                "record",
+                "canonical remote configuration anchor validation spec record",
+                &["ValidateRemoteConfigurationAnchorSpec"][..],
+                16_777_216,
+            ),
+            (
+                "WeakAuthorityAppliedIdentity",
+                "weak-authority-applied-identity",
+                "top|WeakAuthorityAppliedIdentity",
+                0x0071,
+                "union",
+                "canonical nonretaining authority applied-identity union",
+                &["WeakAuthorityAppliedIdentity"][..],
+                16_777_216,
+            ),
+        ];
+
+        for (name, slug, source_key, code, kind, context, containers, max_size) in expected {
+            let wire = catalog
+                .identity
+                .wire
+                .iter()
+                .find(|wire| wire.name.eq(name))
+                .expect("a04 wire owner must exist");
+            assert_eq!(wire.wire_type_id, code, "{name} code");
+            assert_eq!(wire.kind, kind, "{name} kind");
+            assert_eq!(wire.status, "reserved", "{name} lifecycle");
+            assert_eq!(wire.encoding_context, context, "{name} encoding context");
+            assert_eq!(
+                wire.allowed_containing_schemas
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                containers,
+                "{name} containing-schema closure"
+            );
+            assert_eq!(wire.max_size_bytes, max_size, "{name} size ceiling");
+            assert_eq!(wire.containing_union, None, "{name} is an owner");
+            assert_eq!(wire.wire_tag, None, "{name} has no variant tag");
+
+            let candidates = catalog
+                .top_level_candidates
+                .iter()
+                .filter(|candidate| candidate.source_key.eq(source_key))
+                .collect::<Vec<_>>();
+            assert_eq!(candidates.len(), 1, "{name} source candidate is unique");
+            assert_eq!(candidates[0].identity_class, "wire", "{name} class");
+
+            let targets = catalog
+                .targets
+                .iter()
+                .filter(|target| target.source_key.eq(source_key))
+                .collect::<Vec<_>>();
+            assert_eq!(targets.len(), 1, "{name} source target is unique");
+            assert_eq!(
+                targets[0].row_id,
+                format!("a04:target:wire-type-{slug}"),
+                "{name} target row"
+            );
+            assert_eq!(
+                targets[0].target_row_id,
+                format!("a04:wire-type:{slug}"),
+                "{name} target owner"
+            );
+            assert_eq!(targets[0].target_kind, "wire-type", "{name} target kind");
+            assert_eq!(
+                targets[0].definition_status, "declared",
+                "{name} definition status"
+            );
+            assert!(
+                !catalog
+                    .reservations
+                    .iter()
+                    .any(|reservation| reservation.symbol.eq(name)),
+                "{name} is a direct wire mint, not a logical reservation"
+            );
         }
     }
 }

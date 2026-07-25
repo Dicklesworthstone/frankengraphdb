@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 16
+registry_epoch = 17
 
 [[kind]]
 object_kind = 0x0001
@@ -261,6 +261,24 @@ max_size_bytes = 1048576
 golden_corpus = "corpus/logical/backup_manifest/"
 
 [[kind]]
+object_kind = 0x0235
+name = "AuthenticatedClientResultAckReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authenticated_client_result_ack_receipt/"
+
+[[kind]]
+object_kind = 0x0236
+name = "AuthenticatedClientResultReleaseReceipt"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authenticated_client_result_release_receipt/"
+
+[[kind]]
 object_kind = 0x025d
 name = "CanonicalRestorePlanAvailabilityCopy"
 status = "reserved"
@@ -313,6 +331,24 @@ construction_order = 17
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/cross_log_transparency_freshness/"
+
+[[kind]]
+object_kind = 0x0286
+name = "DeliveryLeaseExpiryEvidence"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delivery_lease_expiry_evidence/"
+
+[[kind]]
+object_kind = 0x0287
+name = "DerivedGenerationRegistry"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/derived_generation_registry/"
 
 [[kind]]
 object_kind = 0x0295
@@ -432,6 +468,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_prepare_admission_spec/"
 
 [[kind]]
+object_kind = 0x0323
+name = "LocalSerializationCertificate"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_serialization_certificate/"
+
+[[kind]]
 object_kind = 0x0324
 name = "LocalStatementIndex"
 status = "reserved"
@@ -448,6 +493,15 @@ construction_order = 15
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_statement_registration/"
+
+[[kind]]
+object_kind = 0x032c
+name = "LocalTxnWorkspaceGeneration"
+status = "reserved"
+construction_order = 16
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_txn_workspace_generation/"
 
 [[kind]]
 object_kind = 0x0332
@@ -819,6 +873,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_source_lease_record/"
 
 [[kind]]
+object_kind = 0x0408
+name = "ResultDeliveryDispositionProof"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_disposition_proof/"
+
+[[kind]]
+object_kind = 0x040c
+name = "ResultEndSendCompletionRecord"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_end_send_completion_record/"
+
+[[kind]]
 object_kind = 0x041c
 name = "RoleTimeBoundSubjectInventoryClosure"
 status = "reserved"
@@ -1143,6 +1215,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/txn_allocation_binding_root/"
 
 [[kind]]
+object_kind = 0x04b5
+name = "TxnOutcomeRecord"
+status = "reserved"
+construction_order = 18
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/txn_outcome_record/"
+
+[[kind]]
 object_kind = 0x04b7
 name = "ValidatedRemoteConfigurationAnchor"
 status = "reserved"
@@ -1159,6 +1240,15 @@ construction_order = 62
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/verifier_key_retirement_floor/"
+
+[[kind]]
+object_kind = 0x04e0
+name = "EmbeddedResultFullyConsumedRecord"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/embedded_result_fully_consumed_record/"
 
 [[kind]]
 object_kind = 0x04e1

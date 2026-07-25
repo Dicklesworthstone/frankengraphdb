@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 709
+target_count = 737
 projection_fallback_count = 84
-target_source_assignment_sha256 = "d99378a08e4821dad10ba10391623ded679e16dd1d7971f755ba5b178b7ab88f"
+target_source_assignment_sha256 = "5b9dafb36898b30c8a4d3ff685e67570ffae506009878c09389cb6bdda048357"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 16
+registry_epoch = 17
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -641,7 +641,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 15
+registry_epoch = 17
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -2230,6 +2230,116 @@ role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/validated_remote_configuration_anchor/"
 
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:authenticated-client-result-ack-receipt"
+object_kind = 0x0235
+name = "AuthenticatedClientResultAckReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authenticated_client_result_ack_receipt/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:authenticated-client-result-release-receipt"
+object_kind = 0x0236
+name = "AuthenticatedClientResultReleaseReceipt"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authenticated_client_result_release_receipt/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:delivery-lease-expiry-evidence"
+object_kind = 0x0286
+name = "DeliveryLeaseExpiryEvidence"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delivery_lease_expiry_evidence/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:derived-generation-registry"
+object_kind = 0x0287
+name = "DerivedGenerationRegistry"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/derived_generation_registry/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:embedded-result-fully-consumed-record"
+object_kind = 0x04e0
+name = "EmbeddedResultFullyConsumedRecord"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/embedded_result_fully_consumed_record/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-serialization-certificate"
+object_kind = 0x0323
+name = "LocalSerializationCertificate"
+status = "reserved"
+construction_order = 17
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_serialization_certificate/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-txn-workspace-generation"
+object_kind = 0x032c
+name = "LocalTxnWorkspaceGeneration"
+status = "reserved"
+construction_order = 16
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_txn_workspace_generation/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:result-delivery-disposition-proof"
+object_kind = 0x0408
+name = "ResultDeliveryDispositionProof"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_disposition_proof/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:result-end-send-completion-record"
+object_kind = 0x040c
+name = "ResultEndSendCompletionRecord"
+status = "reserved"
+construction_order = 26
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_end_send_completion_record/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:txn-outcome-record"
+object_kind = 0x04b5
+name = "TxnOutcomeRecord"
+status = "reserved"
+construction_order = 18
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/txn_outcome_record/"
+
 [[physical_kind]]
 slice_id = "a02"
 row_id = "a02:physical-kind:ciphertext-record"
@@ -3637,6 +3747,204 @@ kind = "record"
 status = "reserved"
 encoding_context = "canonical Local statement maintenance-apply spec record"
 allowed_containing_schemas = ["LocalStatementRegistrationSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:advance-remote-configuration-evidence-spec"
+wire_type_id = 0x0068
+name = "AdvanceRemoteConfigurationEvidenceSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical role-valid remote configuration evidence CAS spec record"
+allowed_containing_schemas = ["AdvanceRemoteConfigurationEvidenceSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:authority-local-certificate-header"
+wire_type_id = 0x0069
+name = "AuthorityLocalCertificateHeader"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical authority-local certificate transcript header"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:certificate-attempt-abandon-spec"
+wire_type_id = 0x006a
+name = "CertificateAttemptAbandonSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical certificate-attempt abandonment spec record"
+allowed_containing_schemas = ["CertificateAttemptAbandonSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:certificate-unsigned-body-digest"
+wire_type_id = 0x006b
+name = "CertificateUnsignedBodyDigest"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical domain-separated certificate unsigned-body digest family"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 32
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:imported-certificate-domain"
+wire_type_id = 0x006c
+name = "ImportedCertificateDomain"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical imported certificate authority-domain header"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:raft-maintenance-command"
+wire_type_id = 0x006d
+name = "RaftMaintenanceCommand"
+kind = "union"
+status = "reserved"
+encoding_context = "canonical role-tagged Raft maintenance command union"
+allowed_containing_schemas = ["RaftMaintenanceCommand"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:remote-retention-control-spec"
+wire_type_id = 0x006e
+name = "RemoteRetentionControlSpec"
+kind = "union"
+status = "reserved"
+encoding_context = "canonical role-valid remote-retention control union"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:retirement-lease-descriptor"
+wire_type_id = 0x006f
+name = "RetirementLeaseDescriptor"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical retired-local physical-generation lease descriptor"
+allowed_containing_schemas = ["RootManifest"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:validate-remote-configuration-anchor-spec"
+wire_type_id = 0x0070
+name = "ValidateRemoteConfigurationAnchorSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical remote configuration anchor validation spec record"
+allowed_containing_schemas = ["ValidateRemoteConfigurationAnchorSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:weak-authority-applied-identity"
+wire_type_id = 0x0071
+name = "WeakAuthorityAppliedIdentity"
+kind = "union"
+status = "reserved"
+encoding_context = "canonical nonretaining authority applied-identity union"
+allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-conflict-edge"
+wire_type_id = 0x0072
+name = "LocalConflictEdge"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local transaction-plane record"
+allowed_containing_schemas = ["LocalConflictEdge"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-conflict-entry"
+wire_type_id = 0x0073
+name = "LocalConflictEntry"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local transaction-plane record"
+allowed_containing_schemas = ["LocalConflictEntry"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-outcome-expiry-spec"
+wire_type_id = 0x0074
+name = "LocalOutcomeExpirySpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local transaction-plane record"
+allowed_containing_schemas = ["LocalOutcomeExpirySpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-read-close-spec"
+wire_type_id = 0x0075
+name = "LocalReadCloseSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local transaction-plane record"
+allowed_containing_schemas = ["LocalReadCloseSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-terminal-completion-spec"
+wire_type_id = 0x0076
+name = "LocalTerminalCompletionSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local transaction-plane record"
+allowed_containing_schemas = ["LocalTerminalCompletionSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:request-terminal-abort"
+wire_type_id = 0x0077
+name = "RequestTerminalAbort"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local transaction-plane record"
+allowed_containing_schemas = ["RequestTerminalAbort"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:session-region-close-receipt"
+wire_type_id = 0x0078
+name = "SessionRegionCloseReceipt"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local transaction-plane record"
+allowed_containing_schemas = ["SessionRegionCloseReceipt"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:txn-abort-spec"
+wire_type_id = 0x0079
+name = "TxnAbortSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local transaction-plane record"
+allowed_containing_schemas = ["TxnAbortSpec"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -11323,7 +11631,7 @@ symbol = "AuthenticatedClientResultAckReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0235"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:authenticated-client-result-release-receipt"
@@ -11332,7 +11640,7 @@ symbol = "AuthenticatedClientResultReleaseReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0236"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a11:reservation:authenticated-client-subscription-disposition-receipt"
@@ -12214,7 +12522,7 @@ symbol = "DeliveryLeaseExpiryEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0286"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:delta-block-version"
@@ -12241,7 +12549,7 @@ symbol = "DerivedGenerationRegistry"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0287"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:derived-identity"
@@ -12430,7 +12738,7 @@ symbol = "EmbeddedResultFullyConsumedRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04e0"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:enter-restore-reserved-receipt"
@@ -13825,7 +14133,7 @@ symbol = "LocalSerializationCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0323"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:local-statement-index"
@@ -13906,7 +14214,7 @@ symbol = "LocalTxnWorkspaceGeneration"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x032c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:local-workspace-overlay-root"
@@ -16210,7 +16518,7 @@ symbol = "ResultDeliveryDispositionProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0408"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:result-delivery-lease"
@@ -16246,7 +16554,7 @@ symbol = "ResultEndSendCompletionRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x040c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:result-independent-retention-index"
@@ -17956,7 +18264,7 @@ symbol = "TxnOutcomeRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04b5"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:txn-ownership-lease"
@@ -18233,7 +18541,7 @@ symbol = "AdvanceRemoteConfigurationEvidenceSpec"
 generic_signature = ""
 source_key = "top|AdvanceRemoteConfigurationEvidenceSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a04:1584"]
 
 [[top_level_candidate]]
@@ -18973,7 +19281,7 @@ symbol = "AuthenticatedClientResultAckReceipt"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1506"]
 
 [[top_level_candidate]]
@@ -18983,7 +19291,7 @@ symbol = "AuthenticatedClientResultReleaseReceipt"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1502"]
 
 [[top_level_candidate]]
@@ -19043,7 +19351,7 @@ symbol = "AuthorityLocalCertificateHeader"
 generic_signature = ""
 source_key = "top|AuthorityLocalCertificateHeader"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a04:1570"]
 
 [[top_level_candidate]]
@@ -19933,7 +20241,7 @@ symbol = "CertificateAttemptAbandonSpec"
 generic_signature = ""
 source_key = "top|CertificateAttemptAbandonSpec"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a04:1574"]
 
 [[top_level_candidate]]
@@ -19973,7 +20281,7 @@ symbol = "CertificateUnsignedBodyDigest"
 generic_signature = "<T>"
 source_key = "top|CertificateUnsignedBodyDigest<T>"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a04:1572"]
 
 [[top_level_candidate]]
@@ -20653,7 +20961,7 @@ symbol = "DeliveryLeaseExpiryEvidence"
 generic_signature = ""
 source_key = "top|DeliveryLeaseExpiryEvidence"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1496"]
 
 [[top_level_candidate]]
@@ -20703,7 +21011,7 @@ symbol = "DerivedGenerationRegistry"
 generic_signature = ""
 source_key = "top|DerivedGenerationRegistry"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1542"]
 
 [[top_level_candidate]]
@@ -20983,7 +21291,7 @@ symbol = "EmbeddedResultFullyConsumedRecord"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1504"]
 
 [[top_level_candidate]]
@@ -22223,7 +22531,7 @@ symbol = "ImportedCertificateDomain"
 generic_signature = ""
 source_key = "top|ImportedCertificateDomain"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a04:1570"]
 
 [[top_level_candidate]]
@@ -23003,7 +23311,7 @@ symbol = "LocalConflictEdge"
 generic_signature = ""
 source_key = "top|LocalConflictEdge"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1476"]
 
 [[top_level_candidate]]
@@ -23013,7 +23321,7 @@ symbol = "LocalConflictEntry"
 generic_signature = ""
 source_key = "top|LocalConflictEntry"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1476"]
 
 [[top_level_candidate]]
@@ -23183,7 +23491,7 @@ symbol = "LocalOutcomeExpirySpec"
 generic_signature = ""
 source_key = "top|LocalOutcomeExpirySpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1540"]
 
 [[top_level_candidate]]
@@ -23223,7 +23531,7 @@ symbol = "LocalReadCloseSpec"
 generic_signature = ""
 source_key = "top|LocalReadCloseSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1534"]
 
 [[top_level_candidate]]
@@ -23393,7 +23701,7 @@ symbol = "LocalSerializationCertificate"
 generic_signature = ""
 source_key = "top|LocalSerializationCertificate"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1488"]
 
 [[top_level_candidate]]
@@ -23473,7 +23781,7 @@ symbol = "LocalTerminalCompletionSpec"
 generic_signature = ""
 source_key = "top|LocalTerminalCompletionSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1500", "a03:1532"]
 
 [[top_level_candidate]]
@@ -23513,7 +23821,7 @@ symbol = "LocalTxnWorkspaceGeneration"
 generic_signature = ""
 source_key = "top|LocalTxnWorkspaceGeneration"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1486"]
 
 [[top_level_candidate]]
@@ -25363,7 +25671,7 @@ symbol = "RaftMaintenanceCommand"
 generic_signature = ""
 source_key = "top|RaftMaintenanceCommand"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a04:1560"]
 
 [[top_level_candidate]]
@@ -25853,7 +26161,7 @@ symbol = "RemoteRetentionControlSpec"
 generic_signature = ""
 source_key = "top|RemoteRetentionControlSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a04:1582"]
 
 [[top_level_candidate]]
@@ -26063,7 +26371,7 @@ symbol = "RequestTerminalAbort"
 generic_signature = ""
 source_key = "top|RequestTerminalAbort"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1538", "a21:2697"]
 
 [[top_level_candidate]]
@@ -27543,7 +27851,7 @@ symbol = "ResultDeliveryDispositionProof"
 generic_signature = ""
 source_key = "top|ResultDeliveryDispositionProof"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1522"]
 
 [[top_level_candidate]]
@@ -27633,7 +27941,7 @@ symbol = "ResultEndSendCompletionRecord"
 generic_signature = ""
 source_key = "top|ResultEndSendCompletionRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1504"]
 
 [[top_level_candidate]]
@@ -27893,7 +28201,7 @@ symbol = "RetirementLeaseDescriptor"
 generic_signature = ""
 source_key = "top|RetirementLeaseDescriptor"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a04:1544"]
 
 [[top_level_candidate]]
@@ -28233,7 +28541,7 @@ symbol = "SessionRegionCloseReceipt"
 generic_signature = ""
 source_key = "top|SessionRegionCloseReceipt"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1508"]
 
 [[top_level_candidate]]
@@ -30053,7 +30361,7 @@ symbol = "TxnAbortSpec"
 generic_signature = ""
 source_key = "top|TxnAbortSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1536"]
 
 [[top_level_candidate]]
@@ -30133,7 +30441,7 @@ symbol = "TxnOutcomeRecord"
 generic_signature = ""
 source_key = "top|TxnOutcomeRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1524"]
 
 [[top_level_candidate]]
@@ -30213,7 +30521,7 @@ symbol = "ValidateRemoteConfigurationAnchorSpec"
 generic_signature = ""
 source_key = "top|ValidateRemoteConfigurationAnchorSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a04:1586"]
 
 [[top_level_candidate]]
@@ -30273,7 +30581,7 @@ symbol = "WeakAuthorityAppliedIdentity"
 generic_signature = ""
 source_key = "top|WeakAuthorityAppliedIdentity"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a04:1586"]
 
 [[top_level_candidate]]
@@ -36227,6 +36535,230 @@ target_row_id = "a03:union-arm:local-statement-registration-spec-statement-audit
 slice_id = "a03"
 source_key = "arm|LocalStatementRegistrationSpec|LocalStatementRegistrationSpec.statement_audit_admission|NotRequired"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-advance-remote-configuration-evidence-spec"
+target_row_id = "a04:wire-type:advance-remote-configuration-evidence-spec"
+slice_id = "a04"
+source_key = "top|AdvanceRemoteConfigurationEvidenceSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-authority-local-certificate-header"
+target_row_id = "a04:wire-type:authority-local-certificate-header"
+slice_id = "a04"
+source_key = "top|AuthorityLocalCertificateHeader"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-certificate-attempt-abandon-spec"
+target_row_id = "a04:wire-type:certificate-attempt-abandon-spec"
+slice_id = "a04"
+source_key = "top|CertificateAttemptAbandonSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-certificate-unsigned-body-digest"
+target_row_id = "a04:wire-type:certificate-unsigned-body-digest"
+slice_id = "a04"
+source_key = "top|CertificateUnsignedBodyDigest<T>"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-imported-certificate-domain"
+target_row_id = "a04:wire-type:imported-certificate-domain"
+slice_id = "a04"
+source_key = "top|ImportedCertificateDomain"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-raft-maintenance-command"
+target_row_id = "a04:wire-type:raft-maintenance-command"
+slice_id = "a04"
+source_key = "top|RaftMaintenanceCommand"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-remote-retention-control-spec"
+target_row_id = "a04:wire-type:remote-retention-control-spec"
+slice_id = "a04"
+source_key = "top|RemoteRetentionControlSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-retirement-lease-descriptor"
+target_row_id = "a04:wire-type:retirement-lease-descriptor"
+slice_id = "a04"
+source_key = "top|RetirementLeaseDescriptor"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-validate-remote-configuration-anchor-spec"
+target_row_id = "a04:wire-type:validate-remote-configuration-anchor-spec"
+slice_id = "a04"
+source_key = "top|ValidateRemoteConfigurationAnchorSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-weak-authority-applied-identity"
+target_row_id = "a04:wire-type:weak-authority-applied-identity"
+slice_id = "a04"
+source_key = "top|WeakAuthorityAppliedIdentity"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-authenticated-client-result-ack-receipt"
+target_row_id = "a03:logical-kind:authenticated-client-result-ack-receipt"
+slice_id = "a03"
+source_key = "top|AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-authenticated-client-result-release-receipt"
+target_row_id = "a03:logical-kind:authenticated-client-result-release-receipt"
+slice_id = "a03"
+source_key = "top|AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-delivery-lease-expiry-evidence"
+target_row_id = "a03:logical-kind:delivery-lease-expiry-evidence"
+slice_id = "a03"
+source_key = "top|DeliveryLeaseExpiryEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-derived-generation-registry"
+target_row_id = "a03:logical-kind:derived-generation-registry"
+slice_id = "a03"
+source_key = "top|DerivedGenerationRegistry"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-embedded-result-fully-consumed-record"
+target_row_id = "a03:logical-kind:embedded-result-fully-consumed-record"
+slice_id = "a03"
+source_key = "top|EmbeddedResultFullyConsumedRecord<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-serialization-certificate"
+target_row_id = "a03:logical-kind:local-serialization-certificate"
+slice_id = "a03"
+source_key = "top|LocalSerializationCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-txn-workspace-generation"
+target_row_id = "a03:logical-kind:local-txn-workspace-generation"
+slice_id = "a03"
+source_key = "top|LocalTxnWorkspaceGeneration"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-result-delivery-disposition-proof"
+target_row_id = "a03:logical-kind:result-delivery-disposition-proof"
+slice_id = "a03"
+source_key = "top|ResultDeliveryDispositionProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-result-end-send-completion-record"
+target_row_id = "a03:logical-kind:result-end-send-completion-record"
+slice_id = "a03"
+source_key = "top|ResultEndSendCompletionRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-txn-outcome-record"
+target_row_id = "a03:logical-kind:txn-outcome-record"
+slice_id = "a03"
+source_key = "top|TxnOutcomeRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-local-conflict-edge"
+target_row_id = "a03:wire-type:local-conflict-edge"
+slice_id = "a03"
+source_key = "top|LocalConflictEdge"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-local-conflict-entry"
+target_row_id = "a03:wire-type:local-conflict-entry"
+slice_id = "a03"
+source_key = "top|LocalConflictEntry"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-local-outcome-expiry-spec"
+target_row_id = "a03:wire-type:local-outcome-expiry-spec"
+slice_id = "a03"
+source_key = "top|LocalOutcomeExpirySpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-local-read-close-spec"
+target_row_id = "a03:wire-type:local-read-close-spec"
+slice_id = "a03"
+source_key = "top|LocalReadCloseSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-local-terminal-completion-spec"
+target_row_id = "a03:wire-type:local-terminal-completion-spec"
+slice_id = "a03"
+source_key = "top|LocalTerminalCompletionSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-request-terminal-abort"
+target_row_id = "a03:wire-type:request-terminal-abort"
+slice_id = "a03"
+source_key = "top|RequestTerminalAbort"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-session-region-close-receipt"
+target_row_id = "a03:wire-type:session-region-close-receipt"
+slice_id = "a03"
+source_key = "top|SessionRegionCloseReceipt"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-txn-abort-spec"
+target_row_id = "a03:wire-type:txn-abort-spec"
+slice_id = "a03"
+source_key = "top|TxnAbortSpec"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
