@@ -38224,6 +38224,15 @@ disposition = "reference-only"
 source_locations = ["plan:234"]
 
 [[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ExportLeaf|ExportLeaf<T>.authority_ledger_floor|c4bc39c591a9d281324c07f586b397d3f220f760fd3a710901241bb520821a36|1|b38933c6686aeb4d3685cd28e45711bba35d89372cdc71fbbe206366f4c8d5fe|shorthand field has no exact type"
+source_locations = ["a01:1400"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ExportLeaf<T>|ExportLeaf<T>.authority_ledger_floor|authority_ledger_floor"]
+rationale = "a01:1400: shorthand member `authority_ledger_floor` carries no inline exact type, and ExportLeaf is a logical kind, so no wire envelope commits the span. The a01 owner ruling landed in 694d14b fixes it to `u64` on the registered durable_fields row, derived from the a01 floor family: authority_retention_floor, minimum_authority_checkpoint_floor and authority_order_index are all u64/8. The single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
 row_id = "a01:ambiguity-adjudication:99a87928b4e9051fadedb901f4799986579d307add86f64e1c8848d530e53adf"
 slice_id = "a01"
 ambiguity_source_key = "ambiguity|ambiguous-schema-owner|CertifiedRemoteStrongRef|CertifiedRemoteStrongRef<T>|b39fefc96a603234b2dc09f7edf2008ca2d1feb141cd96771a98ef3e16761e41|1|5e088929034b341574f29a45686cdf1d5d9557cda5f89b7dd5e7916593213374|leading named record has no explicit top-level ownership cue"
@@ -38411,6 +38420,15 @@ source_locations = ["a01:1406"]
 resolution = "maps-to-source"
 resolved_source_keys = ["top|StrongGlobalCommandRef"]
 rationale = "a01:1406: `StrongGlobalCommandRef {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|StrongGlobalCommandRef` itself, not an alias, enumeration, or citation."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:f2ff70af4b775f5145f4f900f742808ffade01b29c77ed78fafb5b4338eb7c37"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ExportLeaf|ExportLeaf<T>.export_projection_version|f623dca97e62855892441afc7df4e85ebcd3de07982e27f7067c0da193b1a433|1|7b8897ff7a937be87f571e969cc4e57a33b88b343f6f59b55f7c6e41d7ef92f7|shorthand field has no exact type"
+source_locations = ["a01:1400"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ExportLeaf<T>|ExportLeaf<T>.export_projection_version|export_projection_version"]
+rationale = "a01:1400: shorthand member `export_projection_version` carries no inline exact type, and ExportLeaf is a logical kind, so no wire envelope commits the span. The a01 owner ruling landed in 694d14b fixes it to `u16` on the registered durable_fields row, derived from the a01 format-version family: format_major, format_minor and incarnation_continuity_profile_id are all u16/2. The single affected census key maps to that source form."
 
 [[ambiguity_adjudication]]
 row_id = "a01:ambiguity-adjudication:f415e1d2a5f705c55cb0e824abed15b2718e4379274f36ef4173e7fbcdc07b56"
@@ -38611,6 +38629,15 @@ resolved_source_keys = ["field|RemotePayloadAvailabilityEvidence|RemotePayloadAv
 rationale = "a01:1400: `authority_retention_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself."
 
 [[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:0780dfaa7be7e082803da9d4d1d980f09c6ab855346e8a7f8638b7c5daea7ea9"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ExportLeaf|ExportLeaf<T>.target_closure_inventory_digest|e9f4ca6621f4e36a6c7058504702c6ef874721b67a2a9208b46097af61cc285a|1|2cc6119c3cc09cc413de2cba219108faa619dd605a0615a204f7dae1985d474d|shorthand field has no exact type"
+source_locations = ["a01:1400"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ExportLeaf<T>|ExportLeaf<T>.target_closure_inventory_digest|target_closure_inventory_digest"]
+rationale = "a01:1400: shorthand member `target_closure_inventory_digest` carries no inline exact type, and ExportLeaf is a logical kind, so no wire envelope commits the span. The a01 owner ruling landed in 694d14b fixes it to `digest256` on the registered durable_fields row, derived from three landed instances, unanimous at digest256/32 with digest_class=target. The single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
 row_id = "a01:ambiguity-adjudication:088c4ff91992149430ae731d5ff92818988720134060669d7f25967c8e35e59f"
 slice_id = "a01"
 ambiguity_source_key = "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.encoding_placement_coverage|9b55bcdb27d3c8b9d1c7e27801d59e7f86a64126eca571ae6a0826c753569db5|1|7724f2742410a6affc66d6564aeea475aacec16dce6b21091f2e26d5075016a2|shorthand field has no exact type"
@@ -38672,6 +38699,15 @@ source_locations = ["a01:1404"]
 resolution = "maps-to-source"
 resolved_source_keys = ["field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.ack_digest|ack_digest"]
 rationale = "a01:1404: `ack_digest` is a digest-commitment field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:ba383604b0f04fa552de5ca7b52083a58cec2bb816d9d50668b4cee84b8cb40e"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ExportLeaf|ExportLeaf<T>.object_specific_scalar_projection|db78957fc4e87eec0adcece6ae1bd57370e57206c74050f76c2ca8a3318c53d6|1|fc5ab2a4bb1ddee224c7ccc0bb65bc663b5f8f50dbc769f6266e22d2acb2149b|shorthand field has no exact type"
+source_locations = ["a01:1400"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ExportLeaf<T>|ExportLeaf<T>.object_specific_scalar_projection|object_specific_scalar_projection"]
+rationale = "a01:1400: shorthand member `object_specific_scalar_projection` carries no inline exact type, and ExportLeaf is a logical kind, so no wire envelope commits the span. The a01 owner ruling landed in 694d14b fixes it to `bytes` on the registered durable_fields row, derived from the a01 canonical_configuration_bytes precedent; the layout is fixed per expansion of T, so the bound is the declared per-kind ceiling rather than a width. The single affected census key maps to that source form."
 
 [[ambiguity_adjudication]]
 row_id = "a01:ambiguity-adjudication:ba4b4e426fd4324114eaaad337e442b5ce7d6e038a34db56d1418c705e15954e"
@@ -39338,6 +39374,15 @@ source_locations = ["a01:1406", "a11:1962"]
 resolution = "maps-to-source"
 resolved_source_keys = ["field|ConditionalGlobalTxnInputRef|ConditionalGlobalTxnInputRef.assigned_global_logical_command_seq|assigned_global_logical_command_seq"]
 rationale = "a01:1406, a11:1962: shorthand member `assigned_global_logical_command_seq` at census path `ConditionalGlobalTxnInputRef.assigned_global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalGlobalTxnInputRef wire envelope contract, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:55674524425476cfb59b374d5d338c633a98488fde9d76d879b29e5b956b138c"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ExportLeaf|ExportLeaf<T>.quorum_signatures|4b7382d93588313ac60e777d7671792202dc4445f17d96d2882ed00971b64a35|1|00791af63539c54ccad5d808edf1263c3f05f4e540e9d33fb0355ebd9e8d79ba|shorthand field has no exact type"
+source_locations = ["a01:1400"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ExportLeaf<T>|ExportLeaf<T>.quorum_signatures|quorum_signatures"]
+rationale = "a01:1400: shorthand member `quorum_signatures` carries no inline exact type, and ExportLeaf is a logical kind, so no wire envelope commits the span. The a01 owner ruling landed in 694d14b fixes it to `bytes` on the registered durable_fields row, derived from the two landed instances in this same release family plus authority_quorum_signatures, all bytes/65536. The single affected census key maps to that source form."
 
 [[ambiguity_adjudication]]
 row_id = "a01:ambiguity-adjudication:56ab0b78574dcc4cc8ada1e27d64228256633d327386f25f3e31c79b082b93d3"
