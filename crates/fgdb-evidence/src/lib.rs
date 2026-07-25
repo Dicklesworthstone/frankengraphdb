@@ -717,6 +717,53 @@ pub enum FallbackBehavior {
 /// Immutable binding of one evidence claim to its identity and declared
 /// context. Fields are read-only after construction (no setters, no `mut`
 /// accessors) — supersession means a new envelope.
+///
+/// The binding itself is structural: callers cannot forge an envelope whose
+/// fields bypass [`EvidenceEnvelope::new`].
+///
+/// ```compile_fail,E0451
+/// use fgdb_claim::EvidenceClaim;
+/// use fgdb_evidence::{EvidenceEnvelope, FallbackBehavior};
+/// use fgdb_types::ObjectId;
+///
+/// let _ = EvidenceEnvelope {
+///     claim: EvidenceClaim::SafetyInvariant {
+///         invariant_id: "FG-INV-01".into(),
+///     },
+///     evidence_oid: ObjectId([1; 32]),
+///     selection_policy_oid: ObjectId([2; 32]),
+///     calibration_window: None,
+///     regime_epoch: 1,
+///     fallback: FallbackBehavior::FailClosed,
+/// };
+/// ```
+///
+/// Nor can a caller replace the claim after construction while retaining the
+/// old evidence identity.
+///
+/// ```compile_fail,E0616
+/// use fgdb_claim::EvidenceClaim;
+/// use fgdb_evidence::{EvidenceEnvelope, FallbackBehavior};
+/// use fgdb_types::ObjectId;
+///
+/// let mut envelope = EvidenceEnvelope::new(
+///     EvidenceClaim::SafetyInvariant {
+///         invariant_id: "FG-INV-01".into(),
+///     },
+///     ObjectId([1; 32]),
+///     ObjectId([2; 32]),
+///     None,
+///     1,
+///     FallbackBehavior::FailClosed,
+/// );
+/// envelope.claim = EvidenceClaim::EmpiricalGate {
+///     fixture: "fixture".into(),
+///     machine_profile: "machine".into(),
+///     sample_count: 1,
+///     variance_budget: "zero".into(),
+///     comparison_rule: "equal".into(),
+/// };
+/// ```
 #[derive(Clone, PartialEq, Debug)]
 pub struct EvidenceEnvelope {
     claim: EvidenceClaim,
@@ -766,8 +813,51 @@ impl EvidenceEnvelope {
     }
 
     /// The lattice at the envelope boundary: may this envelope back a
-    /// registry row of class `target`? Statistical/empirical envelopes can
-    /// never back invariants — a typed rejection, not a warning.
+    /// registry row of class `target`?
+    ///
+    /// This boundary is intentionally value-level because both the envelope's
+    /// [`EvidenceClaim`] variant and `target` can be selected at runtime.
+    /// Illegal pairs therefore return [`LatticeViolation`]; statically known
+    /// pairs use `fgdb_claim::justify` when compile-time rejection is required.
+    /// The successful proof token cannot be forged by constructing its private
+    /// fields.
+    ///
+    /// ```
+    /// use fgdb_claim::{EvidenceClaim, RegistryClaimClass};
+    /// use fgdb_evidence::{EvidenceEnvelope, FallbackBehavior};
+    /// use fgdb_types::ObjectId;
+    ///
+    /// let envelope = EvidenceEnvelope::new(
+    ///     EvidenceClaim::EmpiricalGate {
+    ///         fixture: "fixture".into(),
+    ///         machine_profile: "machine".into(),
+    ///         sample_count: 1,
+    ///         variance_budget: "zero".into(),
+    ///         comparison_rule: "equal".into(),
+    ///     },
+    ///     ObjectId([1; 32]),
+    ///     ObjectId([2; 32]),
+    ///     None,
+    ///     1,
+    ///     FallbackBehavior::FailClosed,
+    /// );
+    ///
+    /// let violation = envelope
+    ///     .justify(RegistryClaimClass::Statistical)
+    ///     .unwrap_err();
+    /// assert_eq!(violation.evidence, RegistryClaimClass::Benchmark);
+    /// assert_eq!(violation.target, RegistryClaimClass::Statistical);
+    /// assert!(envelope.justify(RegistryClaimClass::Benchmark).is_ok());
+    /// ```
+    ///
+    /// ```compile_fail,E0451
+    /// use fgdb_claim::{Justification, RegistryClaimClass};
+    ///
+    /// let _ = Justification {
+    ///     evidence: RegistryClaimClass::Benchmark,
+    ///     target: RegistryClaimClass::Invariant,
+    /// };
+    /// ```
     pub fn justify(&self, target: RegistryClaimClass) -> Result<Justification, LatticeViolation> {
         self.claim.max_registry_class().try_justify(target)
     }
@@ -777,6 +867,15 @@ impl EvidenceEnvelope {
 mod tests {
     use super::*;
     use fgdb_claim::{RefinementStatus, StatisticalErrorControl};
+
+    const REGISTRY_CLASSES: [RegistryClaimClass; 6] = [
+        RegistryClaimClass::Invariant,
+        RegistryClaimClass::Proof,
+        RegistryClaimClass::BoundedModel,
+        RegistryClaimClass::Statistical,
+        RegistryClaimClass::Slo,
+        RegistryClaimClass::Benchmark,
+    ];
 
     fn oid(fill: u8) -> ObjectId {
         ObjectId([fill; 32])
@@ -1265,6 +1364,55 @@ mod tests {
         }
     }
 
+    fn envelope_claim_cases() -> [(EvidenceClaim, usize); 6] {
+        [
+            (
+                EvidenceClaim::SafetyInvariant {
+                    invariant_id: "FG-INV-01".into(),
+                },
+                0,
+            ),
+            (
+                EvidenceClaim::FormalModelClaim {
+                    model_name: "refined proof".into(),
+                    abstraction_boundary: "checked implementation".into(),
+                    checked_bounds: None,
+                    refinement_status: RefinementStatus::RefinedToImplementation,
+                },
+                1,
+            ),
+            (
+                EvidenceClaim::FormalModelClaim {
+                    model_name: "bounded model".into(),
+                    abstraction_boundary: "model only".into(),
+                    checked_bounds: Some("three actors".into()),
+                    refinement_status: RefinementStatus::ModelOnly,
+                },
+                2,
+            ),
+            (statistical_claim(), 3),
+            (
+                EvidenceClaim::ConfigurationModelClaim {
+                    model_version: "v1".into(),
+                    fitted_inputs: vec!["fixture L".into()],
+                    sensitivity: "bounded".into(),
+                    validity_domain: "epoch 7".into(),
+                },
+                3,
+            ),
+            (
+                EvidenceClaim::EmpiricalGate {
+                    fixture: "fixture L".into(),
+                    machine_profile: "machine P".into(),
+                    sample_count: 52_000,
+                    variance_budget: "1%".into(),
+                    comparison_rule: "not slower".into(),
+                },
+                5,
+            ),
+        ]
+    }
+
     #[test]
     fn windows_reject_empty_and_inverted() {
         assert!(CalibrationWindow::new(10, 20).is_ok());
@@ -1304,40 +1452,37 @@ mod tests {
     }
 
     #[test]
-    fn statistical_envelope_cannot_back_an_invariant_row() {
-        let env = EvidenceEnvelope::new(
-            statistical_claim(),
-            oid(1),
-            oid(2),
-            None,
-            1,
-            FallbackBehavior::FailClosed,
-        );
-        // Fine at its own level and below…
-        assert!(env.justify(RegistryClaimClass::Statistical).is_ok());
-        assert!(env.justify(RegistryClaimClass::Slo).is_ok());
-        // …typed rejection above it.
-        let err = env.justify(RegistryClaimClass::Invariant).unwrap_err();
-        assert_eq!(err.evidence, RegistryClaimClass::Statistical);
-        assert_eq!(err.target, RegistryClaimClass::Invariant);
-    }
+    fn envelope_justification_exhausts_every_claim_kind_and_target() -> Result<(), LatticeViolation>
+    {
+        for (case_index, (claim, maximum_index)) in envelope_claim_cases().into_iter().enumerate() {
+            let env = EvidenceEnvelope::new(
+                claim,
+                oid(case_index as u8),
+                oid((case_index + 16) as u8),
+                None,
+                1,
+                FallbackBehavior::FailClosed,
+            );
+            let expected_evidence = REGISTRY_CLASSES[maximum_index];
 
-    #[test]
-    fn refined_formal_envelope_backs_proof_but_not_invariant() {
-        let env = EvidenceEnvelope::new(
-            EvidenceClaim::FormalModelClaim {
-                model_name: "block-level SSI safety (Lean)".into(),
-                abstraction_boundary: "block granularity, no I/O model".into(),
-                checked_bounds: None,
-                refinement_status: RefinementStatus::RefinedToImplementation,
-            },
-            oid(4),
-            oid(5),
-            None,
-            1,
-            FallbackBehavior::FailClosed,
-        );
-        assert!(env.justify(RegistryClaimClass::Proof).is_ok());
-        assert!(env.justify(RegistryClaimClass::Invariant).is_err());
+            for (target_index, target) in REGISTRY_CLASSES.into_iter().enumerate() {
+                let result = env.justify(target);
+                if target_index >= maximum_index {
+                    let justification = result?;
+                    assert_eq!(justification.evidence(), expected_evidence);
+                    assert_eq!(justification.target(), target);
+                } else {
+                    assert_eq!(
+                        result,
+                        Err(LatticeViolation {
+                            evidence: expected_evidence,
+                            target,
+                        }),
+                        "case={case_index} target={target:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }
