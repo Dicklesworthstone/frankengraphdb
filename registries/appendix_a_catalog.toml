@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2126
+target_count = 2128
 projection_fallback_count = 90
-target_source_assignment_sha256 = "b3c7b054ba3a40077a84c3bfda5dfdfb28047fd2940a6917ea37a83448535475"
+target_source_assignment_sha256 = "a175000e22271777919276713fb2dd81dd75800d35b7bc8d416e30d08111c363"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 44
+registry_epoch = 45
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -5307,6 +5307,28 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_reconciliation_status/"
+
+[[logical_kind]]
+slice_id = "a20"
+row_id = "a20:logical-kind:restore-service-promotion-manifest"
+object_kind = 0x03e4
+name = "RestoreServicePromotionManifest"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_service_promotion_manifest/"
+
+[[logical_kind]]
+slice_id = "a20"
+row_id = "a20:logical-kind:restore-service-promotion-receipt"
+object_kind = 0x03e5
+name = "RestoreServicePromotionReceipt"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_service_promotion_receipt/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -35007,7 +35029,7 @@ symbol = "RestoreServicePromotionManifest"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03e4"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a20:reservation:restore-service-promotion-receipt"
@@ -35016,7 +35038,7 @@ symbol = "RestoreServicePromotionReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03e5"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-shard-abandon-ack"
@@ -46093,7 +46115,7 @@ symbol = "RestoreServicePromotionManifest"
 generic_signature = ""
 source_key = "top|RestoreServicePromotionManifest"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a20:2575"]
 
 [[top_level_candidate]]
@@ -46103,7 +46125,7 @@ symbol = "RestoreServicePromotionReceipt"
 generic_signature = ""
 source_key = "top|RestoreServicePromotionReceipt"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a20:2593"]
 
 [[top_level_candidate]]
@@ -66999,6 +67021,22 @@ row_id = "a17:target:logical-kind-restore-journal-key-destruction-summary"
 target_row_id = "a17:logical-kind:restore-journal-key-destruction-summary"
 slice_id = "a17"
 source_key = "top|RestoreJournalKeyDestructionSummary<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:logical-kind-restore-service-promotion-manifest"
+target_row_id = "a20:logical-kind:restore-service-promotion-manifest"
+slice_id = "a20"
+source_key = "top|RestoreServicePromotionManifest"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:logical-kind-restore-service-promotion-receipt"
+target_row_id = "a20:logical-kind:restore-service-promotion-receipt"
+slice_id = "a20"
+source_key = "top|RestoreServicePromotionReceipt"
 target_kind = "logical-kind"
 definition_status = "declared"
 

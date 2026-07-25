@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 44
+registry_epoch = 45
 
 [[kind]]
 object_kind = 0x0001
@@ -2266,6 +2266,24 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_registry/"
+
+[[kind]]
+object_kind = 0x03e4
+name = "RestoreServicePromotionManifest"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_service_promotion_manifest/"
+
+[[kind]]
+object_kind = 0x03e5
+name = "RestoreServicePromotionReceipt"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_service_promotion_receipt/"
 
 [[kind]]
 object_kind = 0x03e6
