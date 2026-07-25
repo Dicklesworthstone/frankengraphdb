@@ -1538,6 +1538,69 @@ mod tests {
     }
 
     #[test]
+    fn accumulation_is_monotone_and_splitting_the_stream_is_exact() -> Result<(), DistinctError> {
+        // Monotonicity: registers only ever rise, so a distinct-count estimate
+        // may not fall as more keys arrive. This is the algebraic counterpart
+        // of the modeled accuracy contract -- a falling estimate would make the
+        // error bound meaningless regardless of what the contract declares.
+        let mut running = sketch()?;
+        let mut previous = running.estimate();
+        for key in 0..64_u64 {
+            running.observe(&key.to_le_bytes());
+            let now = running.estimate();
+            assert!(
+                now >= previous,
+                "distinct estimate fell from {previous} to {now} after key {key}"
+            );
+            previous = now;
+        }
+
+        // Split/merge equivalence. Merge takes the register-wise maximum and
+        // observing takes the same maximum, so partitioning the stream must be
+        // EXACT here too -- asserted on canonical bytes rather than on the
+        // estimate, since two different register vectors can round to the same
+        // estimate and would hide a merge that lost a register.
+        let mut whole = sketch()?;
+        for key in 0..48_u64 {
+            whole.observe(&key.to_le_bytes());
+        }
+        let mut first = sketch()?;
+        for key in 0..24_u64 {
+            first.observe(&key.to_le_bytes());
+        }
+        let mut second = sketch()?;
+        for key in 24..48_u64 {
+            second.observe(&key.to_le_bytes());
+        }
+        first.try_merge(&second)?;
+        assert_eq!(
+            first.try_to_canonical_bytes().expect("canonical bytes"),
+            whole.try_to_canonical_bytes().expect("canonical bytes"),
+            "partitioned accumulation must equal whole-stream accumulation"
+        );
+
+        // Overlapping partitions must also agree, because register maxima are
+        // idempotent: a key counted in both shards may not inflate the state.
+        let mut overlap_first = sketch()?;
+        for key in 0..32_u64 {
+            overlap_first.observe(&key.to_le_bytes());
+        }
+        let mut overlap_second = sketch()?;
+        for key in 16..48_u64 {
+            overlap_second.observe(&key.to_le_bytes());
+        }
+        overlap_first.try_merge(&overlap_second)?;
+        assert_eq!(
+            overlap_first
+                .try_to_canonical_bytes()
+                .expect("canonical bytes"),
+            whole.try_to_canonical_bytes().expect("canonical bytes"),
+            "overlapping shards must not inflate the merged state"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn merge_is_commutative_associative_and_idempotent() -> Result<(), DistinctError> {
         let a = populated(&(0_u64..2_000).collect::<Vec<_>>())?;
         let b = populated(&(1_000_u64..3_000).collect::<Vec<_>>())?;

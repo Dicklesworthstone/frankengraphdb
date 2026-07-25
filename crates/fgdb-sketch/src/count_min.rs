@@ -1278,6 +1278,65 @@ mod tests {
     }
 
     #[test]
+    fn accumulation_is_monotone_and_splitting_the_stream_is_exact() {
+        // Two metamorphic relations, neither previously tested in this crate.
+        //
+        // MONOTONICITY is what makes the one-sided error contract meaningful:
+        // Count-Min may only ever OVERSTATE, so no estimate may fall as more
+        // weight arrives. A decrement path introduced anywhere would break the
+        // `estimate >= truth` half of the accuracy harness, and this catches it
+        // at the algebra rather than statistically.
+        let keys: [&[u8]; 4] = [b"alpha", b"beta", b"gamma", b"delta"];
+        let mut running = sketch();
+        let mut previous = [0_u64; 4];
+        for (round, key) in keys.iter().cycle().take(12).enumerate() {
+            running
+                .try_observe(key, u64::try_from(round % 3 + 1).expect("small weight"))
+                .expect("bounded update");
+            for (index, probe) in keys.iter().enumerate() {
+                let now = running.estimate(probe);
+                assert!(
+                    now >= previous[index],
+                    "estimate for {probe:?} fell from {} to {now} at round {round}",
+                    previous[index]
+                );
+                previous[index] = now;
+            }
+        }
+
+        // SPLIT/MERGE EQUIVALENCE is the property distributed accumulation
+        // rests on: a StatsSegment merged from shards must equal the same
+        // stream accumulated in one place. Count-Min merge is exact counter
+        // addition, so this holds on CANONICAL BYTES, not merely on estimates
+        // -- a weaker assertion on estimates alone would pass even if the
+        // merge disagreed about which counters moved.
+        let left: [(&[u8], u64); 3] = [(b"alpha", 3), (b"beta", 5), (b"alpha", 2)];
+        let right: [(&[u8], u64); 3] = [(b"gamma", 7), (b"alpha", 1), (b"delta", 4)];
+
+        let mut whole = sketch();
+        for (key, weight) in left.iter().chain(right.iter()) {
+            whole.try_observe(key, *weight).expect("bounded update");
+        }
+
+        let mut first = sketch();
+        for (key, weight) in left {
+            first.try_observe(key, weight).expect("bounded update");
+        }
+        let mut second = sketch();
+        for (key, weight) in right {
+            second.try_observe(key, weight).expect("bounded update");
+        }
+        first.try_merge(&second).expect("identical profiles merge");
+
+        assert_eq!(
+            first.try_to_canonical_bytes().expect("canonical bytes"),
+            whole.try_to_canonical_bytes().expect("canonical bytes"),
+            "splitting the stream and merging must equal accumulating it whole"
+        );
+        assert_eq!(first.total_weight(), whole.total_weight());
+    }
+
+    #[test]
     fn merge_is_commutative_and_associative_for_identical_profiles() {
         fn part(entries: &[(&[u8], u64)]) -> CountMinSketch {
             let mut value = sketch();
