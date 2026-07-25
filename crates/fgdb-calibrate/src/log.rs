@@ -6247,6 +6247,60 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_range_is_ordered_and_must_lie_within_its_identity_window() -> TestResult {
+        // The range is INCLUSIVE, so `first == last` is a legal
+        // single-sequence batch rather than an empty one, and only
+        // `first > last` is reversed. That distinction is the entire rule, so
+        // both sides are pinned: a `>=` here would silently outlaw every
+        // one-observation batch.
+        let single = StatisticalBatchRange::try_new(5, 5)?;
+        assert_eq!(single.first(), 5);
+        assert_eq!(single.last(), 5);
+        assert!(StatisticalBatchRange::try_new(0, u64::MAX).is_ok());
+        for (first, last) in [(5_u64, 4_u64), (1, 0), (u64::MAX, 0)] {
+            assert_eq!(
+                StatisticalBatchRange::try_new(first, last),
+                Err(StatisticalLogRecordError::ReversedBatchRange { first, last })
+            );
+        }
+
+        // A record's batch must lie inside the identity window it claims, at
+        // both ends. This is the containment half of the log's ordering
+        // guarantee: batches are ordered and nonoverlapping WITHIN a declared
+        // window, so a batch that escapes the window would be ordered against
+        // a range the identity never covered.
+        let window = StatisticalBatchRange::try_new(10, 19)?;
+
+        // Equality is legal at both ends — a batch may span the whole window.
+        let spanning = eprocess_record_in_window(window, window)?;
+        assert_eq!(spanning.batch(), window);
+        assert_eq!(spanning.identity_window(), window);
+        let interior = StatisticalBatchRange::try_new(12, 15)?;
+        assert_eq!(
+            eprocess_record_in_window(window, interior)?.batch(),
+            interior
+        );
+
+        // Escaping by exactly one at either end is refused. One past each
+        // boundary is the case that separates a correct `<`/`>` pair from an
+        // off-by-one that would admit a batch straddling the window edge.
+        for escaping in [
+            StatisticalBatchRange::try_new(9, 19)?,
+            StatisticalBatchRange::try_new(10, 20)?,
+            StatisticalBatchRange::try_new(0, u64::MAX)?,
+        ] {
+            assert_eq!(
+                eprocess_record_in_window(window, escaping),
+                Err(StatisticalLogRecordError::BatchOutsideIdentityWindow {
+                    batch: escaping,
+                    identity_window: window,
+                })
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn ordered_append_rejections_are_atomic() -> TestResult {
         let mut log = StatisticalDecisionLog::try_new(3)?;
         let identity_window = StatisticalBatchRange::try_new(1, 30)?;
