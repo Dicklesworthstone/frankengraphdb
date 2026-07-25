@@ -40,6 +40,7 @@ const fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     let mut start = 0;
     while start <= haystack.len() - needle.len() {
         let mut offset = 0;
+        // ubs:ignore — the outer range and offset guard prove both indexes in bounds.
         while offset < needle.len() && haystack[start + offset] == needle[offset] {
             offset += 1;
         }
@@ -60,6 +61,7 @@ const fn count_bytes(haystack: &[u8], needle: &[u8]) -> usize {
     let mut start = 0;
     while start <= haystack.len() - needle.len() {
         let mut offset = 0;
+        // ubs:ignore — the outer range and offset guard prove both indexes in bounds.
         while offset < needle.len() && haystack[start + offset] == needle[offset] {
             offset += 1;
         }
@@ -154,7 +156,7 @@ active_logical_object_kinds! {
 /// code/name consistency and active registry membership are compile-time
 /// properties rather than parallel raw constants.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use fgdb_types::{LogicalObjectKind, LogicalObjectKindCode};
 ///
 /// struct UnregisteredObject;
@@ -299,7 +301,7 @@ impl<T: LogicalObjectKind> Clone for WeakDigest<T> {
 impl<T: LogicalObjectKind> Copy for WeakDigest<T> {}
 impl<T: LogicalObjectKind> PartialEq for WeakDigest<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.digest == other.digest
+        self.digest == other.digest // ubs:ignore — non-secret provenance, not an auth token.
     }
 }
 impl<T: LogicalObjectKind> Eq for WeakDigest<T> {}

@@ -253,7 +253,7 @@ impl LogicalDeltaTemplate {
 ///
 /// The tuple field is private and direct construction is rejected:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0423
 /// use fgdb_delta_types::CommittedMarker;
 /// use fgdb_types::MarkerRef;
 ///
@@ -264,12 +264,23 @@ impl LogicalDeltaTemplate {
 ///
 /// Attestation without the commit-purpose capability is also rejected:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0061
 /// use fgdb_delta_types::CommittedMarker;
 /// use fgdb_types::MarkerRef;
 ///
 /// fn forge(marker: MarkerRef) -> CommittedMarker {
 ///     CommittedMarker::attest(marker)
+/// }
+/// ```
+///
+/// A different purpose context cannot stand in for commit authority:
+///
+/// ```compile_fail,E0308
+/// use fgdb_delta_types::CommittedMarker;
+/// use fgdb_types::{MarkerRef, QueryCx};
+///
+/// fn forge(marker: MarkerRef, query_cx: &QueryCx) -> CommittedMarker {
+///     CommittedMarker::attest(marker, query_cx)
 /// }
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -279,7 +290,10 @@ impl CommittedMarker {
     /// Attests that `marker` is durably committed. The W2 commit pipeline may
     /// call this only after its marker-fsync boundary; requiring `commit_cx`
     /// makes that authority explicit and excludes query/transaction/maintenance
-    /// purpose contexts at compile time.
+    /// purpose contexts at compile time. Possession of `CommitCx` is an
+    /// authority witness, not an observation of storage state: the W2
+    /// transition checker remains responsible for proving that this call is
+    /// downstream of the marker fsync.
     pub const fn attest(marker: MarkerRef, _commit_cx: &CommitCx) -> Self {
         CommittedMarker(marker)
     }
@@ -294,12 +308,26 @@ impl CommittedMarker {
 /// a [`CommittedMarker`]; there is deliberately no way to build one from a
 /// bare `MarkerRef`.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use fgdb_delta_types::{LogicalDeltaBatch, LogicalDeltaTemplate};
 /// use fgdb_types::MarkerRef;
 ///
 /// fn order_with_bare_identity(template: LogicalDeltaTemplate, marker: MarkerRef) {
 ///     let _ = LogicalDeltaBatch::order(template, marker);
+/// }
+/// ```
+///
+/// The fields are private, so callers cannot bypass [`LogicalDeltaBatch::order`]
+/// even when they already hold both inputs:
+///
+/// ```compile_fail,E0451
+/// use fgdb_delta_types::{CommittedMarker, LogicalDeltaBatch, LogicalDeltaTemplate};
+///
+/// fn bypass(
+///     template: LogicalDeltaTemplate,
+///     marker: CommittedMarker,
+/// ) -> LogicalDeltaBatch {
+///     LogicalDeltaBatch { template, marker }
 /// }
 /// ```
 #[derive(Clone, PartialEq, Debug)]
