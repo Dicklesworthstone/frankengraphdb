@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 640
+target_count = 644
 projection_fallback_count = 84
-target_source_assignment_sha256 = "d5f0f5d5452a0aae3467de9f291042c82d244f48756d1fc83b55dffff76e7533"
+target_source_assignment_sha256 = "c62690e15958d9c9de453afdfca72d26ee5de2001ea51f0f1e4d1776d0ca94e0"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 14
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 21
+registry_epoch = 22
 
 [[logical_kind]]
 slice_id = "a03"
@@ -7346,6 +7346,71 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the TimeAuthorityObservationImport this TimeValidationEvidence commits to; retained while the referrer is retained, and the acyclic order 23 <= 25 keeps the reference backward-only (a16:2167)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-expected-current-configuration-ref"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x0004
+stable_name = "expected_current_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact current ConfigurationState expected by the proposal; retained with the proposal, and the acyclic order 5 <= 80 keeps the reference backward-only (a15:2059)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-checkpoint-and-configuration-floor-refs"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x0007
+stable_name = "checkpoint_and_configuration_floor_refs"
+exact_wire_type = "KeyDestroyFloorRef"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "closed inline checkpoint/configuration floor-reference inventory; generated union walkers retain each selected target while the proposal is retained (a15:2057-2059)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-backup-legal-hold-and-external-consumer-ack-refs"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x000a
+stable_name = "backup_legal_hold_and_external_consumer_ack_refs"
+exact_wire_type = "KeyDestroyExternalAckRef"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "closed inline backup/legal-hold/remote-consumer acknowledgement-reference inventory; generated union walkers retain each selected target while the proposal is retained (a15:2057-2059)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-sorted-destruction-operation-plans"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x000c
+stable_name = "sorted_destruction_operation_plans"
+exact_wire_type = "KeyDestructionOperationPlan"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "inline authorization recipes sorted by canonical target identity with no duplicate target or operation ID; retained and cut with the proposal (a15:2057-2059)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union]]
 slice_id = "a01"
@@ -34665,6 +34730,38 @@ target_row_id = "a09:logical-kind:escaping-allocation-reservation-record"
 slice_id = "a09"
 source_key = "top|EscapingAllocationReservationRecord"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-expected-current-configuration-ref"
+target_row_id = "a15:field:key-destroy-proposal-expected-current-configuration-ref"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.expected_current_configuration_ref|expected_current_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-checkpoint-and-configuration-floor-refs"
+target_row_id = "a15:field:key-destroy-proposal-checkpoint-and-configuration-floor-refs"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.checkpoint_and_configuration_floor_refs|checkpoint_and_configuration_floor_refs"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-backup-legal-hold-and-external-consumer-ack-refs"
+target_row_id = "a15:field:key-destroy-proposal-backup-legal-hold-and-external-consumer-ack-refs"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.backup_legal_hold_and_external_consumer_ack_refs|backup_legal_hold_and_external_consumer_ack_refs"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-sorted-destruction-operation-plans"
+target_row_id = "a15:field:key-destroy-proposal-sorted-destruction-operation-plans"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.sorted_destruction_operation_plans|sorted_destruction_operation_plans"
+target_kind = "field"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

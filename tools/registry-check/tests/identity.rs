@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 21
+registry_epoch = 22
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 21);
+    assert_eq!(epoch, 22);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3117,13 +3117,133 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     );
     assert_eq!(targets[0].target_kind, "logical-kind");
 
-    assert!(
-        !identity
-            .fields
-            .iter()
-            .any(|field| field.containing_schema == "KeyDestroyProposal"),
-        "the shell must not outrun its unresolved field types or unminted strong targets"
+    let mut proposal_fields = identity
+        .fields
+        .iter()
+        .filter(|field| field.containing_schema == "KeyDestroyProposal")
+        .collect::<Vec<_>>();
+    proposal_fields.sort_by_key(|field| field.field_tag);
+    let expected_fields = [
+        (
+            0x0004,
+            "expected_current_configuration_ref",
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("ConfigurationState"),
+            40,
+            "5 <= 80",
+        ),
+        (
+            0x0007,
+            "checkpoint_and_configuration_floor_refs",
+            "KeyDestroyFloorRef",
+            "many",
+            "inline",
+            "none",
+            None,
+            16_777_216,
+            "generated union walkers",
+        ),
+        (
+            0x000a,
+            "backup_legal_hold_and_external_consumer_ack_refs",
+            "KeyDestroyExternalAckRef",
+            "many",
+            "inline",
+            "none",
+            None,
+            16_777_216,
+            "generated union walkers",
+        ),
+        (
+            0x000c,
+            "sorted_destruction_operation_plans",
+            "KeyDestructionOperationPlan",
+            "many",
+            "inline",
+            "none",
+            None,
+            16_777_216,
+            "no duplicate target or operation ID",
+        ),
+    ];
+    assert_eq!(
+        proposal_fields.len(),
+        expected_fields.len(),
+        "only the fully resolved I7 field cohort may land"
     );
+    for (
+        field,
+        (
+            field_tag,
+            stable_name,
+            exact_wire_type,
+            cardinality,
+            identity_class,
+            reference_semantics,
+            target_schema_id,
+            max_size_bytes,
+            retention_fragment,
+        ),
+    ) in proposal_fields.into_iter().zip(expected_fields)
+    {
+        assert_eq!(field.field_tag, field_tag);
+        assert_eq!(field.stable_name, stable_name);
+        assert_eq!(field.exact_wire_type, exact_wire_type);
+        assert_eq!(field.cardinality, cardinality);
+        assert_eq!(field.identity_class, identity_class);
+        assert_eq!(field.reference_semantics, reference_semantics);
+        assert_eq!(field.target_schema_id.as_deref(), target_schema_id);
+        assert_eq!(field.construction_order, 80);
+        assert_eq!(field.role_predicate, "role-local");
+        assert_eq!(field.version_status, "reserved");
+        assert_eq!(field.max_size_bytes, max_size_bytes);
+        assert!(
+            field.retention_and_cut_rule.contains(retention_fragment),
+            "{stable_name} lost its retention/order law"
+        );
+    }
+
+    let mut proposal_field_targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key.starts_with("field|KeyDestroyProposal|"))
+        .collect::<Vec<_>>();
+    proposal_field_targets.sort_by(|left, right| left.source_key.cmp(&right.source_key));
+    let mut expected_target_rows = [
+        (
+            "field|KeyDestroyProposal|KeyDestroyProposal.backup_legal_hold_and_external_consumer_ack_refs|backup_legal_hold_and_external_consumer_ack_refs",
+            "a15:field:key-destroy-proposal-backup-legal-hold-and-external-consumer-ack-refs",
+        ),
+        (
+            "field|KeyDestroyProposal|KeyDestroyProposal.checkpoint_and_configuration_floor_refs|checkpoint_and_configuration_floor_refs",
+            "a15:field:key-destroy-proposal-checkpoint-and-configuration-floor-refs",
+        ),
+        (
+            "field|KeyDestroyProposal|KeyDestroyProposal.expected_current_configuration_ref|expected_current_configuration_ref",
+            "a15:field:key-destroy-proposal-expected-current-configuration-ref",
+        ),
+        (
+            "field|KeyDestroyProposal|KeyDestroyProposal.sorted_destruction_operation_plans|sorted_destruction_operation_plans",
+            "a15:field:key-destroy-proposal-sorted-destruction-operation-plans",
+        ),
+    ];
+    expected_target_rows.sort_by_key(|(source_key, _)| *source_key);
+    assert_eq!(
+        proposal_field_targets.len(),
+        expected_target_rows.len(),
+        "each I7 field source key must map exactly once"
+    );
+    for (target, (source_key, target_row_id)) in
+        proposal_field_targets.into_iter().zip(expected_target_rows)
+    {
+        assert_eq!(target.source_key, source_key);
+        assert_eq!(target.target_row_id, target_row_id);
+        assert_eq!(target.target_kind, "field");
+        assert_eq!(target.definition_status, "declared");
+    }
     assert!(
         !identity.ordinary_unions.iter().any(|union| {
             union.containing_schema == "KeyDestroyProposal"
@@ -3992,10 +4112,24 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("TimeValidationEvidence", "observation_import_ref")
         )
     };
+    // A15 I7 adds the first four fully resolved KeyDestroyProposal members.
+    // Remove them as a cohort so the historical witness still reconstructs
+    // the exact namespace predating every post-erratum field increment.
+    let post_erratum_a15_i7_field = |schema: &str, name: &str| {
+        schema == "KeyDestroyProposal"
+            && matches!(
+                name,
+                "expected_current_configuration_ref"
+                    | "checkpoint_and_configuration_floor_refs"
+                    | "backup_legal_hold_and_external_consumer_ack_refs"
+                    | "sorted_destruction_operation_plans"
+            )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_union(&field.exact_wire_type)
             && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a16_reference_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a15_i7_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 41,
@@ -4003,9 +4137,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove exactly the post-erratum A15, A01, A16, and A03 unions"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 43,
+        pre_erratum.fields.len() + 47,
         current_field_count,
-        "the historical witness must remove the post-erratum embedded-union anchor fields and the A01 applied-result fields"
+        "the historical witness must remove every post-erratum field cohort through A15 I7"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
