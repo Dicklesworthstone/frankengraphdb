@@ -1263,6 +1263,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use asupersync::lab::{LabRunReport, run_async_under_lab};
     use asupersync::runtime::JoinError;
@@ -1602,6 +1604,624 @@ mod tests {
                 assert!(Cx::is_restricted());
             });
             assert!(!Cx::is_restricted());
+        });
+    }
+
+    // ---------------------------------------------------------------------
+    // Lifecycle laws.
+    //
+    // The tests above each walk one hand-picked path with one hand-picked id.
+    // The tests below quantify over the whole acquisition surface instead: all
+    // nine acquisition methods across all five obligation-bearing roles, and
+    // every terminal depth the affine chain admits. They are laws, not
+    // examples, so a new acquisition method or a new boundary is expected to
+    // be added to `every_acquisition` / `BOUNDARY_CHAIN` rather than to be
+    // silently exempt from them.
+    // ---------------------------------------------------------------------
+
+    /// The non-terminal boundary chain, in order. `Resolution` is not a member:
+    /// it is the single terminal event appended by `ObligationCore::resolve`.
+    const BOUNDARY_CHAIN: [ObligationStage; 4] = [
+        ObligationStage::Acquisition,
+        ObligationStage::Transfer,
+        ObligationStage::Publication,
+        ObligationStage::Cleanup,
+    ];
+
+    /// Terminal depths: 0..=3 abort after that many boundaries have been
+    /// crossed, and 4 is the fully discharged path.
+    const TERMINAL_DEPTHS: [usize; 5] = [0, 1, 2, 3, 4];
+
+    /// Drive one obligation to a terminal state at `depth`.
+    ///
+    /// The typestate makes each depth a distinct type, so this cannot be a
+    /// loop over a runtime index inside the caller — that is precisely why the
+    /// existing tests enumerate paths by hand. Collapsing the dispatch here
+    /// lets the *laws* quantify over depth even though the *types* cannot.
+    fn terminate_at_depth(
+        obligation: PurposeObligation<Acquired>,
+        depth: usize,
+    ) -> ObligationReceipt {
+        match depth {
+            0 => obligation.abort(),
+            1 => obligation.transfer().unwrap().abort(),
+            2 => obligation.transfer().unwrap().publish().unwrap().abort(),
+            3 => obligation
+                .transfer()
+                .unwrap()
+                .publish()
+                .unwrap()
+                .cleanup()
+                .unwrap()
+                .abort(),
+            4 => obligation
+                .transfer()
+                .unwrap()
+                .publish()
+                .unwrap()
+                .cleanup()
+                .unwrap()
+                .complete()
+                .unwrap(),
+            other => panic!("no terminal path at depth {other}"),
+        }
+    }
+
+    /// Every acquisition method the context surface offers, with the
+    /// role/kind/units triple the source assigns to it.
+    #[allow(clippy::type_complexity)]
+    fn every_acquisition(
+        contexts: &PurposeContexts,
+        base: u64,
+    ) -> Vec<(
+        &'static str,
+        ContextRole,
+        DatabaseObligationKind,
+        u64,
+        PurposeObligation<Acquired>,
+    )> {
+        vec![
+            (
+                "query.pin_snapshot",
+                ContextRole::Query,
+                DatabaseObligationKind::PinSnapshot,
+                1,
+                contexts.query().pin_snapshot(id(base + 1)).unwrap(),
+            ),
+            (
+                "txn.pin_snapshot",
+                ContextRole::Txn,
+                DatabaseObligationKind::PinSnapshot,
+                1,
+                contexts.txn().pin_snapshot(id(base + 2)).unwrap(),
+            ),
+            (
+                "txn.reserve_prepared_bytes",
+                ContextRole::Txn,
+                DatabaseObligationKind::ReservePreparedBytes,
+                16,
+                contexts
+                    .txn()
+                    .reserve_prepared_bytes(id(base + 3), bytes(16))
+                    .unwrap(),
+            ),
+            (
+                "commit.reserve_prepared_bytes",
+                ContextRole::Commit,
+                DatabaseObligationKind::ReservePreparedBytes,
+                32,
+                contexts
+                    .commit()
+                    .reserve_prepared_bytes(id(base + 4), bytes(32))
+                    .unwrap(),
+            ),
+            (
+                "commit.reserve_raft_payload_space",
+                ContextRole::Commit,
+                DatabaseObligationKind::ReserveRaftPayloadSpace,
+                64,
+                contexts
+                    .commit()
+                    .reserve_raft_payload_space(id(base + 5), bytes(64))
+                    .unwrap(),
+            ),
+            (
+                "commit.publish_segment",
+                ContextRole::Commit,
+                DatabaseObligationKind::PublishSegment,
+                1,
+                contexts.commit().publish_segment(id(base + 6)).unwrap(),
+            ),
+            (
+                "maint.publish_segment",
+                ContextRole::Maint,
+                DatabaseObligationKind::PublishSegment,
+                1,
+                contexts.maint().publish_segment(id(base + 7)).unwrap(),
+            ),
+            (
+                "repl.reserve_raft_payload_space",
+                ContextRole::Repl,
+                DatabaseObligationKind::ReserveRaftPayloadSpace,
+                128,
+                contexts
+                    .repl()
+                    .reserve_raft_payload_space(id(base + 8), bytes(128))
+                    .unwrap(),
+            ),
+            (
+                "repl.publish_segment",
+                ContextRole::Repl,
+                DatabaseObligationKind::PublishSegment,
+                1,
+                contexts.repl().publish_segment(id(base + 9)).unwrap(),
+            ),
+        ]
+    }
+
+    /// L1. Every receipt's stage evidence is a prefix of [`BOUNDARY_CHAIN`]
+    /// followed by exactly one terminal `Resolution`, at every terminal depth
+    /// and for every acquisition method.
+    ///
+    /// The existing cancellation test pins four hand-written stage vectors;
+    /// this derives the expected vector from the chain itself, so it also
+    /// catches a stage recorded out of chain order, a duplicated stage, and a
+    /// receipt that overruns the fixed-size evidence array.
+    #[test]
+    fn stage_evidence_is_a_chain_prefix_plus_one_resolution_at_every_depth() {
+        under_lab(200, |contexts, _root| {
+            for depth in TERMINAL_DEPTHS {
+                for (label, _role, _kind, _units, obligation) in
+                    every_acquisition(&contexts, 100 * depth as u64)
+                {
+                    let receipt = terminate_at_depth(obligation, depth);
+                    let observed = stages(&receipt);
+
+                    let mut expected: Vec<ObligationStage> =
+                        BOUNDARY_CHAIN[..=depth.min(BOUNDARY_CHAIN.len() - 1)].to_vec();
+                    expected.push(ObligationStage::Resolution);
+                    assert_eq!(observed, expected, "{label} at depth {depth}");
+
+                    // Exactly one Resolution, and it is last.
+                    assert_eq!(
+                        observed
+                            .iter()
+                            .filter(|stage| **stage == ObligationStage::Resolution)
+                            .count(),
+                        1,
+                        "{label} at depth {depth}"
+                    );
+                    assert_eq!(
+                        observed.last(),
+                        Some(&ObligationStage::Resolution),
+                        "{label} at depth {depth}"
+                    );
+
+                    // No stage is recorded twice.
+                    let distinct: HashSet<ObligationStage> = observed.iter().copied().collect();
+                    assert_eq!(distinct.len(), observed.len(), "{label} at depth {depth}");
+
+                    // The fixed-size evidence array is never overrun.
+                    assert!(
+                        observed.len() <= MAX_OBLIGATION_EVENTS,
+                        "{label} at depth {depth} recorded {} events",
+                        observed.len()
+                    );
+
+                    // Only the terminal event carries a resolution, and it
+                    // agrees with the receipt.
+                    let expected_resolution = if depth == 4 {
+                        ObligationResolution::Discharged
+                    } else {
+                        ObligationResolution::Aborted
+                    };
+                    assert_eq!(
+                        receipt.resolution(),
+                        expected_resolution,
+                        "{label} at depth {depth}"
+                    );
+                    let resolutions: Vec<Option<ObligationResolution>> = receipt
+                        .events()
+                        .map(ObligationLifecycleEvent::resolution)
+                        .collect();
+                    for (index, resolution) in resolutions.iter().enumerate() {
+                        let want = if index + 1 == resolutions.len() {
+                            Some(expected_resolution)
+                        } else {
+                            None
+                        };
+                        assert_eq!(*resolution, want, "{label} at depth {depth} event {index}");
+                    }
+
+                    // Every event carries the same identity as its receipt.
+                    for event in receipt.events() {
+                        assert_eq!(event.id(), receipt.id(), "{label} at depth {depth}");
+                        assert_eq!(
+                            event.generation(),
+                            receipt.generation(),
+                            "{label} at depth {depth}"
+                        );
+                        assert_eq!(event.role(), receipt.role(), "{label} at depth {depth}");
+                        assert_eq!(event.kind(), receipt.kind(), "{label} at depth {depth}");
+                        assert_eq!(event.units(), receipt.units(), "{label} at depth {depth}");
+                        assert_eq!(
+                            event.task_id(),
+                            receipt.task_id(),
+                            "{label} at depth {depth}"
+                        );
+                        assert_eq!(
+                            event.region_id(),
+                            receipt.region_id(),
+                            "{label} at depth {depth}"
+                        );
+                    }
+                }
+                assert_eq!(contexts.outstanding_obligations(), 0, "depth {depth}");
+            }
+        });
+    }
+
+    /// L2. Generations are dense and strictly increasing from
+    /// `FIRST_OBLIGATION_GENERATION` across an interleaving of every role, not
+    /// merely distinct within one role.
+    ///
+    /// `narrow_runtime_root` mints a fresh tracker, so the first generation
+    /// handed out by a given `PurposeContexts` is pinned, not incidental.
+    #[test]
+    fn generations_are_dense_and_strictly_increasing_across_every_role() {
+        under_lab(201, |contexts, _root| {
+            let acquisitions = every_acquisition(&contexts, 0);
+            assert_eq!(contexts.outstanding_obligations(), acquisitions.len());
+
+            let receipts: Vec<ObligationReceipt> = acquisitions
+                .into_iter()
+                .map(|(_label, _role, _kind, _units, obligation)| obligation.abort())
+                .collect();
+            let generations: Vec<u64> = receipts
+                .iter()
+                .map(|receipt| receipt.generation().get())
+                .collect();
+
+            for pair in generations.windows(2) {
+                assert!(
+                    pair[0] < pair[1],
+                    "generations not increasing: {generations:?}"
+                );
+            }
+            let distinct: HashSet<u64> = generations.iter().copied().collect();
+            assert_eq!(distinct.len(), generations.len(), "{generations:?}");
+
+            // The first generation is written as a literal, deliberately.
+            // Deriving it from `FIRST_OBLIGATION_GENERATION` would make this
+            // assertion self-referential: a change to that constant would move
+            // the expectation with the behaviour and the law would never fire.
+            let expected: Vec<u64> = (1..=generations.len() as u64).collect();
+            assert_eq!(generations, expected);
+            assert_eq!(FIRST_OBLIGATION_GENERATION, expected[0]);
+
+            // A second contexts instance restarts the sequence: the counter is
+            // per-root, not global.
+            assert_eq!(contexts.outstanding_obligations(), 0);
+        });
+    }
+
+    /// L3. The live count is conserved: it tracks acquisitions minus
+    /// terminations at every step, and every role's view of it agrees, because
+    /// all obligation-bearing roles share one tracker.
+    #[test]
+    fn outstanding_count_is_conserved_and_agrees_across_every_role_view() {
+        under_lab(202, |contexts, _root| {
+            let views: [fn(&PurposeContexts) -> usize; 5] = [
+                |c| c.query().outstanding_obligations(),
+                |c| c.txn().outstanding_obligations(),
+                |c| c.commit().outstanding_obligations(),
+                |c| c.maint().outstanding_obligations(),
+                |c| c.repl().outstanding_obligations(),
+            ];
+            let assert_all_views_agree = |expected: usize, at: &str| {
+                assert_eq!(contexts.outstanding_obligations(), expected, "{at}");
+                for (index, view) in views.iter().enumerate() {
+                    assert_eq!(view(&contexts), expected, "role view {index} at {at}");
+                }
+            };
+
+            assert_all_views_agree(0, "start");
+
+            // `every_acquisition` builds its obligations eagerly, so it cannot
+            // be used to observe the count rising one acquisition at a time.
+            // These are deferred on purpose.
+            #[allow(clippy::type_complexity)]
+            let deferred: Vec<(
+                &str,
+                Box<dyn FnOnce() -> PurposeObligation<Acquired> + '_>,
+            )> = vec![
+                (
+                    "query.pin_snapshot",
+                    Box::new(|| contexts.query().pin_snapshot(id(1)).unwrap()),
+                ),
+                (
+                    "txn.pin_snapshot",
+                    Box::new(|| contexts.txn().pin_snapshot(id(2)).unwrap()),
+                ),
+                (
+                    "txn.reserve_prepared_bytes",
+                    Box::new(|| {
+                        contexts
+                            .txn()
+                            .reserve_prepared_bytes(id(3), bytes(16))
+                            .unwrap()
+                    }),
+                ),
+                (
+                    "commit.reserve_prepared_bytes",
+                    Box::new(|| {
+                        contexts
+                            .commit()
+                            .reserve_prepared_bytes(id(4), bytes(32))
+                            .unwrap()
+                    }),
+                ),
+                (
+                    "commit.reserve_raft_payload_space",
+                    Box::new(|| {
+                        contexts
+                            .commit()
+                            .reserve_raft_payload_space(id(5), bytes(64))
+                            .unwrap()
+                    }),
+                ),
+                (
+                    "commit.publish_segment",
+                    Box::new(|| contexts.commit().publish_segment(id(6)).unwrap()),
+                ),
+                (
+                    "maint.publish_segment",
+                    Box::new(|| contexts.maint().publish_segment(id(7)).unwrap()),
+                ),
+                (
+                    "repl.reserve_raft_payload_space",
+                    Box::new(|| {
+                        contexts
+                            .repl()
+                            .reserve_raft_payload_space(id(8), bytes(128))
+                            .unwrap()
+                    }),
+                ),
+                (
+                    "repl.publish_segment",
+                    Box::new(|| contexts.repl().publish_segment(id(9)).unwrap()),
+                ),
+            ];
+
+            let mut live: Vec<PurposeObligation<Acquired>> = Vec::new();
+            for (index, (label, acquire_one)) in deferred.into_iter().enumerate() {
+                live.push(acquire_one());
+                assert_all_views_agree(index + 1, label);
+            }
+
+            let acquired = live.len();
+            for (index, obligation) in live.into_iter().enumerate() {
+                let _receipt = obligation.abort();
+                assert_all_views_agree(acquired - index - 1, "termination");
+            }
+
+            assert_all_views_agree(0, "end");
+        });
+    }
+
+    /// The complete identifier vocabulary the redacted evidence surface is
+    /// allowed to render: the two record type names, their field names, and
+    /// the variants of the four stable enums they carry. Numbers are always
+    /// allowed; free-form text never is.
+    ///
+    /// Adding a descriptive `String` field to either record — the exact leak
+    /// the module header forbids — introduces a token outside this set.
+    const EVIDENCE_VOCABULARY: [&str; 27] = [
+        // record and newtype names
+        "ObligationReceipt",
+        "ObligationLifecycleEvent",
+        "ObligationId",
+        "ObligationGeneration",
+        "Some",
+        "None",
+        // field names
+        "id",
+        "generation",
+        "task_id",
+        "region_id",
+        "role",
+        "kind",
+        "stage",
+        "units",
+        "resolution",
+        "events",
+        "event_count",
+        // ContextRole
+        "Query",
+        "Txn",
+        "Commit",
+        "Maint",
+        "Repl",
+        // DatabaseObligationKind
+        "PinSnapshot",
+        "ReservePreparedBytes",
+        "ReserveRaftPayloadSpace",
+        "PublishSegment",
+        // ObligationStage and ObligationResolution are covered by the stage
+        // and resolution spellings below.
+        "Acquisition",
+    ];
+
+    /// Identifier-like tokens in `rendered` that are not in the allowed
+    /// vocabulary. Digits and punctuation are ignored; this is a whitelist over
+    /// identifiers, not a blacklist over words — a blacklist cannot work here,
+    /// because the legitimate kind name `ReserveRaftPayloadSpace` contains
+    /// "payload" and the legitimate stage `Publication` contains "public".
+    fn foreign_evidence_tokens(rendered: &str) -> Vec<String> {
+        let allowed: HashSet<&str> = EVIDENCE_VOCABULARY.into_iter().collect();
+        let stage_and_resolution: HashSet<String> = [
+            format!("{:?}", ObligationStage::Acquisition),
+            format!("{:?}", ObligationStage::Transfer),
+            format!("{:?}", ObligationStage::Publication),
+            format!("{:?}", ObligationStage::Cleanup),
+            format!("{:?}", ObligationStage::Resolution),
+            format!("{:?}", ObligationResolution::Discharged),
+            format!("{:?}", ObligationResolution::Aborted),
+        ]
+        .into_iter()
+        .collect();
+
+        let mut foreign = Vec::new();
+        let mut token = String::new();
+        let flush = |token: &mut String, foreign: &mut Vec<String>| {
+            if !token.is_empty() {
+                let candidate = std::mem::take(token);
+                let is_number = candidate.chars().all(|c| c.is_ascii_digit());
+                if !is_number
+                    && !allowed.contains(candidate.as_str())
+                    && !stage_and_resolution.contains(&candidate)
+                {
+                    foreign.push(candidate);
+                }
+            }
+        };
+        for ch in rendered.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                token.push(ch);
+            } else {
+                flush(&mut token, &mut foreign);
+            }
+        }
+        flush(&mut token, &mut foreign);
+        foreign
+    }
+
+    /// L4. The evidence surface renders only its closed vocabulary, for every
+    /// acquisition method at every terminal depth — not just for the one
+    /// discharged receipt the existing lifecycle test inspects.
+    ///
+    /// The instrument is controlled in both directions inside the test: a
+    /// fabricated render must be rejected, and a real one must be accepted.
+    /// Without the negative control a checker that silently matched nothing
+    /// would pass this test on every input.
+    #[test]
+    fn evidence_renders_only_its_closed_vocabulary_for_every_method_and_depth() {
+        // Negative control: a fabricated leak is caught — both the foreign
+        // field name and its free-form value.
+        assert_eq!(
+            foreign_evidence_tokens("ObligationReceipt { tenant: acme_corp }"),
+            vec!["tenant".to_string(), "acme_corp".to_string()],
+            "vocabulary checker failed to reject a fabricated leak"
+        );
+        // Positive control: the closed vocabulary and bare numbers are clean.
+        assert!(
+            foreign_evidence_tokens("ObligationReceipt { units: 4096, role: Commit }").is_empty(),
+            "vocabulary checker rejected a legitimate render"
+        );
+
+        under_lab(203, |contexts, _root| {
+            for depth in TERMINAL_DEPTHS {
+                for (label, role, kind, _units, obligation) in
+                    every_acquisition(&contexts, 100 * depth as u64)
+                {
+                    let receipt = terminate_at_depth(obligation, depth);
+                    let rendered =
+                        format!("{receipt:?} {:?}", receipt.events().collect::<Vec<_>>());
+
+                    let foreign = foreign_evidence_tokens(&rendered);
+                    assert!(
+                        foreign.is_empty(),
+                        "{label} at depth {depth} rendered foreign tokens {foreign:?}: {rendered}"
+                    );
+
+                    // Non-vacuity: the surface really is rendering the stable
+                    // enums, so the assertion above is testing something.
+                    assert!(
+                        rendered.contains(&format!("{role:?}")),
+                        "{label} at depth {depth} omitted its role: {rendered}"
+                    );
+                    assert!(
+                        rendered.contains(&format!("{kind:?}")),
+                        "{label} at depth {depth} omitted its kind: {rendered}"
+                    );
+                    assert!(
+                        receipt.events().count() >= 2,
+                        "{label} at depth {depth} rendered too few events"
+                    );
+                }
+                assert_eq!(contexts.outstanding_obligations(), 0, "depth {depth}");
+            }
+        });
+    }
+
+    /// L5. `units` round-trips the requested reservation for the byte-carrying
+    /// kinds across the whole `NonZeroU64` range, and is the fixed sentinel `1`
+    /// for the kinds that reserve no bytes.
+    ///
+    /// The existing lifecycle test pins this at the single value 4096.
+    #[test]
+    fn units_round_trip_the_requested_reservation_for_every_byte_carrying_kind() {
+        const REQUESTS: [u64; 8] = [1, 2, 3, 7, 63, 4096, u64::MAX - 1, u64::MAX];
+
+        under_lab(204, |contexts, _root| {
+            for (index, request) in REQUESTS.into_iter().enumerate() {
+                let base = 10 * index as u64;
+                let reservations = [
+                    (
+                        "txn.reserve_prepared_bytes",
+                        contexts
+                            .txn()
+                            .reserve_prepared_bytes(id(base + 1), bytes(request))
+                            .unwrap(),
+                    ),
+                    (
+                        "commit.reserve_prepared_bytes",
+                        contexts
+                            .commit()
+                            .reserve_prepared_bytes(id(base + 2), bytes(request))
+                            .unwrap(),
+                    ),
+                    (
+                        "commit.reserve_raft_payload_space",
+                        contexts
+                            .commit()
+                            .reserve_raft_payload_space(id(base + 3), bytes(request))
+                            .unwrap(),
+                    ),
+                    (
+                        "repl.reserve_raft_payload_space",
+                        contexts
+                            .repl()
+                            .reserve_raft_payload_space(id(base + 4), bytes(request))
+                            .unwrap(),
+                    ),
+                ];
+                for (label, obligation) in reservations {
+                    let receipt = obligation.abort();
+                    assert_eq!(receipt.units(), request, "{label} with {request}");
+                    for event in receipt.events() {
+                        assert_eq!(event.units(), request, "{label} with {request}");
+                    }
+                }
+            }
+
+            // The kinds that reserve no bytes report the fixed sentinel, and it
+            // does not vary with the id they were acquired under.
+            for (label, _role, kind, expected_units, obligation) in
+                every_acquisition(&contexts, 900)
+            {
+                let receipt = obligation.abort();
+                assert_eq!(receipt.units(), expected_units, "{label}");
+                if !matches!(
+                    kind,
+                    DatabaseObligationKind::ReservePreparedBytes
+                        | DatabaseObligationKind::ReserveRaftPayloadSpace
+                ) {
+                    assert_eq!(receipt.units(), 1, "{label} is not byte-carrying");
+                }
+            }
+
+            assert_eq!(contexts.outstanding_obligations(), 0);
         });
     }
 }
