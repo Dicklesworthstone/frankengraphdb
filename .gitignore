@@ -6,6 +6,16 @@ target_*/
 crates/*/target/
 a.out
 
+# Loose compiled artifacts in the SOURCE tree. CARGO_TARGET_DIR always points
+# outside the repo, so no legitimate build output ever belongs in-tree. These
+# come from ad-hoc `rustc` harness invocations that omit `-o`/`--out-dir`; a
+# bare `rustc --crate-type=lib -` reading stdin emits `librust_out.rlib` into
+# the CWD, which is how one reached the repo root. The flag fix is to pass
+# `--crate-name <name> -o <dir>/lib<name>.rlib`; this rule is the backstop so
+# the class cannot reach a commit even when an invocation is wrong.
+*.rlib
+*.rmeta
+
 # Database on-disk state — never commit. A live FrankenGraphDB directory holds the
 # only mutable file (manifest.root) plus content-addressed, RaptorQ-coded ECS
 # symbol stores; none of it belongs in git.
