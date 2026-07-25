@@ -196,6 +196,7 @@ fn run_transcript(root: &asupersync::Cx) {
     let mut t = Transcript {
         digest: Fnv1a::new(),
     };
+    let contexts = PurposeContexts::narrow_runtime_root(root);
     t.emit("== foundation_types_e2e transcript v4 ==");
 
     // 1. Canonical scalars: every variant, encode/decode round trip.
@@ -438,7 +439,8 @@ fn run_transcript(root: &asupersync::Cx) {
         marker_oid: oid(0xAA),
         commit_seq: CommitSeq(41999),
     };
-    let batch = LogicalDeltaBatch::order(template, CommittedMarker::attest(marker));
+    let committed_marker = CommittedMarker::attest(marker, &contexts.commit());
+    let batch = LogicalDeltaBatch::order(template, committed_marker);
     t.emit(&format!(
         "ordered batch at commit_seq {:?} with {} rows",
         batch.commit_seq(),
@@ -581,7 +583,6 @@ fn run_transcript(root: &asupersync::Cx) {
             .map_or(0, |set| set.len()),
     ));
 
-    let contexts = PurposeContexts::narrow_runtime_root(root);
     let obligation = contexts
         .commit()
         .reserve_prepared_bytes(

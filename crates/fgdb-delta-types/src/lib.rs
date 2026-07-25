@@ -27,7 +27,7 @@
 
 mod zweight;
 
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, MarkerRef, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitCx, EId, GraphId, MarkerRef, ObjectId, VId};
 
 pub use fgdb_bigint::{ArithmeticOperation as ZWeightOperation, LimbLimit};
 pub use zweight::{ZWeight, ZWeightError};
@@ -247,16 +247,40 @@ impl LogicalDeltaTemplate {
 /// complete). This is a distinct type from the bare identity
 /// [`MarkerRef`](fgdb_types::MarkerRef) so the delta layer can demand
 /// committedness in signatures. Production construction sites live in the
-/// W2 commit pipeline (`fgdb-w2-commit-protocol`), after the marker fsync;
-/// once `Cx` capabilities land, attestation will additionally require the
-/// commit capability, making misuse unrepresentable rather than reviewable.
+/// W2 commit pipeline (`fgdb-w2-commit-protocol`), after the marker fsync. The
+/// attestation boundary requires a purpose-typed [`CommitCx`], so a bare marker
+/// identity outside the commit lane cannot be promoted through this API.
+///
+/// The tuple field is private and direct construction is rejected:
+///
+/// ```compile_fail
+/// use fgdb_delta_types::CommittedMarker;
+/// use fgdb_types::MarkerRef;
+///
+/// fn forge(marker: MarkerRef) -> CommittedMarker {
+///     CommittedMarker(marker)
+/// }
+/// ```
+///
+/// Attestation without the commit-purpose capability is also rejected:
+///
+/// ```compile_fail
+/// use fgdb_delta_types::CommittedMarker;
+/// use fgdb_types::MarkerRef;
+///
+/// fn forge(marker: MarkerRef) -> CommittedMarker {
+///     CommittedMarker::attest(marker)
+/// }
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct CommittedMarker(MarkerRef);
 
 impl CommittedMarker {
-    /// Attests that `marker` is durably committed. See the type docs for who
-    /// may call this.
-    pub const fn attest(marker: MarkerRef) -> Self {
+    /// Attests that `marker` is durably committed. The W2 commit pipeline may
+    /// call this only after its marker-fsync boundary; requiring `commit_cx`
+    /// makes that authority explicit and excludes query/transaction/maintenance
+    /// purpose contexts at compile time.
+    pub const fn attest(marker: MarkerRef, _commit_cx: &CommitCx) -> Self {
         CommittedMarker(marker)
     }
 
@@ -269,6 +293,15 @@ impl CommittedMarker {
 /// marker that gives it its place in history. The only constructor consumes
 /// a [`CommittedMarker`]; there is deliberately no way to build one from a
 /// bare `MarkerRef`.
+///
+/// ```compile_fail
+/// use fgdb_delta_types::{LogicalDeltaBatch, LogicalDeltaTemplate};
+/// use fgdb_types::MarkerRef;
+///
+/// fn order_with_bare_identity(template: LogicalDeltaTemplate, marker: MarkerRef) {
+///     let _ = LogicalDeltaBatch::order(template, marker);
+/// }
+/// ```
 #[derive(Clone, PartialEq, Debug)]
 pub struct LogicalDeltaBatch {
     template: LogicalDeltaTemplate,
@@ -299,7 +332,29 @@ impl LogicalDeltaBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fgdb_types::CommitSeq;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::{CommitSeq, PurposeContexts};
+
+    fn with_commit_cx<T, F>(seed: u64, run: F) -> T
+    where
+        T: Send + 'static,
+        F: FnOnce(CommitCx) -> T + Send + 'static,
+    {
+        let (output, report) = run_async_under_lab(seed, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            run(contexts.commit())
+        });
+        assert!(report.quiescent, "lab run did not quiesce: {report:?}");
+        assert!(
+            report.oracle_report.total > 0 && report.oracle_report.all_passed(),
+            "lab oracle failed: {report:?}"
+        );
+        assert!(
+            report.invariant_violations.is_empty(),
+            "lab invariant violation: {report:?}"
+        );
+        output
+    }
 
     fn key() -> DeltaTemplateKey {
         DeltaTemplateKey {
@@ -429,37 +484,48 @@ mod tests {
 
     #[test]
     fn template_is_sequence_neutral_and_batch_is_ordered() {
-        let template = LogicalDeltaTemplate::new(key(), one_row_of_each_family());
-        // The template type carries no order: its full public surface is the
-        // key and rows. (The absence of any marker/seq accessor is the
-        // compile-time half of this test.)
-        assert_eq!(template.key(), &key());
-        assert_eq!(template.rows().len(), 12);
+        with_commit_cx(0x000D_317A, |commit_cx| {
+            let template = LogicalDeltaTemplate::new(key(), one_row_of_each_family());
+            // The template type carries no order: its full public surface is the
+            // key and rows. (The absence of any marker/seq accessor is the
+            // compile-time half of this test.)
+            assert_eq!(template.key(), &key());
+            assert_eq!(template.rows().len(), 12);
 
-        let marker = MarkerRef {
-            marker_oid: ObjectId([0xAA; 32]),
-            commit_seq: CommitSeq(41999),
-        };
-        let batch = LogicalDeltaBatch::order(template.clone(), CommittedMarker::attest(marker));
-        assert_eq!(batch.commit_seq(), CommitSeq(41999));
-        assert_eq!(batch.template(), &template);
-        assert_eq!(batch.marker().marker(), marker);
+            let marker = MarkerRef {
+                marker_oid: ObjectId([0xAA; 32]),
+                commit_seq: CommitSeq(41999),
+            };
+            let committed = CommittedMarker::attest(marker, &commit_cx);
+            let batch = LogicalDeltaBatch::order(template.clone(), committed);
+            assert_eq!(batch.commit_seq(), CommitSeq(41999));
+            assert_eq!(batch.template(), &template);
+            assert_eq!(batch.marker().marker(), marker);
+        });
     }
 
     #[test]
     fn identical_templates_under_different_markers_are_different_batches() {
-        let t = LogicalDeltaTemplate::new(key(), one_row_of_each_family());
-        let m1 = CommittedMarker::attest(MarkerRef {
-            marker_oid: ObjectId([1; 32]),
-            commit_seq: CommitSeq(1),
+        with_commit_cx(0x000D_317B, |commit_cx| {
+            let t = LogicalDeltaTemplate::new(key(), one_row_of_each_family());
+            let m1 = CommittedMarker::attest(
+                MarkerRef {
+                    marker_oid: ObjectId([1; 32]),
+                    commit_seq: CommitSeq(1),
+                },
+                &commit_cx,
+            );
+            let m2 = CommittedMarker::attest(
+                MarkerRef {
+                    marker_oid: ObjectId([2; 32]),
+                    commit_seq: CommitSeq(2),
+                },
+                &commit_cx,
+            );
+            let b1 = LogicalDeltaBatch::order(t.clone(), m1);
+            let b2 = LogicalDeltaBatch::order(t, m2);
+            assert_ne!(b1, b2, "order comes from the marker, not the rows");
+            assert_eq!(b1.template(), b2.template());
         });
-        let m2 = CommittedMarker::attest(MarkerRef {
-            marker_oid: ObjectId([2; 32]),
-            commit_seq: CommitSeq(2),
-        });
-        let b1 = LogicalDeltaBatch::order(t.clone(), m1);
-        let b2 = LogicalDeltaBatch::order(t, m2);
-        assert_ne!(b1, b2, "order comes from the marker, not the rows");
-        assert_eq!(b1.template(), b2.template());
     }
 }
