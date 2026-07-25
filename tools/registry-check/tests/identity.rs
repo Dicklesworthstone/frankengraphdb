@@ -4103,6 +4103,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "DeltaDeliveryEnvelopeProvenance"
                 | "DeltaDeliveryEnvelopeSourceRole"
                 | "WeakAuthorityAppliedIdentity"
+                | "CanonicalConstraintDomainKey"
+                | "ConstraintOwnerAssignment"
+                | "ConstraintStateMutation"
                 | "DeliveryTransitionAppliedRef"
                 | "LocalAttemptRegistrationSpec"
                 | "LocalAuditTicketOwner"
@@ -4322,7 +4325,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a05_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 117,
+        pre_erratum.ordinary_unions.len() + 120,
         current_union_count,
         "the historical witness must remove exactly the post-erratum A15, A01, A16, and A03 unions"
     );

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 26
+registry_epoch = 27
 
 [[type]]
 wire_type_id = 0x0001
@@ -2252,4 +2252,152 @@ containing_union = "WeakAuthorityAppliedIdentity"
 wire_tag = 0x0003
 encoding_context = "arm Shard of closed union WeakAuthorityAppliedIdentity"
 allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00e5
+name = "CanonicalConstraintDomainKey"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Cardinality | Element | Equality | Reference | Temporal; the canonical constraint domain key (a12:1964-1999)"
+allowed_containing_schemas = ["CanonicalConstraintDomainKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00e6
+name = "CanonicalConstraintDomainKey.cardinality"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CanonicalConstraintDomainKey"
+wire_tag = 0x0001
+encoding_context = "arm Cardinality of closed union CanonicalConstraintDomainKey"
+allowed_containing_schemas = ["CanonicalConstraintDomainKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00e7
+name = "CanonicalConstraintDomainKey.element"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CanonicalConstraintDomainKey"
+wire_tag = 0x0002
+encoding_context = "arm Element of closed union CanonicalConstraintDomainKey"
+allowed_containing_schemas = ["CanonicalConstraintDomainKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00e8
+name = "CanonicalConstraintDomainKey.equality"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CanonicalConstraintDomainKey"
+wire_tag = 0x0003
+encoding_context = "arm Equality of closed union CanonicalConstraintDomainKey"
+allowed_containing_schemas = ["CanonicalConstraintDomainKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00e9
+name = "CanonicalConstraintDomainKey.reference"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CanonicalConstraintDomainKey"
+wire_tag = 0x0004
+encoding_context = "arm Reference of closed union CanonicalConstraintDomainKey"
+allowed_containing_schemas = ["CanonicalConstraintDomainKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00ea
+name = "CanonicalConstraintDomainKey.temporal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CanonicalConstraintDomainKey"
+wire_tag = 0x0005
+encoding_context = "arm Temporal of closed union CanonicalConstraintDomainKey"
+allowed_containing_schemas = ["CanonicalConstraintDomainKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00eb
+name = "ConstraintOwnerAssignment"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: MetaOwned | ShardOwned; which authority owns a registered constraint (a12:1964-1999)"
+allowed_containing_schemas = ["ConstraintOwnerAssignment"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00ec
+name = "ConstraintOwnerAssignment.meta_owned"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ConstraintOwnerAssignment"
+wire_tag = 0x0001
+encoding_context = "arm MetaOwned of closed union ConstraintOwnerAssignment"
+allowed_containing_schemas = ["ConstraintOwnerAssignment"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00ed
+name = "ConstraintOwnerAssignment.shard_owned"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ConstraintOwnerAssignment"
+wire_tag = 0x0002
+encoding_context = "arm ShardOwned of closed union ConstraintOwnerAssignment"
+allowed_containing_schemas = ["ConstraintOwnerAssignment"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00ee
+name = "ConstraintStateMutation"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: SetCardinality | SetEquality | SetReference | SetTemporalInterval; the registered constraint-state mutations (a12:1964-1999)"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00ef
+name = "ConstraintStateMutation.set_cardinality"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ConstraintStateMutation"
+wire_tag = 0x0001
+encoding_context = "arm SetCardinality of closed union ConstraintStateMutation"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00f0
+name = "ConstraintStateMutation.set_equality"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ConstraintStateMutation"
+wire_tag = 0x0002
+encoding_context = "arm SetEquality of closed union ConstraintStateMutation"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00f1
+name = "ConstraintStateMutation.set_reference"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ConstraintStateMutation"
+wire_tag = 0x0003
+encoding_context = "arm SetReference of closed union ConstraintStateMutation"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00f2
+name = "ConstraintStateMutation.set_temporal_interval"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ConstraintStateMutation"
+wire_tag = 0x0004
+encoding_context = "arm SetTemporalInterval of closed union ConstraintStateMutation"
+allowed_containing_schemas = ["ConstraintStateMutation"]
 max_size_bytes = 16777216

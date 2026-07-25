@@ -3696,6 +3696,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "CanonicalConstraintDomainKey"
+containing_schema = "CanonicalConstraintDomainKey"
+union_path = "CanonicalConstraintDomainKey"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CanonicalConstraintDomainKey"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "CertifiedLegacyLocalArtifactRef<T>"
 containing_schema = "CertifiedLegacyLocalArtifactRef<T>"
 union_path = "CertifiedLegacyLocalArtifactRef<T>"
@@ -3746,6 +3757,28 @@ union_path = "CommittedDeltaSourceRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["CommittedDeltaSourceRef"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ConstraintOwnerAssignment"
+containing_schema = "ConstraintOwnerAssignment"
+union_path = "ConstraintOwnerAssignment"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintOwnerAssignment"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ConstraintStateMutation"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -5094,6 +5127,71 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union_arm]]
+union_name = "CanonicalConstraintDomainKey"
+containing_schema = "CanonicalConstraintDomainKey"
+union_path = "CanonicalConstraintDomainKey"
+arm_tag = 0x0001
+source_arm_name = "Cardinality"
+stable_name = "cardinality"
+payload_kind = "inline-record"
+payload_sha256 = "9dbc0205d924fe6bb817445a96cd70b23cdc14c40ae48f944e7964ff38c5caf0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CanonicalConstraintDomainKey"
+containing_schema = "CanonicalConstraintDomainKey"
+union_path = "CanonicalConstraintDomainKey"
+arm_tag = 0x0002
+source_arm_name = "Element"
+stable_name = "element"
+payload_kind = "inline-record"
+payload_sha256 = "51d6646a30600009a3c89e44fa344731a3df35260cc21d70f74fa8e169ac7190"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CanonicalConstraintDomainKey"
+containing_schema = "CanonicalConstraintDomainKey"
+union_path = "CanonicalConstraintDomainKey"
+arm_tag = 0x0003
+source_arm_name = "Equality"
+stable_name = "equality"
+payload_kind = "inline-record"
+payload_sha256 = "d160ad65cdbe05de8767c30eefc687897ce05113c66a6514085c8112cba759f3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CanonicalConstraintDomainKey"
+containing_schema = "CanonicalConstraintDomainKey"
+union_path = "CanonicalConstraintDomainKey"
+arm_tag = 0x0004
+source_arm_name = "Reference"
+stable_name = "reference"
+payload_kind = "inline-record"
+payload_sha256 = "6f0a637711d41f0c6dfd7cb3c3c6461e19acb32841212f384dde011f5d6ce676"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CanonicalConstraintDomainKey"
+containing_schema = "CanonicalConstraintDomainKey"
+union_path = "CanonicalConstraintDomainKey"
+arm_tag = 0x0005
+source_arm_name = "Temporal"
+stable_name = "temporal"
+payload_kind = "inline-record"
+payload_sha256 = "dbcdaa4718bfca3bdd208e2f6b0b0a3f41185e01900f7f8125e8780b5b7157bf"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "CertifiedLegacyLocalArtifactRef<T>"
 containing_schema = "CertifiedLegacyLocalArtifactRef<T>"
 union_path = "CertifiedLegacyLocalArtifactRef<T>"
@@ -5290,6 +5388,83 @@ source_arm_name = "Global"
 stable_name = "global"
 payload_kind = "inline-record"
 payload_sha256 = "0d76de718152db77b3c6e2aae639ff58e5aaae777b7bc0ed297243c762f1f89d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConstraintOwnerAssignment"
+containing_schema = "ConstraintOwnerAssignment"
+union_path = "ConstraintOwnerAssignment"
+arm_tag = 0x0001
+source_arm_name = "MetaOwned"
+stable_name = "meta_owned"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintOwnerAssignment"
+containing_schema = "ConstraintOwnerAssignment"
+union_path = "ConstraintOwnerAssignment"
+arm_tag = 0x0002
+source_arm_name = "ShardOwned"
+stable_name = "shard_owned"
+payload_kind = "inline-record"
+payload_sha256 = "b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConstraintStateMutation"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation"
+arm_tag = 0x0001
+source_arm_name = "SetCardinality"
+stable_name = "set_cardinality"
+payload_kind = "inline-record"
+payload_sha256 = "e2a6163f864e677e82135aba7931ccbf0106ba6baff756efe0df43fe15b57dd0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConstraintStateMutation"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation"
+arm_tag = 0x0002
+source_arm_name = "SetEquality"
+stable_name = "set_equality"
+payload_kind = "inline-record"
+payload_sha256 = "af7098579fc3ee693bb20a5d144adf105279bd633a098fcb8684bb90a5b73299"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConstraintStateMutation"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation"
+arm_tag = 0x0003
+source_arm_name = "SetReference"
+stable_name = "set_reference"
+payload_kind = "inline-record"
+payload_sha256 = "775581e11327bbefc5c560e8605013be31b4bded5b7de1121538b4f3b69c292d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConstraintStateMutation"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation"
+arm_tag = 0x0004
+source_arm_name = "SetTemporalInterval"
+stable_name = "set_temporal_interval"
+payload_kind = "inline-record"
+payload_sha256 = "fdadf019da4d89f8e645383659ddf512d382b237ea0aff657b82ff75b7a3d16e"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
