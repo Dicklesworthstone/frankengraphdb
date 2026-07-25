@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 36
+registry_epoch = 37
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -3789,6 +3789,34 @@ retention_and_cut_rule = "closed union Usable|NotYetValid|Expired; the classific
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[field]]
+containing_schema = "TopologyState"
+field_tag = 0x000d
+stable_name = "applied_control_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "optional"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-meta"
+retention_and_cut_rule = "inline applied-control identity retained with TopologyState; no independent reachability edge (a04:1588)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+containing_schema = "ValidatedRemoteConfigurationAnchor"
+field_tag = 0x000c
+stable_name = "consumer_applied_identity"
+exact_wire_type = "WeakAuthorityAppliedIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline nonretaining consumer applied identity retained with the validated anchor; no independent reachability edge (a04:1586)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union]]
 union_name = "AdministrativeAbortAuthorizationRecordOperationRequestTerminalAbortStage"
 containing_schema = "AdministrativeAbortAuthorizationRecord<Role:AuthorityOwningRole>"
@@ -5225,6 +5253,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RaftMaintenanceCommand"
+containing_schema = "RaftMaintenanceCommand"
+union_path = "RaftMaintenanceCommand"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RaftMaintenanceCommand"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "ReadParticipantRoutingCertificateExecutionScope"
 containing_schema = "ReadParticipantRoutingCertificate"
 union_path = "ReadParticipantRoutingCertificate.execution_scope"
@@ -5246,6 +5285,17 @@ allowed_containing_schemas = ["RemoteAuthorityConfigurationEvidence"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65537
+
+[[union]]
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union]]
 union_name = "RequestTerminalAbortStage"
@@ -5832,7 +5882,7 @@ containing_schema = "WeakAuthorityAppliedIdentity"
 union_path = "WeakAuthorityAppliedIdentity"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+allowed_containing_schemas = ["ValidatedRemoteConfigurationAnchor"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -10266,6 +10316,45 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union_arm]]
+union_name = "RaftMaintenanceCommand"
+containing_schema = "RaftMaintenanceCommand"
+union_path = "RaftMaintenanceCommand"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "88172dd60ba1cca1155af932fa43e982bd44b698ffc476327bca25be57cfde45"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RaftMaintenanceCommand"
+containing_schema = "RaftMaintenanceCommand"
+union_path = "RaftMaintenanceCommand"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "eeafae78b778f68cf3fc34d68663b35b7316e7c0c004eb5c11d982a1eef74637"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RaftMaintenanceCommand"
+containing_schema = "RaftMaintenanceCommand"
+union_path = "RaftMaintenanceCommand"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "259d58930b54ee5f66887b101a2b467696d4c806190710d77e0f550e0c9188aa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "ReadParticipantRoutingCertificateExecutionScope"
 containing_schema = "ReadParticipantRoutingCertificate"
 union_path = "ReadParticipantRoutingCertificate.execution_scope"
@@ -10327,6 +10416,110 @@ payload_sha256 = "3a2d87d0f381667522afda570d38ae9c32537aede9bb42bee73ef3dbb8d5a7
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0001
+source_arm_name = "AcquireGrant"
+stable_name = "acquire_grant"
+payload_kind = "inline-record"
+payload_sha256 = "3d2eca5b05c39a339a55544db4ef38c8627286e12bc46eedc20c7e2dc27bdfe8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0002
+source_arm_name = "RegisterConsumerGrant"
+stable_name = "register_consumer_grant"
+payload_kind = "inline-record"
+payload_sha256 = "c3a9c04dc72c1b5714934dbe21da5265c3623af0fae006d27d60ee4755d38397"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0003
+source_arm_name = "RequestConsumerRelease"
+stable_name = "request_consumer_release"
+payload_kind = "inline-record"
+payload_sha256 = "c47004ec1bc102c2efa2b24e1c0521030366f897f240645d9c5249e3b823cbbb"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0004
+source_arm_name = "PublishConsumerReleaseEvidence"
+stable_name = "publish_consumer_release_evidence"
+payload_kind = "inline-record"
+payload_sha256 = "13fafe1d4a2ca66becac7f0e6f89afa0b956f291c2e3776728131c0d9ea95760"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0005
+source_arm_name = "ApplyAuthorityRelease"
+stable_name = "apply_authority_release"
+payload_kind = "inline-record"
+payload_sha256 = "3b71a528ee85ba804999da14c3d1bf4972dfd96d176449a7c8a07042fd417319"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0006
+source_arm_name = "PublishAuthorityReleaseAck"
+stable_name = "publish_authority_release_ack"
+payload_kind = "inline-record"
+payload_sha256 = "168e14cf2b5827497239ef905be8e957dbd6ea100e3553899364c0a9089cfa28"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0007
+source_arm_name = "ConsumeReleaseAck"
+stable_name = "consume_release_ack"
+payload_kind = "inline-record"
+payload_sha256 = "e661b30eae0fbdd05b5d42fa408e9247196112736fbb3ddeff69c21fea3e0a84"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0008
+source_arm_name = "AdoptLegacyAuthorityTransfer"
+stable_name = "adopt_legacy_authority_transfer"
+payload_kind = "inline-record"
+payload_sha256 = "4c46a602c0e8e0b7d889479e1e1653fd8100270a9d673acc3fde6ba13924664a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "RequestTerminalAbortStage"

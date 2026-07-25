@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1502
+target_count = 1528
 projection_fallback_count = 90
-target_source_assignment_sha256 = "ddbce71a5b0203c088f8363d0bde90aed5147799d3a3315c1e000b9235ad91c8"
+target_source_assignment_sha256 = "2569cbc9a4e028afa4b09a0c0c9512aeb5da181c61ce617c4c8c23f036ac737d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 28
+registry_epoch = 29
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 36
+registry_epoch = 37
 
 [[logical_kind]]
 slice_id = "a03"
@@ -5218,7 +5218,7 @@ name = "WeakAuthorityAppliedIdentity"
 kind = "union"
 status = "reserved"
 encoding_context = "canonical nonretaining authority applied-identity union"
-allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+allowed_containing_schemas = ["ValidatedRemoteConfigurationAnchor"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -6988,6 +6988,149 @@ status = "reserved"
 encoding_context = "arm Feature of closed union QuotaPath"
 allowed_containing_schemas = ["QuotaPath"]
 max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:raft-maintenance-command-local"
+wire_type_id = 0x00fe
+name = "RaftMaintenanceCommand.local"
+kind = "union_variant"
+containing_union = "RaftMaintenanceCommand"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm Local of closed union RaftMaintenanceCommand"
+allowed_containing_schemas = ["RaftMaintenanceCommand"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:raft-maintenance-command-meta"
+wire_type_id = 0x00ff
+name = "RaftMaintenanceCommand.meta"
+kind = "union_variant"
+containing_union = "RaftMaintenanceCommand"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm Meta of closed union RaftMaintenanceCommand"
+allowed_containing_schemas = ["RaftMaintenanceCommand"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:raft-maintenance-command-shard"
+wire_type_id = 0x0100
+name = "RaftMaintenanceCommand.shard"
+kind = "union_variant"
+containing_union = "RaftMaintenanceCommand"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm Shard of closed union RaftMaintenanceCommand"
+allowed_containing_schemas = ["RaftMaintenanceCommand"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:remote-retention-control-spec-acquire-grant"
+wire_type_id = 0x0101
+name = "RemoteRetentionControlSpec.acquire_grant"
+kind = "union_variant"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm AcquireGrant of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:remote-retention-control-spec-register-consumer-grant"
+wire_type_id = 0x0102
+name = "RemoteRetentionControlSpec.register_consumer_grant"
+kind = "union_variant"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm RegisterConsumerGrant of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:remote-retention-control-spec-request-consumer-release"
+wire_type_id = 0x0103
+name = "RemoteRetentionControlSpec.request_consumer_release"
+kind = "union_variant"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm RequestConsumerRelease of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:remote-retention-control-spec-publish-consumer-release-evidence"
+wire_type_id = 0x0104
+name = "RemoteRetentionControlSpec.publish_consumer_release_evidence"
+kind = "union_variant"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0004
+status = "reserved"
+encoding_context = "arm PublishConsumerReleaseEvidence of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:remote-retention-control-spec-apply-authority-release"
+wire_type_id = 0x0105
+name = "RemoteRetentionControlSpec.apply_authority_release"
+kind = "union_variant"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0005
+status = "reserved"
+encoding_context = "arm ApplyAuthorityRelease of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:remote-retention-control-spec-publish-authority-release-ack"
+wire_type_id = 0x0106
+name = "RemoteRetentionControlSpec.publish_authority_release_ack"
+kind = "union_variant"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0006
+status = "reserved"
+encoding_context = "arm PublishAuthorityReleaseAck of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:remote-retention-control-spec-consume-release-ack"
+wire_type_id = 0x0107
+name = "RemoteRetentionControlSpec.consume_release_ack"
+kind = "union_variant"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0007
+status = "reserved"
+encoding_context = "arm ConsumeReleaseAck of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:remote-retention-control-spec-adopt-legacy-authority-transfer"
+wire_type_id = 0x0108
+name = "RemoteRetentionControlSpec.adopt_legacy_authority_transfer"
+kind = "union_variant"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0008
+status = "reserved"
+encoding_context = "arm AdoptLegacyAuthorityTransfer of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
 
 [[field]]
 slice_id = "a03"
@@ -11286,6 +11429,38 @@ reference_semantics = "none"
 construction_order = 35
 role_predicate = "true"
 retention_and_cut_rule = "closed union Atomic|Coalesced; the delta's committed source provenance, retained with the envelope so coalescing stays provable and W12 emits only Meta-published Global sources (a11:1934)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:topology-state-applied-control-ref"
+containing_schema = "TopologyState"
+field_tag = 0x000d
+stable_name = "applied_control_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "optional"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-meta"
+retention_and_cut_rule = "inline applied-control identity retained with TopologyState; no independent reachability edge (a04:1588)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:validated-remote-configuration-anchor-consumer-applied-identity"
+containing_schema = "ValidatedRemoteConfigurationAnchor"
+field_tag = 0x000c
+stable_name = "consumer_applied_identity"
+exact_wire_type = "WeakAuthorityAppliedIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline nonretaining consumer applied identity retained with the validated anchor; no independent reachability edge (a04:1586)"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -18258,7 +18433,7 @@ containing_schema = "WeakAuthorityAppliedIdentity"
 union_path = "WeakAuthorityAppliedIdentity"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+allowed_containing_schemas = ["ValidatedRemoteConfigurationAnchor"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -21541,6 +21716,197 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:raft-maintenance-command-5db5de01fbae1e54"
+union_name = "RaftMaintenanceCommand"
+containing_schema = "RaftMaintenanceCommand"
+union_path = "RaftMaintenanceCommand"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RaftMaintenanceCommand"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:raft-maintenance-command-local-166e0ce93e239283"
+union_name = "RaftMaintenanceCommand"
+containing_schema = "RaftMaintenanceCommand"
+union_path = "RaftMaintenanceCommand"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "88172dd60ba1cca1155af932fa43e982bd44b698ffc476327bca25be57cfde45"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:raft-maintenance-command-meta-a986852dd35ce52b"
+union_name = "RaftMaintenanceCommand"
+containing_schema = "RaftMaintenanceCommand"
+union_path = "RaftMaintenanceCommand"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "eeafae78b778f68cf3fc34d68663b35b7316e7c0c004eb5c11d982a1eef74637"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:raft-maintenance-command-shard-6092bf9775cd5dfc"
+union_name = "RaftMaintenanceCommand"
+containing_schema = "RaftMaintenanceCommand"
+union_path = "RaftMaintenanceCommand"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "259d58930b54ee5f66887b101a2b467696d4c806190710d77e0f550e0c9188aa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:remote-retention-control-spec-2e20a44d05d16f80"
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-control-spec-acquire-grant-f3b09b90f1d2c6bb"
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0001
+source_arm_name = "AcquireGrant"
+stable_name = "acquire_grant"
+payload_kind = "inline-record"
+payload_sha256 = "3d2eca5b05c39a339a55544db4ef38c8627286e12bc46eedc20c7e2dc27bdfe8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-control-spec-register-consumer-grant-154402bf251f51ae"
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0002
+source_arm_name = "RegisterConsumerGrant"
+stable_name = "register_consumer_grant"
+payload_kind = "inline-record"
+payload_sha256 = "c3a9c04dc72c1b5714934dbe21da5265c3623af0fae006d27d60ee4755d38397"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-control-spec-request-consumer-release-0699968f2848f0b1"
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0003
+source_arm_name = "RequestConsumerRelease"
+stable_name = "request_consumer_release"
+payload_kind = "inline-record"
+payload_sha256 = "c47004ec1bc102c2efa2b24e1c0521030366f897f240645d9c5249e3b823cbbb"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-control-spec-publish-consumer-release-evidence-86544bfa99c7cb1d"
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0004
+source_arm_name = "PublishConsumerReleaseEvidence"
+stable_name = "publish_consumer_release_evidence"
+payload_kind = "inline-record"
+payload_sha256 = "13fafe1d4a2ca66becac7f0e6f89afa0b956f291c2e3776728131c0d9ea95760"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-control-spec-apply-authority-release-e95b41c059245ab6"
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0005
+source_arm_name = "ApplyAuthorityRelease"
+stable_name = "apply_authority_release"
+payload_kind = "inline-record"
+payload_sha256 = "3b71a528ee85ba804999da14c3d1bf4972dfd96d176449a7c8a07042fd417319"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-control-spec-publish-authority-release-ack-8a598a86d04eb5ff"
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0006
+source_arm_name = "PublishAuthorityReleaseAck"
+stable_name = "publish_authority_release_ack"
+payload_kind = "inline-record"
+payload_sha256 = "168e14cf2b5827497239ef905be8e957dbd6ea100e3553899364c0a9089cfa28"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-control-spec-consume-release-ack-9b078d8cbfd19eb7"
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0007
+source_arm_name = "ConsumeReleaseAck"
+stable_name = "consume_release_ack"
+payload_kind = "inline-record"
+payload_sha256 = "e661b30eae0fbdd05b5d42fa408e9247196112736fbb3ddeff69c21fea3e0a84"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-control-spec-adopt-legacy-authority-transfer-c66ff0c93c82d6eb"
+union_name = "RemoteRetentionControlSpec"
+containing_schema = "RemoteRetentionControlSpec"
+union_path = "RemoteRetentionControlSpec"
+arm_tag = 0x0008
+source_arm_name = "AdoptLegacyAuthorityTransfer"
+stable_name = "adopt_legacy_authority_transfer"
+payload_kind = "inline-record"
+payload_sha256 = "4c46a602c0e8e0b7d889479e1e1653fd8100270a9d673acc3fde6ba13924664a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
@@ -53671,6 +54037,214 @@ target_row_id = "a13:union-arm:key-grant-registry-entries-terminal-status-expire
 slice_id = "a13"
 source_key = "arm|KeyGrantRegistry<Role>|KeyGrantRegistry<Role>.entries.Terminal.status|Expired"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-raft-maintenance-command-5db5de01fbae1e54"
+target_row_id = "a04:union:raft-maintenance-command-5db5de01fbae1e54"
+slice_id = "a04"
+source_key = "union|RaftMaintenanceCommand|RaftMaintenanceCommand"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-raft-maintenance-command-local-166e0ce93e239283"
+target_row_id = "a04:union-arm:raft-maintenance-command-local-166e0ce93e239283"
+slice_id = "a04"
+source_key = "arm|RaftMaintenanceCommand|RaftMaintenanceCommand|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-raft-maintenance-command-local"
+target_row_id = "a04:wire-type:raft-maintenance-command-local"
+slice_id = "a04"
+source_key = "arm|RaftMaintenanceCommand|RaftMaintenanceCommand|Local"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-raft-maintenance-command-meta-a986852dd35ce52b"
+target_row_id = "a04:union-arm:raft-maintenance-command-meta-a986852dd35ce52b"
+slice_id = "a04"
+source_key = "arm|RaftMaintenanceCommand|RaftMaintenanceCommand|Meta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-raft-maintenance-command-meta"
+target_row_id = "a04:wire-type:raft-maintenance-command-meta"
+slice_id = "a04"
+source_key = "arm|RaftMaintenanceCommand|RaftMaintenanceCommand|Meta"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-raft-maintenance-command-shard-6092bf9775cd5dfc"
+target_row_id = "a04:union-arm:raft-maintenance-command-shard-6092bf9775cd5dfc"
+slice_id = "a04"
+source_key = "arm|RaftMaintenanceCommand|RaftMaintenanceCommand|Shard"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-raft-maintenance-command-shard"
+target_row_id = "a04:wire-type:raft-maintenance-command-shard"
+slice_id = "a04"
+source_key = "arm|RaftMaintenanceCommand|RaftMaintenanceCommand|Shard"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-remote-retention-control-spec-2e20a44d05d16f80"
+target_row_id = "a04:union:remote-retention-control-spec-2e20a44d05d16f80"
+slice_id = "a04"
+source_key = "union|RemoteRetentionControlSpec|RemoteRetentionControlSpec"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-control-spec-acquire-grant-f3b09b90f1d2c6bb"
+target_row_id = "a04:union-arm:remote-retention-control-spec-acquire-grant-f3b09b90f1d2c6bb"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|AcquireGrant"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-remote-retention-control-spec-acquire-grant"
+target_row_id = "a04:wire-type:remote-retention-control-spec-acquire-grant"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|AcquireGrant"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-control-spec-register-consumer-grant-154402bf251f51ae"
+target_row_id = "a04:union-arm:remote-retention-control-spec-register-consumer-grant-154402bf251f51ae"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|RegisterConsumerGrant"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-remote-retention-control-spec-register-consumer-grant"
+target_row_id = "a04:wire-type:remote-retention-control-spec-register-consumer-grant"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|RegisterConsumerGrant"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-control-spec-request-consumer-release-0699968f2848f0b1"
+target_row_id = "a04:union-arm:remote-retention-control-spec-request-consumer-release-0699968f2848f0b1"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|RequestConsumerRelease"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-remote-retention-control-spec-request-consumer-release"
+target_row_id = "a04:wire-type:remote-retention-control-spec-request-consumer-release"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|RequestConsumerRelease"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-control-spec-publish-consumer-release-evidence-86544bfa99c7cb1d"
+target_row_id = "a04:union-arm:remote-retention-control-spec-publish-consumer-release-evidence-86544bfa99c7cb1d"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|PublishConsumerReleaseEvidence"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-remote-retention-control-spec-publish-consumer-release-evidence"
+target_row_id = "a04:wire-type:remote-retention-control-spec-publish-consumer-release-evidence"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|PublishConsumerReleaseEvidence"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-control-spec-apply-authority-release-e95b41c059245ab6"
+target_row_id = "a04:union-arm:remote-retention-control-spec-apply-authority-release-e95b41c059245ab6"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|ApplyAuthorityRelease"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-remote-retention-control-spec-apply-authority-release"
+target_row_id = "a04:wire-type:remote-retention-control-spec-apply-authority-release"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|ApplyAuthorityRelease"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-control-spec-publish-authority-release-ack-8a598a86d04eb5ff"
+target_row_id = "a04:union-arm:remote-retention-control-spec-publish-authority-release-ack-8a598a86d04eb5ff"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|PublishAuthorityReleaseAck"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-remote-retention-control-spec-publish-authority-release-ack"
+target_row_id = "a04:wire-type:remote-retention-control-spec-publish-authority-release-ack"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|PublishAuthorityReleaseAck"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-control-spec-consume-release-ack-9b078d8cbfd19eb7"
+target_row_id = "a04:union-arm:remote-retention-control-spec-consume-release-ack-9b078d8cbfd19eb7"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|ConsumeReleaseAck"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-remote-retention-control-spec-consume-release-ack"
+target_row_id = "a04:wire-type:remote-retention-control-spec-consume-release-ack"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|ConsumeReleaseAck"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-control-spec-adopt-legacy-authority-transfer-c66ff0c93c82d6eb"
+target_row_id = "a04:union-arm:remote-retention-control-spec-adopt-legacy-authority-transfer-c66ff0c93c82d6eb"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|AdoptLegacyAuthorityTransfer"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-remote-retention-control-spec-adopt-legacy-authority-transfer"
+target_row_id = "a04:wire-type:remote-retention-control-spec-adopt-legacy-authority-transfer"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|AdoptLegacyAuthorityTransfer"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-topology-state-applied-control-ref"
+target_row_id = "a04:field:topology-state-applied-control-ref"
+slice_id = "a04"
+source_key = "field|TopologyState|TopologyState.applied_control_ref|applied_control_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-validated-remote-configuration-anchor-consumer-applied-identity"
+target_row_id = "a04:field:validated-remote-configuration-anchor-consumer-applied-identity"
+slice_id = "a04"
+source_key = "field|ValidatedRemoteConfigurationAnchor|ValidatedRemoteConfigurationAnchor.consumer_applied_identity|consumer_applied_identity"
+target_kind = "field"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

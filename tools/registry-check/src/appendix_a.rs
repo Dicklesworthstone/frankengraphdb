@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 1502;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 1528;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "c83a4117a3df140bab48251c044b610880486d3e1f80808c651bd0535159d581";
+    "b5ada89fe80b01d5be1c4ba6dc60f3b17a692b61d3bc368f02b892f210dff201";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 90;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "ddbce71a5b0203c088f8363d0bde90aed5147799d3a3315c1e000b9235ad91c8";
+    "2569cbc9a4e028afa4b09a0c0c9512aeb5da181c61ce617c4c8c23f036ac737d";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -15616,7 +15616,7 @@ stable_name = "Ready"
                 0x0071,
                 "union",
                 "canonical nonretaining authority applied-identity union",
-                &["WeakAuthorityAppliedIdentity"][..],
+                &["ValidatedRemoteConfigurationAnchor"][..],
                 16_777_216,
             ),
         ];
@@ -15684,12 +15684,278 @@ stable_name = "Ready"
     }
 
     #[test]
+    fn a04_embedded_wire_union_contracts_are_exact() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let expected_unions = [
+            (
+                "RaftMaintenanceCommand",
+                "a04:union:raft-maintenance-command-5db5de01fbae1e54",
+                3,
+            ),
+            (
+                "RemoteRetentionControlSpec",
+                "a04:union:remote-retention-control-spec-2e20a44d05d16f80",
+                8,
+            ),
+        ];
+        for (owner, row_id, arm_count) in expected_unions {
+            let unions = catalog
+                .identity
+                .ordinary_unions
+                .iter()
+                .filter(|union| {
+                    union.union_name.eq(owner)
+                        && union.containing_schema.eq(owner)
+                        && union.union_path.eq(owner)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(unions.len(), 1, "{owner} union is unique");
+            let union = unions[0];
+            assert_eq!(union.tag_wire_type, "u8", "{owner} tag type");
+            assert_eq!(union.encoding_context, "closed-tagged", "{owner} encoding");
+            assert_eq!(
+                union
+                    .allowed_containing_schemas
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                [owner],
+                "{owner} containing-schema closure"
+            );
+            assert_eq!(union.role_predicate, "true", "{owner} role predicate");
+            assert_eq!(union.version_status, "reserved", "{owner} lifecycle");
+            assert_eq!(union.max_size_bytes, 16_777_216, "{owner} size ceiling");
+            assert_eq!(union.arms.len(), arm_count, "{owner} arm closure");
+            assert!(
+                catalog
+                    .projection_rows
+                    .iter()
+                    .any(|row| row.row_id.eq(row_id) && row.row_kind.eq("union"))
+            );
+
+            let source_key = format!("union|{owner}|{owner}");
+            let targets = catalog
+                .targets
+                .iter()
+                .filter(|target| target.source_key.eq(&source_key))
+                .collect::<Vec<_>>();
+            assert_eq!(targets.len(), 1, "{owner} union target is unique");
+            assert_eq!(targets[0].target_row_id, row_id, "{owner} target owner");
+            assert_eq!(targets[0].target_kind, "union", "{owner} target kind");
+        }
+
+        let expected_arms = [
+            (
+                "RaftMaintenanceCommand",
+                "raft-maintenance-command",
+                "Local",
+                "local",
+                0x0001,
+                0x00fe,
+                "88172dd60ba1cca1155af932fa43e982bd44b698ffc476327bca25be57cfde45",
+                "a04:union-arm:raft-maintenance-command-local-166e0ce93e239283",
+            ),
+            (
+                "RaftMaintenanceCommand",
+                "raft-maintenance-command",
+                "Meta",
+                "meta",
+                0x0002,
+                0x00ff,
+                "eeafae78b778f68cf3fc34d68663b35b7316e7c0c004eb5c11d982a1eef74637",
+                "a04:union-arm:raft-maintenance-command-meta-a986852dd35ce52b",
+            ),
+            (
+                "RaftMaintenanceCommand",
+                "raft-maintenance-command",
+                "Shard",
+                "shard",
+                0x0003,
+                0x0100,
+                "259d58930b54ee5f66887b101a2b467696d4c806190710d77e0f550e0c9188aa",
+                "a04:union-arm:raft-maintenance-command-shard-6092bf9775cd5dfc",
+            ),
+            (
+                "RemoteRetentionControlSpec",
+                "remote-retention-control-spec",
+                "AcquireGrant",
+                "acquire_grant",
+                0x0001,
+                0x0101,
+                "3d2eca5b05c39a339a55544db4ef38c8627286e12bc46eedc20c7e2dc27bdfe8",
+                "a04:union-arm:remote-retention-control-spec-acquire-grant-f3b09b90f1d2c6bb",
+            ),
+            (
+                "RemoteRetentionControlSpec",
+                "remote-retention-control-spec",
+                "RegisterConsumerGrant",
+                "register_consumer_grant",
+                0x0002,
+                0x0102,
+                "c3a9c04dc72c1b5714934dbe21da5265c3623af0fae006d27d60ee4755d38397",
+                "a04:union-arm:remote-retention-control-spec-register-consumer-grant-154402bf251f51ae",
+            ),
+            (
+                "RemoteRetentionControlSpec",
+                "remote-retention-control-spec",
+                "RequestConsumerRelease",
+                "request_consumer_release",
+                0x0003,
+                0x0103,
+                "c47004ec1bc102c2efa2b24e1c0521030366f897f240645d9c5249e3b823cbbb",
+                "a04:union-arm:remote-retention-control-spec-request-consumer-release-0699968f2848f0b1",
+            ),
+            (
+                "RemoteRetentionControlSpec",
+                "remote-retention-control-spec",
+                "PublishConsumerReleaseEvidence",
+                "publish_consumer_release_evidence",
+                0x0004,
+                0x0104,
+                "13fafe1d4a2ca66becac7f0e6f89afa0b956f291c2e3776728131c0d9ea95760",
+                "a04:union-arm:remote-retention-control-spec-publish-consumer-release-evidence-86544bfa99c7cb1d",
+            ),
+            (
+                "RemoteRetentionControlSpec",
+                "remote-retention-control-spec",
+                "ApplyAuthorityRelease",
+                "apply_authority_release",
+                0x0005,
+                0x0105,
+                "3b71a528ee85ba804999da14c3d1bf4972dfd96d176449a7c8a07042fd417319",
+                "a04:union-arm:remote-retention-control-spec-apply-authority-release-e95b41c059245ab6",
+            ),
+            (
+                "RemoteRetentionControlSpec",
+                "remote-retention-control-spec",
+                "PublishAuthorityReleaseAck",
+                "publish_authority_release_ack",
+                0x0006,
+                0x0106,
+                "168e14cf2b5827497239ef905be8e957dbd6ea100e3553899364c0a9089cfa28",
+                "a04:union-arm:remote-retention-control-spec-publish-authority-release-ack-8a598a86d04eb5ff",
+            ),
+            (
+                "RemoteRetentionControlSpec",
+                "remote-retention-control-spec",
+                "ConsumeReleaseAck",
+                "consume_release_ack",
+                0x0007,
+                0x0107,
+                "e661b30eae0fbdd05b5d42fa408e9247196112736fbb3ddeff69c21fea3e0a84",
+                "a04:union-arm:remote-retention-control-spec-consume-release-ack-9b078d8cbfd19eb7",
+            ),
+            (
+                "RemoteRetentionControlSpec",
+                "remote-retention-control-spec",
+                "AdoptLegacyAuthorityTransfer",
+                "adopt_legacy_authority_transfer",
+                0x0008,
+                0x0108,
+                "4c46a602c0e8e0b7d889479e1e1653fd8100270a9d673acc3fde6ba13924664a",
+                "a04:union-arm:remote-retention-control-spec-adopt-legacy-authority-transfer-c66ff0c93c82d6eb",
+            ),
+        ];
+        for (owner, owner_slug, source_name, stable_name, tag, code, digest, arm_row_id) in
+            expected_arms
+        {
+            let union = catalog
+                .identity
+                .ordinary_unions
+                .iter()
+                .find(|union| union.union_name.eq(owner))
+                .expect("a04 ordinary union exists");
+            let arm = union
+                .arms
+                .iter()
+                .find(|arm| arm.source_arm_name.eq(source_name))
+                .expect("a04 ordinary-union arm exists");
+            assert_eq!(arm.arm_tag, tag, "{owner}.{source_name} tag");
+            assert_eq!(arm.stable_name, stable_name, "{owner}.{source_name} name");
+            assert_eq!(arm.payload_kind, "inline-record");
+            assert_eq!(arm.payload_sha256.as_deref(), Some(digest));
+            assert_eq!(arm.role_predicate, "true");
+            assert_eq!(arm.version_status, "reserved");
+            assert_eq!(arm.max_size_bytes, 16_777_216);
+            assert!(
+                catalog
+                    .projection_rows
+                    .iter()
+                    .any(|row| row.row_id.eq(arm_row_id) && row.row_kind.eq("union-arm"))
+            );
+
+            let wire_name = format!("{owner}.{stable_name}");
+            let variants = catalog
+                .identity
+                .wire
+                .iter()
+                .filter(|wire| wire.name.eq(&wire_name))
+                .collect::<Vec<_>>();
+            assert_eq!(variants.len(), 1, "{wire_name} variant is unique");
+            let variant = variants[0];
+            assert_eq!(variant.wire_type_id, code, "{wire_name} code");
+            assert_eq!(variant.kind, "union_variant");
+            assert_eq!(variant.containing_union.as_deref(), Some(owner));
+            assert_eq!(variant.wire_tag, Some(tag));
+            assert_eq!(variant.status, "reserved");
+            assert_eq!(
+                variant.encoding_context,
+                format!("arm {source_name} of closed union {owner}")
+            );
+            assert_eq!(
+                variant
+                    .allowed_containing_schemas
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                [owner]
+            );
+            assert_eq!(variant.max_size_bytes, 16_777_216);
+
+            let source_key = format!("arm|{owner}|{owner}|{source_name}");
+            let targets = catalog
+                .targets
+                .iter()
+                .filter(|target| target.source_key.eq(&source_key))
+                .collect::<Vec<_>>();
+            assert_eq!(targets.len(), 2, "{wire_name} has arm and wire targets");
+            assert!(targets.iter().any(|target| {
+                target.target_kind.eq("union-arm") && target.target_row_id.eq(arm_row_id)
+            }));
+            assert!(targets.iter().any(|target| {
+                target.target_kind.eq("wire-type")
+                    && target.target_row_id.eq(&format!(
+                        "a04:wire-type:{owner_slug}-{}",
+                        stable_name.replace('_', "-")
+                    ))
+            }));
+        }
+    }
+
+    #[test]
     fn a04_weak_authority_applied_identity_union_is_exact() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
         let owner = "WeakAuthorityAppliedIdentity";
         let owner_slug = "weak-authority-applied-identity";
         let union_row_id = "a04:union:weak-authority-applied-identity-8f52cac0fe558262";
+
+        let wire_owners = catalog
+            .identity
+            .wire
+            .iter()
+            .filter(|wire| wire.name.eq(owner))
+            .collect::<Vec<_>>();
+        assert_eq!(wire_owners.len(), 1, "{owner} wire owner is unique");
+        assert_eq!(
+            wire_owners[0]
+                .allowed_containing_schemas
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["ValidatedRemoteConfigurationAnchor"]
+        );
 
         let unions = catalog
             .identity
@@ -15711,7 +15977,7 @@ stable_name = "Ready"
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            [owner]
+            ["ValidatedRemoteConfigurationAnchor"]
         );
         assert_eq!(union.role_predicate, "true");
         assert_eq!(union.version_status, "reserved");
@@ -15841,5 +16107,83 @@ stable_name = "Ready"
                 .all(|field| field.containing_schema != owner),
             "{owner} remains a value union and does not become a durable-field owner"
         );
+    }
+
+    #[test]
+    fn a04_unanimous_precedent_field_contracts_are_exact() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let expected_fields = [
+            (
+                "TopologyState",
+                "applied_control_ref",
+                0x000d,
+                "AppliedControlRef",
+                "optional",
+                "role-meta",
+                49,
+                "a04:field:topology-state-applied-control-ref",
+                "field|TopologyState|TopologyState.applied_control_ref|applied_control_ref",
+            ),
+            (
+                "ValidatedRemoteConfigurationAnchor",
+                "consumer_applied_identity",
+                0x000c,
+                "WeakAuthorityAppliedIdentity",
+                "one",
+                "true",
+                16_777_216,
+                "a04:field:validated-remote-configuration-anchor-consumer-applied-identity",
+                "field|ValidatedRemoteConfigurationAnchor|ValidatedRemoteConfigurationAnchor.consumer_applied_identity|consumer_applied_identity",
+            ),
+        ];
+        for (
+            schema,
+            stable_name,
+            field_tag,
+            exact_wire_type,
+            cardinality,
+            role_predicate,
+            max_size_bytes,
+            row_id,
+            source_key,
+        ) in expected_fields
+        {
+            let fields = catalog
+                .identity
+                .fields
+                .iter()
+                .filter(|field| {
+                    field.containing_schema.eq(schema) && field.stable_name.eq(stable_name)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(fields.len(), 1, "{schema}.{stable_name} field is unique");
+            let field = fields[0];
+            assert_eq!(field.field_tag, field_tag);
+            assert_eq!(field.exact_wire_type, exact_wire_type);
+            assert_eq!(field.cardinality, cardinality);
+            assert_eq!(field.identity_class, "inline");
+            assert_eq!(field.reference_semantics, "none");
+            assert_eq!(field.construction_order, 40);
+            assert_eq!(field.role_predicate, role_predicate);
+            assert_eq!(field.version_status, "reserved");
+            assert_eq!(field.max_size_bytes, max_size_bytes);
+            assert!(
+                catalog
+                    .projection_rows
+                    .iter()
+                    .any(|row| row.row_id.eq(row_id) && row.row_kind.eq("field"))
+            );
+
+            let targets = catalog
+                .targets
+                .iter()
+                .filter(|target| target.source_key.eq(source_key))
+                .collect::<Vec<_>>();
+            assert_eq!(targets.len(), 1, "{schema}.{stable_name} target is unique");
+            assert_eq!(targets[0].target_row_id, row_id);
+            assert_eq!(targets[0].target_kind, "field");
+            assert_eq!(targets[0].definition_status, "declared");
+        }
     }
 }

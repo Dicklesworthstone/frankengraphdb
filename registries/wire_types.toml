@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 28
+registry_epoch = 29
 
 [[type]]
 wire_type_id = 0x0001
@@ -1092,7 +1092,7 @@ name = "WeakAuthorityAppliedIdentity"
 kind = "union"
 status = "reserved"
 encoding_context = "canonical nonretaining authority applied-identity union"
-allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+allowed_containing_schemas = ["ValidatedRemoteConfigurationAnchor"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -2518,3 +2518,124 @@ wire_tag = 0x0005
 encoding_context = "arm Feature of closed union QuotaPath"
 allowed_containing_schemas = ["QuotaPath"]
 max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00fe
+name = "RaftMaintenanceCommand.local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RaftMaintenanceCommand"
+wire_tag = 0x0001
+encoding_context = "arm Local of closed union RaftMaintenanceCommand"
+allowed_containing_schemas = ["RaftMaintenanceCommand"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00ff
+name = "RaftMaintenanceCommand.meta"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RaftMaintenanceCommand"
+wire_tag = 0x0002
+encoding_context = "arm Meta of closed union RaftMaintenanceCommand"
+allowed_containing_schemas = ["RaftMaintenanceCommand"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0100
+name = "RaftMaintenanceCommand.shard"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RaftMaintenanceCommand"
+wire_tag = 0x0003
+encoding_context = "arm Shard of closed union RaftMaintenanceCommand"
+allowed_containing_schemas = ["RaftMaintenanceCommand"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0101
+name = "RemoteRetentionControlSpec.acquire_grant"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0001
+encoding_context = "arm AcquireGrant of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0102
+name = "RemoteRetentionControlSpec.register_consumer_grant"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0002
+encoding_context = "arm RegisterConsumerGrant of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0103
+name = "RemoteRetentionControlSpec.request_consumer_release"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0003
+encoding_context = "arm RequestConsumerRelease of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0104
+name = "RemoteRetentionControlSpec.publish_consumer_release_evidence"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0004
+encoding_context = "arm PublishConsumerReleaseEvidence of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0105
+name = "RemoteRetentionControlSpec.apply_authority_release"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0005
+encoding_context = "arm ApplyAuthorityRelease of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0106
+name = "RemoteRetentionControlSpec.publish_authority_release_ack"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0006
+encoding_context = "arm PublishAuthorityReleaseAck of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0107
+name = "RemoteRetentionControlSpec.consume_release_ack"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0007
+encoding_context = "arm ConsumeReleaseAck of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0108
+name = "RemoteRetentionControlSpec.adopt_legacy_authority_transfer"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RemoteRetentionControlSpec"
+wire_tag = 0x0008
+encoding_context = "arm AdoptLegacyAuthorityTransfer of closed union RemoteRetentionControlSpec"
+allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216

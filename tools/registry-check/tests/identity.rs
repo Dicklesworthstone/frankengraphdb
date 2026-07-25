@@ -4154,6 +4154,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "CommittedDeltaSourceRef"
                 | "DeltaDeliveryEnvelopeProvenance"
                 | "DeltaDeliveryEnvelopeSourceRole"
+                | "RaftMaintenanceCommand"
+                | "RemoteRetentionControlSpec"
                 | "WeakAuthorityAppliedIdentity"
                 | "CanonicalConstraintDomainKey"
                 | "ConstraintOwnerAssignment"
@@ -4445,22 +4447,33 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("LocalToShardProjection", "target_shard_domain")
         )
     };
+    let post_erratum_a04_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("TopologyState", "applied_control_ref")
+                | (
+                    "ValidatedRemoteConfigurationAnchor",
+                    "consumer_applied_identity"
+                )
+        )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_union(&field.exact_wire_type)
             && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a16_reference_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a15_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a05_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a04_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 181,
+        pre_erratum.ordinary_unions.len() + 183,
         current_union_count,
-        "the historical witness must remove exactly the post-erratum A15, A01, A16, and A03 unions"
+        "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 61,
+        pre_erratum.fields.len() + 63,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through A15 I8"
+        "the historical witness must remove every post-erratum field cohort through the A04 unanimous-precedent tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
