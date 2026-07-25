@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 30
+registry_epoch = 31
 
 [[type]]
 wire_type_id = 0x0001
@@ -3058,4 +3058,126 @@ containing_union = "ShardRestoreRegistryValue"
 wire_tag = 0x0009
 encoding_context = "arm ParticipantTerminal of closed union ShardRestoreRegistryValue"
 allowed_containing_schemas = ["ShardRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0131
+name = "BootstrapReservationAppliedUseIdentity"
+kind = "record"
+status = "reserved"
+encoding_context = "closed record BootstrapReservationAppliedUseIdentity (a19)"
+allowed_containing_schemas = ["BootstrapReservationAppliedUseIdentity"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0132
+name = "PreBootstrapReservationBodyRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union PreBootstrapReservationBodyRef (a19)"
+allowed_containing_schemas = ["PreBootstrapReservationBodyRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0133
+name = "PriorIncarnationLeaseCohortDisposition"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union PriorIncarnationLeaseCohortDisposition (a19)"
+allowed_containing_schemas = ["PriorIncarnationLeaseCohortDisposition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0134
+name = "PriorIncarnationLeaseIssuerFenceRow"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "closed discriminant PriorIncarnationLeaseIssuerFenceRow (a19)"
+allowed_containing_schemas = ["PriorIncarnationLeaseIssuerFenceRow"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0135
+name = "ReservationBodyRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union ReservationBodyRef (a19)"
+allowed_containing_schemas = ["ReservationBodyRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0136
+name = "PreBootstrapReservationBodyRef.new_database_identity"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PreBootstrapReservationBodyRef"
+wire_tag = 0x0001
+encoding_context = "arm NewDatabaseIdentity of closed union PreBootstrapReservationBodyRef"
+allowed_containing_schemas = ["PreBootstrapReservationBodyRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0137
+name = "PreBootstrapReservationBodyRef.allocation_epoch"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PreBootstrapReservationBodyRef"
+wire_tag = 0x0002
+encoding_context = "arm AllocationEpoch of closed union PreBootstrapReservationBodyRef"
+allowed_containing_schemas = ["PreBootstrapReservationBodyRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0138
+name = "PriorIncarnationLeaseCohortDisposition.revoked"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PriorIncarnationLeaseCohortDisposition"
+wire_tag = 0x0001
+encoding_context = "arm Revoked of closed union PriorIncarnationLeaseCohortDisposition"
+allowed_containing_schemas = ["PriorIncarnationLeaseCohortDisposition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0139
+name = "PriorIncarnationLeaseCohortDisposition.expired"
+kind = "union_variant"
+status = "reserved"
+containing_union = "PriorIncarnationLeaseCohortDisposition"
+wire_tag = 0x0002
+encoding_context = "arm Expired of closed union PriorIncarnationLeaseCohortDisposition"
+allowed_containing_schemas = ["PriorIncarnationLeaseCohortDisposition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x013a
+name = "ReservationBodyRef.new_database_identity"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReservationBodyRef"
+wire_tag = 0x0001
+encoding_context = "arm NewDatabaseIdentity of closed union ReservationBodyRef"
+allowed_containing_schemas = ["ReservationBodyRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x013b
+name = "ReservationBodyRef.service_visibility_epoch"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReservationBodyRef"
+wire_tag = 0x0002
+encoding_context = "arm ServiceVisibilityEpoch of closed union ReservationBodyRef"
+allowed_containing_schemas = ["ReservationBodyRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x013c
+name = "ReservationBodyRef.allocation_epoch"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReservationBodyRef"
+wire_tag = 0x0003
+encoding_context = "arm AllocationEpoch of closed union ReservationBodyRef"
+allowed_containing_schemas = ["ReservationBodyRef"]
 max_size_bytes = 16777216

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 41
+registry_epoch = 42
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -3859,6 +3859,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "AllocationEpochReservationMode"
+containing_schema = "AllocationEpochReservation"
+union_path = "AllocationEpochReservation.mode"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AllocationEpochReservation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "AllocationValueKind"
 containing_schema = "AllocationValueKind"
 union_path = "AllocationValueKind"
@@ -3931,6 +3942,17 @@ union_path = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRol
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "BootstrapReservationAppliedUseIdentityKindSpecificUseSubject"
+containing_schema = "BootstrapReservationAppliedUseIdentity<Role,Kind>"
+union_path = "BootstrapReservationAppliedUseIdentity<Role,Kind>.kind_specific_use_subject"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BootstrapReservationAppliedUseIdentity<Role,Kind>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -5247,6 +5269,17 @@ version_status = "reserved"
 max_size_bytes = 65536
 
 [[union]]
+union_name = "NewDatabaseIdentityTargetCreationCommitmentExternalCasTargetPosture"
+containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
+union_path = "NewDatabaseIdentityTargetCreationCommitment.ExternalCas.target_posture"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["NewDatabaseIdentityTargetCreationCommitment"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "NoTerminalPlanLockShareOrOrderProofAllMatchingOrderAttemptDispositions"
 containing_schema = "NoTerminalPlanLockShareOrOrderProof"
 union_path = "NoTerminalPlanLockShareOrOrderProof.all_matching_order_attempt_dispositions"
@@ -5276,6 +5309,28 @@ field_tag = 0x0009
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["OfflineMacaroonIssuerEpochFenceReceipt"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "PortableReservationAuthorityObservationIntendedAction"
+containing_schema = "PortableReservationAuthorityObservation"
+union_path = "PortableReservationAuthorityObservation.intended_action"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableReservationAuthorityObservation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "PortableRestoreContinuityAncestryProofOrderedHeadsRecordTransitionKind"
+containing_schema = "PortableRestoreContinuityAncestryProof"
+union_path = "PortableRestoreContinuityAncestryProof.ordered_heads.record.transition_kind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableRestoreContinuityAncestryProof"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -5360,6 +5415,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "PreBootstrapReservationBodyRef"
+containing_schema = "PreBootstrapReservationBodyRef"
+union_path = "PreBootstrapReservationBodyRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PreBootstrapReservationBodyRef"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "PreparedOrderAttemptRootEntries"
 containing_schema = "PreparedOrderAttemptRoot<Role>"
 union_path = "PreparedOrderAttemptRoot<Role>.entries"
@@ -5399,6 +5465,28 @@ union_path = "PreparedOwnershipTransferRecord<Role>.transition_phase"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["PreparedOwnershipTransferRecord<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "PriorIncarnationLeaseCohortDisposition"
+containing_schema = "PriorIncarnationLeaseCohortDisposition"
+union_path = "PriorIncarnationLeaseCohortDisposition"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PriorIncarnationLeaseCohortDisposition"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "PriorIncarnationLeaseIssuerFenceRowIssuerKind"
+containing_schema = "PriorIncarnationLeaseIssuerFenceRow"
+union_path = "PriorIncarnationLeaseIssuerFenceRow.issuer_kind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PriorIncarnationLeaseIssuerFenceRow"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -5470,6 +5558,39 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RecoveryAllocationEpochAuthority<Role>"
+containing_schema = "RecoveryAllocationEpochAuthority<Role>"
+union_path = "RecoveryAllocationEpochAuthority<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RecoveryAllocationEpochAuthority<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RecoveryBridgeAuthority<Role>"
+containing_schema = "RecoveryBridgeAuthority<Role>"
+union_path = "RecoveryBridgeAuthority<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RecoveryBridgeAuthority<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RecoveryBridgeSourceLeaseBasis<Role>"
+containing_schema = "RecoveryBridgeSourceLeaseBasis<Role>"
+union_path = "RecoveryBridgeSourceLeaseBasis<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RecoveryBridgeSourceLeaseBasis<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RecoveryIncarnationTransformPlanMode"
 containing_schema = "RecoveryIncarnationTransformPlan<Role>"
 union_path = "RecoveryIncarnationTransformPlan<Role>.mode"
@@ -5532,6 +5653,149 @@ union_path = "RequestTerminalAbort.stage"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RequestTerminalAbort"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+containing_schema = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+union_path = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationAuthorityHeadState"
+containing_schema = "ReservationAuthorityHead"
+union_path = "ReservationAuthorityHead.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationAuthorityHead"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationBodyRef"
+containing_schema = "ReservationBodyRef"
+union_path = "ReservationBodyRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationBodyRef"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationBurnEligibility<Role>"
+containing_schema = "ReservationBurnEligibility<Role>"
+union_path = "ReservationBurnEligibility<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationBurnEligibility<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationBurnSource<Role:AuthorityOwningRole>"
+containing_schema = "ReservationBurnSource<Role:AuthorityOwningRole>"
+union_path = "ReservationBurnSource<Role:AuthorityOwningRole>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationBurnSource<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationConsumeAuthorizationBasis<Role,Kind>"
+containing_schema = "ReservationConsumeAuthorizationBasis<Role,Kind>"
+union_path = "ReservationConsumeAuthorizationBasis<Role,Kind>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationConsumeAuthorizationBasis<Role,Kind>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+union_path = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationDispositionEligibility<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationDispositionEligibilityExpiredFixedClaimRequiredRecordTag"
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+union_path = "ReservationDispositionEligibility<Role:AuthorityOwningRole>.ExpiredFixedClaim.required_record_tag"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationDispositionEligibility<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationOperationTerminalRecordAction"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.action"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationOperationTerminalRecordTerminal"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.terminal"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationOperationTerminalRecordTerminalNoEffectReason"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.terminal.NoEffect.reason"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationUseRecord<Role:AuthorityOwningRole>"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationUseRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReservationUseRecordReservationConflictQuarantinedConflictClass"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>.ReservationConflictQuarantined.conflict_class"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReservationUseRecord<Role:AuthorityOwningRole>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -5647,6 +5911,39 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RestoreDirectCreationAuthorityRecordMode"
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>.mode"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreDirectCreationAuthorityRecordModeCloneNewIdentityCreationAuthority"
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>.mode.CloneNewIdentity.creation_authority"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreFirstRootPublicationAuthority<Role>"
+containing_schema = "RestoreFirstRootPublicationAuthority<Role>"
+union_path = "RestoreFirstRootPublicationAuthority<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreFirstRootPublicationAuthority<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RestoreIdentityKeyDispositionEvidence"
 containing_schema = "RestoreIdentityKeyDispositionEvidence"
 union_path = "RestoreIdentityKeyDispositionEvidence"
@@ -5719,6 +6016,28 @@ union_path = "RestoreLeaseState<Role:AuthorityOwningRole>"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RestoreLeaseState<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreReconciliationRoot<Role>"
+containing_schema = "RestoreReconciliationRoot<Role>"
+union_path = "RestoreReconciliationRoot<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreReconciliationRoot<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreReconciliationStatus<Role>"
+containing_schema = "RestoreReconciliationStatus<Role>"
+union_path = "RestoreReconciliationStatus<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreReconciliationStatus<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -5865,6 +6184,50 @@ field_tag = 0x0006
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreState"
+containing_schema = "RestoreState"
+union_path = "RestoreState"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreStateLocalPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Local.phase"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreStateMetaPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Meta.phase"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreStateShardPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Shard.phase"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreState"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -6492,6 +6855,30 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union_arm]]
+union_name = "AllocationEpochReservationMode"
+containing_schema = "AllocationEpochReservation"
+union_path = "AllocationEpochReservation.mode"
+arm_tag = 0x0001
+source_arm_name = "RecoverSameIdentity"
+stable_name = "recover_same_identity"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "AllocationEpochReservationMode"
+containing_schema = "AllocationEpochReservation"
+union_path = "AllocationEpochReservation.mode"
+arm_tag = 0x0002
+source_arm_name = "CloneNewIdentity"
+stable_name = "clone_new_identity"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
 union_name = "AllocationValueKind"
 containing_schema = "AllocationValueKind"
 union_path = "AllocationValueKind"
@@ -6713,6 +7100,32 @@ source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
 stable_name = "directory_bound_embedded_no_catalog"
 payload_kind = "inline-record"
 payload_sha256 = "a1966600103926f245b7dc9250f98e11b8fb3983b75da31bf0ea2904eb10aea1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BootstrapReservationAppliedUseIdentityKindSpecificUseSubject"
+containing_schema = "BootstrapReservationAppliedUseIdentity<Role,Kind>"
+union_path = "BootstrapReservationAppliedUseIdentity<Role,Kind>.kind_specific_use_subject"
+arm_tag = 0x0001
+source_arm_name = "NewDatabaseIdentity"
+stable_name = "new_database_identity"
+payload_kind = "inline-record"
+payload_sha256 = "8b1b0fc1d04ffe377c5cb3c5b9a08ae7513ad86ce48c31ec99fb159cd63442db"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BootstrapReservationAppliedUseIdentityKindSpecificUseSubject"
+containing_schema = "BootstrapReservationAppliedUseIdentity<Role,Kind>"
+union_path = "BootstrapReservationAppliedUseIdentity<Role,Kind>.kind_specific_use_subject"
+arm_tag = 0x0002
+source_arm_name = "AllocationEpoch"
+stable_name = "allocation_epoch"
+payload_kind = "inline-record"
+payload_sha256 = "d94f4d65be3e8ceebc76f2db1cfe8edbb3748d30024d3599a95c5ca63da9536d"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -10810,6 +11223,30 @@ version_status = "reserved"
 max_size_bytes = 65536
 
 [[union_arm]]
+union_name = "NewDatabaseIdentityTargetCreationCommitmentExternalCasTargetPosture"
+containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
+union_path = "NewDatabaseIdentityTargetCreationCommitment.ExternalCas.target_posture"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "NewDatabaseIdentityTargetCreationCommitmentExternalCasTargetPosture"
+containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
+union_path = "NewDatabaseIdentityTargetCreationCommitment.ExternalCas.target_posture"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "sharded"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
 union_name = "NoTerminalPlanLockShareOrOrderProofAllMatchingOrderAttemptDispositions"
 containing_schema = "NoTerminalPlanLockShareOrOrderProof"
 union_path = "NoTerminalPlanLockShareOrOrderProof.all_matching_order_attempt_dispositions"
@@ -10880,6 +11317,102 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PortableReservationAuthorityObservationIntendedAction"
+containing_schema = "PortableReservationAuthorityObservation"
+union_path = "PortableReservationAuthorityObservation.intended_action"
+arm_tag = 0x0001
+source_arm_name = "Claim"
+stable_name = "claim"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PortableReservationAuthorityObservationIntendedAction"
+containing_schema = "PortableReservationAuthorityObservation"
+union_path = "PortableReservationAuthorityObservation.intended_action"
+arm_tag = 0x0002
+source_arm_name = "Consume"
+stable_name = "consume"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PortableReservationAuthorityObservationIntendedAction"
+containing_schema = "PortableReservationAuthorityObservation"
+union_path = "PortableReservationAuthorityObservation.intended_action"
+arm_tag = 0x0003
+source_arm_name = "BurnBeforeUse"
+stable_name = "burn_before_use"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PortableReservationAuthorityObservationIntendedAction"
+containing_schema = "PortableReservationAuthorityObservation"
+union_path = "PortableReservationAuthorityObservation.intended_action"
+arm_tag = 0x0004
+source_arm_name = "Status"
+stable_name = "status"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PortableRestoreContinuityAncestryProofOrderedHeadsRecordTransitionKind"
+containing_schema = "PortableRestoreContinuityAncestryProof"
+union_path = "PortableRestoreContinuityAncestryProof.ordered_heads.record.transition_kind"
+arm_tag = 0x0001
+source_arm_name = "EnterRestoreFencePending"
+stable_name = "enter_restore_fence_pending"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PortableRestoreContinuityAncestryProofOrderedHeadsRecordTransitionKind"
+containing_schema = "PortableRestoreContinuityAncestryProof"
+union_path = "PortableRestoreContinuityAncestryProof.ordered_heads.record.transition_kind"
+arm_tag = 0x0002
+source_arm_name = "EnterRestoreReserved"
+stable_name = "enter_restore_reserved"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PortableRestoreContinuityAncestryProofOrderedHeadsRecordTransitionKind"
+containing_schema = "PortableRestoreContinuityAncestryProof"
+union_path = "PortableRestoreContinuityAncestryProof.ordered_heads.record.transition_kind"
+arm_tag = 0x0003
+source_arm_name = "CommitAcquisitionRefinementBootstrapOpeners"
+stable_name = "commit_acquisition_refinement_bootstrap_openers"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PortableRestoreContinuityAncestryProofOrderedHeadsRecordTransitionKind"
+containing_schema = "PortableRestoreContinuityAncestryProof"
+union_path = "PortableRestoreContinuityAncestryProof.ordered_heads.record.transition_kind"
+arm_tag = 0x0004
+source_arm_name = "CommitAcquisitionRefinementVerifiedObjectInventory"
+stable_name = "commit_acquisition_refinement_verified_object_inventory"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "PortableRestoreSourceLeaseAuthorityObservationActionBinding"
@@ -11124,6 +11657,32 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "PreBootstrapReservationBodyRef"
+containing_schema = "PreBootstrapReservationBodyRef"
+union_path = "PreBootstrapReservationBodyRef"
+arm_tag = 0x0001
+source_arm_name = "NewDatabaseIdentity"
+stable_name = "new_database_identity"
+payload_kind = "inline-record"
+payload_sha256 = "7c2a47ea635fe102f83e8c24a2a2d040548e50c9403771f6ced3dce92e2d2355"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PreBootstrapReservationBodyRef"
+containing_schema = "PreBootstrapReservationBodyRef"
+union_path = "PreBootstrapReservationBodyRef"
+arm_tag = 0x0002
+source_arm_name = "AllocationEpoch"
+stable_name = "allocation_epoch"
+payload_kind = "inline-record"
+payload_sha256 = "af99191847e5b9d19163e9f9cf29f31541b6e373220e0b3fa76085069ca0d102"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "PreparedOrderAttemptRootEntries"
 containing_schema = "PreparedOrderAttemptRoot<Role>"
 union_path = "PreparedOrderAttemptRoot<Role>.entries"
@@ -11278,6 +11837,56 @@ union_path = "PreparedOwnershipTransferRecord<Role>.transition_phase"
 arm_tag = 0x0003
 source_arm_name = "RetirementAcknowledged"
 stable_name = "retirement_acknowledged"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PriorIncarnationLeaseCohortDisposition"
+containing_schema = "PriorIncarnationLeaseCohortDisposition"
+union_path = "PriorIncarnationLeaseCohortDisposition"
+arm_tag = 0x0001
+source_arm_name = "Revoked"
+stable_name = "revoked"
+payload_kind = "inline-record"
+payload_sha256 = "d88d5dff98d302242d2cd6afa336e579aab541f6e1f255183d3af62db6703f80"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PriorIncarnationLeaseCohortDisposition"
+containing_schema = "PriorIncarnationLeaseCohortDisposition"
+union_path = "PriorIncarnationLeaseCohortDisposition"
+arm_tag = 0x0002
+source_arm_name = "Expired"
+stable_name = "expired"
+payload_kind = "inline-record"
+payload_sha256 = "1e597d7b52dbdd12f0c6e930377d5e783440e2b4c7480c5ae2edefcbab8e1302"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PriorIncarnationLeaseIssuerFenceRowIssuerKind"
+containing_schema = "PriorIncarnationLeaseIssuerFenceRow"
+union_path = "PriorIncarnationLeaseIssuerFenceRow.issuer_kind"
+arm_tag = 0x0001
+source_arm_name = "OnlineContinuity"
+stable_name = "online_continuity"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PriorIncarnationLeaseIssuerFenceRowIssuerKind"
+containing_schema = "PriorIncarnationLeaseIssuerFenceRow"
+union_path = "PriorIncarnationLeaseIssuerFenceRow.issuer_kind"
+arm_tag = 0x0002
+source_arm_name = "OfflineIssuer"
+stable_name = "offline_issuer"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
@@ -11494,6 +12103,123 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RecoveryAllocationEpochAuthority<Role>"
+containing_schema = "RecoveryAllocationEpochAuthority<Role>"
+union_path = "RecoveryAllocationEpochAuthority<Role>"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "1949b4e4165ef809220d32ea716835a8c151c17c0f69eee319293bce8305c800"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryAllocationEpochAuthority<Role>"
+containing_schema = "RecoveryAllocationEpochAuthority<Role>"
+union_path = "RecoveryAllocationEpochAuthority<Role>"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "bd99b3e4138cc46107e184cb0088da831708eb485492219e3af763c81b8736d8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryAllocationEpochAuthority<Role>"
+containing_schema = "RecoveryAllocationEpochAuthority<Role>"
+union_path = "RecoveryAllocationEpochAuthority<Role>"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "353c338458cee7ebd2c528434ba2d231eb293e37caacec9959954b0d7ff9d2de"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryBridgeAuthority<Role>"
+containing_schema = "RecoveryBridgeAuthority<Role>"
+union_path = "RecoveryBridgeAuthority<Role>"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "933b74bbb7a02d2e6bf6e3c42bdb2dc8b060d276343b23351ed1cc050ff97de7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryBridgeAuthority<Role>"
+containing_schema = "RecoveryBridgeAuthority<Role>"
+union_path = "RecoveryBridgeAuthority<Role>"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "d4606dee5f1a32db99c18fdd8c74bfa6f9cc387d344453aea22d2fd08e7a3062"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryBridgeAuthority<Role>"
+containing_schema = "RecoveryBridgeAuthority<Role>"
+union_path = "RecoveryBridgeAuthority<Role>"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "64f85f8fa3239e5025f08e542adcb75b1cb71a1b1887e49a5f8bfdcde65b82b9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryBridgeSourceLeaseBasis<Role>"
+containing_schema = "RecoveryBridgeSourceLeaseBasis<Role>"
+union_path = "RecoveryBridgeSourceLeaseBasis<Role>"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "018fa69408d6f9493cb9c2aae15e46d6cf347fe1f2a89f2726ede263c6316876"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryBridgeSourceLeaseBasis<Role>"
+containing_schema = "RecoveryBridgeSourceLeaseBasis<Role>"
+union_path = "RecoveryBridgeSourceLeaseBasis<Role>"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "8b31ceafa4561062c263216bb4296ef846c0220421fb9d6e33e66cacc20ecd9c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryBridgeSourceLeaseBasis<Role>"
+containing_schema = "RecoveryBridgeSourceLeaseBasis<Role>"
+union_path = "RecoveryBridgeSourceLeaseBasis<Role>"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "b6303707c6bab792a78e844e6f806c1148d70e08c1b95355a39695ee0c233beb"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "RecoveryIncarnationTransformPlanMode"
@@ -11744,6 +12470,527 @@ union_path = "RequestTerminalAbort.stage"
 arm_tag = 0x0002
 source_arm_name = "PrepareAdmitted"
 stable_name = "prepare_admitted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+containing_schema = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+union_path = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+arm_tag = 0x0001
+source_arm_name = "BootstrapNewDatabaseIdentity"
+stable_name = "bootstrap_new_database_identity"
+payload_kind = "inline-record"
+payload_sha256 = "78e6ab6219fa3af6c4eaf9cc3c9b3703b2e330bfcf717e8360abe757f4624f29"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+containing_schema = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+union_path = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+arm_tag = 0x0002
+source_arm_name = "BootstrapAllocationEpoch"
+stable_name = "bootstrap_allocation_epoch"
+payload_kind = "inline-record"
+payload_sha256 = "fa04ab9617f44a0c2e4e3aaaed8cb2071583c7a3368ce846853d4ef28c55ced4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+containing_schema = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+union_path = "ReservationAppliedUseIdentity<Role:AuthorityOwningRole>"
+arm_tag = 0x0003
+source_arm_name = "RoleTransitionServiceVisibilityEpoch"
+stable_name = "role_transition_service_visibility_epoch"
+payload_kind = "inline-record"
+payload_sha256 = "1786150fe52f47909dc1cb35e51027d1cbd440249c8feae751050ed0961373c2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationAuthorityHeadState"
+containing_schema = "ReservationAuthorityHead"
+union_path = "ReservationAuthorityHead.state"
+arm_tag = 0x0001
+source_arm_name = "Reserved"
+stable_name = "reserved"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationAuthorityHeadState"
+containing_schema = "ReservationAuthorityHead"
+union_path = "ReservationAuthorityHead.state"
+arm_tag = 0x0002
+source_arm_name = "ClaimedForUse"
+stable_name = "claimed_for_use"
+payload_kind = "inline-record"
+payload_sha256 = "631a01a6152b5ae3673ba449aa5344f89afc4f4fb0aee0d70149a5d4402add64"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationAuthorityHeadState"
+containing_schema = "ReservationAuthorityHead"
+union_path = "ReservationAuthorityHead.state"
+arm_tag = 0x0003
+source_arm_name = "Consumed"
+stable_name = "consumed"
+payload_kind = "inline-record"
+payload_sha256 = "5ee9d775964a3466001e18b943291eb5434cbbb51eef53215b63da87a8dc5fdc"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationAuthorityHeadState"
+containing_schema = "ReservationAuthorityHead"
+union_path = "ReservationAuthorityHead.state"
+arm_tag = 0x0004
+source_arm_name = "BurnedBeforeUse"
+stable_name = "burned_before_use"
+payload_kind = "inline-record"
+payload_sha256 = "83005d03267b6c250bdaa9812e2643e66f0a1cd30eeda5ceb3eee1feeb6f06fe"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationBodyRef"
+containing_schema = "ReservationBodyRef"
+union_path = "ReservationBodyRef"
+arm_tag = 0x0001
+source_arm_name = "NewDatabaseIdentity"
+stable_name = "new_database_identity"
+payload_kind = "inline-record"
+payload_sha256 = "9acf96a3de81edfdac1d6904ec2aff5bbe4a909bfa7b96b906df4b5b62b3019c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationBodyRef"
+containing_schema = "ReservationBodyRef"
+union_path = "ReservationBodyRef"
+arm_tag = 0x0002
+source_arm_name = "ServiceVisibilityEpoch"
+stable_name = "service_visibility_epoch"
+payload_kind = "inline-record"
+payload_sha256 = "baccd2a1c1651096acd41a03dba9b95d9e744df4008884281956702a3ea7e4b9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationBodyRef"
+containing_schema = "ReservationBodyRef"
+union_path = "ReservationBodyRef"
+arm_tag = 0x0003
+source_arm_name = "AllocationEpoch"
+stable_name = "allocation_epoch"
+payload_kind = "inline-record"
+payload_sha256 = "07e14f4503f2cad178d0306e9a07f7e97106688c54fc7b1b173b6ceaf31003be"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationBurnEligibility<Role>"
+containing_schema = "ReservationBurnEligibility<Role>"
+union_path = "ReservationBurnEligibility<Role>"
+arm_tag = 0x0001
+source_arm_name = "ExpiredUnused"
+stable_name = "expired_unused"
+payload_kind = "inline-record"
+payload_sha256 = "3ffb48f75b2b94e792aa5fdfe8bc34508d2bdb7166d75f2e6db54317147f61ef"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationBurnEligibility<Role>"
+containing_schema = "ReservationBurnEligibility<Role>"
+union_path = "ReservationBurnEligibility<Role>"
+arm_tag = 0x0002
+source_arm_name = "ExplicitAbandonment"
+stable_name = "explicit_abandonment"
+payload_kind = "inline-record"
+payload_sha256 = "4d0c182ce8aa07256dbd67ac75d4ad9d4b7389217f4cc96fbc2e70c3e00d1299"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationBurnSource<Role:AuthorityOwningRole>"
+containing_schema = "ReservationBurnSource<Role:AuthorityOwningRole>"
+union_path = "ReservationBurnSource<Role:AuthorityOwningRole>"
+arm_tag = 0x0001
+source_arm_name = "UnclaimedReserved"
+stable_name = "unclaimed_reserved"
+payload_kind = "inline-record"
+payload_sha256 = "968bfa58a19056ae9e82a42c970c785e8dffaa359b930f62c4f8bde6f1eaf58d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationBurnSource<Role:AuthorityOwningRole>"
+containing_schema = "ReservationBurnSource<Role:AuthorityOwningRole>"
+union_path = "ReservationBurnSource<Role:AuthorityOwningRole>"
+arm_tag = 0x0002
+source_arm_name = "ClaimedUnused"
+stable_name = "claimed_unused"
+payload_kind = "inline-record"
+payload_sha256 = "80ac3f24ab5cc64b580129253f3a9592f515d276a92e4131789b7d5ea97fc0c1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationConsumeAuthorizationBasis<Role,Kind>"
+containing_schema = "ReservationConsumeAuthorizationBasis<Role,Kind>"
+union_path = "ReservationConsumeAuthorizationBasis<Role,Kind>"
+arm_tag = 0x0001
+source_arm_name = "RestoreBootstrap"
+stable_name = "restore_bootstrap"
+payload_kind = "inline-record"
+payload_sha256 = "b2b9595b27c1d183df8062191a5e8d918934c6bf8bb96071e97ea1ed06598425"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationConsumeAuthorizationBasis<Role,Kind>"
+containing_schema = "ReservationConsumeAuthorizationBasis<Role,Kind>"
+union_path = "ReservationConsumeAuthorizationBasis<Role,Kind>"
+arm_tag = 0x0002
+source_arm_name = "RoleTransitionServiceVisibility"
+stable_name = "role_transition_service_visibility"
+payload_kind = "inline-record"
+payload_sha256 = "33e9398a912b7654948b54dc13f8c79a95d785968a1e07308c29a939cf98fd70"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+union_path = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+arm_tag = 0x0001
+source_arm_name = "Live"
+stable_name = "live"
+payload_kind = "inline-record"
+payload_sha256 = "2c79c06a3d3fb809a23540fd0bc85608e3461e7f3705f92debe4a9bf7f8cff58"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+union_path = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+arm_tag = 0x0002
+source_arm_name = "ExpiredFixedClaim"
+stable_name = "expired_fixed_claim"
+payload_kind = "inline-record"
+payload_sha256 = "ef5cb8a4ae159a7227376c48f7e35db3eff49b6db2b8f0e7ad58bd03f027537c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationDispositionEligibilityExpiredFixedClaimRequiredRecordTag"
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+union_path = "ReservationDispositionEligibility<Role:AuthorityOwningRole>.ExpiredFixedClaim.required_record_tag"
+arm_tag = 0x0001
+source_arm_name = "AppliedAwaitingConsumeAuthorization"
+stable_name = "applied_awaiting_consume_authorization"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationDispositionEligibilityExpiredFixedClaimRequiredRecordTag"
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+union_path = "ReservationDispositionEligibility<Role:AuthorityOwningRole>.ExpiredFixedClaim.required_record_tag"
+arm_tag = 0x0002
+source_arm_name = "ConsumeAuthorizedUndispatched"
+stable_name = "consume_authorized_undispatched"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationOperationTerminalRecordAction"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.action"
+arm_tag = 0x0001
+source_arm_name = "Claim"
+stable_name = "claim"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationOperationTerminalRecordAction"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.action"
+arm_tag = 0x0002
+source_arm_name = "Consume"
+stable_name = "consume"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationOperationTerminalRecordAction"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.action"
+arm_tag = 0x0003
+source_arm_name = "BurnBeforeUse"
+stable_name = "burn_before_use"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationOperationTerminalRecordTerminal"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.terminal"
+arm_tag = 0x0001
+source_arm_name = "Applied"
+stable_name = "applied"
+payload_kind = "inline-record"
+payload_sha256 = "9cebb7578d71779880f5814badb3eee26a21873068bb559be78cb3490dfa9d66"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationOperationTerminalRecordTerminal"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.terminal"
+arm_tag = 0x0002
+source_arm_name = "NeverSent"
+stable_name = "never_sent"
+payload_kind = "inline-record"
+payload_sha256 = "b161fdea01f9f6dae596634edd786566f01a202ecf1f28711e7351f4c62fe62e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationOperationTerminalRecordTerminal"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.terminal"
+arm_tag = 0x0003
+source_arm_name = "NoEffect"
+stable_name = "no_effect"
+payload_kind = "inline-record"
+payload_sha256 = "da984c9a6715949466664f451861cf09f5fcd00dcda20e64bc167b7aa5bc1eac"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationOperationTerminalRecordTerminalNoEffectReason"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.terminal.NoEffect.reason"
+arm_tag = 0x0001
+source_arm_name = "PermanentlyRefused"
+stable_name = "permanently_refused"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationOperationTerminalRecordTerminalNoEffectReason"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.terminal.NoEffect.reason"
+arm_tag = 0x0002
+source_arm_name = "ConflictNoEffect"
+stable_name = "conflict_no_effect"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationOperationTerminalRecordTerminalNoEffectReason"
+containing_schema = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationOperationTerminalRecord<Role:AuthorityOwningRole>.terminal.NoEffect.reason"
+arm_tag = 0x0003
+source_arm_name = "ExpiredNotRegisteredNoEffect"
+stable_name = "expired_not_registered_no_effect"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationUseRecord<Role:AuthorityOwningRole>"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>"
+arm_tag = 0x0001
+source_arm_name = "ReservedAvailable"
+stable_name = "reserved_available"
+payload_kind = "inline-record"
+payload_sha256 = "f3cd900d2a6b11ecf9ae3c2a42229f9de9f4fe4425ece20e9b23a9bdeea49055"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationUseRecord<Role:AuthorityOwningRole>"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>"
+arm_tag = 0x0002
+source_arm_name = "ClaimAuthorizedUndispatched"
+stable_name = "claim_authorized_undispatched"
+payload_kind = "inline-record"
+payload_sha256 = "e6571473d64f5c5337138fe29e9ae557bf37fddf5890981ccc6cd1611f332402"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationUseRecord<Role:AuthorityOwningRole>"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>"
+arm_tag = 0x0003
+source_arm_name = "ClaimedAvailable"
+stable_name = "claimed_available"
+payload_kind = "inline-record"
+payload_sha256 = "82c47956801ca9e1ed278754f974315180e44841f84f6f4991281960f6fe2a41"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationUseRecord<Role:AuthorityOwningRole>"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>"
+arm_tag = 0x0004
+source_arm_name = "AppliedAwaitingConsumeAuthorization"
+stable_name = "applied_awaiting_consume_authorization"
+payload_kind = "inline-record"
+payload_sha256 = "198b30d94a00eeb43af7c0722f22a37af8d8096c485abf3571e5e5baeb187244"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationUseRecord<Role:AuthorityOwningRole>"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>"
+arm_tag = 0x0005
+source_arm_name = "ConsumeAuthorizedUndispatched"
+stable_name = "consume_authorized_undispatched"
+payload_kind = "inline-record"
+payload_sha256 = "9dd2dd4ad224b258b667d4a85b8fc73fb2560d85c279c59e1e18721db318497e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationUseRecord<Role:AuthorityOwningRole>"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>"
+arm_tag = 0x0006
+source_arm_name = "BurnAuthorizedUndispatched"
+stable_name = "burn_authorized_undispatched"
+payload_kind = "inline-record"
+payload_sha256 = "47ae182dabbcd61444953538405c9b969d55c274aa793cee46a0fed5db94c7bb"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationUseRecord<Role:AuthorityOwningRole>"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>"
+arm_tag = 0x0007
+source_arm_name = "Consumed"
+stable_name = "consumed"
+payload_kind = "inline-record"
+payload_sha256 = "ceda479b2626345050d050aea83c2252f8525beea132c1ce1a1da6f16f440dd1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationUseRecord<Role:AuthorityOwningRole>"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>"
+arm_tag = 0x0008
+source_arm_name = "BurnedBeforeUse"
+stable_name = "burned_before_use"
+payload_kind = "inline-record"
+payload_sha256 = "ad297dc09262d8d6c1874df476e9bd4c8e5dff49580c1e1461ff450d418bad89"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationUseRecord<Role:AuthorityOwningRole>"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>"
+arm_tag = 0x0009
+source_arm_name = "ReservationConflictQuarantined"
+stable_name = "reservation_conflict_quarantined"
+payload_kind = "inline-record"
+payload_sha256 = "bc8d34b688c85d36b039f3527fb149582450a9be2f4f96218e435e97c52a9d93"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReservationUseRecordReservationConflictQuarantinedConflictClass"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>.ReservationConflictQuarantined.conflict_class"
+arm_tag = 0x0001
+source_arm_name = "NonEquivalentClaimantOrUse"
+stable_name = "non_equivalent_claimant_or_use"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationUseRecordReservationConflictQuarantinedConflictClass"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>.ReservationConflictQuarantined.conflict_class"
+arm_tag = 0x0002
+source_arm_name = "BurnedAfterDurableAppliedUse"
+stable_name = "burned_after_durable_applied_use"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReservationUseRecordReservationConflictQuarantinedConflictClass"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+union_path = "ReservationUseRecord<Role:AuthorityOwningRole>.ReservationConflictQuarantined.conflict_class"
+arm_tag = 0x0003
+source_arm_name = "DivergentAuthorityHistory"
+stable_name = "divergent_authority_history"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
@@ -12083,6 +13330,97 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "RestoreDirectCreationAuthorityRecordMode"
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>.mode"
+arm_tag = 0x0001
+source_arm_name = "RecoverSameIdentity"
+stable_name = "recover_same_identity"
+payload_kind = "inline-record"
+payload_sha256 = "e5bd9aa3f019ba30c29f6fdb1e8913f289a442e72fcaeca1e04d693f789e8ca1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreDirectCreationAuthorityRecordMode"
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>.mode"
+arm_tag = 0x0002
+source_arm_name = "CloneNewIdentity"
+stable_name = "clone_new_identity"
+payload_kind = "inline-record"
+payload_sha256 = "e89907deda1b91c72e6a15561dbdf859b9b91018cf3c148688a41fc9ea2f9f52"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreDirectCreationAuthorityRecordModeCloneNewIdentityCreationAuthority"
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>.mode.CloneNewIdentity.creation_authority"
+arm_tag = 0x0001
+source_arm_name = "DirectoryBound"
+stable_name = "directory_bound"
+payload_kind = "inline-record"
+payload_sha256 = "f3b93865099b31afe25903ddb66b6bbbd06cd6195f762dd8e120fadefe0a3733"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreDirectCreationAuthorityRecordModeCloneNewIdentityCreationAuthority"
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>.mode.CloneNewIdentity.creation_authority"
+arm_tag = 0x0002
+source_arm_name = "ExternalCas"
+stable_name = "external_cas"
+payload_kind = "inline-record"
+payload_sha256 = "ebc4d163563ab0314add18c6efaf4d6d612e9745abd372e29c85b5acc4042bac"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreFirstRootPublicationAuthority<Role>"
+containing_schema = "RestoreFirstRootPublicationAuthority<Role>"
+union_path = "RestoreFirstRootPublicationAuthority<Role>"
+arm_tag = 0x0001
+source_arm_name = "LocalDirectoryBound"
+stable_name = "local_directory_bound"
+payload_kind = "inline-record"
+payload_sha256 = "166d406386205c11719d5f96db9798c9c342daf1f282deb582b7857c74adbad7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreFirstRootPublicationAuthority<Role>"
+containing_schema = "RestoreFirstRootPublicationAuthority<Role>"
+union_path = "RestoreFirstRootPublicationAuthority<Role>"
+arm_tag = 0x0002
+source_arm_name = "LocalExternalCas"
+stable_name = "local_external_cas"
+payload_kind = "inline-record"
+payload_sha256 = "3b5d836915fb702c68395fabc047661a674538210a7f0a0e91007d87d3b7c4d7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreFirstRootPublicationAuthority<Role>"
+containing_schema = "RestoreFirstRootPublicationAuthority<Role>"
+union_path = "RestoreFirstRootPublicationAuthority<Role>"
+arm_tag = 0x0003
+source_arm_name = "MetaExternalCas"
+stable_name = "meta_external_cas"
+payload_kind = "inline-record"
+payload_sha256 = "f5e81aa16d9f4eee265ca925d586a591b13def7a85c44b6f7f9c370fe6b5eb79"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "RestoreIdentityKeyDispositionEvidence"
 containing_schema = "RestoreIdentityKeyDispositionEvidence"
 union_path = "RestoreIdentityKeyDispositionEvidence"
@@ -12299,6 +13637,84 @@ source_arm_name = "ReleaseAuthorizedUndispatched"
 stable_name = "release_authorized_undispatched"
 payload_kind = "inline-record"
 payload_sha256 = "4628640a0653e717f71663083e1f243f53bf2331abfcb34695b040917b108d7d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreReconciliationRoot<Role>"
+containing_schema = "RestoreReconciliationRoot<Role>"
+union_path = "RestoreReconciliationRoot<Role>"
+arm_tag = 0x0001
+source_arm_name = "Pending"
+stable_name = "pending"
+payload_kind = "inline-record"
+payload_sha256 = "7de512320834ca1d8a6775d67c77504de06e9fa81f271c912e424ef3cb5aaff7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreReconciliationRoot<Role>"
+containing_schema = "RestoreReconciliationRoot<Role>"
+union_path = "RestoreReconciliationRoot<Role>"
+arm_tag = 0x0002
+source_arm_name = "Resolved"
+stable_name = "resolved"
+payload_kind = "inline-record"
+payload_sha256 = "1128eb094c4d86917aafd45a0c08583cbeeecce6867f1fc53f5c5648406cd808"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreReconciliationRoot<Role>"
+containing_schema = "RestoreReconciliationRoot<Role>"
+union_path = "RestoreReconciliationRoot<Role>"
+arm_tag = 0x0003
+source_arm_name = "ExplicitlyRetained"
+stable_name = "explicitly_retained"
+payload_kind = "inline-record"
+payload_sha256 = "4782daefbfbbe5731d6ea4ba60afa2e1bd05997cc09742a5e7163ded9ea301b6"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreReconciliationRoot<Role>"
+containing_schema = "RestoreReconciliationRoot<Role>"
+union_path = "RestoreReconciliationRoot<Role>"
+arm_tag = 0x0004
+source_arm_name = "Disabled"
+stable_name = "disabled"
+payload_kind = "inline-record"
+payload_sha256 = "e013cf013525832cc48fbac5714de1f9ef66fd08c223d28edbf69de7a3c7cde6"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreReconciliationStatus<Role>"
+containing_schema = "RestoreReconciliationStatus<Role>"
+union_path = "RestoreReconciliationStatus<Role>"
+arm_tag = 0x0001
+source_arm_name = "Pending"
+stable_name = "pending"
+payload_kind = "inline-record"
+payload_sha256 = "393ddf519dae1b63c3e21013e0643373aa79d638fd93048dd239d634fd3af3df"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreReconciliationStatus<Role>"
+containing_schema = "RestoreReconciliationStatus<Role>"
+union_path = "RestoreReconciliationStatus<Role>"
+arm_tag = 0x0002
+source_arm_name = "Complete"
+stable_name = "complete"
+payload_kind = "inline-record"
+payload_sha256 = "8661e3f0ac0cf648c19c71802e33775d382de5218f8ea558bac1ebe6eed06e0c"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -12805,6 +14221,185 @@ source_arm_name = "RenewImported"
 stable_name = "renew_imported"
 payload_kind = "inline-record"
 payload_sha256 = "d958e9f3235734c2be454bf2e0095b21e5d46810220284f9a0d7eaeaab045ec2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreState"
+containing_schema = "RestoreState"
+union_path = "RestoreState"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "36387823c4d507e8508088044b0195d656564587f3382e2468eddd59cfee62bc"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreState"
+containing_schema = "RestoreState"
+union_path = "RestoreState"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "18f4d01f7b7deb3487692ca277f0655412e59299d2b0c2292310530cdc2c7ba4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreState"
+containing_schema = "RestoreState"
+union_path = "RestoreState"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "50c489f52bc59d9afde37d436ac66343a82209dad647ecdfb96605b3fb831b2a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreStateLocalPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Local.phase"
+arm_tag = 0x0001
+source_arm_name = "Reconciling"
+stable_name = "reconciling"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreStateLocalPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Local.phase"
+arm_tag = 0x0002
+source_arm_name = "VisibilityCommitted"
+stable_name = "visibility_committed"
+payload_kind = "inline-record"
+payload_sha256 = "59b8b97bab62ab7195e0a06e138f14f0e4390caa1496bbc94fadcffd24fc40a5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreStateLocalPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Local.phase"
+arm_tag = 0x0003
+source_arm_name = "ServicePreparedHidden"
+stable_name = "service_prepared_hidden"
+payload_kind = "inline-record"
+payload_sha256 = "715b24c66779c19a8047e7bbc3a6506b566fa9c882e8c8590b4bc242c6384d2d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreStateMetaPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Meta.phase"
+arm_tag = 0x0001
+source_arm_name = "Reconciling"
+stable_name = "reconciling"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreStateMetaPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Meta.phase"
+arm_tag = 0x0002
+source_arm_name = "ActivationOrdered"
+stable_name = "activation_ordered"
+payload_kind = "inline-record"
+payload_sha256 = "59b8b97bab62ab7195e0a06e138f14f0e4390caa1496bbc94fadcffd24fc40a5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreStateMetaPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Meta.phase"
+arm_tag = 0x0003
+source_arm_name = "VisibilityCommitted"
+stable_name = "visibility_committed"
+payload_kind = "inline-record"
+payload_sha256 = "d31d8231eb7f59e972b02decde6241eb1cddf1d41077e85076df187e9622a372"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreStateMetaPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Meta.phase"
+arm_tag = 0x0004
+source_arm_name = "ServicePreparedHidden"
+stable_name = "service_prepared_hidden"
+payload_kind = "inline-record"
+payload_sha256 = "715b24c66779c19a8047e7bbc3a6506b566fa9c882e8c8590b4bc242c6384d2d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreStateShardPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Shard.phase"
+arm_tag = 0x0001
+source_arm_name = "Reconciling"
+stable_name = "reconciling"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreStateShardPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Shard.phase"
+arm_tag = 0x0002
+source_arm_name = "ActivationAppliedHidden"
+stable_name = "activation_applied_hidden"
+payload_kind = "inline-record"
+payload_sha256 = "59b8b97bab62ab7195e0a06e138f14f0e4390caa1496bbc94fadcffd24fc40a5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreStateShardPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Shard.phase"
+arm_tag = 0x0003
+source_arm_name = "VisibilityApplied"
+stable_name = "visibility_applied"
+payload_kind = "inline-record"
+payload_sha256 = "d31d8231eb7f59e972b02decde6241eb1cddf1d41077e85076df187e9622a372"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreStateShardPhase"
+containing_schema = "RestoreState"
+union_path = "RestoreState.Shard.phase"
+arm_tag = 0x0004
+source_arm_name = "ServicePreparedHidden"
+stable_name = "service_prepared_hidden"
+payload_kind = "inline-record"
+payload_sha256 = "715b24c66779c19a8047e7bbc3a6506b566fa9c882e8c8590b4bc242c6384d2d"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
