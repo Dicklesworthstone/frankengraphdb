@@ -11120,7 +11120,8 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
                 || row.source_key.starts_with("field|")
                 || (row.target_kind == "union" && row.source_key.starts_with("union|"))
                 || (row.target_kind == "union-arm" && row.source_key.starts_with("arm|"))
-                || ordinary_union_wire_source_supported;
+                || ordinary_union_wire_source_supported
+                || expected_keys.generated_reference_union_supported(row);
             if !source_contract_supported {
                 out.push(Violation::new(
                     "complete_slice_source_contract_unverified",
@@ -11420,6 +11421,43 @@ struct ExpectedStructuralKeys {
     field_owner_and_name: BTreeMap<String, (String, String)>,
     union_expected: BTreeMap<String, String>,
     arm_expected: BTreeMap<String, String>,
+    /// Canonical durable-fields projection keys for the per-anchor reference
+    /// unions and arms this catalog's own identity rows GENERATE.
+    ///
+    /// A reference union has no source census key and never can have one.  The
+    /// plan specifies the RULE, not the instance: a01:1402 names
+    /// `RemoteGrantTargetRef` as "the containing-schema-generated closed union
+    /// with one typed strong-reference arm per exportable authority-local
+    /// target kind", and the generator mints one such name per anchor.  This
+    /// catalog has already ADJUDICATED that doctrine — the a01
+    /// `definition-without-structural-body` row for `RemoteGrantTargetRef`
+    /// resolves `not-a-durable-schema` because the construct is
+    /// "generator-owned with no structural body in this rendering".  That
+    /// adjudication could re-home its subject onto `top|RemoteGrantTargetRef`
+    /// only because the plan NAMES it; the per-anchor unions below are never
+    /// named in any spelling, so no `top|`, `union|` or `arm|` key can exist
+    /// for them and the generator rule is the only contract there is.
+    ///
+    /// So it is checked the way every other structural key is: by
+    /// RECONSTRUCTION from the typed `[[reference_union]]` /
+    /// `[[reference_union_arm]]` rows, never by parsing the key.  That is
+    /// strictly stronger than admitting the projection fallback, which asserts
+    /// nothing at all about the name.
+    generated_reference_union: BTreeSet<String>,
+    generated_reference_union_arm: BTreeSet<String>,
+}
+
+impl ExpectedStructuralKeys {
+    /// True when `row` is a generated reference union or arm whose `source_key`
+    /// byte-matches the key its own identity row derives.  A drifted or
+    /// hand-edited name is rejected exactly as an ordinary union's would be.
+    fn generated_reference_union_supported(&self, row: &Target) -> bool {
+        match row.target_kind.as_str() {
+            "reference-union" => self.generated_reference_union.contains(&row.source_key),
+            "reference-union-arm" => self.generated_reference_union_arm.contains(&row.source_key),
+            _ => false,
+        }
+    }
 }
 
 fn expected_structural_keys(catalog: &Catalog) -> ExpectedStructuralKeys {
@@ -11446,6 +11484,18 @@ fn expected_structural_keys(catalog: &Catalog) -> ExpectedStructuralKeys {
                     arm.containing_schema, arm.union_path, arm.source_arm_name
                 ),
             );
+        }
+    }
+    for union in &catalog.identity.unions {
+        keys.generated_reference_union.insert(format!(
+            "projection|durable_fields|{}.{}",
+            union.containing_schema, union.union_name
+        ));
+        for arm in &union.arms {
+            keys.generated_reference_union_arm.insert(format!(
+                "projection|durable_fields|{}.{}",
+                arm.union_name, arm.stable_name
+            ));
         }
     }
     keys
@@ -11482,6 +11532,23 @@ fn validate_target_source_identity(
                 &row.row_id,
                 "ordinary union and arm projections require their exact structural source; projection fallback is forbidden",
             ));
+            return;
+        }
+        // A generated reference union is not using the fallback as a
+        // placeholder for a source key it has not found yet: the key it carries
+        // is the one its own identity row derives, and no other key exists for
+        // it in any spelling.  It is therefore a completable contract, unlike
+        // every other projection-only source, which is still waiting on a
+        // census key that could arrive.
+        //
+        // g0 is excluded deliberately.  It owns no `[[slice]]` row, so every
+        // law that gives `complete` its meaning — annotation, semantic binding,
+        // static and runtime evidence — iterates past it and can never fire.
+        // This law is the only one still standing between a g0 target and an
+        // unverifiable completion claim, so g0's generated unions keep the
+        // `declared` requirement they have always had.  They are structurally
+        // exempt from the completion battery and need nothing from this escape.
+        if row.slice_id != "g0" && keys.generated_reference_union_supported(row) {
             return;
         }
         if row.definition_status != "declared" {

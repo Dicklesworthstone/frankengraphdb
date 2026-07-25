@@ -2073,6 +2073,135 @@ fn appendix_a_every_slice_pin_rejects_independent_mutation() {
 }
 
 #[test]
+fn appendix_a_generated_reference_union_targets_have_a_satisfiable_state() {
+    // A per-anchor reference union is GENERATED, never written.  The plan
+    // states the rule, not the instance — a01:1402 defines the family as "the
+    // containing-schema-generated closed union with one typed strong-reference
+    // arm per exportable authority-local target kind" — so the per-anchor name
+    // can never acquire a source census key in any spelling.
+    //
+    // Before this law, such a row had NO satisfiable state once its slice went
+    // complete: `declared` fired `complete_slice_target_declared`, `complete`
+    // fired `catalog_target_projection_incomplete`, and either state fired
+    // `complete_slice_source_contract_unverified`, which is not gated on the
+    // target's own status.  Three laws, empty intersection.
+    let mut catalog = real_appendix_catalog();
+    let generated: Vec<(String, String, String)> = catalog
+        .targets
+        .iter()
+        .filter(|target| {
+            matches!(
+                target.target_kind.as_str(),
+                "reference-union" | "reference-union-arm"
+            ) && target.slice_id != "g0"
+        })
+        .map(|target| {
+            (
+                target.slice_id.clone(),
+                target.row_id.clone(),
+                target.target_row_id.clone(),
+            )
+        })
+        .collect();
+    // g0 carries three more, structurally exempt because g0 owns no `[[slice]]`
+    // row and the completion laws iterate slices.
+    assert_eq!(
+        generated.len(),
+        10,
+        "the generated reference-union population moved; re-measure before trusting this suite"
+    );
+
+    let armed_slices: BTreeSet<&str> = generated
+        .iter()
+        .map(|(slice_id, _, _)| slice_id.as_str())
+        .collect();
+    assert_eq!(
+        armed_slices,
+        BTreeSet::from(["a04", "a06", "a10"]),
+        "generated reference unions moved slices"
+    );
+    let armed_slices: BTreeSet<String> = armed_slices.iter().map(|id| (*id).to_owned()).collect();
+    let armed_rows: BTreeSet<&str> = generated
+        .iter()
+        .map(|(_, _, target_row_id)| target_row_id.as_str())
+        .collect();
+    let armed_rows: BTreeSet<String> = armed_rows.iter().map(|id| (*id).to_owned()).collect();
+    for slice in &mut catalog.slices {
+        if armed_slices.contains(&slice.id) {
+            slice.definition_status = "complete".to_owned();
+        }
+    }
+    for target in &mut catalog.targets {
+        if armed_rows.contains(&target.target_row_id) {
+            target.definition_status = "complete".to_owned();
+        }
+    }
+
+    let violations = appendix_a::validate_catalog(&catalog);
+
+    // POSITIVE CONTROL, and it is load-bearing: without it every assertion
+    // below passes vacuously on an unarmed battery.  a04 also holds top-level
+    // rows whose owner is named in the plan but never structurally rendered;
+    // those are a separate, unresolved question and MUST still fire here.
+    assert!(
+        violations.iter().any(|violation| {
+            violation.code == "complete_slice_source_contract_unverified"
+                && violation.row_id == "a04:logical-kind:root-manifest"
+        }),
+        "the completion battery is not armed, so this suite proves nothing: {violations:?}"
+    );
+
+    for (_, row_id, target_row_id) in &generated {
+        let blocking: Vec<&Violation> = violations
+            .iter()
+            .filter(|violation| {
+                (&violation.row_id == row_id || &violation.row_id == target_row_id)
+                    && matches!(
+                        violation.code.as_str(),
+                        "complete_slice_source_contract_unverified"
+                            | "catalog_target_projection_incomplete"
+                            | "complete_slice_target_declared"
+                    )
+            })
+            .collect();
+        assert!(
+            blocking.is_empty(),
+            "generated reference union {target_row_id} has no satisfiable state: {blocking:?}"
+        );
+    }
+
+    // g0 must NOT gain the same escape.  It owns no `[[slice]]` row, so every
+    // law that gives `complete` its meaning is slice-gated past it and
+    // `catalog_target_projection_incomplete` is the only thing left standing
+    // between a g0 target and an unverifiable completion claim.  Widening the
+    // escape to g0 passes every count-level check — g0 rows are absent from
+    // those counts by construction — so it is pinned here by name.
+    let mut g0_complete = real_appendix_catalog();
+    let mut flipped = 0;
+    for target in &mut g0_complete.targets {
+        if target.slice_id == "g0"
+            && matches!(
+                target.target_kind.as_str(),
+                "reference-union" | "reference-union-arm"
+            )
+        {
+            target.definition_status = "complete".to_owned();
+            flipped += 1;
+        }
+    }
+    assert_eq!(flipped, 3, "g0 generated reference-union population moved");
+    let violations = appendix_a::validate_catalog(&g0_complete);
+    assert_eq!(
+        violations
+            .iter()
+            .filter(|violation| violation.code == "catalog_target_projection_incomplete")
+            .count(),
+        3,
+        "a g0 generated reference union may not claim complete: {violations:?}"
+    );
+}
+
+#[test]
 fn appendix_a_complete_slice_requires_full_source_target_and_evidence_closure() {
     let mut catalog = real_appendix_catalog();
     let slice = catalog
