@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1129
+target_count = 1132
 projection_fallback_count = 89
-target_source_assignment_sha256 = "4dbac44480cd0134effdc6d9ae7228d85c98f198b3fa07bc20b35738d2f0b4a1"
+target_source_assignment_sha256 = "252e769ef11ad1ba0bf8785b47ca387b5c46945aeeab535f01f8a14a2b5caace"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -16427,6 +16427,19 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a11"
+row_id = "a11:union:delta-delivery-envelope-source-role-c5cf32dcbe8c9075"
+union_name = "DeltaDeliveryEnvelopeSourceRole"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance.Coalesced.source_role"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a06"
 row_id = "a06:union-arm:local-prepared-root-entry-owned-2ed32136e7102fa5"
@@ -16501,6 +16514,34 @@ payload_sha256 = "a2a7cf8d3f6570e619f354affa3c48b2c28b85e461062c20e625df3709ed72
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a11"
+row_id = "a11:union-arm:delta-delivery-envelope-source-role-local-ccc69a9030e9a02c"
+union_name = "DeltaDeliveryEnvelopeSourceRole"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance.Coalesced.source_role"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a11"
+row_id = "a11:union-arm:delta-delivery-envelope-source-role-global-e9742b77728157df"
+union_name = "DeltaDeliveryEnvelopeSourceRole"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance.Coalesced.source_role"
+arm_tag = 0x0002
+source_arm_name = "Global"
+stable_name = "global"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
@@ -45648,6 +45689,30 @@ target_row_id = "a05:wire-type:sharding-service-prepare-spec"
 slice_id = "a05"
 source_key = "top|ShardingServicePrepareSpec"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-delta-delivery-envelope-source-role-c5cf32dcbe8c9075"
+target_row_id = "a11:union:delta-delivery-envelope-source-role-c5cf32dcbe8c9075"
+slice_id = "a11"
+source_key = "union|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance.Coalesced.source_role"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-arm-delta-delivery-envelope-source-role-local-ccc69a9030e9a02c"
+target_row_id = "a11:union-arm:delta-delivery-envelope-source-role-local-ccc69a9030e9a02c"
+slice_id = "a11"
+source_key = "arm|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance.Coalesced.source_role|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-arm-delta-delivery-envelope-source-role-global-e9742b77728157df"
+target_row_id = "a11:union-arm:delta-delivery-envelope-source-role-global-e9742b77728157df"
+slice_id = "a11"
+source_key = "arm|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance.Coalesced.source_role|Global"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

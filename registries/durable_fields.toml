@@ -3796,6 +3796,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "DeltaDeliveryEnvelopeSourceRole"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance.Coalesced.source_role"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "DerivedGenerationRegistryStatus"
 containing_schema = "DerivedGenerationRegistry"
 union_path = "DerivedGenerationRegistry.status"
@@ -5276,6 +5287,30 @@ payload_sha256 = "a2a7cf8d3f6570e619f354affa3c48b2c28b85e461062c20e625df3709ed72
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "DeltaDeliveryEnvelopeSourceRole"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance.Coalesced.source_role"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "DeltaDeliveryEnvelopeSourceRole"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance.Coalesced.source_role"
+arm_tag = 0x0002
+source_arm_name = "Global"
+stable_name = "global"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "DerivedGenerationRegistryStatus"
