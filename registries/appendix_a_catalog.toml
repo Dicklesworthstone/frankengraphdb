@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 644
+target_count = 669
 projection_fallback_count = 84
-target_source_assignment_sha256 = "c62690e15958d9c9de453afdfca72d26ee5de2001ea51f0f1e4d1776d0ca94e0"
+target_source_assignment_sha256 = "42ce1c47c5b704d446e3300b3c706cdd278e116952b3f90aa288944d05579111"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 12
+registry_epoch = 14
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 14
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 22
+registry_epoch = 23
 
 [[logical_kind]]
 slice_id = "a03"
@@ -1934,6 +1934,17 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/portable_restore_archive_acquisition_receipt/"
 
 [[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:canonical-restore-plan-availability-copy"
+object_kind = 0x025d
+name = "CanonicalRestorePlanAvailabilityCopy"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_restore_plan_availability_copy/"
+
+[[logical_kind]]
 slice_id = "a03"
 row_id = "a03:logical-kind:result-ack-authority"
 object_kind = 0x0528
@@ -1954,6 +1965,50 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/result_release_evidence/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-begin-idempotency-index"
+object_kind = 0x02fb
+name = "LocalBeginIdempotencyIndex"
+status = "reserved"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_begin_idempotency_index/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-statement-index"
+object_kind = 0x0324
+name = "LocalStatementIndex"
+status = "reserved"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_statement_index/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:sharding-migration-state"
+object_kind = 0x0488
+name = "ShardingMigrationState"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_migration_state/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:terminal-write-result-preparation"
+object_kind = 0x0493
+name = "TerminalWriteResultPreparation"
+status = "reserved"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/terminal_write_result_preparation/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -9859,6 +9914,336 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-begin-idempotency-index-47cda6b570e52e2b"
+union_name = "LocalBeginIdempotencyIndex"
+containing_schema = "LocalBeginIdempotencyIndex"
+union_path = "LocalBeginIdempotencyIndex"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalBeginIdempotencyIndex"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-idempotency-index-reserved-8aaa24a888e7e6da"
+union_name = "LocalBeginIdempotencyIndex"
+containing_schema = "LocalBeginIdempotencyIndex"
+union_path = "LocalBeginIdempotencyIndex"
+arm_tag = 0x0001
+source_arm_name = "Reserved"
+stable_name = "reserved"
+payload_kind = "inline-record"
+payload_sha256 = "703ab406507a36c0e5a847fd35e2e535ec4b2b4f0311b876b31bd1bde2cfdf0a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-idempotency-index-bound-detailed-b7edef1d563e1974"
+union_name = "LocalBeginIdempotencyIndex"
+containing_schema = "LocalBeginIdempotencyIndex"
+union_path = "LocalBeginIdempotencyIndex"
+arm_tag = 0x0002
+source_arm_name = "BoundDetailed"
+stable_name = "bound_detailed"
+payload_kind = "inline-record"
+payload_sha256 = "965f2565b50f575b30d9ea1c18e4c6099cb0a604e7a1ea4875a9c160811a9693"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-idempotency-index-bound-compacted-eb79480634aec61e"
+union_name = "LocalBeginIdempotencyIndex"
+containing_schema = "LocalBeginIdempotencyIndex"
+union_path = "LocalBeginIdempotencyIndex"
+arm_tag = 0x0003
+source_arm_name = "BoundCompacted"
+stable_name = "bound_compacted"
+payload_kind = "inline-record"
+payload_sha256 = "42d508a09c084d8128c996a1ebc0188b8220747c31e845a4e4585a8bdce0af82"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-idempotency-index-never-registered-detailed-3695d47973d04b4a"
+union_name = "LocalBeginIdempotencyIndex"
+containing_schema = "LocalBeginIdempotencyIndex"
+union_path = "LocalBeginIdempotencyIndex"
+arm_tag = 0x0004
+source_arm_name = "NeverRegisteredDetailed"
+stable_name = "never_registered_detailed"
+payload_kind = "inline-record"
+payload_sha256 = "452ffcaaeee0da856196335673025765b3c6f0ccb1bd745fdab0d7fce656f44e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-idempotency-index-never-registered-compacted-5f435ea7e1954cd8"
+union_name = "LocalBeginIdempotencyIndex"
+containing_schema = "LocalBeginIdempotencyIndex"
+union_path = "LocalBeginIdempotencyIndex"
+arm_tag = 0x0005
+source_arm_name = "NeverRegisteredCompacted"
+stable_name = "never_registered_compacted"
+payload_kind = "inline-record"
+payload_sha256 = "2fee78582c673e0e596a0a69906fa85272dc5936e1a8c3e68ea3c7af2c3ab82f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-idempotency-index-expired-tombstone-730395a5a08a24e0"
+union_name = "LocalBeginIdempotencyIndex"
+containing_schema = "LocalBeginIdempotencyIndex"
+union_path = "LocalBeginIdempotencyIndex"
+arm_tag = 0x0006
+source_arm_name = "ExpiredTombstone"
+stable_name = "expired_tombstone"
+payload_kind = "inline-record"
+payload_sha256 = "1ef6e0ad5823fc51636bbb09b57daeac7e97c06a0637968b6c67b61f7d766b73"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-statement-index-46f6015ab50bf304"
+union_name = "LocalStatementIndex"
+containing_schema = "LocalStatementIndex"
+union_path = "LocalStatementIndex"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalStatementIndex"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-statement-index-open-d8a388d98b6d6197"
+union_name = "LocalStatementIndex"
+containing_schema = "LocalStatementIndex"
+union_path = "LocalStatementIndex"
+arm_tag = 0x0001
+source_arm_name = "Open"
+stable_name = "open"
+payload_kind = "inline-record"
+payload_sha256 = "6bd5a87738c139d41c20438bb0e25f8fdd9e36b55aa78b8c6e3bed57e14f1ef9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-statement-index-published-00806d82c3e49811"
+union_name = "LocalStatementIndex"
+containing_schema = "LocalStatementIndex"
+union_path = "LocalStatementIndex"
+arm_tag = 0x0002
+source_arm_name = "Published"
+stable_name = "published"
+payload_kind = "inline-record"
+payload_sha256 = "c5f5b4f89376ceb0a549a32896aeb5f565e2ebdb8ce6e06eedfcf21d64a68cd3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-statement-index-failed-36e7cf68768c3ba7"
+union_name = "LocalStatementIndex"
+containing_schema = "LocalStatementIndex"
+union_path = "LocalStatementIndex"
+arm_tag = 0x0003
+source_arm_name = "Failed"
+stable_name = "failed"
+payload_kind = "inline-record"
+payload_sha256 = "1b9999a387b5f28c9bce295408bb668d2722f4e7b4c93d597b4c04d605c3ee1a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-statement-index-abandoned-329973902a2f059d"
+union_name = "LocalStatementIndex"
+containing_schema = "LocalStatementIndex"
+union_path = "LocalStatementIndex"
+arm_tag = 0x0004
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "inline-record"
+payload_sha256 = "01e41384bf53d4075029e9491c0e711dedc588e775ebf72696feb2a528feab36"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:sharding-migration-state-49a0d2e5c6cffb0b"
+union_name = "ShardingMigrationState"
+containing_schema = "ShardingMigrationState"
+union_path = "ShardingMigrationState"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ShardingMigrationState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:sharding-migration-state-freeze-pending-audit-f7f8977d53f45edb"
+union_name = "ShardingMigrationState"
+containing_schema = "ShardingMigrationState"
+union_path = "ShardingMigrationState"
+arm_tag = 0x0001
+source_arm_name = "FreezePendingAudit"
+stable_name = "freeze_pending_audit"
+payload_kind = "inline-record"
+payload_sha256 = "2d2b3e7dba38f2c3c2cc8ff73e0b05de9d0b6850b11f3f19dac9bd11e668e50a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:sharding-migration-state-frozen-visible-3f8aa267fa1e6cd7"
+union_name = "ShardingMigrationState"
+containing_schema = "ShardingMigrationState"
+union_path = "ShardingMigrationState"
+arm_tag = 0x0002
+source_arm_name = "FrozenVisible"
+stable_name = "frozen_visible"
+payload_kind = "inline-record"
+payload_sha256 = "d9842ed2a21819f5b046a5e1d770ef83403f3d31d7d38d29f28e447aa83bf5f2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:sharding-migration-state-role-transition-locked-d1e0aa0a6ec3a723"
+union_name = "ShardingMigrationState"
+containing_schema = "ShardingMigrationState"
+union_path = "ShardingMigrationState"
+arm_tag = 0x0003
+source_arm_name = "RoleTransitionLocked"
+stable_name = "role_transition_locked"
+payload_kind = "inline-record"
+payload_sha256 = "d2b7889509fe6769cf485d27148d2b566b45a04d5090fc6e5e1eef7e1414bf28"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:sharding-migration-state-resolved-f21812bb55d8875d"
+union_name = "ShardingMigrationState"
+containing_schema = "ShardingMigrationState"
+union_path = "ShardingMigrationState"
+arm_tag = 0x0004
+source_arm_name = "Resolved"
+stable_name = "resolved"
+payload_kind = "inline-record"
+payload_sha256 = "dd6e59aa7857e08090570a18ba15bd098d4578ab1594b94ea7708989dd88c08a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:terminal-write-result-preparation-b2ff0768d5695f0c"
+union_name = "TerminalWriteResultPreparation"
+containing_schema = "TerminalWriteResultPreparation"
+union_path = "TerminalWriteResultPreparation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TerminalWriteResultPreparation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:terminal-write-result-preparation-local-c7b6e7fd949b15e8"
+union_name = "TerminalWriteResultPreparation"
+containing_schema = "TerminalWriteResultPreparation"
+union_path = "TerminalWriteResultPreparation"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "0802113fb6dad6baedf18857beed4c9748fb7ca9a0b0833f5a8ce0833f72b9e0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:terminal-write-result-preparation-sharded-787a450ee63f63c0"
+union_name = "TerminalWriteResultPreparation"
+containing_schema = "TerminalWriteResultPreparation"
+union_path = "TerminalWriteResultPreparation"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "sharded"
+payload_kind = "inline-record"
+payload_sha256 = "5278527e9b8eb82b0e099c22ae0f3bc3a181cb59cd5a7d0f94f956e8e3c22727"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
 slice_id = "a10"
@@ -10874,7 +11259,7 @@ symbol = "CanonicalRestorePlanAvailabilityCopy"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x025d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a17:reservation:canonical-restore-source-acquisition-plan-copy"
@@ -12575,7 +12960,7 @@ symbol = "LocalBeginIdempotencyIndex"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02fb"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:local-begin-reservation-record"
@@ -12944,7 +13329,7 @@ symbol = "LocalStatementIndex"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0324"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:local-statement-registration"
@@ -16562,7 +16947,7 @@ symbol = "ShardingMigrationState"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0488"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:sharding-role-transition-plan"
@@ -16742,7 +17127,7 @@ symbol = "TerminalWriteResultPreparation"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0493"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:time-authority-drain-hold"
@@ -18863,7 +19248,7 @@ symbol = "CanonicalRestorePlanAvailabilityCopy"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|CanonicalRestorePlanAvailabilityCopy<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2285"]
 
 [[top_level_candidate]]
@@ -22033,7 +22418,7 @@ symbol = "LocalBeginIdempotencyIndex"
 generic_signature = ""
 source_key = "top|LocalBeginIdempotencyIndex"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1482"]
 
 [[top_level_candidate]]
@@ -22533,7 +22918,7 @@ symbol = "LocalStatementIndex"
 generic_signature = ""
 source_key = "top|LocalStatementIndex"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1486"]
 
 [[top_level_candidate]]
@@ -28313,7 +28698,7 @@ symbol = "ShardingMigrationState"
 generic_signature = ""
 source_key = "top|ShardingMigrationState"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1464"]
 
 [[top_level_candidate]]
@@ -28703,7 +29088,7 @@ symbol = "TerminalWriteResultPreparation"
 generic_signature = ""
 source_key = "top|TerminalWriteResultPreparation"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1526"]
 
 [[top_level_candidate]]
@@ -30664,6 +31049,14 @@ target_row_id = "a15:wire-type:key-destruction-operation-plan"
 slice_id = "a15"
 source_key = "top|KeyDestructionOperationPlan"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-canonical-restore-plan-availability-copy"
+target_row_id = "a17:logical-kind:canonical-restore-plan-availability-copy"
+slice_id = "a17"
+source_key = "top|CanonicalRestorePlanAvailabilityCopy<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
@@ -34762,6 +35155,236 @@ target_row_id = "a15:field:key-destroy-proposal-sorted-destruction-operation-pla
 slice_id = "a15"
 source_key = "field|KeyDestroyProposal|KeyDestroyProposal.sorted_destruction_operation_plans|sorted_destruction_operation_plans"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-begin-idempotency-index"
+target_row_id = "a03:logical-kind:local-begin-idempotency-index"
+slice_id = "a03"
+source_key = "top|LocalBeginIdempotencyIndex"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-statement-index"
+target_row_id = "a03:logical-kind:local-statement-index"
+slice_id = "a03"
+source_key = "top|LocalStatementIndex"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-sharding-migration-state"
+target_row_id = "a03:logical-kind:sharding-migration-state"
+slice_id = "a03"
+source_key = "top|ShardingMigrationState"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-terminal-write-result-preparation"
+target_row_id = "a03:logical-kind:terminal-write-result-preparation"
+slice_id = "a03"
+source_key = "top|TerminalWriteResultPreparation"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:union-local-begin-idempotency-index-47cda6b570e52e2b"
+target_row_id = "a03:union:local-begin-idempotency-index-47cda6b570e52e2b"
+slice_id = "a03"
+source_key = "union|LocalBeginIdempotencyIndex|LocalBeginIdempotencyIndex"
+target_kind = "union"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-idempotency-index-reserved-8aaa24a888e7e6da"
+target_row_id = "a03:union-arm:local-begin-idempotency-index-reserved-8aaa24a888e7e6da"
+slice_id = "a03"
+source_key = "arm|LocalBeginIdempotencyIndex|LocalBeginIdempotencyIndex|Reserved"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-idempotency-index-bound-detailed-b7edef1d563e1974"
+target_row_id = "a03:union-arm:local-begin-idempotency-index-bound-detailed-b7edef1d563e1974"
+slice_id = "a03"
+source_key = "arm|LocalBeginIdempotencyIndex|LocalBeginIdempotencyIndex|BoundDetailed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-idempotency-index-bound-compacted-eb79480634aec61e"
+target_row_id = "a03:union-arm:local-begin-idempotency-index-bound-compacted-eb79480634aec61e"
+slice_id = "a03"
+source_key = "arm|LocalBeginIdempotencyIndex|LocalBeginIdempotencyIndex|BoundCompacted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-idempotency-index-never-registered-detailed-3695d47973d04b4a"
+target_row_id = "a03:union-arm:local-begin-idempotency-index-never-registered-detailed-3695d47973d04b4a"
+slice_id = "a03"
+source_key = "arm|LocalBeginIdempotencyIndex|LocalBeginIdempotencyIndex|NeverRegisteredDetailed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-idempotency-index-never-registered-compacted-5f435ea7e1954cd8"
+target_row_id = "a03:union-arm:local-begin-idempotency-index-never-registered-compacted-5f435ea7e1954cd8"
+slice_id = "a03"
+source_key = "arm|LocalBeginIdempotencyIndex|LocalBeginIdempotencyIndex|NeverRegisteredCompacted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-idempotency-index-expired-tombstone-730395a5a08a24e0"
+target_row_id = "a03:union-arm:local-begin-idempotency-index-expired-tombstone-730395a5a08a24e0"
+slice_id = "a03"
+source_key = "arm|LocalBeginIdempotencyIndex|LocalBeginIdempotencyIndex|ExpiredTombstone"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-local-statement-index-46f6015ab50bf304"
+target_row_id = "a03:union:local-statement-index-46f6015ab50bf304"
+slice_id = "a03"
+source_key = "union|LocalStatementIndex|LocalStatementIndex"
+target_kind = "union"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-statement-index-open-d8a388d98b6d6197"
+target_row_id = "a03:union-arm:local-statement-index-open-d8a388d98b6d6197"
+slice_id = "a03"
+source_key = "arm|LocalStatementIndex|LocalStatementIndex|Open"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-statement-index-published-00806d82c3e49811"
+target_row_id = "a03:union-arm:local-statement-index-published-00806d82c3e49811"
+slice_id = "a03"
+source_key = "arm|LocalStatementIndex|LocalStatementIndex|Published"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-statement-index-failed-36e7cf68768c3ba7"
+target_row_id = "a03:union-arm:local-statement-index-failed-36e7cf68768c3ba7"
+slice_id = "a03"
+source_key = "arm|LocalStatementIndex|LocalStatementIndex|Failed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-statement-index-abandoned-329973902a2f059d"
+target_row_id = "a03:union-arm:local-statement-index-abandoned-329973902a2f059d"
+slice_id = "a03"
+source_key = "arm|LocalStatementIndex|LocalStatementIndex|Abandoned"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-sharding-migration-state-49a0d2e5c6cffb0b"
+target_row_id = "a03:union:sharding-migration-state-49a0d2e5c6cffb0b"
+slice_id = "a03"
+source_key = "union|ShardingMigrationState|ShardingMigrationState"
+target_kind = "union"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-sharding-migration-state-freeze-pending-audit-f7f8977d53f45edb"
+target_row_id = "a03:union-arm:sharding-migration-state-freeze-pending-audit-f7f8977d53f45edb"
+slice_id = "a03"
+source_key = "arm|ShardingMigrationState|ShardingMigrationState|FreezePendingAudit"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-sharding-migration-state-frozen-visible-3f8aa267fa1e6cd7"
+target_row_id = "a03:union-arm:sharding-migration-state-frozen-visible-3f8aa267fa1e6cd7"
+slice_id = "a03"
+source_key = "arm|ShardingMigrationState|ShardingMigrationState|FrozenVisible"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-sharding-migration-state-role-transition-locked-d1e0aa0a6ec3a723"
+target_row_id = "a03:union-arm:sharding-migration-state-role-transition-locked-d1e0aa0a6ec3a723"
+slice_id = "a03"
+source_key = "arm|ShardingMigrationState|ShardingMigrationState|RoleTransitionLocked"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-sharding-migration-state-resolved-f21812bb55d8875d"
+target_row_id = "a03:union-arm:sharding-migration-state-resolved-f21812bb55d8875d"
+slice_id = "a03"
+source_key = "arm|ShardingMigrationState|ShardingMigrationState|Resolved"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-terminal-write-result-preparation-b2ff0768d5695f0c"
+target_row_id = "a03:union:terminal-write-result-preparation-b2ff0768d5695f0c"
+slice_id = "a03"
+source_key = "union|TerminalWriteResultPreparation|TerminalWriteResultPreparation"
+target_kind = "union"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-terminal-write-result-preparation-local-c7b6e7fd949b15e8"
+target_row_id = "a03:union-arm:terminal-write-result-preparation-local-c7b6e7fd949b15e8"
+slice_id = "a03"
+source_key = "arm|TerminalWriteResultPreparation|TerminalWriteResultPreparation|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+
+[[target]]
+row_id = "a03:target:union-arm-terminal-write-result-preparation-sharded-787a450ee63f63c0"
+target_row_id = "a03:union-arm:terminal-write-result-preparation-sharded-787a450ee63f63c0"
+slice_id = "a03"
+source_key = "arm|TerminalWriteResultPreparation|TerminalWriteResultPreparation|Sharded"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
