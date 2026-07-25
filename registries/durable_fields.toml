@@ -347,6 +347,20 @@ version_status = "active"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "provenance"
+exact_wire_type = "DeltaDeliveryEnvelopeProvenance"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "closed union Atomic|Coalesced; the delta's committed source provenance, retained with the envelope so coalescing stays provable and W12 emits only Meta-published Global sources (a11:1934)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "ExportLeaf<T>"
 field_tag = 0x0002
 stable_name = "target_identity"
@@ -3770,6 +3784,18 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "DeltaDeliveryEnvelopeProvenance"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance"
+field_tag = 0x000c
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "DerivedGenerationRegistryStatus"
 containing_schema = "DerivedGenerationRegistry"
 union_path = "DerivedGenerationRegistry.status"
@@ -5221,6 +5247,32 @@ source_arm_name = "ProtocolMaintenance"
 stable_name = "protocol_maintenance"
 payload_kind = "inline-record"
 payload_sha256 = "8097269175b13b47d3b9dde38463eba23b94f88f8599f60a6034c01ed925c0a8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "DeltaDeliveryEnvelopeProvenance"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance"
+arm_tag = 0x0001
+source_arm_name = "Atomic"
+stable_name = "atomic"
+payload_kind = "inline-record"
+payload_sha256 = "fb8d4e067dc65e20f71dd638ec488aaf4e9d98c8ba4d368366f0f79f2747320b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "DeltaDeliveryEnvelopeProvenance"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance"
+arm_tag = 0x0002
+source_arm_name = "Coalesced"
+stable_name = "coalesced"
+payload_kind = "inline-record"
+payload_sha256 = "a2a7cf8d3f6570e619f354affa3c48b2c28b85e461062c20e625df3709ed72e3"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

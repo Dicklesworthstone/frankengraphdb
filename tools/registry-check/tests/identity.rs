@@ -4100,6 +4100,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "TimeBoundOnlineMacaroonRootProjection"
                 | "DeliveryFrontier"
                 | "CommittedDeltaSourceRef"
+                | "DeltaDeliveryEnvelopeProvenance"
                 | "DeliveryTransitionAppliedRef"
                 | "LocalAttemptRegistrationSpec"
                 | "LocalAuditTicketOwner"
@@ -4310,12 +4311,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a05_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 105,
+        pre_erratum.ordinary_unions.len() + 106,
         current_union_count,
         "the historical witness must remove exactly the post-erratum A15, A01, A16, and A03 unions"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 51,
+        pre_erratum.fields.len() + 52,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through A15 I8"
     );

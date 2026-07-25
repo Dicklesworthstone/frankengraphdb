@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1087
+target_count = 1091
 projection_fallback_count = 89
-target_source_assignment_sha256 = "5671fdef115d2e1a649a2f298f8ca5a92c59f22766f69926bbf186796b8f87d1"
+target_source_assignment_sha256 = "d30a78f1562b95219fd47352157d247d87abc0c14845afd81594c3c34c29edbe"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -9741,6 +9741,22 @@ version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
 
+[[field]]
+slice_id = "a11"
+row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-provenance"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "provenance"
+exact_wire_type = "DeltaDeliveryEnvelopeProvenance"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "closed union Atomic|Coalesced; the delta's committed source provenance, retained with the envelope so coalescing stays provable and W12 emits only Meta-published Global sources (a11:1934)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union]]
 slice_id = "a01"
 row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
@@ -15979,6 +15995,20 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a11"
+row_id = "a11:union:delta-delivery-envelope-provenance-6aa9f577935b88a5"
+union_name = "DeltaDeliveryEnvelopeProvenance"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance"
+field_tag = 0x000c
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a06"
 row_id = "a06:union-arm:local-prepared-root-entry-owned-2ed32136e7102fa5"
@@ -16020,6 +16050,36 @@ source_arm_name = "Transferred"
 stable_name = "transferred"
 payload_kind = "inline-record"
 payload_sha256 = "8d0ceac902ad1135cc161797b937e02f212042442cc8f01070ae6856fb5b7068"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a11"
+row_id = "a11:union-arm:delta-delivery-envelope-provenance-atomic-0ebe998d1c209d8f"
+union_name = "DeltaDeliveryEnvelopeProvenance"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance"
+arm_tag = 0x0001
+source_arm_name = "Atomic"
+stable_name = "atomic"
+payload_kind = "inline-record"
+payload_sha256 = "fb8d4e067dc65e20f71dd638ec488aaf4e9d98c8ba4d368366f0f79f2747320b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a11"
+row_id = "a11:union-arm:delta-delivery-envelope-provenance-coalesced-3e7ff3585f51649a"
+union_name = "DeltaDeliveryEnvelopeProvenance"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+union_path = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance"
+arm_tag = 0x0002
+source_arm_name = "Coalesced"
+stable_name = "coalesced"
+payload_kind = "inline-record"
+payload_sha256 = "a2a7cf8d3f6570e619f354affa3c48b2c28b85e461062c20e625df3709ed72e3"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -44834,6 +44894,38 @@ target_row_id = "a06:wire-type:local-prepared-root-entry-transferred"
 slice_id = "a06"
 source_key = "arm|LocalPreparedRootEntry|LocalPreparedRootEntry|Transferred"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:field-delta-delivery-envelope-role-authority-owning-role-provenance"
+target_row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-provenance"
+slice_id = "a11"
+source_key = "field|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance|provenance"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-delta-delivery-envelope-provenance-6aa9f577935b88a5"
+target_row_id = "a11:union:delta-delivery-envelope-provenance-6aa9f577935b88a5"
+slice_id = "a11"
+source_key = "union|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-arm-delta-delivery-envelope-provenance-atomic-0ebe998d1c209d8f"
+target_row_id = "a11:union-arm:delta-delivery-envelope-provenance-atomic-0ebe998d1c209d8f"
+slice_id = "a11"
+source_key = "arm|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance|Atomic"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-arm-delta-delivery-envelope-provenance-coalesced-3e7ff3585f51649a"
+target_row_id = "a11:union-arm:delta-delivery-envelope-provenance-coalesced-3e7ff3585f51649a"
+slice_id = "a11"
+source_key = "arm|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance|Coalesced"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
