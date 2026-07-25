@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2156
+target_count = 2159
 projection_fallback_count = 90
-target_source_assignment_sha256 = "6b7dd5b3ee4edeeb754975acbbf14638d8231f3f6246730dafc8de84cb9f98ab"
+target_source_assignment_sha256 = "48cd78e0992a40fd2f85b95fb5be63a31328885118790184b60c64a1d6ecc1d0"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -29454,6 +29454,19 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a08"
+row_id = "a08:union:global-authorization-decision-record-operation-audit-admission-1b3e64c0ede5792b"
+union_name = "GlobalAuthorizationDecisionRecordOperationAuditAdmission"
+containing_schema = "GlobalAuthorizationDecisionRecord"
+union_path = "GlobalAuthorizationDecisionRecord.operation_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GlobalAuthorizationDecisionRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a19"
 row_id = "a19:union-arm:restore-state-shard-phase-reconciling-eaf9dfc1e7e1eb1f"
@@ -30287,6 +30300,34 @@ union_path = "TypedCertifiedMetaProjectionPayload.ordered_slot_deltas.record.aft
 arm_tag = 0x0002
 source_arm_name = "StrongRef"
 stable_name = "strong_ref"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:global-authorization-decision-record-operation-audit-admission-operation-audit-admission-claimed-3994f5dda8a35341"
+union_name = "GlobalAuthorizationDecisionRecordOperationAuditAdmission"
+containing_schema = "GlobalAuthorizationDecisionRecord"
+union_path = "GlobalAuthorizationDecisionRecord.operation_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "OperationAuditAdmission::Claimed"
+stable_name = "operation_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:global-authorization-decision-record-operation-audit-admission-not-required-d9267d7f30c4ba9e"
+union_name = "GlobalAuthorizationDecisionRecordOperationAuditAdmission"
+containing_schema = "GlobalAuthorizationDecisionRecord"
+union_path = "GlobalAuthorizationDecisionRecord.operation_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
@@ -67653,6 +67694,30 @@ target_row_id = "a20:logical-kind:restore-service-promotion-receipt"
 slice_id = "a20"
 source_key = "top|RestoreServicePromotionReceipt"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-global-authorization-decision-record-operation-audit-admission-1b3e64c0ede5792b"
+target_row_id = "a08:union:global-authorization-decision-record-operation-audit-admission-1b3e64c0ede5792b"
+slice_id = "a08"
+source_key = "union|GlobalAuthorizationDecisionRecord|GlobalAuthorizationDecisionRecord.operation_audit_admission"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-global-authorization-decision-record-operation-audit-admission-operation-audit-admission-claimed-3994f5dda8a35341"
+target_row_id = "a08:union-arm:global-authorization-decision-record-operation-audit-admission-operation-audit-admission-claimed-3994f5dda8a35341"
+slice_id = "a08"
+source_key = "arm|GlobalAuthorizationDecisionRecord|GlobalAuthorizationDecisionRecord.operation_audit_admission|OperationAuditAdmission::Claimed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-global-authorization-decision-record-operation-audit-admission-not-required-d9267d7f30c4ba9e"
+target_row_id = "a08:union-arm:global-authorization-decision-record-operation-audit-admission-not-required-d9267d7f30c4ba9e"
+slice_id = "a08"
+source_key = "arm|GlobalAuthorizationDecisionRecord|GlobalAuthorizationDecisionRecord.operation_audit_admission|NotRequired"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

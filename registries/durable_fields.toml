@@ -4454,6 +4454,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "GlobalAuthorizationDecisionRecordOperationAuditAdmission"
+containing_schema = "GlobalAuthorizationDecisionRecord"
+union_path = "GlobalAuthorizationDecisionRecord.operation_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GlobalAuthorizationDecisionRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "GlobalBeginIdempotencyIndex"
 containing_schema = "GlobalBeginIdempotencyIndex"
 union_path = "GlobalBeginIdempotencyIndex"
@@ -9060,6 +9071,30 @@ source_arm_name = "Terminal"
 stable_name = "terminal"
 payload_kind = "unit"
 role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GlobalAuthorizationDecisionRecordOperationAuditAdmission"
+containing_schema = "GlobalAuthorizationDecisionRecord"
+union_path = "GlobalAuthorizationDecisionRecord.operation_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "OperationAuditAdmission::Claimed"
+stable_name = "operation_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GlobalAuthorizationDecisionRecordOperationAuditAdmission"
+containing_schema = "GlobalAuthorizationDecisionRecord"
+union_path = "GlobalAuthorizationDecisionRecord.operation_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
 
