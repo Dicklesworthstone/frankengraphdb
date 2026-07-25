@@ -671,6 +671,81 @@ mod tests {
     }
 
     #[test]
+    fn the_outcome_vocabulary_and_frame_headers_are_closed() {
+        // `every_maintained_family_tag_round_trips` closes the FAMILY
+        // vocabulary; the OUTCOME vocabulary had no equivalent. Both carry the
+        // same canonicity obligation: this log is the audit trail for sketch
+        // maintenance, so a decoder that admitted an unknown tag would let two
+        // distinct byte strings denote one logical event. Tag 0 is called out
+        // because it is the byte a zeroed or padded buffer supplies.
+        assert_eq!(
+            SketchMaintenanceOutcome::from_tag(1),
+            Ok(SketchMaintenanceOutcome::Merged)
+        );
+        assert_eq!(
+            SketchMaintenanceOutcome::from_tag(2),
+            Ok(SketchMaintenanceOutcome::RebuildRequired)
+        );
+        for tag in [0_u8, 3, 255] {
+            assert_eq!(
+                SketchMaintenanceOutcome::from_tag(tag),
+                Err(SketchMaintenanceCodecError::UnknownMaintenanceOutcome { tag })
+            );
+        }
+
+        // Frame discipline. The log header is magic[8], version u16, reserved
+        // u16, profile u32, count u32; the record frame repeats magic and
+        // version at its own offsets. Each rejection below is driven by
+        // perturbing exactly one field of an otherwise valid encoding, so the
+        // error identifies that field rather than incidental damage.
+        let mut log = SketchMaintenanceLog::new(8).expect("valid profile");
+        log.append(merge_record(0)).expect("first record");
+        let canonical = log.to_canonical_bytes().expect("canonical bytes");
+        assert!(
+            SketchMaintenanceLog::from_canonical_bytes(&canonical, LIMITS, 8).is_ok(),
+            "the unperturbed encoding must decode, or the cases below prove nothing"
+        );
+
+        let perturbed = |edit: &dyn Fn(&mut Vec<u8>)| {
+            let mut bytes = canonical.clone();
+            edit(&mut bytes);
+            SketchMaintenanceLog::from_canonical_bytes(&bytes, LIMITS, 8)
+        };
+
+        assert_eq!(
+            perturbed(&|bytes| bytes[0] ^= 0xff),
+            Err(SketchMaintenanceCodecError::LogMagic)
+        );
+        assert_eq!(
+            perturbed(&|bytes| bytes[8..10].copy_from_slice(&9_u16.to_le_bytes())),
+            Err(SketchMaintenanceCodecError::LogVersion { version: 9 })
+        );
+        // A reserved field is not spare space: a nonzero value is a second
+        // spelling of the same log and must be refused, not ignored.
+        assert_eq!(
+            perturbed(&|bytes| bytes[10..12].copy_from_slice(&1_u16.to_le_bytes())),
+            Err(SketchMaintenanceCodecError::LogReserved { reserved: 1 })
+        );
+        assert_eq!(
+            perturbed(&|bytes| bytes[LOG_HEADER_BYTES] ^= 0xff),
+            Err(SketchMaintenanceCodecError::RecordMagic)
+        );
+        assert_eq!(
+            perturbed(&|bytes| {
+                let at = LOG_HEADER_BYTES + 8;
+                bytes[at..at + 2].copy_from_slice(&9_u16.to_le_bytes());
+            }),
+            Err(SketchMaintenanceCodecError::RecordVersion { version: 9 })
+        );
+        // The outcome tag rejection reached through a real frame, closing the
+        // loop between the vocabulary above and the wire format.
+        assert_eq!(
+            perturbed(&|bytes| bytes[LOG_HEADER_BYTES + 11] = 7),
+            Err(SketchMaintenanceCodecError::UnknownMaintenanceOutcome { tag: 7 })
+        );
+    }
+
+    #[test]
     fn merge_log_round_trips_and_replays_byte_identically() {
         let mut log = SketchMaintenanceLog::new(8).expect("valid profile");
         log.append(merge_record(0)).expect("first record");
