@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 25
+registry_epoch = 26
 
 [[kind]]
 object_kind = 0x0001
@@ -1789,3 +1789,39 @@ construction_order = 35
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/subscription_delivery_transition_spec/"
+
+[[kind]]
+object_kind = 0x052f
+name = "MetaRelevanceRangeProof"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_relevance_range_proof/"
+
+[[kind]]
+object_kind = 0x0530
+name = "MetaPreparedPayloadRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_prepared_payload_root/"
+
+[[kind]]
+object_kind = 0x0531
+name = "PreparedOwnershipTransferRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prepared_ownership_transfer_record/"
+
+[[kind]]
+object_kind = 0x0532
+name = "MetaCheckpointCertificate"
+status = "reserved"
+construction_order = 45
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_checkpoint_certificate/"

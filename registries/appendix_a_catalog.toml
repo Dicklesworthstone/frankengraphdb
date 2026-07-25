@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1091
+target_count = 1095
 projection_fallback_count = 89
-target_source_assignment_sha256 = "d30a78f1562b95219fd47352157d247d87abc0c14845afd81594c3c34c29edbe"
+target_source_assignment_sha256 = "c97d91fbda5805d30216ffdce3944a2ddaa37f4223c0655d29d8985a0085b740"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 25
+registry_epoch = 26
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -2822,6 +2822,50 @@ construction_order = 35
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_recovery_checkpoint/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:meta-relevance-range-proof"
+object_kind = 0x052f
+name = "MetaRelevanceRangeProof"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_relevance_range_proof/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:meta-prepared-payload-root"
+object_kind = 0x0530
+name = "MetaPreparedPayloadRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_prepared_payload_root/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:prepared-ownership-transfer-record"
+object_kind = 0x0531
+name = "PreparedOwnershipTransferRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prepared_ownership_transfer_record/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:meta-checkpoint-certificate"
+object_kind = 0x0532
+name = "MetaCheckpointCertificate"
+status = "reserved"
+construction_order = 45
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_checkpoint_certificate/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -29028,7 +29072,7 @@ symbol = "MetaCheckpointCertificate"
 generic_signature = ""
 source_key = "top|MetaCheckpointCertificate"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1688"]
 
 [[top_level_candidate]]
@@ -29178,7 +29222,7 @@ symbol = "MetaPreparedPayloadRoot"
 generic_signature = ""
 source_key = "top|MetaPreparedPayloadRoot"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1694"]
 
 [[top_level_candidate]]
@@ -29198,7 +29242,7 @@ symbol = "MetaRelevanceRangeProof"
 generic_signature = ""
 source_key = "top|MetaRelevanceRangeProof"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1690"]
 
 [[top_level_candidate]]
@@ -30338,7 +30382,7 @@ symbol = "PreparedOwnershipTransferRecord"
 generic_signature = "<Role>"
 source_key = "top|PreparedOwnershipTransferRecord<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1696"]
 
 [[top_level_candidate]]
@@ -44926,6 +44970,38 @@ target_row_id = "a11:union-arm:delta-delivery-envelope-provenance-coalesced-3e7f
 slice_id = "a11"
 source_key = "arm|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.provenance|Coalesced"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-meta-relevance-range-proof"
+target_row_id = "a06:logical-kind:meta-relevance-range-proof"
+slice_id = "a06"
+source_key = "top|MetaRelevanceRangeProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-meta-prepared-payload-root"
+target_row_id = "a06:logical-kind:meta-prepared-payload-root"
+slice_id = "a06"
+source_key = "top|MetaPreparedPayloadRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-prepared-ownership-transfer-record"
+target_row_id = "a06:logical-kind:prepared-ownership-transfer-record"
+slice_id = "a06"
+source_key = "top|PreparedOwnershipTransferRecord<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-meta-checkpoint-certificate"
+target_row_id = "a06:logical-kind:meta-checkpoint-certificate"
+slice_id = "a06"
+source_key = "top|MetaCheckpointCertificate"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
