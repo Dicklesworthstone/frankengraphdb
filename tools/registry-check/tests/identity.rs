@@ -3064,6 +3064,64 @@ fn idr_key_destruction_operation_plan_reserved_wire_shell_is_exact() {
 }
 
 #[test]
+fn idr_weak_epoch_identity_reserved_wire_record_is_exact() {
+    let identity = real_identity();
+    let wire = identity
+        .wire
+        .iter()
+        .find(|wire| wire.name == "WeakEpochIdentity")
+        .expect("WeakEpochIdentity wire record exists");
+    assert_eq!(wire.wire_type_id, 0x013d);
+    assert_eq!(wire.kind, "record");
+    assert_eq!(wire.status, "reserved");
+    assert_eq!(wire.containing_union, None);
+    assert_eq!(wire.wire_tag, None);
+    assert_eq!(wire.allowed_containing_schemas, vec!["*".to_owned()]);
+    assert_eq!(wire.max_size_bytes, 16_777_216);
+    assert!(
+        wire.encoding_context.contains("nonretaining")
+            && wire.encoding_context.contains("a13:2004"),
+        "the wire record must preserve the source semantics and citation"
+    );
+    assert!(
+        !identity
+            .logical
+            .iter()
+            .any(|logical| logical.name == "WeakEpochIdentity"),
+        "the nonretaining identity must not acquire a logical object identity"
+    );
+
+    let catalog = real_appendix_catalog();
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == "top|WeakEpochIdentity")
+        .expect("WeakEpochIdentity source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "wire");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == "top|WeakEpochIdentity")
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(
+        targets[0].target_row_id,
+        "a13:wire-type:weak-epoch-identity"
+    );
+    assert_eq!(targets[0].target_kind, "wire-type");
+    assert_eq!(targets[0].definition_status, "declared");
+    assert!(
+        !catalog
+            .reservations
+            .iter()
+            .any(|reservation| reservation.symbol == "WeakEpochIdentity"),
+        "a nonretaining wire record must not acquire a type reservation"
+    );
+}
+
+#[test]
 fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     let identity = real_identity();
     let logical = identity

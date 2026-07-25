@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2159
+target_count = 2160
 projection_fallback_count = 90
-target_source_assignment_sha256 = "48cd78e0992a40fd2f85b95fb5be63a31328885118790184b60c64a1d6ecc1d0"
+target_source_assignment_sha256 = "bcf085cdee280ff7cc552cc4c6bed50d6be87eeabba232768beb65b966520e2e"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,7 +641,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 31
+registry_epoch = 32
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -9404,6 +9404,17 @@ wire_tag = 0x0003
 status = "reserved"
 encoding_context = "arm AllocationEpoch of closed union ReservationBodyRef"
 allowed_containing_schemas = ["ReservationBodyRef"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a13"
+row_id = "a13:wire-type:weak-epoch-identity"
+wire_type_id = 0x013d
+name = "WeakEpochIdentity"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical nonretaining WeakEpochIdentity record; exact member layout per Appendix A a13:2004"
+allowed_containing_schemas = ["*"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -49877,7 +49888,7 @@ symbol = "WeakEpochIdentity"
 generic_signature = ""
 source_key = "top|WeakEpochIdentity"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a13:2004"]
 
 [[top_level_candidate]]
@@ -62222,6 +62233,14 @@ target_row_id = "a13:logical-kind:key-grant-registry"
 slice_id = "a13"
 source_key = "top|KeyGrantRegistry<Role>"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:wire-type-weak-epoch-identity"
+target_row_id = "a13:wire-type:weak-epoch-identity"
+slice_id = "a13"
+source_key = "top|WeakEpochIdentity"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[target]]

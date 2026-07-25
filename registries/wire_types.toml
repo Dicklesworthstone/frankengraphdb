@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 31
+registry_epoch = 32
 
 [[type]]
 wire_type_id = 0x0001
@@ -3180,4 +3180,13 @@ containing_union = "ReservationBodyRef"
 wire_tag = 0x0003
 encoding_context = "arm AllocationEpoch of closed union ReservationBodyRef"
 allowed_containing_schemas = ["ReservationBodyRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x013d
+name = "WeakEpochIdentity"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical nonretaining WeakEpochIdentity record; exact member layout per Appendix A a13:2004"
+allowed_containing_schemas = ["*"]
 max_size_bytes = 16777216
