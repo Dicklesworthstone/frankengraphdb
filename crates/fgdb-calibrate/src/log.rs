@@ -5928,6 +5928,76 @@ mod tests {
     }
 
     #[test]
+    fn conformal_alpha_is_half_open_and_calibration_bounds_are_ordered() -> TestResult {
+        let statistic =
+            |alpha_bits: u64, minimum: u64, maximum: u64| StatisticalStatistic::ConformalCoverage {
+                profile_oid: oid(16),
+                population_oid: oid(17),
+                selection_oid: oid(18),
+                alpha_bits,
+                mode: StatisticalConformalMode::Upper,
+                minimum_calibration_samples: minimum,
+                maximum_calibration_samples: maximum,
+                threshold_bits: 2.0_f64.to_bits(),
+                nonconformity_score_bits: 1.0_f64.to_bits(),
+                coverage_target_bits: 0.8_f64.to_bits(),
+                assessments: 10,
+                covered: 8,
+            };
+        let record = |statistic| {
+            StatisticalLogRecord::try_from_parts(
+                &TEST_IDENTITY_AUTHORITY,
+                StatisticalMonitorKind::ConformalThreshold,
+                oid(11),
+                oid(13),
+                StatisticalBatchRange::try_new(10, 19).expect("ordered batch"),
+                7,
+                oid(14),
+                oid(15),
+                oid(15),
+                statistic,
+            )
+        };
+
+        // Control: the unperturbed fixture must construct, or every rejection
+        // below could be caused by something other than the field perturbed.
+        assert!(record(statistic(0.2_f64.to_bits(), 5, 10)).is_ok());
+
+        // Alpha is HALF-OPEN [0.0, 1.0). Zero is a legal target miscoverage;
+        // one is not, because an alpha of one asks for zero coverage. Both
+        // ends are pinned because the openness at exactly one end is the whole
+        // rule, and a `..=` slipped in here would admit it silently.
+        assert!(record(statistic(0.0_f64.to_bits(), 5, 10)).is_ok());
+        for rejected in [1.0_f64, 1.5, -0.1, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                record(statistic(rejected.to_bits(), 5, 10)),
+                Err(StatisticalLogRecordError::InvalidConformalAlpha {
+                    bits: rejected.to_bits(),
+                }),
+                "alpha {rejected} must be refused as outside [0, 1)"
+            );
+        }
+
+        // Calibration bounds: a minimum of zero is refused because a coverage
+        // claim over no calibration samples is not a claim, and the maximum
+        // may not fall below the minimum. Equality IS legal — a fixed-size
+        // calibration set is a valid configuration, not a degenerate one.
+        assert!(record(statistic(0.2_f64.to_bits(), 7, 7)).is_ok());
+        for (minimum, maximum) in [(0_u64, 10_u64), (0, 0), (6, 5)] {
+            assert_eq!(
+                record(statistic(0.2_f64.to_bits(), minimum, maximum)),
+                Err(
+                    StatisticalLogRecordError::InvalidConformalCalibrationBounds {
+                        minimum,
+                        maximum,
+                    }
+                )
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn statistic_validation_rejects_noncanonical_values_and_counts() -> TestResult {
         let negative_zero = eprocess_statistic(oid(6), (-0.0_f64).to_bits());
         assert!(matches!(
