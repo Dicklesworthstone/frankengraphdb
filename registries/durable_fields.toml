@@ -3795,6 +3795,72 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ConstraintStateMutationSetEqualityAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.after"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ConstraintStateMutationSetEqualityBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.before"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ConstraintStateMutationSetReferenceAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.after"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ConstraintStateMutationSetReferenceBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.before"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ConstraintStateMutationSetTemporalIntervalAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.after"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ConstraintStateMutationSetTemporalIntervalBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.before"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "ContinuityAuthorityCurrentBasis<Role>"
 containing_schema = "ContinuityAuthorityCurrentBasis<Role>"
 union_path = "ContinuityAuthorityCurrentBasis<Role>"
@@ -5855,6 +5921,150 @@ payload_sha256 = "fdadf019da4d89f8e645383659ddf512d382b237ea0aff657b82ff75b7a3d1
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetEqualityAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.after"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetEqualityAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.after"
+arm_tag = 0x0002
+source_arm_name = "Owner"
+stable_name = "owner"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetEqualityBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.before"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetEqualityBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.before"
+arm_tag = 0x0002
+source_arm_name = "Owner"
+stable_name = "owner"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetReferenceAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.after"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetReferenceAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.after"
+arm_tag = 0x0002
+source_arm_name = "ReferenceAggregate"
+stable_name = "reference_aggregate"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetReferenceBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.before"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetReferenceBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.before"
+arm_tag = 0x0002
+source_arm_name = "ReferenceAggregate"
+stable_name = "reference_aggregate"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetTemporalIntervalAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.after"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetTemporalIntervalAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.after"
+arm_tag = 0x0002
+source_arm_name = "CanonicalInterval"
+stable_name = "canonical_interval"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetTemporalIntervalBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.before"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateMutationSetTemporalIntervalBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.before"
+arm_tag = 0x0002
+source_arm_name = "CanonicalInterval"
+stable_name = "canonical_interval"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "ContinuityAuthorityCurrentBasis<Role>"

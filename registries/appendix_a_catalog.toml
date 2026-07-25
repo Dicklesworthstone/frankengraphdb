@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1362
+target_count = 1380
 projection_fallback_count = 89
-target_source_assignment_sha256 = "96293ed82b478bf3fdd50e7ba683323cdd74c82d2e19c6bf5997cb302715aac9"
+target_source_assignment_sha256 = "ea336daaa698cd25b516bedc95b7ee097b5471cd4124a340fbe8bd4a3312727d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -19554,6 +19554,84 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:constraint-state-mutation-set-equality-before-83dd4af5709cc928"
+union_name = "ConstraintStateMutationSetEqualityBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.before"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:constraint-state-mutation-set-equality-after-93035e942b82da77"
+union_name = "ConstraintStateMutationSetEqualityAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.after"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:constraint-state-mutation-set-reference-before-3be9aec885221b6c"
+union_name = "ConstraintStateMutationSetReferenceBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.before"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:constraint-state-mutation-set-reference-after-f18c49038dc527cc"
+union_name = "ConstraintStateMutationSetReferenceAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.after"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:constraint-state-mutation-set-temporal-interval-before-20ac35f02f50313b"
+union_name = "ConstraintStateMutationSetTemporalIntervalBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.before"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:constraint-state-mutation-set-temporal-interval-after-d25e5a3759fd5f54"
+union_name = "ConstraintStateMutationSetTemporalIntervalAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.after"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateMutation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a07"
 row_id = "a07:union-arm:terminal-abort-authority-source-correctness-required-registered-reason-serialization-failure-9b9d33fea15956dd"
@@ -19647,6 +19725,174 @@ union_path = "TerminalAbortAuthority<Role:AuthorityOwningRole>.source.Correctnes
 arm_tag = 0x0007
 source_arm_name = "ParticipantFailure"
 stable_name = "participant_failure"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-equality-before-none-9087d2e86ffd5954"
+union_name = "ConstraintStateMutationSetEqualityBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.before"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-equality-before-owner-07324214d307b4ed"
+union_name = "ConstraintStateMutationSetEqualityBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.before"
+arm_tag = 0x0002
+source_arm_name = "Owner"
+stable_name = "owner"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-equality-after-none-7dcca3a177df3af6"
+union_name = "ConstraintStateMutationSetEqualityAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.after"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-equality-after-owner-da5dcc9c14c86d9b"
+union_name = "ConstraintStateMutationSetEqualityAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetEquality.after"
+arm_tag = 0x0002
+source_arm_name = "Owner"
+stable_name = "owner"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-reference-before-none-991386d4b0f078cd"
+union_name = "ConstraintStateMutationSetReferenceBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.before"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-reference-before-reference-aggregate-d5bb988c1f54c425"
+union_name = "ConstraintStateMutationSetReferenceBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.before"
+arm_tag = 0x0002
+source_arm_name = "ReferenceAggregate"
+stable_name = "reference_aggregate"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-reference-after-none-d360b2458c599463"
+union_name = "ConstraintStateMutationSetReferenceAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.after"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-reference-after-reference-aggregate-05712266c4509d52"
+union_name = "ConstraintStateMutationSetReferenceAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetReference.after"
+arm_tag = 0x0002
+source_arm_name = "ReferenceAggregate"
+stable_name = "reference_aggregate"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-temporal-interval-before-none-788b83106351cb4b"
+union_name = "ConstraintStateMutationSetTemporalIntervalBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.before"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-temporal-interval-before-canonical-interval-1a83f1805c364c6d"
+union_name = "ConstraintStateMutationSetTemporalIntervalBefore"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.before"
+arm_tag = 0x0002
+source_arm_name = "CanonicalInterval"
+stable_name = "canonical_interval"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-temporal-interval-after-none-1b35de6a08104b73"
+union_name = "ConstraintStateMutationSetTemporalIntervalAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.after"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-mutation-set-temporal-interval-after-canonical-interval-a3626f19da033bc4"
+union_name = "ConstraintStateMutationSetTemporalIntervalAfter"
+containing_schema = "ConstraintStateMutation"
+union_path = "ConstraintStateMutation.SetTemporalInterval.after"
+arm_tag = 0x0002
+source_arm_name = "CanonicalInterval"
+stable_name = "canonical_interval"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
@@ -50660,6 +50906,150 @@ row_id = "a07:target:union-arm-terminal-abort-authority-source-correctness-requi
 target_row_id = "a07:union-arm:terminal-abort-authority-source-correctness-required-registered-reason-participant-failure-35b6fea24bdfd3c6"
 slice_id = "a07"
 source_key = "arm|TerminalAbortAuthority<Role:AuthorityOwningRole>|TerminalAbortAuthority<Role:AuthorityOwningRole>.source.CorrectnessRequired.registered_reason|ParticipantFailure"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-constraint-state-mutation-set-equality-before-83dd4af5709cc928"
+target_row_id = "a12:union:constraint-state-mutation-set-equality-before-83dd4af5709cc928"
+slice_id = "a12"
+source_key = "union|ConstraintStateMutation|ConstraintStateMutation.SetEquality.before"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-equality-before-none-9087d2e86ffd5954"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-equality-before-none-9087d2e86ffd5954"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetEquality.before|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-equality-before-owner-07324214d307b4ed"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-equality-before-owner-07324214d307b4ed"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetEquality.before|Owner"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-constraint-state-mutation-set-equality-after-93035e942b82da77"
+target_row_id = "a12:union:constraint-state-mutation-set-equality-after-93035e942b82da77"
+slice_id = "a12"
+source_key = "union|ConstraintStateMutation|ConstraintStateMutation.SetEquality.after"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-equality-after-none-7dcca3a177df3af6"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-equality-after-none-7dcca3a177df3af6"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetEquality.after|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-equality-after-owner-da5dcc9c14c86d9b"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-equality-after-owner-da5dcc9c14c86d9b"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetEquality.after|Owner"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-constraint-state-mutation-set-reference-before-3be9aec885221b6c"
+target_row_id = "a12:union:constraint-state-mutation-set-reference-before-3be9aec885221b6c"
+slice_id = "a12"
+source_key = "union|ConstraintStateMutation|ConstraintStateMutation.SetReference.before"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-reference-before-none-991386d4b0f078cd"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-reference-before-none-991386d4b0f078cd"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetReference.before|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-reference-before-reference-aggregate-d5bb988c1f54c425"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-reference-before-reference-aggregate-d5bb988c1f54c425"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetReference.before|ReferenceAggregate"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-constraint-state-mutation-set-reference-after-f18c49038dc527cc"
+target_row_id = "a12:union:constraint-state-mutation-set-reference-after-f18c49038dc527cc"
+slice_id = "a12"
+source_key = "union|ConstraintStateMutation|ConstraintStateMutation.SetReference.after"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-reference-after-none-d360b2458c599463"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-reference-after-none-d360b2458c599463"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetReference.after|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-reference-after-reference-aggregate-05712266c4509d52"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-reference-after-reference-aggregate-05712266c4509d52"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetReference.after|ReferenceAggregate"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-constraint-state-mutation-set-temporal-interval-before-20ac35f02f50313b"
+target_row_id = "a12:union:constraint-state-mutation-set-temporal-interval-before-20ac35f02f50313b"
+slice_id = "a12"
+source_key = "union|ConstraintStateMutation|ConstraintStateMutation.SetTemporalInterval.before"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-temporal-interval-before-none-788b83106351cb4b"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-temporal-interval-before-none-788b83106351cb4b"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetTemporalInterval.before|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-temporal-interval-before-canonical-interval-1a83f1805c364c6d"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-temporal-interval-before-canonical-interval-1a83f1805c364c6d"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetTemporalInterval.before|CanonicalInterval"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-constraint-state-mutation-set-temporal-interval-after-d25e5a3759fd5f54"
+target_row_id = "a12:union:constraint-state-mutation-set-temporal-interval-after-d25e5a3759fd5f54"
+slice_id = "a12"
+source_key = "union|ConstraintStateMutation|ConstraintStateMutation.SetTemporalInterval.after"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-temporal-interval-after-none-1b35de6a08104b73"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-temporal-interval-after-none-1b35de6a08104b73"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetTemporalInterval.after|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-mutation-set-temporal-interval-after-canonical-interval-a3626f19da033bc4"
+target_row_id = "a12:union-arm:constraint-state-mutation-set-temporal-interval-after-canonical-interval-a3626f19da033bc4"
+slice_id = "a12"
+source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetTemporalInterval.after|CanonicalInterval"
 target_kind = "union-arm"
 definition_status = "declared"
 
