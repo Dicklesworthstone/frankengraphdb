@@ -2011,6 +2011,88 @@ mod tests {
     }
 
     #[test]
+    fn integrity_validation_rejects_structured_count_and_alignment_mismatches() {
+        let logical_limits = limits().logical_digest();
+
+        let mut source_count = fixture(NeighborCodec::EliasFano, NeighborCodec::DenseIntervals);
+        source_count.source_ids = SortedIdentityColumn::try_new_with_delta_for_slots(
+            &[VId(10), VId(20)],
+            limits().source_identity(),
+        )
+        .expect("shorter source column is independently canonical");
+        assert_eq!(
+            source_count.validate_integrity(&resolver, logical_limits),
+            Err(SealedRunError::CorruptRun {
+                invariant: SealedRunInvariant::SourceColumnLength,
+                row_index: None,
+            })
+        );
+
+        let mut offset_count = fixture(NeighborCodec::EliasFano, NeighborCodec::DenseIntervals);
+        offset_count.offsets =
+            EliasFano::try_new(&[0, 3, 6], EliasFanoEntryLimit::new(3)).expect("test offsets");
+        assert_eq!(
+            offset_count.validate_integrity(&resolver, logical_limits),
+            Err(SealedRunError::CorruptRun {
+                invariant: SealedRunInvariant::OffsetCount,
+                row_index: None,
+            })
+        );
+
+        let mut offset_origin = fixture(NeighborCodec::EliasFano, NeighborCodec::DenseIntervals);
+        offset_origin.offsets =
+            EliasFano::try_new(&[1, 3, 3, 6], EliasFanoEntryLimit::new(4)).expect("test offsets");
+        assert_eq!(
+            offset_origin.validate_integrity(&resolver, logical_limits),
+            Err(SealedRunError::CorruptRun {
+                invariant: SealedRunInvariant::OffsetOrigin,
+                row_index: None,
+            })
+        );
+
+        let mut offset_terminal = fixture(NeighborCodec::EliasFano, NeighborCodec::DenseIntervals);
+        offset_terminal.offsets =
+            EliasFano::try_new(&[0, 3, 3, 5], EliasFanoEntryLimit::new(4)).expect("test offsets");
+        assert_eq!(
+            offset_terminal.validate_integrity(&resolver, logical_limits),
+            Err(SealedRunError::CorruptRun {
+                invariant: SealedRunInvariant::OffsetTerminal,
+                row_index: None,
+            })
+        );
+
+        let mut origin_count = fixture(NeighborCodec::EliasFano, NeighborCodec::DenseIntervals);
+        origin_count.origin_birth_orders.pop();
+        assert_eq!(
+            origin_count.validate_integrity(&resolver, logical_limits),
+            Err(SealedRunError::CorruptRun {
+                invariant: SealedRunInvariant::OriginColumnLength,
+                row_index: None,
+            })
+        );
+
+        let mut origin_alignment = fixture(NeighborCodec::EliasFano, NeighborCodec::DenseIntervals);
+        origin_alignment.origin_birth_orders[0] = birth(EId(999), 0);
+        assert_eq!(
+            origin_alignment.validate_integrity(&resolver, logical_limits),
+            Err(SealedRunError::CorruptRun {
+                invariant: SealedRunInvariant::OriginEdgeAlignment,
+                row_index: Some(0),
+            })
+        );
+
+        let mut evidence_count = fixture(NeighborCodec::EliasFano, NeighborCodec::DenseIntervals);
+        evidence_count.evidence.row_count += 1;
+        assert_eq!(
+            evidence_count.validate_integrity(&resolver, logical_limits),
+            Err(SealedRunError::CorruptRun {
+                invariant: SealedRunInvariant::Evidence,
+                row_index: None,
+            })
+        );
+    }
+
+    #[test]
     fn row_index_and_evidence_output_bounds_fail_closed() {
         let run = fixture(NeighborCodec::EliasFano, NeighborCodec::DenseIntervals);
         assert_eq!(
