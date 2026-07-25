@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 14
+registry_epoch = 15
 
 [[kind]]
 object_kind = 0x0001
@@ -369,6 +369,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/lease_window_successor_proof/"
 
 [[kind]]
+object_kind = 0x02f5
+name = "LocalAttemptRegistration"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_attempt_registration/"
+
+[[kind]]
 object_kind = 0x02fb
 name = "LocalBeginIdempotencyIndex"
 status = "reserved"
@@ -378,6 +387,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_begin_idempotency_index/"
 
 [[kind]]
+object_kind = 0x02fd
+name = "LocalBeginReservationSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_begin_reservation_spec/"
+
+[[kind]]
+object_kind = 0x0315
+name = "LocalPrepareAdmissionSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_prepare_admission_spec/"
+
+[[kind]]
 object_kind = 0x0324
 name = "LocalStatementIndex"
 status = "reserved"
@@ -385,6 +412,15 @@ construction_order = 25
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_statement_index/"
+
+[[kind]]
+object_kind = 0x0325
+name = "LocalStatementRegistration"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_statement_registration/"
 
 [[kind]]
 object_kind = 0x0332

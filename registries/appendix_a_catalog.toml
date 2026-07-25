@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 669
+target_count = 675
 projection_fallback_count = 84
-target_source_assignment_sha256 = "42ce1c47c5b704d446e3300b3c706cdd278e116952b3f90aa288944d05579111"
+target_source_assignment_sha256 = "ea327f54d528d3e8702ee274643e500c66fdae09fc48f9943461a1a4e1c6f1b5"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 14
+registry_epoch = 15
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -641,7 +641,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 14
+registry_epoch = 15
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -2009,6 +2009,50 @@ construction_order = 25
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/terminal_write_result_preparation/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-attempt-registration"
+object_kind = 0x02f5
+name = "LocalAttemptRegistration"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_attempt_registration/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-statement-registration"
+object_kind = 0x0325
+name = "LocalStatementRegistration"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_statement_registration/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-begin-reservation-spec"
+object_kind = 0x02fd
+name = "LocalBeginReservationSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_begin_reservation_spec/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-prepare-admission-spec"
+object_kind = 0x0315
+name = "LocalPrepareAdmissionSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_prepare_admission_spec/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -3396,6 +3440,28 @@ encoding_context = "arm Sharded of closed union ResultManifestRef"
 allowed_containing_schemas = ["ResultManifestRef"]
 max_size_bytes = 16777216
 
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-statement-publication-spec"
+wire_type_id = 0x0066
+name = "LocalStatementPublicationSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local statement maintenance-apply spec record"
+allowed_containing_schemas = ["LocalStatementPublicationSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-statement-registration-spec"
+wire_type_id = 0x0067
+name = "LocalStatementRegistrationSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local statement maintenance-apply spec record"
+allowed_containing_schemas = ["LocalStatementRegistrationSpec"]
+max_size_bytes = 16777216
 
 [[field]]
 slice_id = "a03"
@@ -12906,7 +12972,7 @@ symbol = "LocalAttemptRegistration"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02f5"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:local-audit-ticket-claim-record"
@@ -12978,7 +13044,7 @@ symbol = "LocalBeginReservationSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02fd"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a14:reservation:local-branch-key-allocator-merge-floor"
@@ -13194,7 +13260,7 @@ symbol = "LocalPrepareAdmissionSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0315"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a14:reservation:local-prepared-owner-floor"
@@ -13338,7 +13404,7 @@ symbol = "LocalStatementRegistration"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0325"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:local-terminal-admission-fence"
@@ -22298,7 +22364,7 @@ symbol = "LocalAttemptRegistration"
 generic_signature = ""
 source_key = "top|LocalAttemptRegistration"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1484"]
 
 [[top_level_candidate]]
@@ -22438,7 +22504,7 @@ symbol = "LocalBeginReservationSpec"
 generic_signature = ""
 source_key = "top|LocalBeginReservationSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1482"]
 
 [[top_level_candidate]]
@@ -22688,7 +22754,7 @@ symbol = "LocalPrepareAdmissionSpec"
 generic_signature = ""
 source_key = "top|LocalPrepareAdmissionSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1528"]
 
 [[top_level_candidate]]
@@ -22928,7 +22994,7 @@ symbol = "LocalStatementPublicationSpec"
 generic_signature = ""
 source_key = "top|LocalStatementPublicationSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1488"]
 
 [[top_level_candidate]]
@@ -22948,7 +23014,7 @@ symbol = "LocalStatementRegistration"
 generic_signature = ""
 source_key = "top|LocalStatementRegistration"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1486"]
 
 [[top_level_candidate]]
@@ -22958,7 +23024,7 @@ symbol = "LocalStatementRegistrationSpec"
 generic_signature = ""
 source_key = "top|LocalStatementRegistrationSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1486"]
 
 [[top_level_candidate]]
@@ -35385,6 +35451,54 @@ target_row_id = "a03:union-arm:terminal-write-result-preparation-sharded-787a450
 slice_id = "a03"
 source_key = "arm|TerminalWriteResultPreparation|TerminalWriteResultPreparation|Sharded"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-attempt-registration"
+target_row_id = "a03:logical-kind:local-attempt-registration"
+slice_id = "a03"
+source_key = "top|LocalAttemptRegistration"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-statement-registration"
+target_row_id = "a03:logical-kind:local-statement-registration"
+slice_id = "a03"
+source_key = "top|LocalStatementRegistration"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-begin-reservation-spec"
+target_row_id = "a03:logical-kind:local-begin-reservation-spec"
+slice_id = "a03"
+source_key = "top|LocalBeginReservationSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-prepare-admission-spec"
+target_row_id = "a03:logical-kind:local-prepare-admission-spec"
+slice_id = "a03"
+source_key = "top|LocalPrepareAdmissionSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-local-statement-publication-spec"
+target_row_id = "a03:wire-type:local-statement-publication-spec"
+slice_id = "a03"
+source_key = "top|LocalStatementPublicationSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-local-statement-registration-spec"
+target_row_id = "a03:wire-type:local-statement-registration-spec"
+slice_id = "a03"
+source_key = "top|LocalStatementRegistrationSpec"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

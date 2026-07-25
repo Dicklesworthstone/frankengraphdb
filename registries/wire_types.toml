@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 14
+registry_epoch = 15
 
 [[type]]
 wire_type_id = 0x0001
@@ -985,4 +985,22 @@ containing_union = "ResultManifestRef"
 wire_tag = 0x0002
 encoding_context = "arm Sharded of closed union ResultManifestRef"
 allowed_containing_schemas = ["ResultManifestRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0066
+name = "LocalStatementPublicationSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local statement maintenance-apply spec record"
+allowed_containing_schemas = ["LocalStatementPublicationSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0067
+name = "LocalStatementRegistrationSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local statement maintenance-apply spec record"
+allowed_containing_schemas = ["LocalStatementRegistrationSpec"]
 max_size_bytes = 16777216
