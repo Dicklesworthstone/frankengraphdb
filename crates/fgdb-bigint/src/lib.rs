@@ -6,14 +6,44 @@
 //! structurally. This crate intentionally defines no durable byte encoding;
 //! generated format code owns that contract.
 //!
-//! Every operation that may allocate a variable number of limbs requires an
+//! Fixed-width scalar constructors allocate at most two limbs. Every operation
+//! that can accept, produce, or reserve a variable number of limbs requires an
 //! explicit [`LimbLimit`]. There is no unlimited arithmetic overload.
+//!
+//! ```
+//! use fgdb_bigint::{BigInt, LimbLimit, Sign};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let limit = LimbLimit::new(4);
+//! let imported =
+//!     BigInt::from_canonical_limbs(Sign::Positive, vec![1].into_boxed_slice(), limit)?;
+//! let one = BigInt::from_u64(1);
+//! let _ = imported.checked_clone(limit)?;
+//! let _ = imported.checked_neg(limit)?;
+//! let _ = imported.checked_add(&one, limit)?;
+//! let _ = imported.checked_sub(&one, limit)?;
+//! let _ = imported.checked_mul(&one, limit)?;
+//! let _ = imported.checked_div_rem(&one, limit)?;
+//! # Ok(())
+//! # }
+//! ```
 
 #![forbid(unsafe_code)]
 
 use std::{cmp::Ordering, fmt};
 
 /// A canonical arbitrary-precision signed integer.
+///
+/// Its variable-size representation cannot be constructed directly.
+///
+/// ```compile_fail,E0451
+/// use fgdb_bigint::BigInt;
+///
+/// let _ = BigInt {
+///     negative: false,
+///     limbs: vec![1],
+/// };
+/// ```
 #[derive(PartialEq, Eq, Hash, Debug)]
 pub struct BigInt {
     negative: bool,
@@ -225,6 +255,15 @@ impl BigInt {
     /// A boxed slice makes the transferred allocation exactly length-shaped.
     /// The codec must enforce its byte-length bound before allocating that
     /// slice; this constructor independently enforces the logical limb limit.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::{BigInt, Sign};
+    ///
+    /// let _ = BigInt::from_canonical_limbs(
+    ///     Sign::Positive,
+    ///     vec![1].into_boxed_slice(),
+    /// );
+    /// ```
     pub fn from_canonical_limbs(
         sign: Sign,
         limbs_le: Box<[u64]>,
@@ -278,18 +317,9 @@ impl BigInt {
     fn allocate_workspace_limbs(
         operation: ArithmeticOperation,
         required_limbs: usize,
+        limit: LimbLimit,
     ) -> Result<Vec<u64>, ArithmeticError> {
-        if required_limbs > (isize::MAX as usize) / std::mem::size_of::<u64>() {
-            return Err(ArithmeticError::CapacityOverflow { operation });
-        }
-        let mut limbs = Vec::new();
-        limbs
-            .try_reserve_exact(required_limbs)
-            .map_err(|_| ArithmeticError::AllocationFailed {
-                operation,
-                requested_limbs: required_limbs,
-            })?;
-        Ok(limbs)
+        Self::allocate_limbs(operation, required_limbs, limit)
     }
 
     fn from_sign_magnitude(negative: bool, mut limbs: Vec<u64>) -> Self {
@@ -347,6 +377,22 @@ impl BigInt {
     }
 
     /// Fallibly copies this value within an explicit limb budget.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let value = BigInt::from_u64(1);
+    /// let _ = value.checked_clone();
+    /// ```
+    ///
+    /// `BigInt` deliberately does not implement the unbounded `Clone` trait.
+    ///
+    /// ```compile_fail,E0599
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let value = BigInt::from_u64(1);
+    /// let _ = value.clone();
+    /// ```
     pub fn checked_clone(&self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
         let mut limbs = Self::allocate_limbs(ArithmeticOperation::Clone, self.limbs.len(), limit)?;
         limbs.extend_from_slice(&self.limbs);
@@ -637,6 +683,7 @@ impl BigInt {
         magnitude: &[u64],
         shift: u32,
         extra_high_limb: bool,
+        limit: LimbLimit,
     ) -> Result<Vec<u64>, ArithmeticError> {
         let required_limbs = magnitude
             .len()
@@ -645,7 +692,7 @@ impl BigInt {
                 operation: ArithmeticOperation::Divide,
             })?;
         let mut normalized =
-            Self::allocate_workspace_limbs(ArithmeticOperation::Divide, required_limbs)?;
+            Self::allocate_workspace_limbs(ArithmeticOperation::Divide, required_limbs, limit)?;
         if shift == 0 {
             normalized.extend_from_slice(magnitude);
             if extra_high_limb {
@@ -733,8 +780,9 @@ impl BigInt {
             return Err(ArithmeticError::DivisionByZero);
         };
         let shift = divisor_most_significant.leading_zeros();
-        let normalized_divisor = Self::normalized_division_operand(divisor, shift, false)?;
-        let mut normalized_dividend = Self::normalized_division_operand(dividend, shift, true)?;
+        let normalized_divisor = Self::normalized_division_operand(divisor, shift, false, limit)?;
+        let mut normalized_dividend =
+            Self::normalized_division_operand(dividend, shift, true, limit)?;
         let divisor_high = u128::from(normalized_divisor[divisor.len() - 1]);
         let divisor_next = u128::from(normalized_divisor[divisor.len() - 2]);
         let base = 1u128 << 64;
@@ -797,6 +845,24 @@ impl BigInt {
         Ok((quotient, remainder))
     }
 
+    /// Negates this value within an explicit limb budget.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let value = BigInt::from_u64(1);
+    /// let _ = value.checked_neg();
+    /// ```
+    ///
+    /// The unary negation operator is absent because it has no place to carry
+    /// a [`LimbLimit`].
+    ///
+    /// ```compile_fail,E0600
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let value = BigInt::from_u64(1);
+    /// let _ = -value;
+    /// ```
     pub fn checked_neg(&self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
         let mut limbs = Self::allocate_limbs(ArithmeticOperation::Negate, self.limbs.len(), limit)?;
         limbs.extend_from_slice(&self.limbs);
@@ -806,6 +872,24 @@ impl BigInt {
         })
     }
 
+    /// Adds two values within an explicit limb budget.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let left = BigInt::from_u64(1);
+    /// let right = BigInt::from_u64(2);
+    /// let _ = left.checked_add(&right);
+    /// ```
+    ///
+    /// The `+` operator is absent because it has no place to carry a
+    /// [`LimbLimit`].
+    ///
+    /// ```compile_fail,E0369
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let _ = BigInt::from_u64(1) + BigInt::from_u64(2);
+    /// ```
     pub fn checked_add(&self, other: &Self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
         if self.negative == other.negative {
             return Ok(Self::from_sign_magnitude(
@@ -826,6 +910,24 @@ impl BigInt {
         }
     }
 
+    /// Subtracts two values within an explicit limb budget.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let left = BigInt::from_u64(1);
+    /// let right = BigInt::from_u64(2);
+    /// let _ = left.checked_sub(&right);
+    /// ```
+    ///
+    /// The `-` operator is absent because it has no place to carry a
+    /// [`LimbLimit`].
+    ///
+    /// ```compile_fail,E0369
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let _ = BigInt::from_u64(1) - BigInt::from_u64(2);
+    /// ```
     pub fn checked_sub(&self, other: &Self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
         if self.negative != other.negative {
             return Ok(Self::from_sign_magnitude(
@@ -861,9 +963,28 @@ impl BigInt {
         }
     }
 
+    /// Multiplies two values within an explicit limb budget.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let left = BigInt::from_u64(1);
+    /// let right = BigInt::from_u64(2);
+    /// let _ = left.checked_mul(&right);
+    /// ```
+    ///
+    /// The `*` operator is absent because it has no place to carry a
+    /// [`LimbLimit`].
+    ///
+    /// ```compile_fail,E0369
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let _ = BigInt::from_u64(1) * BigInt::from_u64(2);
+    /// ```
     pub fn checked_mul(&self, other: &Self, limit: LimbLimit) -> Result<Self, ArithmeticError> {
-        // `LimbLimit` bounds result allocation. CPU work is intentionally a
-        // separate concern for the downstream resource-ledger/Cx wrapper.
+        // `LimbLimit` bounds variable-size allocation. CPU work is
+        // intentionally a separate concern for the downstream
+        // resource-ledger/Cx wrapper.
         Ok(Self::from_sign_magnitude(
             self.negative != other.negative,
             Self::mul_magnitude(&self.limbs, &other.limbs, limit)?,
@@ -879,11 +1000,34 @@ impl BigInt {
     ///
     /// `self == quotient * divisor + remainder`
     ///
-    /// and `abs(remainder) < abs(divisor)`. Both returned magnitudes must fit
-    /// `limit`; a zero divisor is rejected before any resource admission.
-    /// Multi-limb division uses normalized base-2^64 long division with
-    /// quotient-digit correction, never value-proportional repeated
-    /// subtraction.
+    /// and `abs(remainder) < abs(divisor)`. Every result and normalization
+    /// workspace allocation must fit `limit`; a zero divisor is rejected
+    /// before any resource admission. Multi-limb division uses normalized
+    /// base-2^64 long division with quotient-digit correction, never
+    /// value-proportional repeated subtraction.
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let dividend = BigInt::from_u64(2);
+    /// let divisor = BigInt::from_u64(1);
+    /// let _ = dividend.checked_div_rem(&divisor);
+    /// ```
+    ///
+    /// Neither `/` nor `%` is implemented because those operators have no
+    /// place to carry a [`LimbLimit`].
+    ///
+    /// ```compile_fail,E0369
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let _ = BigInt::from_u64(2) / BigInt::from_u64(1);
+    /// ```
+    ///
+    /// ```compile_fail,E0369
+    /// use fgdb_bigint::BigInt;
+    ///
+    /// let _ = BigInt::from_u64(2) % BigInt::from_u64(1);
+    /// ```
     pub fn checked_div_rem(
         &self,
         divisor: &Self,
@@ -1372,8 +1516,8 @@ mod tests {
                     continue;
                 }
                 let (quotient, remainder) = dividend_big
-                    .checked_div_rem(&divisor_big, LimbLimit::new(2))
-                    .expect("u128 quotient and remainder occupy at most two limbs");
+                    .checked_div_rem(&divisor_big, LimbLimit::new(3))
+                    .expect("u128 division needs at most three workspace/result limbs");
                 assert_eq!(
                     quotient,
                     BigInt::from_u128(dividend / divisor),
@@ -1598,11 +1742,21 @@ mod tests {
 
     #[test]
     fn division_workspace_capacity_and_allocation_failures_are_typed() {
+        assert_eq!(
+            BigInt::allocate_workspace_limbs(ArithmeticOperation::Divide, 2, LimbLimit::new(1),),
+            Err(ArithmeticError::LimbLimitExceeded {
+                operation: ArithmeticOperation::Divide,
+                required_limbs: 2,
+                limit: 1,
+            })
+        );
+
         let first_impossible_limb_count = (isize::MAX as usize) / std::mem::size_of::<u64>() + 1;
         assert_eq!(
             BigInt::allocate_workspace_limbs(
                 ArithmeticOperation::Divide,
                 first_impossible_limb_count,
+                LimbLimit::new(usize::MAX),
             ),
             Err(ArithmeticError::CapacityOverflow {
                 operation: ArithmeticOperation::Divide,
@@ -1614,12 +1768,35 @@ mod tests {
             BigInt::allocate_workspace_limbs(
                 ArithmeticOperation::Divide,
                 largest_addressable_limb_count,
+                LimbLimit::new(usize::MAX),
             ),
             Err(ArithmeticError::AllocationFailed {
                 operation: ArithmeticOperation::Divide,
                 requested_limbs: largest_addressable_limb_count,
             })
         );
+    }
+
+    #[test]
+    fn public_division_limit_covers_normalization_workspace_not_only_results() {
+        let dividend = BigInt::from_sign_magnitude(false, vec![0, 0, 1]);
+        let divisor = BigInt::from_sign_magnitude(false, vec![0, 1]);
+
+        assert_eq!(
+            dividend.checked_div_rem(&divisor, LimbLimit::new(2)),
+            Err(ArithmeticError::LimbLimitExceeded {
+                operation: ArithmeticOperation::Divide,
+                required_limbs: 4,
+                limit: 2,
+            }),
+            "the dividend normalization workspace is admitted before allocation"
+        );
+
+        let (quotient, remainder) = dividend
+            .checked_div_rem(&divisor, LimbLimit::new(4))
+            .expect("a four-limb workspace budget admits the exact result");
+        assert_eq!(quotient, BigInt::from_sign_magnitude(false, vec![0, 1]));
+        assert_eq!(remainder, BigInt::zero());
     }
 
     #[test]
