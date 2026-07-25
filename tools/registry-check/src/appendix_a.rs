@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 675;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 709;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "96990948c4b7b3b5195534116dec5d23bdd99186e5e4cf796046d68789fb4676";
+    "dd52c721c60cf5ac45a38637903ff2bea711d007f836dc95388376f2b7db22b9";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 84;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "ea327f54d528d3e8702ee274643e500c66fdae09fc48f9943461a1a4e1c6f1b5";
+    "d99378a08e4821dad10ba10391623ded679e16dd1d7971f755ba5b178b7ab88f";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -64,11 +64,11 @@ pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 389;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
     "78c2adede17da5eea90ffb344591c7292e7d093c8ef07175c906e7595219639d";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
-pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 103;
-pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 710;
+pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 117;
+pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 696;
 pub const EXPECTED_RESERVATION_HIGH_WATER: u16 = 0x051d;
 pub const EXPECTED_RESERVATION_ASSIGNMENT_SHA256: &str =
-    "42cf2522e7af01a9daa882c3da220a2384479d037e30843cad2dd86e22a5e9f2";
+    "9c108b879fac12df1ecdba3792f7a78e2a345fb33aafa1751bb592c57cdc158a";
 pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
 pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_458;
@@ -15226,5 +15226,253 @@ stable_name = "Ready"
             }),
             "a maintenance checker was rebound to an unrelated existing artifact: {violations:?}"
         );
+    }
+
+    #[test]
+    fn a04_manifest_raft_owner_shells_are_exact() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let expected = [
+            (
+                "CertificateAttemptPlan",
+                "certificate-attempt-plan",
+                "top|CertificateAttemptPlan",
+                0x0265,
+                10,
+                "true",
+                16_777_216,
+                true,
+            ),
+            (
+                "CertificateSignerLock",
+                "certificate-signer-lock",
+                "top|CertificateSignerLock",
+                0x0269,
+                12,
+                "true",
+                16_777_216,
+                true,
+            ),
+            (
+                "CertificateSignatureShare",
+                "certificate-signature-share",
+                "top|CertificateSignatureShare",
+                0x052b,
+                14,
+                "true",
+                16_777_216,
+                false,
+            ),
+            (
+                "InitialProtocolStateRecipe",
+                "initial-protocol-state-recipe",
+                "top|InitialProtocolStateRecipe<Role>",
+                0x02d7,
+                30,
+                "true",
+                16_777_216,
+                true,
+            ),
+            (
+                "RaftConsensusCutProjection",
+                "raft-consensus-cut-projection",
+                "top|RaftConsensusCutProjection<Role>",
+                0x03a1,
+                40,
+                "true",
+                16_777_216,
+                true,
+            ),
+            (
+                "RaftHardState",
+                "raft-hard-state",
+                "top|RaftHardState",
+                0x03a2,
+                40,
+                "true",
+                16_777_216,
+                true,
+            ),
+            (
+                "RaftLogSegment",
+                "raft-log-segment",
+                "top|RaftLogSegment",
+                0x052a,
+                40,
+                "true",
+                1_073_741_824,
+                false,
+            ),
+            (
+                "RaftSnapshot",
+                "raft-snapshot",
+                "top|RaftSnapshot",
+                0x03a3,
+                40,
+                "true",
+                1_073_741_824,
+                true,
+            ),
+            (
+                "RaftStateRoot",
+                "raft-state-root",
+                "top|RaftStateRoot<Role>",
+                0x03a4,
+                40,
+                "true",
+                16_777_216,
+                true,
+            ),
+            (
+                "RemoteConfigurationTrustRoot",
+                "remote-configuration-trust-root",
+                "top|RemoteConfigurationTrustRoot",
+                0x03ae,
+                40,
+                "true",
+                16_777_216,
+                true,
+            ),
+            (
+                "RemoteRetentionConsumerRoot",
+                "remote-retention-consumer-root",
+                "top|RemoteRetentionConsumerRoot",
+                0x03b6,
+                40,
+                "true",
+                16_777_216,
+                true,
+            ),
+            (
+                "RemoteRetentionObligationRoot",
+                "remote-retention-obligation-root",
+                "top|RemoteRetentionObligationRoot",
+                0x03bb,
+                40,
+                "true",
+                16_777_216,
+                true,
+            ),
+            (
+                "RemoteTrustCompactionPrecondition",
+                "remote-trust-compaction-precondition",
+                "top|RemoteTrustCompactionPrecondition",
+                0x03c2,
+                40,
+                "true",
+                16_777_216,
+                true,
+            ),
+            (
+                "ShardProtocolState",
+                "shard-protocol-state",
+                "top|ShardProtocolState",
+                0x046b,
+                40,
+                "role-shard",
+                16_777_216,
+                true,
+            ),
+            (
+                "TopologyState",
+                "topology-state",
+                "top|TopologyState",
+                0x04aa,
+                40,
+                "role-meta",
+                16_777_216,
+                true,
+            ),
+            (
+                "ValidatedRemoteConfigurationAnchor",
+                "validated-remote-configuration-anchor",
+                "top|ValidatedRemoteConfigurationAnchor",
+                0x04b7,
+                40,
+                "true",
+                16_777_216,
+                true,
+            ),
+        ];
+
+        for (name, slug, source_key, code, order, role, max_size, reserved_code) in expected {
+            let logical = catalog
+                .identity
+                .logical
+                .iter()
+                .find(|logical| logical.name == name)
+                .expect("a04 logical owner must exist");
+            assert_eq!(logical.object_kind, code, "{name} code");
+            assert_eq!(logical.status, "reserved", "{name} lifecycle");
+            assert_eq!(
+                logical.construction_order, order,
+                "{name} construction order"
+            );
+            assert_eq!(logical.role_predicate, role, "{name} role");
+            assert_eq!(logical.max_size_bytes, max_size, "{name} size ceiling");
+            assert_eq!(
+                logical.golden_corpus,
+                format!("corpus/logical/{}/", slug.replace('-', "_")),
+                "{name} corpus"
+            );
+
+            let candidates = catalog
+                .top_level_candidates
+                .iter()
+                .filter(|candidate| candidate.source_key == source_key)
+                .collect::<Vec<_>>();
+            assert_eq!(candidates.len(), 1, "{name} source candidate is unique");
+            assert_eq!(candidates[0].identity_class, "logical", "{name} class");
+
+            let targets = catalog
+                .targets
+                .iter()
+                .filter(|target| target.source_key == source_key)
+                .collect::<Vec<_>>();
+            assert_eq!(targets.len(), 1, "{name} source target is unique");
+            assert_eq!(
+                targets[0].row_id,
+                format!("a04:target:logical-kind-{slug}"),
+                "{name} target row"
+            );
+            assert_eq!(
+                targets[0].target_row_id,
+                format!("a04:logical-kind:{slug}"),
+                "{name} target owner"
+            );
+            assert_eq!(targets[0].target_kind, "logical-kind", "{name} target kind");
+            assert_eq!(
+                targets[0].definition_status, "declared",
+                "{name} definition status"
+            );
+
+            let reservations = catalog
+                .reservations
+                .iter()
+                .filter(|reservation| reservation.symbol == name)
+                .collect::<Vec<_>>();
+            if reserved_code {
+                assert_eq!(reservations.len(), 1, "{name} reservation is unique");
+                assert_eq!(
+                    reservations[0].row_id,
+                    format!("a04:reservation:{slug}"),
+                    "{name} reservation row"
+                );
+                assert_eq!(
+                    reservations[0].code_reservation,
+                    format!("0x{code:04x}"),
+                    "{name} reserved code"
+                );
+                assert_eq!(
+                    reservations[0].disposition, "existing",
+                    "{name} reservation disposition"
+                );
+            } else {
+                assert!(
+                    reservations.is_empty(),
+                    "{name} is a direct unreserved mint"
+                );
+            }
+        }
     }
 }

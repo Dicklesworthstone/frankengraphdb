@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 23
+registry_epoch = 24
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 23);
+    assert_eq!(epoch, 24);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -4013,6 +4013,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "LocalStatementIndex"
                 | "ShardingMigrationState"
                 | "TerminalWriteResultPreparation"
+                | "LocalAttemptRegistrationOperationAuditAdmission"
+                | "LocalBeginReservationSpecOperationAuditAdmission"
+                | "LocalPrepareAdmissionSpecOperationAuditAdmission"
+                | "LocalStatementPublicationSpecStatementAuditAdmission"
+                | "LocalStatementRegistrationSpecStatementAuditAdmission"
+                | "LocalStatementRegistrationStatementAuditAdmission"
         )
     };
     pre_erratum
@@ -4136,7 +4142,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a15_i7_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 45,
+        pre_erratum.ordinary_unions.len() + 51,
         current_union_count,
         "the historical witness must remove exactly the post-erratum A15, A01, A16, and A03 unions"
     );
@@ -5104,6 +5110,125 @@ fn idr_portable_restore_archive_acquisition_receipt_reserved_logical_shell_is_ex
     );
 
     let target_row_id = "a17:logical-kind:portable-restore-archive-acquisition-receipt";
+    let a17 = catalog
+        .slices
+        .iter()
+        .find(|slice| slice.id == "a17")
+        .expect("a17 slice exists");
+    assert_eq!(
+        a17.definition_status, "declared",
+        "coverage must close before completion-layer authoring"
+    );
+    assert!(
+        !catalog
+            .annotations
+            .iter()
+            .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .semantic_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .expansion_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .evidence
+                .iter()
+                .any(|row| row.target_row_id == target_row_id),
+        "a declared shell must not skip coverage-first sequencing with premature completion rows"
+    );
+}
+
+#[test]
+fn idr_canonical_restore_plan_availability_copy_reserved_logical_shell_is_exact() {
+    let identity = real_identity();
+    let logical = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "CanonicalRestorePlanAvailabilityCopy")
+        .expect("CanonicalRestorePlanAvailabilityCopy logical shell exists");
+    assert_eq!(logical.object_kind, 0x025d);
+    assert_eq!(logical.status, "reserved");
+    assert_eq!(logical.construction_order, 6);
+    assert_eq!(logical.role_predicate, "true");
+    assert_eq!(logical.max_size_bytes, 16_777_216);
+    assert_eq!(
+        logical.golden_corpus,
+        "corpus/logical/canonical_restore_plan_availability_copy/"
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|reservation| reservation.symbol == "CanonicalRestorePlanAvailabilityCopy")
+        .expect("CanonicalRestorePlanAvailabilityCopy permanent reservation exists");
+    assert_eq!(
+        reservation.row_id,
+        "a17:reservation:canonical-restore-plan-availability-copy"
+    );
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x025d");
+    assert_eq!(reservation.disposition, "existing");
+
+    let source_key = "top|CanonicalRestorePlanAvailabilityCopy<Role:AuthorityOwningRole>";
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == source_key)
+        .expect("CanonicalRestorePlanAvailabilityCopy source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == source_key)
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "source candidate must map exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a17:target:logical-kind-canonical-restore-plan-availability-copy"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a17:logical-kind:canonical-restore-plan-availability-copy"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+    assert_eq!(targets[0].definition_status, "declared");
+
+    assert!(
+        !identity
+            .fields
+            .iter()
+            .any(|field| { field.containing_schema == "CanonicalRestorePlanAvailabilityCopy" }),
+        "the shell increment must not preempt its field census"
+    );
+    assert!(
+        !identity.ordinary_unions.iter().any(|union| {
+            union.containing_schema == "CanonicalRestorePlanAvailabilityCopy"
+                || union.union_name == "CanonicalRestorePlanAvailabilityCopy"
+        }) && !identity.unions.iter().any(|union| {
+            union.containing_schema == "CanonicalRestorePlanAvailabilityCopy"
+                || union.union_name == "CanonicalRestorePlanAvailabilityCopy"
+        }),
+        "the shell increment must not preempt unions or arms"
+    );
+    assert!(
+        !catalog.ambiguity_adjudications.iter().any(|row| {
+            row.ambiguity_source_key
+                .contains("|CanonicalRestorePlanAvailabilityCopy|")
+                || row
+                    .resolved_source_keys
+                    .iter()
+                    .any(|source_key| source_key.contains("|CanonicalRestorePlanAvailabilityCopy|"))
+        }),
+        "shorthand ambiguities must remain open until exact field types are settled"
+    );
+
+    let target_row_id = "a17:logical-kind:canonical-restore-plan-availability-copy";
     let a17 = catalog
         .slices
         .iter()

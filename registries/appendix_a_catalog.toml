@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 675
+target_count = 709
 projection_fallback_count = 84
-target_source_assignment_sha256 = "ea327f54d528d3e8702ee274643e500c66fdae09fc48f9943461a1a4e1c6f1b5"
+target_source_assignment_sha256 = "d99378a08e4821dad10ba10391623ded679e16dd1d7971f755ba5b178b7ab88f"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 15
+registry_epoch = 16
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 15
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 23
+registry_epoch = 24
 
 [[logical_kind]]
 slice_id = "a03"
@@ -2053,6 +2053,182 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_prepare_admission_spec/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:certificate-attempt-plan"
+object_kind = 0x0265
+name = "CertificateAttemptPlan"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_attempt_plan/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:certificate-signer-lock"
+object_kind = 0x0269
+name = "CertificateSignerLock"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_signer_lock/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:certificate-signature-share"
+object_kind = 0x052b
+name = "CertificateSignatureShare"
+status = "reserved"
+construction_order = 14
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_signature_share/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:initial-protocol-state-recipe"
+object_kind = 0x02d7
+name = "InitialProtocolStateRecipe"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/initial_protocol_state_recipe/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:raft-consensus-cut-projection"
+object_kind = 0x03a1
+name = "RaftConsensusCutProjection"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/raft_consensus_cut_projection/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:raft-hard-state"
+object_kind = 0x03a2
+name = "RaftHardState"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/raft_hard_state/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:raft-log-segment"
+object_kind = 0x052a
+name = "RaftLogSegment"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 1073741824
+golden_corpus = "corpus/logical/raft_log_segment/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:raft-snapshot"
+object_kind = 0x03a3
+name = "RaftSnapshot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 1073741824
+golden_corpus = "corpus/logical/raft_snapshot/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:raft-state-root"
+object_kind = 0x03a4
+name = "RaftStateRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/raft_state_root/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:remote-configuration-trust-root"
+object_kind = 0x03ae
+name = "RemoteConfigurationTrustRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_configuration_trust_root/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:remote-retention-consumer-root"
+object_kind = 0x03b6
+name = "RemoteRetentionConsumerRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_consumer_root/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:remote-retention-obligation-root"
+object_kind = 0x03bb
+name = "RemoteRetentionObligationRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_obligation_root/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:remote-trust-compaction-precondition"
+object_kind = 0x03c2
+name = "RemoteTrustCompactionPrecondition"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_trust_compaction_precondition/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:shard-protocol-state"
+object_kind = 0x046b
+name = "ShardProtocolState"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_protocol_state/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:topology-state"
+object_kind = 0x04aa
+name = "TopologyState"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_state/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:validated-remote-configuration-anchor"
+object_kind = 0x04b7
+name = "ValidatedRemoteConfigurationAnchor"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/validated_remote_configuration_anchor/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -10310,6 +10486,269 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-attempt-registration-operation-audit-admission-db7051255b08c6a2"
+union_name = "LocalAttemptRegistrationOperationAuditAdmission"
+containing_schema = "LocalAttemptRegistration"
+union_path = "LocalAttemptRegistration.operation_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalAttemptRegistration"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-attempt-registration-operation-audit-admission-local-operation-audit-admission-claimed-03d3f7da2731519f"
+union_name = "LocalAttemptRegistrationOperationAuditAdmission"
+containing_schema = "LocalAttemptRegistration"
+union_path = "LocalAttemptRegistration.operation_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalOperationAuditAdmission::Claimed"
+stable_name = "local_operation_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-attempt-registration-operation-audit-admission-not-required-16e1f86e1fb45ba8"
+union_name = "LocalAttemptRegistrationOperationAuditAdmission"
+containing_schema = "LocalAttemptRegistration"
+union_path = "LocalAttemptRegistration.operation_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-begin-reservation-spec-operation-audit-admission-01772101bdcba3fd"
+union_name = "LocalBeginReservationSpecOperationAuditAdmission"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.operation_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalBeginReservationSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-reservation-spec-operation-audit-admission-local-operation-audit-admission-pending-unclaimed-9c1e92453e033501"
+union_name = "LocalBeginReservationSpecOperationAuditAdmission"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.operation_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalOperationAuditAdmission::PendingUnclaimed"
+stable_name = "local_operation_audit_admission_pending_unclaimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-begin-reservation-spec-operation-audit-admission-not-required-e75669dbaccd13dc"
+union_name = "LocalBeginReservationSpecOperationAuditAdmission"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.operation_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-prepare-admission-spec-operation-audit-admission-c5f8c21eedb4b975"
+union_name = "LocalPrepareAdmissionSpecOperationAuditAdmission"
+containing_schema = "LocalPrepareAdmissionSpec"
+union_path = "LocalPrepareAdmissionSpec.operation_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalPrepareAdmissionSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-prepare-admission-spec-operation-audit-admission-local-operation-audit-admission-claimed-ff6c85dd02edc05e"
+union_name = "LocalPrepareAdmissionSpecOperationAuditAdmission"
+containing_schema = "LocalPrepareAdmissionSpec"
+union_path = "LocalPrepareAdmissionSpec.operation_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalOperationAuditAdmission::Claimed"
+stable_name = "local_operation_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-prepare-admission-spec-operation-audit-admission-not-required-5fe0fc0798e92a70"
+union_name = "LocalPrepareAdmissionSpecOperationAuditAdmission"
+containing_schema = "LocalPrepareAdmissionSpec"
+union_path = "LocalPrepareAdmissionSpec.operation_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-statement-publication-spec-statement-audit-admission-5b417d86fe3b705a"
+union_name = "LocalStatementPublicationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementPublicationSpec"
+union_path = "LocalStatementPublicationSpec.statement_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalStatementPublicationSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-statement-publication-spec-statement-audit-admission-local-statement-audit-admission-claimed-07286cd7384b405b"
+union_name = "LocalStatementPublicationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementPublicationSpec"
+union_path = "LocalStatementPublicationSpec.statement_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalStatementAuditAdmission::Claimed"
+stable_name = "local_statement_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-statement-publication-spec-statement-audit-admission-not-required-d6ba27e9862c2f22"
+union_name = "LocalStatementPublicationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementPublicationSpec"
+union_path = "LocalStatementPublicationSpec.statement_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-statement-registration-statement-audit-admission-f73b036c015feed2"
+union_name = "LocalStatementRegistrationStatementAuditAdmission"
+containing_schema = "LocalStatementRegistration"
+union_path = "LocalStatementRegistration.statement_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalStatementRegistration"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-statement-registration-statement-audit-admission-local-statement-audit-admission-claimed-e60d624cb4fd49e7"
+union_name = "LocalStatementRegistrationStatementAuditAdmission"
+containing_schema = "LocalStatementRegistration"
+union_path = "LocalStatementRegistration.statement_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalStatementAuditAdmission::Claimed"
+stable_name = "local_statement_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-statement-registration-statement-audit-admission-not-required-952ac0ab98c4667d"
+union_name = "LocalStatementRegistrationStatementAuditAdmission"
+containing_schema = "LocalStatementRegistration"
+union_path = "LocalStatementRegistration.statement_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union]]
+slice_id = "a03"
+row_id = "a03:union:local-statement-registration-spec-statement-audit-admission-b67201fccb46a209"
+union_name = "LocalStatementRegistrationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementRegistrationSpec"
+union_path = "LocalStatementRegistrationSpec.statement_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalStatementRegistrationSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-statement-registration-spec-statement-audit-admission-local-statement-audit-admission-pending-unclaimed-c9bf5ede59c6df2d"
+union_name = "LocalStatementRegistrationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementRegistrationSpec"
+union_path = "LocalStatementRegistrationSpec.statement_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalStatementAuditAdmission::PendingUnclaimed"
+stable_name = "local_statement_audit_admission_pending_unclaimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+
+[[union_arm]]
+slice_id = "a03"
+row_id = "a03:union-arm:local-statement-registration-spec-statement-audit-admission-not-required-759566bbee2cae38"
+union_name = "LocalStatementRegistrationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementRegistrationSpec"
+union_path = "LocalStatementRegistrationSpec.statement_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
 slice_id = "a10"
@@ -11406,7 +11845,7 @@ symbol = "CertificateAttemptPlan"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0265"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:certificate-attempt-record"
@@ -11442,7 +11881,7 @@ symbol = "CertificateSignerLock"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0269"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:certified-legacy-artifact-registry"
@@ -12702,7 +13141,7 @@ symbol = "InitialProtocolStateRecipe"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02d7"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a10:reservation:intent-semantics"
@@ -14763,7 +15202,7 @@ symbol = "RaftConsensusCutProjection"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03a1"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:raft-gap-classification-proof"
@@ -14781,7 +15220,7 @@ symbol = "RaftHardState"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03a2"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a04:reservation:raft-snapshot"
@@ -14790,7 +15229,7 @@ symbol = "RaftSnapshot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03a3"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a04:reservation:raft-state-root"
@@ -14799,7 +15238,7 @@ symbol = "RaftStateRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03a4"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:read-access-admission-record"
@@ -14943,7 +15382,7 @@ symbol = "RemoteConfigurationTrustRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03ae"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:remote-grant-retirement-plan"
@@ -15015,7 +15454,7 @@ symbol = "RemoteRetentionConsumerRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03b6"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a01:reservation:remote-retention-grant-evidence"
@@ -15060,7 +15499,7 @@ symbol = "RemoteRetentionObligationRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03bb"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a01:reservation:remote-retention-release-ack-certificate"
@@ -15123,7 +15562,7 @@ symbol = "RemoteTrustCompactionPrecondition"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03c2"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:renyi-accounting-profile"
@@ -16743,7 +17182,7 @@ symbol = "ShardProtocolState"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x046b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-queryable-history-floor"
@@ -17400,7 +17839,7 @@ symbol = "TopologyState"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04aa"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:topology-transfer-ack"
@@ -17562,7 +18001,7 @@ symbol = "ValidatedRemoteConfigurationAnchor"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04b7"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:verifier-key-retirement-floor"
@@ -19504,7 +19943,7 @@ symbol = "CertificateAttemptPlan"
 generic_signature = ""
 source_key = "top|CertificateAttemptPlan"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1572"]
 
 [[top_level_candidate]]
@@ -19514,7 +19953,7 @@ symbol = "CertificateSignatureShare"
 generic_signature = ""
 source_key = "top|CertificateSignatureShare"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1572"]
 
 [[top_level_candidate]]
@@ -19524,7 +19963,7 @@ symbol = "CertificateSignerLock"
 generic_signature = ""
 source_key = "top|CertificateSignerLock"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1572"]
 
 [[top_level_candidate]]
@@ -21874,7 +22313,7 @@ symbol = "InitialProtocolStateRecipe"
 generic_signature = "<Role>"
 source_key = "top|InitialProtocolStateRecipe<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1548"]
 
 [[top_level_candidate]]
@@ -24894,7 +25333,7 @@ symbol = "RaftConsensusCutProjection"
 generic_signature = "<Role>"
 source_key = "top|RaftConsensusCutProjection<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1564"]
 
 [[top_level_candidate]]
@@ -24904,7 +25343,7 @@ symbol = "RaftHardState"
 generic_signature = ""
 source_key = "top|RaftHardState"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1560", "a04:1566"]
 
 [[top_level_candidate]]
@@ -24914,7 +25353,7 @@ symbol = "RaftLogSegment"
 generic_signature = ""
 source_key = "top|RaftLogSegment"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1560"]
 
 [[top_level_candidate]]
@@ -24954,7 +25393,7 @@ symbol = "RaftSnapshot"
 generic_signature = ""
 source_key = "top|RaftSnapshot"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1566"]
 
 [[top_level_candidate]]
@@ -24964,7 +25403,7 @@ symbol = "RaftStateRoot"
 generic_signature = "<Role>"
 source_key = "top|RaftStateRoot<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1568"]
 
 [[top_level_candidate]]
@@ -25314,7 +25753,7 @@ symbol = "RemoteConfigurationTrustRoot"
 generic_signature = ""
 source_key = "top|RemoteConfigurationTrustRoot"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1584"]
 
 [[top_level_candidate]]
@@ -25404,7 +25843,7 @@ symbol = "RemoteRetentionConsumerRoot"
 generic_signature = ""
 source_key = "top|RemoteRetentionConsumerRoot"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1580"]
 
 [[top_level_candidate]]
@@ -25454,7 +25893,7 @@ symbol = "RemoteRetentionObligationRoot"
 generic_signature = ""
 source_key = "top|RemoteRetentionObligationRoot"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1578"]
 
 [[top_level_candidate]]
@@ -25524,7 +25963,7 @@ symbol = "RemoteTrustCompactionPrecondition"
 generic_signature = ""
 source_key = "top|RemoteTrustCompactionPrecondition"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1586"]
 
 [[top_level_candidate]]
@@ -28364,7 +28803,7 @@ symbol = "ShardProtocolState"
 generic_signature = ""
 source_key = "top|ShardProtocolState"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1546"]
 
 [[top_level_candidate]]
@@ -29524,7 +29963,7 @@ symbol = "TopologyState"
 generic_signature = ""
 source_key = "top|TopologyState"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1588"]
 
 [[top_level_candidate]]
@@ -29784,7 +30223,7 @@ symbol = "ValidatedRemoteConfigurationAnchor"
 generic_signature = ""
 source_key = "top|ValidatedRemoteConfigurationAnchor"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1586"]
 
 [[top_level_candidate]]
@@ -35499,6 +35938,295 @@ target_row_id = "a03:wire-type:local-statement-registration-spec"
 slice_id = "a03"
 source_key = "top|LocalStatementRegistrationSpec"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-certificate-attempt-plan"
+target_row_id = "a04:logical-kind:certificate-attempt-plan"
+slice_id = "a04"
+source_key = "top|CertificateAttemptPlan"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-certificate-signer-lock"
+target_row_id = "a04:logical-kind:certificate-signer-lock"
+slice_id = "a04"
+source_key = "top|CertificateSignerLock"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-certificate-signature-share"
+target_row_id = "a04:logical-kind:certificate-signature-share"
+slice_id = "a04"
+source_key = "top|CertificateSignatureShare"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-initial-protocol-state-recipe"
+target_row_id = "a04:logical-kind:initial-protocol-state-recipe"
+slice_id = "a04"
+source_key = "top|InitialProtocolStateRecipe<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-raft-consensus-cut-projection"
+target_row_id = "a04:logical-kind:raft-consensus-cut-projection"
+slice_id = "a04"
+source_key = "top|RaftConsensusCutProjection<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-raft-hard-state"
+target_row_id = "a04:logical-kind:raft-hard-state"
+slice_id = "a04"
+source_key = "top|RaftHardState"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-raft-log-segment"
+target_row_id = "a04:logical-kind:raft-log-segment"
+slice_id = "a04"
+source_key = "top|RaftLogSegment"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-raft-snapshot"
+target_row_id = "a04:logical-kind:raft-snapshot"
+slice_id = "a04"
+source_key = "top|RaftSnapshot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-raft-state-root"
+target_row_id = "a04:logical-kind:raft-state-root"
+slice_id = "a04"
+source_key = "top|RaftStateRoot<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-remote-configuration-trust-root"
+target_row_id = "a04:logical-kind:remote-configuration-trust-root"
+slice_id = "a04"
+source_key = "top|RemoteConfigurationTrustRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-remote-retention-consumer-root"
+target_row_id = "a04:logical-kind:remote-retention-consumer-root"
+slice_id = "a04"
+source_key = "top|RemoteRetentionConsumerRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-remote-retention-obligation-root"
+target_row_id = "a04:logical-kind:remote-retention-obligation-root"
+slice_id = "a04"
+source_key = "top|RemoteRetentionObligationRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-remote-trust-compaction-precondition"
+target_row_id = "a04:logical-kind:remote-trust-compaction-precondition"
+slice_id = "a04"
+source_key = "top|RemoteTrustCompactionPrecondition"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-shard-protocol-state"
+target_row_id = "a04:logical-kind:shard-protocol-state"
+slice_id = "a04"
+source_key = "top|ShardProtocolState"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-topology-state"
+target_row_id = "a04:logical-kind:topology-state"
+slice_id = "a04"
+source_key = "top|TopologyState"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-validated-remote-configuration-anchor"
+target_row_id = "a04:logical-kind:validated-remote-configuration-anchor"
+slice_id = "a04"
+source_key = "top|ValidatedRemoteConfigurationAnchor"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:union-local-attempt-registration-operation-audit-admission-db7051255b08c6a2"
+target_row_id = "a03:union:local-attempt-registration-operation-audit-admission-db7051255b08c6a2"
+slice_id = "a03"
+source_key = "union|LocalAttemptRegistration|LocalAttemptRegistration.operation_audit_admission"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-attempt-registration-operation-audit-admission-local-operation-audit-admission-claimed-03d3f7da2731519f"
+target_row_id = "a03:union-arm:local-attempt-registration-operation-audit-admission-local-operation-audit-admission-claimed-03d3f7da2731519f"
+slice_id = "a03"
+source_key = "arm|LocalAttemptRegistration|LocalAttemptRegistration.operation_audit_admission|LocalOperationAuditAdmission::Claimed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-attempt-registration-operation-audit-admission-not-required-16e1f86e1fb45ba8"
+target_row_id = "a03:union-arm:local-attempt-registration-operation-audit-admission-not-required-16e1f86e1fb45ba8"
+slice_id = "a03"
+source_key = "arm|LocalAttemptRegistration|LocalAttemptRegistration.operation_audit_admission|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-begin-reservation-spec-operation-audit-admission-01772101bdcba3fd"
+target_row_id = "a03:union:local-begin-reservation-spec-operation-audit-admission-01772101bdcba3fd"
+slice_id = "a03"
+source_key = "union|LocalBeginReservationSpec|LocalBeginReservationSpec.operation_audit_admission"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-reservation-spec-operation-audit-admission-local-operation-audit-admission-pending-unclaimed-9c1e92453e033501"
+target_row_id = "a03:union-arm:local-begin-reservation-spec-operation-audit-admission-local-operation-audit-admission-pending-unclaimed-9c1e92453e033501"
+slice_id = "a03"
+source_key = "arm|LocalBeginReservationSpec|LocalBeginReservationSpec.operation_audit_admission|LocalOperationAuditAdmission::PendingUnclaimed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-begin-reservation-spec-operation-audit-admission-not-required-e75669dbaccd13dc"
+target_row_id = "a03:union-arm:local-begin-reservation-spec-operation-audit-admission-not-required-e75669dbaccd13dc"
+slice_id = "a03"
+source_key = "arm|LocalBeginReservationSpec|LocalBeginReservationSpec.operation_audit_admission|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-prepare-admission-spec-operation-audit-admission-c5f8c21eedb4b975"
+target_row_id = "a03:union:local-prepare-admission-spec-operation-audit-admission-c5f8c21eedb4b975"
+slice_id = "a03"
+source_key = "union|LocalPrepareAdmissionSpec|LocalPrepareAdmissionSpec.operation_audit_admission"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-prepare-admission-spec-operation-audit-admission-local-operation-audit-admission-claimed-ff6c85dd02edc05e"
+target_row_id = "a03:union-arm:local-prepare-admission-spec-operation-audit-admission-local-operation-audit-admission-claimed-ff6c85dd02edc05e"
+slice_id = "a03"
+source_key = "arm|LocalPrepareAdmissionSpec|LocalPrepareAdmissionSpec.operation_audit_admission|LocalOperationAuditAdmission::Claimed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-prepare-admission-spec-operation-audit-admission-not-required-5fe0fc0798e92a70"
+target_row_id = "a03:union-arm:local-prepare-admission-spec-operation-audit-admission-not-required-5fe0fc0798e92a70"
+slice_id = "a03"
+source_key = "arm|LocalPrepareAdmissionSpec|LocalPrepareAdmissionSpec.operation_audit_admission|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-statement-publication-spec-statement-audit-admission-5b417d86fe3b705a"
+target_row_id = "a03:union:local-statement-publication-spec-statement-audit-admission-5b417d86fe3b705a"
+slice_id = "a03"
+source_key = "union|LocalStatementPublicationSpec|LocalStatementPublicationSpec.statement_audit_admission"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-statement-publication-spec-statement-audit-admission-local-statement-audit-admission-claimed-07286cd7384b405b"
+target_row_id = "a03:union-arm:local-statement-publication-spec-statement-audit-admission-local-statement-audit-admission-claimed-07286cd7384b405b"
+slice_id = "a03"
+source_key = "arm|LocalStatementPublicationSpec|LocalStatementPublicationSpec.statement_audit_admission|LocalStatementAuditAdmission::Claimed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-statement-publication-spec-statement-audit-admission-not-required-d6ba27e9862c2f22"
+target_row_id = "a03:union-arm:local-statement-publication-spec-statement-audit-admission-not-required-d6ba27e9862c2f22"
+slice_id = "a03"
+source_key = "arm|LocalStatementPublicationSpec|LocalStatementPublicationSpec.statement_audit_admission|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-statement-registration-statement-audit-admission-f73b036c015feed2"
+target_row_id = "a03:union:local-statement-registration-statement-audit-admission-f73b036c015feed2"
+slice_id = "a03"
+source_key = "union|LocalStatementRegistration|LocalStatementRegistration.statement_audit_admission"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-statement-registration-statement-audit-admission-local-statement-audit-admission-claimed-e60d624cb4fd49e7"
+target_row_id = "a03:union-arm:local-statement-registration-statement-audit-admission-local-statement-audit-admission-claimed-e60d624cb4fd49e7"
+slice_id = "a03"
+source_key = "arm|LocalStatementRegistration|LocalStatementRegistration.statement_audit_admission|LocalStatementAuditAdmission::Claimed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-statement-registration-statement-audit-admission-not-required-952ac0ab98c4667d"
+target_row_id = "a03:union-arm:local-statement-registration-statement-audit-admission-not-required-952ac0ab98c4667d"
+slice_id = "a03"
+source_key = "arm|LocalStatementRegistration|LocalStatementRegistration.statement_audit_admission|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-local-statement-registration-spec-statement-audit-admission-b67201fccb46a209"
+target_row_id = "a03:union:local-statement-registration-spec-statement-audit-admission-b67201fccb46a209"
+slice_id = "a03"
+source_key = "union|LocalStatementRegistrationSpec|LocalStatementRegistrationSpec.statement_audit_admission"
+target_kind = "union"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-statement-registration-spec-statement-audit-admission-local-statement-audit-admission-pending-unclaimed-c9bf5ede59c6df2d"
+target_row_id = "a03:union-arm:local-statement-registration-spec-statement-audit-admission-local-statement-audit-admission-pending-unclaimed-c9bf5ede59c6df2d"
+slice_id = "a03"
+source_key = "arm|LocalStatementRegistrationSpec|LocalStatementRegistrationSpec.statement_audit_admission|LocalStatementAuditAdmission::PendingUnclaimed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:union-arm-local-statement-registration-spec-statement-audit-admission-not-required-759566bbee2cae38"
+target_row_id = "a03:union-arm:local-statement-registration-spec-statement-audit-admission-not-required-759566bbee2cae38"
+slice_id = "a03"
+source_key = "arm|LocalStatementRegistrationSpec|LocalStatementRegistrationSpec.statement_audit_admission|NotRequired"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

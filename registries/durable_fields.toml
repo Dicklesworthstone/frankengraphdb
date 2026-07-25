@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 23
+registry_epoch = 24
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -3654,6 +3654,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "LocalAttemptRegistrationOperationAuditAdmission"
+containing_schema = "LocalAttemptRegistration"
+union_path = "LocalAttemptRegistration.operation_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalAttemptRegistration"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "LocalAttemptRegistrationSpec"
 containing_schema = "LocalAttemptRegistrationSpec"
 union_path = "LocalAttemptRegistrationSpec"
@@ -3687,6 +3698,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "LocalBeginReservationSpecOperationAuditAdmission"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.operation_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalBeginReservationSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "LocalOperationAuditAdmission"
 containing_schema = "LocalOperationAuditAdmission"
 union_path = "LocalOperationAuditAdmission"
@@ -3704,6 +3726,17 @@ union_path = "LocalOutcomeCompactionSpec"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["LocalOutcomeCompactionSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "LocalPrepareAdmissionSpecOperationAuditAdmission"
+containing_schema = "LocalPrepareAdmissionSpec"
+union_path = "LocalPrepareAdmissionSpec.operation_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalPrepareAdmissionSpec"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -3742,12 +3775,45 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "LocalStatementPublicationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementPublicationSpec"
+union_path = "LocalStatementPublicationSpec.statement_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalStatementPublicationSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "LocalStatementPublishedOutput"
 containing_schema = "LocalStatementPublishedOutput"
 union_path = "LocalStatementPublishedOutput"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["LocalStatementPublishedOutput"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "LocalStatementRegistrationStatementAuditAdmission"
+containing_schema = "LocalStatementRegistration"
+union_path = "LocalStatementRegistration.statement_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalStatementRegistration"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "LocalStatementRegistrationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementRegistrationSpec"
+union_path = "LocalStatementRegistrationSpec.statement_audit_admission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalStatementRegistrationSpec"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -4334,6 +4400,30 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "LocalAttemptRegistrationOperationAuditAdmission"
+containing_schema = "LocalAttemptRegistration"
+union_path = "LocalAttemptRegistration.operation_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalOperationAuditAdmission::Claimed"
+stable_name = "local_operation_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "LocalAttemptRegistrationOperationAuditAdmission"
+containing_schema = "LocalAttemptRegistration"
+union_path = "LocalAttemptRegistration.operation_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
 union_name = "LocalAttemptRegistrationSpec"
 containing_schema = "LocalAttemptRegistrationSpec"
 union_path = "LocalAttemptRegistrationSpec"
@@ -4477,6 +4567,30 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "LocalBeginReservationSpecOperationAuditAdmission"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.operation_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalOperationAuditAdmission::PendingUnclaimed"
+stable_name = "local_operation_audit_admission_pending_unclaimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "LocalBeginReservationSpecOperationAuditAdmission"
+containing_schema = "LocalBeginReservationSpec"
+union_path = "LocalBeginReservationSpec.operation_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
 union_name = "LocalOperationAuditAdmission"
 containing_schema = "LocalOperationAuditAdmission"
 union_path = "LocalOperationAuditAdmission"
@@ -4540,6 +4654,30 @@ payload_sha256 = "6367c91284d0c91440417e8aeec16adbd5b43ef16a7e69d9ad36a23aa5bf8f
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "LocalPrepareAdmissionSpecOperationAuditAdmission"
+containing_schema = "LocalPrepareAdmissionSpec"
+union_path = "LocalPrepareAdmissionSpec.operation_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalOperationAuditAdmission::Claimed"
+stable_name = "local_operation_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "LocalPrepareAdmissionSpecOperationAuditAdmission"
+containing_schema = "LocalPrepareAdmissionSpec"
+union_path = "LocalPrepareAdmissionSpec.operation_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "LocalResultDeliveryOwner"
@@ -4670,6 +4808,30 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "LocalStatementPublicationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementPublicationSpec"
+union_path = "LocalStatementPublicationSpec.statement_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalStatementAuditAdmission::Claimed"
+stable_name = "local_statement_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "LocalStatementPublicationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementPublicationSpec"
+union_path = "LocalStatementPublicationSpec.statement_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
 union_name = "LocalStatementPublishedOutput"
 containing_schema = "LocalStatementPublishedOutput"
 union_path = "LocalStatementPublishedOutput"
@@ -4694,6 +4856,54 @@ payload_sha256 = "ea13bdd74818b47c41f3a60712e8adf1a312d9bde8d77c5e48434c1240adec
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "LocalStatementRegistrationStatementAuditAdmission"
+containing_schema = "LocalStatementRegistration"
+union_path = "LocalStatementRegistration.statement_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalStatementAuditAdmission::Claimed"
+stable_name = "local_statement_audit_admission_claimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "LocalStatementRegistrationStatementAuditAdmission"
+containing_schema = "LocalStatementRegistration"
+union_path = "LocalStatementRegistration.statement_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "LocalStatementRegistrationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementRegistrationSpec"
+union_path = "LocalStatementRegistrationSpec.statement_audit_admission"
+arm_tag = 0x0001
+source_arm_name = "LocalStatementAuditAdmission::PendingUnclaimed"
+stable_name = "local_statement_audit_admission_pending_unclaimed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "LocalStatementRegistrationSpecStatementAuditAdmission"
+containing_schema = "LocalStatementRegistrationSpec"
+union_path = "LocalStatementRegistrationSpec.statement_audit_admission"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "MacaroonRootIssuanceState"

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 15
+registry_epoch = 16
 
 [[kind]]
 object_kind = 0x0001
@@ -270,6 +270,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/canonical_restore_plan_availability_copy/"
 
 [[kind]]
+object_kind = 0x0265
+name = "CertificateAttemptPlan"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_attempt_plan/"
+
+[[kind]]
+object_kind = 0x0269
+name = "CertificateSignerLock"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_signer_lock/"
+
+[[kind]]
 object_kind = 0x0278
 name = "ConfigurationState"
 status = "reserved"
@@ -340,6 +358,15 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/identity_continuity_record/"
+
+[[kind]]
+object_kind = 0x02d7
+name = "InitialProtocolStateRecipe"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/initial_protocol_state_recipe/"
 
 [[kind]]
 object_kind = 0x02da
@@ -576,6 +603,42 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/prior_incarnation_lease_cohort_window/"
 
 [[kind]]
+object_kind = 0x03a1
+name = "RaftConsensusCutProjection"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/raft_consensus_cut_projection/"
+
+[[kind]]
+object_kind = 0x03a2
+name = "RaftHardState"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/raft_hard_state/"
+
+[[kind]]
+object_kind = 0x03a3
+name = "RaftSnapshot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 1073741824
+golden_corpus = "corpus/logical/raft_snapshot/"
+
+[[kind]]
+object_kind = 0x03a4
+name = "RaftStateRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/raft_state_root/"
+
+[[kind]]
 object_kind = 0x03ad
 name = "RemoteAuthorityConfigurationEvidence"
 status = "reserved"
@@ -583,6 +646,15 @@ construction_order = 14
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/remote_authority_configuration_evidence/"
+
+[[kind]]
+object_kind = 0x03ae
+name = "RemoteConfigurationTrustRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_configuration_trust_root/"
 
 [[kind]]
 object_kind = 0x03b2
@@ -621,6 +693,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/remote_retention_consume_ack_record/"
 
 [[kind]]
+object_kind = 0x03b6
+name = "RemoteRetentionConsumerRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_consumer_root/"
+
+[[kind]]
 object_kind = 0x03b7
 name = "RemoteRetentionGrantEvidence"
 status = "reserved"
@@ -655,6 +736,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/remote_retention_no_old_grant_proof/"
+
+[[kind]]
+object_kind = 0x03bb
+name = "RemoteRetentionObligationRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_retention_obligation_root/"
 
 [[kind]]
 object_kind = 0x03bc
@@ -709,6 +799,15 @@ construction_order = 34
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/remote_retention_release_tombstone/"
+
+[[kind]]
+object_kind = 0x03c2
+name = "RemoteTrustCompactionPrecondition"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_trust_compaction_precondition/"
 
 [[kind]]
 object_kind = 0x03f9
@@ -790,6 +889,15 @@ construction_order = 10
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_id_range_lease/"
+
+[[kind]]
+object_kind = 0x046b
+name = "ShardProtocolState"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_protocol_state/"
 
 [[kind]]
 object_kind = 0x0475
@@ -1008,6 +1116,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/time_validation_evidence/"
 
 [[kind]]
+object_kind = 0x04aa
+name = "TopologyState"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_state/"
+
+[[kind]]
 object_kind = 0x04af
 name = "TransparencyCheckpointFreshnessBasis"
 status = "reserved"
@@ -1024,6 +1141,15 @@ construction_order = 12
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/txn_allocation_binding_root/"
+
+[[kind]]
+object_kind = 0x04b7
+name = "ValidatedRemoteConfigurationAnchor"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/validated_remote_configuration_anchor/"
 
 [[kind]]
 object_kind = 0x04b8
@@ -1159,3 +1285,21 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/result_release_evidence/"
+
+[[kind]]
+object_kind = 0x052a
+name = "RaftLogSegment"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 1073741824
+golden_corpus = "corpus/logical/raft_log_segment/"
+
+[[kind]]
+object_kind = 0x052b
+name = "CertificateSignatureShare"
+status = "reserved"
+construction_order = 14
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_signature_share/"
