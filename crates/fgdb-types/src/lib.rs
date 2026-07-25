@@ -3,8 +3,10 @@
 //! Pure types only: no I/O, no durable state, `forbid(unsafe_code)`. Durable
 //! *encoders* for these types are generated from the registries by
 //! `fgdb-w1-generated-parsers` — the encodings here are the canonical value
-//! encodings required for FG-INV-12 coherence (equality ⇒ same hash; total
-//! order; encode/decode round trip), not wire formats.
+//! encodings required for FG-INV-12 coherence (equality independently implies
+//! the same hash and the same canonical encoding; total order agrees with
+//! encoded-byte order; encode/decode round trip), not wire formats. Hash
+//! equality is never scalar or encoding identity.
 
 #![forbid(unsafe_code)]
 

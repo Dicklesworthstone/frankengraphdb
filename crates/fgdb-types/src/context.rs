@@ -948,6 +948,31 @@ pub enum Cleanup {}
 
 /// Affine database obligation. The state parameter makes boundary order
 /// unrepresentable out of sequence.
+///
+/// Skipping the transfer boundary is a type error because `publish` exists
+/// only on [`PurposeObligation<Transferred>`]:
+///
+/// ```compile_fail,E0599
+/// use fgdb_types::{Acquired, PurposeObligation};
+///
+/// fn skip_transfer(obligation: PurposeObligation<Acquired>) {
+///     let _ = obligation.publish();
+/// }
+/// ```
+///
+/// The complete legal transition chain type-checks:
+///
+/// ```
+/// use fgdb_types::{
+///     Acquired, ObligationCancellationError, ObligationReceipt, PurposeObligation,
+/// };
+///
+/// fn complete_in_order(
+///     obligation: PurposeObligation<Acquired>,
+/// ) -> Result<ObligationReceipt, ObligationCancellationError> {
+///     obligation.transfer()?.publish()?.cleanup()?.complete()
+/// }
+/// ```
 #[must_use = "database obligations must be completed or aborted"]
 pub struct PurposeObligation<State> {
     core: ObligationCore,

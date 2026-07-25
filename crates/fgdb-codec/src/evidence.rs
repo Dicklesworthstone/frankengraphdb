@@ -220,6 +220,20 @@ impl CodecRunRow {
     /// The caller supplies only symbolic, non-durable IDs and the logical entry
     /// count. Both the exact bytes and their dispatch path come from the sealed
     /// [`KernelOutput`], so an evidence caller cannot relabel arbitrary bytes.
+    ///
+    /// A public kernel operation is the legal way to obtain the provenance
+    /// token consumed here:
+    ///
+    /// ```
+    /// use fgdb_codec::evidence::CodecRunRow;
+    /// use fgdb_codec::kernel::{ScalarKernels, VarintKernel};
+    ///
+    /// let output = ScalarKernels.encode_varint_output(300);
+    /// let row =
+    ///     CodecRunRow::try_from_kernel_output("varint", "example", 1, &output).unwrap();
+    /// assert_eq!(row.encoded_bytes(), output.len());
+    /// assert_eq!(row.dispatch_path(), output.dispatch_path());
+    /// ```
     pub fn try_from_kernel_output(
         codec_id: &str,
         corpus_id: &str,

@@ -3,7 +3,8 @@
 //! This module carries the FG-INV-12 binding clause: *canonical scalar
 //! equality, hashing, ordering, and encoding are coherent*. Concretely:
 //!
-//! - `a == b` ⇒ `hash(a) == hash(b)` ⇒ `encode(a) == encode(b)`,
+//! - `a == b` independently implies both `hash(a) == hash(b)` and
+//!   `encode(a) == encode(b)`,
 //! - `Ord` is total and transitive over all scalars (cross-type order is the
 //!   fixed profile type rank: Null < Bool < Int < Decimal < Float < Text <
 //!   Timestamp < Bytes),
@@ -11,6 +12,38 @@
 //!   use exactly the semantic scalar order,
 //! - `decode(encode(v)) == v` for every value, and decode rejects malformed
 //!   input under length-before-allocation bounds.
+//!
+//! Hash equality has no converse identity meaning: hashes may collide and
+//! must never stand in for scalar or canonical-encoding equality. A deliberately
+//! colliding hasher makes that boundary executable:
+//!
+//! ```
+//! use fgdb_types::CanonicalScalar;
+//! use std::hash::{Hash, Hasher};
+//!
+//! #[derive(Default)]
+//! struct CollidingHasher;
+//!
+//! impl Hasher for CollidingHasher {
+//!     fn finish(&self) -> u64 {
+//!         0
+//!     }
+//!
+//!     fn write(&mut self, _bytes: &[u8]) {}
+//! }
+//!
+//! fn collision_hash(value: &CanonicalScalar) -> u64 {
+//!     let mut hasher = CollidingHasher;
+//!     value.hash(&mut hasher);
+//!     hasher.finish()
+//! }
+//!
+//! let left = CanonicalScalar::Int(1);
+//! let right = CanonicalScalar::Int(2);
+//! assert_ne!(left, right);
+//! assert_eq!(collision_hash(&left), collision_hash(&right));
+//! assert_ne!(left.encode().unwrap(), right.encode().unwrap());
+//! ```
 //!
 //! `STRICT_PORTABLE` float canonicalization collapses every NaN to one quiet
 //! NaN and `-0.0` to `+0.0`. Decimal, timestamp, and text values use their
