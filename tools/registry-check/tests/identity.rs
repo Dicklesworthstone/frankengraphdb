@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 17
+registry_epoch = 18
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 17);
+    assert_eq!(epoch, 18);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3217,6 +3217,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "RemoteRetentionReleaseRequestRecord",
                     "consumer_applied_ref"
                 )
+                | ("ExportLeaf<T>", "target_identity")
+                | ("ExportLeaf<T>", "local_strong_ref_projection")
         )
     };
     // The a16 field-coverage closure lands plain `StrongRef` rows, which carry
@@ -3304,7 +3306,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove exactly the post-erratum A15, A01, and A16 unions"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 35,
+        pre_erratum.fields.len() + 37,
         current_field_count,
         "the historical witness must remove the post-erratum embedded-union anchor fields and the A01 applied-result fields"
     );

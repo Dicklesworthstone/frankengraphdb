@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 534
+target_count = 536
 projection_fallback_count = 83
-target_source_assignment_sha256 = "12a53d0191da3e7bb8dcf52e083ff1b1872dbedc8bb441e2f27365986252429f"
+target_source_assignment_sha256 = "65db6b864cd01e57916ed48fc8b11996b72d8c442515f51919a4995a065d52e9"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -600,7 +600,7 @@ registry_epoch = 8
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 17
+registry_epoch = 18
 
 [[logical_kind]]
 slice_id = "a03"
@@ -4208,6 +4208,38 @@ role_predicate = "true"
 retention_and_cut_rule = "capability-safe permanent floor below which summary and ack leaf stay provable; proving release requires no new releasable grant (a01:1404)"
 version_status = "reserved"
 max_size_bytes = 8
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:export-leaf-t-target-identity"
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0002
+stable_name = "target_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "typed remote identity of the authority-local target this leaf projects (a01:1400); comparison-only and never a local reachability edge (a01:1396), so the consumer never decodes an authority-local StrongRef as local"
+version_status = "reserved"
+max_size_bytes = 159
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:export-leaf-t-local-strong-ref-projection"
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0005
+stable_name = "local_strong_ref_projection"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "every authority-local strong reference of T replaced by a typed remote identity (a01:1400); the projector is injectively bound to the canonical digest of T, and none of these entries is a local retaining edge"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 slice_id = "a01"
@@ -30018,6 +30050,22 @@ row_id = "a01:target:field-remote-release-summary-entry-permanent-release-proof-
 target_row_id = "a01:field:remote-release-summary-entry-permanent-release-proof-floor"
 slice_id = "a01"
 source_key = "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.permanent_release_proof_floor|permanent_release_proof_floor"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:field-export-leaf-t-target-identity"
+target_row_id = "a01:field:export-leaf-t-target-identity"
+slice_id = "a01"
+source_key = "field|ExportLeaf<T>|ExportLeaf<T>.target_identity|target_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:field-export-leaf-t-local-strong-ref-projection"
+target_row_id = "a01:field:export-leaf-t-local-strong-ref-projection"
+slice_id = "a01"
+source_key = "field|ExportLeaf<T>|ExportLeaf<T>.local_strong_ref_projection|local_strong_ref_projection"
 target_kind = "field"
 definition_status = "declared"
 

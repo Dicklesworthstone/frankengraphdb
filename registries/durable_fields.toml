@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 17
+registry_epoch = 18
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -344,6 +344,34 @@ construction_order = 10
 role_predicate = "true"
 retention_and_cut_rule = "control-command payload (bead a10 populates the exact schema)"
 version_status = "active"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0002
+stable_name = "target_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "typed remote identity of the authority-local target this leaf projects (a01:1400); comparison-only and never a local reachability edge (a01:1396), so the consumer never decodes an authority-local StrongRef as local"
+version_status = "reserved"
+max_size_bytes = 159
+
+[[field]]
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0005
+stable_name = "local_strong_ref_projection"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "every authority-local strong reference of T replaced by a typed remote identity (a01:1400); the projector is injectively bound to the canonical digest of T, and none of these entries is a local retaining edge"
+version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
