@@ -4549,6 +4549,142 @@ mod tests {
     }
 
     #[test]
+    fn every_closed_tag_vocabulary_rejects_everything_outside_it() {
+        // `record_round_trip_covers_every_closed_statistic_variant` proves the
+        // valid values survive a round trip. Nothing proved the complement:
+        // that a byte outside each closed vocabulary is REFUSED rather than
+        // silently mapped. That complement is a canonicity property, not a
+        // politeness one — a decoder that accepted an unknown tag would let two
+        // distinct byte strings denote one logical state, and replay would stop
+        // being bit-identical.
+        //
+        // Tag 0 is called out separately in every case below because it is the
+        // value a zeroed or truncated-then-padded buffer supplies, and it must
+        // never resolve to a live variant.
+
+        assert_eq!(
+            StatisticalConformalMode::try_from_tag(1),
+            Ok(StatisticalConformalMode::Upper)
+        );
+        assert_eq!(
+            StatisticalConformalMode::try_from_tag(2),
+            Ok(StatisticalConformalMode::TwoSided)
+        );
+        for tag in [0_u8, 3, 255] {
+            assert_eq!(
+                StatisticalConformalMode::try_from_tag(tag),
+                Err(StatisticalLogCodecError::UnknownConformalMode { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, StatisticalMonitorKind::EProcess),
+            (2, StatisticalMonitorKind::ConformalThreshold),
+            (3, StatisticalMonitorKind::ExplorationBudget),
+            (4, StatisticalMonitorKind::DrainProgress),
+            (5, StatisticalMonitorKind::RegimeChange),
+            (6, StatisticalMonitorKind::OffPolicyEvaluation),
+            (7, StatisticalMonitorKind::AnnRecall),
+        ] {
+            assert_eq!(StatisticalMonitorKind::try_from_tag(tag), Ok(expected));
+        }
+        for tag in [0_u8, 8, 255] {
+            assert_eq!(
+                StatisticalMonitorKind::try_from_tag(tag),
+                Err(StatisticalLogCodecError::UnknownMonitorKind { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, OpeEstimator::Direct),
+            (2, OpeEstimator::ImportanceWeighted),
+            (3, OpeEstimator::DoublyRobust),
+        ] {
+            assert_eq!(decode_ope_estimator(tag), Ok(expected));
+        }
+        for tag in [0_u8, 4, 255] {
+            assert_eq!(
+                decode_ope_estimator(tag),
+                Err(StatisticalLogCodecError::UnknownOpeEstimator { tag })
+            );
+        }
+
+        // A single-variant vocabulary is the easiest one to get wrong, because
+        // a decoder that ignored the tag entirely would still pass any test
+        // that only ever supplies the one valid value.
+        assert_eq!(
+            decode_ope_failure_behavior(1),
+            Ok(OpeFailureBehavior::SelectPinnedFallback)
+        );
+        for tag in [0_u8, 2, 255] {
+            assert_eq!(
+                decode_ope_failure_behavior(tag),
+                Err(StatisticalLogCodecError::UnknownOpeFailureBehavior { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, OpeSelectionReason::IncompleteWindow),
+            (2, OpeSelectionReason::ZeroSupport),
+            (3, OpeSelectionReason::InsufficientEffectiveSampleSize),
+            (4, OpeSelectionReason::CandidateNotBetter),
+            (5, OpeSelectionReason::CandidateEstimatedBetter),
+        ] {
+            assert_eq!(decode_ope_selection_reason(tag), Ok(expected));
+        }
+        for tag in [0_u8, 6, 255] {
+            assert_eq!(
+                decode_ope_selection_reason(tag),
+                Err(StatisticalLogCodecError::UnknownOpeSelectionReason { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, QuerySampleDesign::KeyedUniformWithoutReplacement),
+            (2, QuerySampleDesign::KeyedIndependentWithReplacement),
+            (3, QuerySampleDesign::UnspecifiedDependence),
+        ] {
+            assert_eq!(decode_ann_sample_design(tag), Ok(expected));
+        }
+        for tag in [0_u8, 4, 255] {
+            assert_eq!(
+                decode_ann_sample_design(tag),
+                Err(StatisticalLogCodecError::UnknownAnnSampleDesign { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, AnnRecallAction::Candidate),
+            (2, AnnRecallAction::PinnedFallback),
+            (3, AnnRecallAction::Rebuild),
+        ] {
+            assert_eq!(decode_ann_action(tag), Ok(expected));
+        }
+        for tag in [0_u8, 4, 255] {
+            assert_eq!(
+                decode_ann_action(tag),
+                Err(StatisticalLogCodecError::UnknownAnnAction { tag })
+            );
+        }
+
+        for (tag, expected) in [
+            (1_u8, AnnRecallActionReason::IncompleteWindow),
+            (2, AnnRecallActionReason::UnsupportedAssumptions),
+            (3, AnnRecallActionReason::StatisticallyInconclusive),
+            (4, AnnRecallActionReason::CandidateRecallSatisfied),
+            (5, AnnRecallActionReason::RecallDriftDetected),
+        ] {
+            assert_eq!(decode_ann_action_reason(tag), Ok(expected));
+        }
+        for tag in [0_u8, 6, 255] {
+            assert_eq!(
+                decode_ann_action_reason(tag),
+                Err(StatisticalLogCodecError::UnknownAnnActionReason { tag })
+            );
+        }
+    }
+
+    #[test]
     fn fixed_width_integer_codec_is_normative_little_endian() -> TestResult {
         let mut bytes = Vec::new();
         push_u16(&mut bytes, 0x1234);
