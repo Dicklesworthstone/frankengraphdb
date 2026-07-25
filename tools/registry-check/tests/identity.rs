@@ -3369,6 +3369,64 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
 }
 
 #[test]
+fn idr_backup_proof_reserved_logical_shells_are_exact() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    for (name, code, row_id, corpus) in [
+        (
+            "BackupInventoryBijectionProof",
+            0x023d,
+            "a15:logical-kind:backup-inventory-bijection-proof",
+            "corpus/logical/backup_inventory_bijection_proof/",
+        ),
+        (
+            "BackupRecoverabilityProof",
+            0x0244,
+            "a15:logical-kind:backup-recoverability-proof",
+            "corpus/logical/backup_recoverability_proof/",
+        ),
+    ] {
+        let logical = identity
+            .logical
+            .iter()
+            .find(|logical| logical.name == name)
+            .expect("backup-proof logical shell exists");
+        assert_eq!(logical.object_kind, code);
+        assert_eq!(logical.status, "reserved");
+        assert_eq!(logical.construction_order, 10);
+        assert_eq!(logical.role_predicate, "true");
+        assert_eq!(logical.max_size_bytes, 16_777_216);
+        assert_eq!(logical.golden_corpus, corpus);
+
+        let reservation = catalog
+            .reservations
+            .iter()
+            .find(|reservation| reservation.symbol == name)
+            .expect("backup-proof permanent reservation exists");
+        assert_eq!(reservation.identity_class, "logical");
+        assert_eq!(reservation.disposition, "existing");
+
+        let source_key = format!("top|{name}");
+        let candidate = catalog
+            .top_level_candidates
+            .iter()
+            .find(|candidate| candidate.source_key == source_key)
+            .expect("backup-proof source candidate exists");
+        assert_eq!(candidate.source_kind, "confirmed");
+        assert_eq!(candidate.identity_class, "logical");
+
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|target| target.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{name} maps exactly once");
+        assert_eq!(targets[0].target_row_id, row_id);
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+}
+
+#[test]
 fn idr_key_reference_quarantine_reserved_logical_shell_is_exact() {
     let identity = real_identity();
     let logical = identity

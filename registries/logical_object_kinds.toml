@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 37
+registry_epoch = 38
 
 [[kind]]
 object_kind = 0x0001
@@ -349,6 +349,24 @@ construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/authority_owning_restore_abandonment_tombstone/"
+
+[[kind]]
+object_kind = 0x023d
+name = "BackupInventoryBijectionProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/backup_inventory_bijection_proof/"
+
+[[kind]]
+object_kind = 0x0244
+name = "BackupRecoverabilityProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/backup_recoverability_proof/"
 
 [[kind]]
 object_kind = 0x024c

@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1670
+target_count = 1672
 projection_fallback_count = 90
-target_source_assignment_sha256 = "42df767a936f473c6da0a53872749b5772bd1c9d03ae9c5c577dda3c0058c839"
+target_source_assignment_sha256 = "a25444a0d4f6a890034dc924e1a5c8c48992355eb1fe976fac8efad550a25669"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 37
+registry_epoch = 38
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -1943,6 +1943,28 @@ construction_order = 10
 role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/key_reference_quarantine/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:backup-inventory-bijection-proof"
+object_kind = 0x023d
+name = "BackupInventoryBijectionProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/backup_inventory_bijection_proof/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:backup-recoverability-proof"
+object_kind = 0x0244
+name = "BackupRecoverabilityProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/backup_recoverability_proof/"
 
 [[logical_kind]]
 slice_id = "a06"
@@ -24457,7 +24479,7 @@ symbol = "BackupInventoryBijectionProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x023d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:backup-key-release-ack"
@@ -24547,7 +24569,7 @@ symbol = "BackupRecoverabilityProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0244"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:backup-release-record"
@@ -32198,7 +32220,7 @@ symbol = "BackupInventoryBijectionProof"
 generic_signature = ""
 source_key = "top|BackupInventoryBijectionProof"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a15:2111"]
 
 [[top_level_candidate]]
@@ -32328,7 +32350,7 @@ symbol = "BackupRecoverabilityProof"
 generic_signature = ""
 source_key = "top|BackupRecoverabilityProof"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a15:2111"]
 
 [[top_level_candidate]]
@@ -44376,6 +44398,14 @@ target_kind = "field"
 definition_status = "declared"
 
 [[target]]
+row_id = "a15:target:logical-kind-backup-inventory-bijection-proof"
+target_row_id = "a15:logical-kind:backup-inventory-bijection-proof"
+slice_id = "a15"
+source_key = "top|BackupInventoryBijectionProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
 row_id = "a15:target:logical-kind-backup-manifest"
 target_row_id = "a15:logical-kind:backup-manifest"
 slice_id = "a15"
@@ -44396,6 +44426,14 @@ row_id = "a15:target:logical-kind-backup-manifest-signature-set"
 target_row_id = "a15:logical-kind:backup-manifest-signature-set"
 slice_id = "a15"
 source_key = "top|BackupManifestSignatureSet"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-backup-recoverability-proof"
+target_row_id = "a15:logical-kind:backup-recoverability-proof"
+slice_id = "a15"
+source_key = "top|BackupRecoverabilityProof"
 target_kind = "logical-kind"
 definition_status = "declared"
 
