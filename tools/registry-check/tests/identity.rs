@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 14
+registry_epoch = 15
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 14);
+    assert_eq!(epoch, 15);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3202,18 +3202,35 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     pre_erratum
         .ordinary_unions
         .retain(|union| !post_erratum_union(&union.union_name));
-    pre_erratum
-        .fields
-        .retain(|field| !post_erratum_union(&field.exact_wire_type));
+    // The A01 2D applied-result fields are typed by `AuthorityAppliedRef`, a
+    // wire union that PREDATES the erratum, so `post_erratum_union` cannot
+    // recognize them the way it recognizes an embedded union's anchor field.
+    // They are matched by their own (schema, field) identity instead.
+    let post_erratum_a01_applied_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("RemoteRetentionAckPublishRecord", "authority_applied_ref")
+                | ("RemoteRetentionConsumeAckRecord", "consumer_applied_ref")
+                | ("RemoteRetentionGrantRecord", "authority_applied_ref")
+                | (
+                    "RemoteRetentionReleaseRequestRecord",
+                    "consumer_applied_ref"
+                )
+        )
+    };
+    pre_erratum.fields.retain(|field| {
+        !post_erratum_union(&field.exact_wire_type)
+            && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
+    });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 27,
         current_union_count,
         "the historical witness must remove exactly the post-erratum A15, A01, and A16 unions"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 9,
+        pre_erratum.fields.len() + 13,
         current_field_count,
-        "the historical witness must remove exactly the post-erratum embedded-union anchor fields"
+        "the historical witness must remove the post-erratum embedded-union anchor fields and the A01 applied-result fields"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
@@ -3339,7 +3356,7 @@ fn idr_a01_incomplete_activation_cohort_is_reserved() {
         .iter()
         .filter(|row| incomplete_schemas.contains(row.containing_schema.as_str()))
         .collect();
-    assert_eq!(fields.len(), 109);
+    assert_eq!(fields.len(), 113);
     assert!(
         fields.iter().all(|row| row.version_status == "reserved"),
         "incomplete A01 durable fields must not be consumable"

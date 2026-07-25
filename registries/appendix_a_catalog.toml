@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 504
+target_count = 508
 projection_fallback_count = 83
-target_source_assignment_sha256 = "f90c82deb65f769f60146616e89c5afb86ef220d5349afe3f092bcb7eebbf90b"
+target_source_assignment_sha256 = "78a5c3bf658975ab7878c97caf581a8902b3a8035a2023f2275c6971401cb25d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -600,7 +600,7 @@ registry_epoch = 8
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 14
+registry_epoch = 15
 
 [[logical_kind]]
 slice_id = "a03"
@@ -4261,6 +4261,22 @@ max_size_bytes = 32
 
 [[field]]
 slice_id = "a01"
+row_id = "a01:field:remote-retention-ack-publish-record-authority-applied-ref"
+containing_schema = "RemoteRetentionAckPublishRecord"
+field_tag = 0x0004
+stable_name = "authority_applied_ref"
+exact_wire_type = "AuthorityAppliedRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 38
+role_predicate = "true"
+retention_and_cut_rule = "closed role-tagged citation of the authority publish control that atomically created this record and installed the RemoteReleaseSummaryEntry (a01:1404 step 5); the tag names the already-constructed command input and its assigned order and is used only inside its owning group, never an ambient/local-only assumption (a01:1394,1404); the retaining edge to that command lives in the selected AuthorityAppliedRef arm, whose interior is committed by the registered AuthorityAppliedRef wire contract"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a01"
 row_id = "a01:field:remote-retention-consume-ack-record-ack-leaf-ref"
 containing_schema = "RemoteRetentionConsumeAckRecord"
 field_tag = 0x0001
@@ -4308,6 +4324,22 @@ role_predicate = "true"
 retention_and_cut_rule = "correlates the consumer's consume-ack with the authority's RemoteReleaseSummaryEntry key (a01:1404); comparison only, no cross-group edge"
 version_status = "reserved"
 max_size_bytes = 32
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:remote-retention-consume-ack-record-consumer-applied-ref"
+containing_schema = "RemoteRetentionConsumeAckRecord"
+field_tag = 0x0004
+stable_name = "consumer_applied_ref"
+exact_wire_type = "AuthorityAppliedRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 42
+role_predicate = "true"
+retention_and_cut_rule = "closed role-tagged citation of the consumer ConsumeReleaseAck apply that created this record (a01:1404 step 6); only after this applied root may the consumer retire request/grant evidence past its checkpoint floor; the tag is used only inside its owning group and prevents role ambiguity (a01:1404); the retaining edge to that command lives in the selected AuthorityAppliedRef arm, whose interior is committed by the registered AuthorityAppliedRef wire contract"
+version_status = "reserved"
+max_size_bytes = 49
 
 [[field]]
 slice_id = "a01"
@@ -4537,6 +4569,22 @@ role_predicate = "true"
 retention_and_cut_rule = "created Active by authority apply (a01:1402); the active grant record is removed (not transitioned in place) by release apply step 3 (a01:1404)"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:remote-retention-grant-record-authority-applied-ref"
+containing_schema = "RemoteRetentionGrantRecord"
+field_tag = 0x0003
+stable_name = "authority_applied_ref"
+exact_wire_type = "AuthorityAppliedRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 22
+role_predicate = "true"
+retention_and_cut_rule = "closed role-tagged citation of the authority apply that created this grant record in RemoteRetentionObligationRoot (a01:1402); retained with the record until release apply removes the active grant, and the release tombstone carries no strong edge back to it (a01:1404 step 3); the retaining edge to that command lives in the selected AuthorityAppliedRef arm, whose interior is committed by the registered AuthorityAppliedRef wire contract"
+version_status = "reserved"
+max_size_bytes = 49
 
 [[field]]
 slice_id = "a01"
@@ -5017,6 +5065,22 @@ retention_and_cut_rule = "commitment that no consumer reference to the old grant
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:remote-retention-release-request-record-consumer-applied-ref"
+containing_schema = "RemoteRetentionReleaseRequestRecord"
+field_tag = 0x0003
+stable_name = "consumer_applied_ref"
+exact_wire_type = "AuthorityAppliedRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 28
+role_predicate = "true"
+retention_and_cut_rule = "closed role-tagged citation of the consumer apply that rechecked the complete consumer root and installed ReleaseRequested (a01:1404 step 1); that typestate can acquire no further local ref under the old grant, so any concurrent use must first publish a distinct successor grant; the retaining edge to that command lives in the selected AuthorityAppliedRef arm, whose interior is committed by the registered AuthorityAppliedRef wire contract"
+version_status = "reserved"
+max_size_bytes = 49
 
 [[field]]
 slice_id = "a01"
@@ -29550,6 +29614,14 @@ target_kind = "field"
 definition_status = "declared"
 
 [[target]]
+row_id = "a01:target:field-remote-retention-ack-publish-record-authority-applied-ref"
+target_row_id = "a01:field:remote-retention-ack-publish-record-authority-applied-ref"
+slice_id = "a01"
+source_key = "field|RemoteRetentionAckPublishRecord|RemoteRetentionAckPublishRecord.authority_applied_ref|authority_applied_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
 row_id = "a01:target:field-remote-retention-consume-ack-record-ack-leaf-ref"
 target_row_id = "a01:field:remote-retention-consume-ack-record-ack-leaf-ref"
 slice_id = "a01"
@@ -29570,6 +29642,14 @@ row_id = "a01:target:field-remote-retention-consume-ack-record-summary-key"
 target_row_id = "a01:field:remote-retention-consume-ack-record-summary-key"
 slice_id = "a01"
 source_key = "field|RemoteRetentionConsumeAckRecord|RemoteRetentionConsumeAckRecord.summary_key|summary_key"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:field-remote-retention-consume-ack-record-consumer-applied-ref"
+target_row_id = "a01:field:remote-retention-consume-ack-record-consumer-applied-ref"
+slice_id = "a01"
+source_key = "field|RemoteRetentionConsumeAckRecord|RemoteRetentionConsumeAckRecord.consumer_applied_ref|consumer_applied_ref"
 target_kind = "field"
 definition_status = "declared"
 
@@ -29682,6 +29762,14 @@ row_id = "a01:target:field-remote-retention-grant-record-state"
 target_row_id = "a01:field:remote-retention-grant-record-state"
 slice_id = "a01"
 source_key = "field|RemoteRetentionGrantRecord|RemoteRetentionGrantRecord.state|state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:field-remote-retention-grant-record-authority-applied-ref"
+target_row_id = "a01:field:remote-retention-grant-record-authority-applied-ref"
+slice_id = "a01"
+source_key = "field|RemoteRetentionGrantRecord|RemoteRetentionGrantRecord.authority_applied_ref|authority_applied_ref"
 target_kind = "field"
 definition_status = "declared"
 
@@ -29914,6 +30002,14 @@ row_id = "a01:target:field-remote-retention-release-request-record-consumer-no-r
 target_row_id = "a01:field:remote-retention-release-request-record-consumer-no-reference-floor-digest"
 slice_id = "a01"
 source_key = "field|RemoteRetentionReleaseRequestRecord|RemoteRetentionReleaseRequestRecord.consumer_no_reference_floor_digest|consumer_no_reference_floor_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:field-remote-retention-release-request-record-consumer-applied-ref"
+target_row_id = "a01:field:remote-retention-release-request-record-consumer-applied-ref"
+slice_id = "a01"
+source_key = "field|RemoteRetentionReleaseRequestRecord|RemoteRetentionReleaseRequestRecord.consumer_applied_ref|consumer_applied_ref"
 target_kind = "field"
 definition_status = "declared"
 
