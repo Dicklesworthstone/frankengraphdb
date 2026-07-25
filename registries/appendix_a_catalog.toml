@@ -41369,3 +41369,498 @@ source_locations = ["a16:2167"]
 resolution = "maps-to-source"
 resolved_source_keys = ["field|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.validated_process_incarnation_id|validated_process_incarnation_id"]
 rationale = "a16:2167: shorthand member `validated_process_incarnation_id` at census path `TimeValidationEvidence.classification.Usable.validated_process_incarnation_id` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `Usable` arm, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:db66247a27fb86a8603024209e2ddd3fe88d0af75ee5f1ee02c68f9788142a3c"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|conflicting-candidate-evidence|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId|7abf48bb8920aecc18976e2a710332f888bce54c09cc1fdefa34905215fe0c6d|1|7b328a6974a5d4010e974e3c5ed04ed52d1942ce154471d6544eead1534710b8|the same schema source key has divergent structural bodies"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|PlacementDescriptorWithoutId"]
+rationale = "a02:1449: `PlacementDescriptorWithoutId` is rendered with divergent bodies at a01:1443 and a02:1449, which is why the census flags conflicting evidence. The family is nevertheless a registered durable schema: a01 registered it as wire type 0x001e with its own target, so the affected census key maps to that registered source form. Which of the two bodies is normative is a separate a01+a02 erratum and is deliberately not settled by this row."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:44e6b6852bdc2c0f3336cc4a9f866a0430e83a64baa491610e066c4e9e0a113f"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|definition-without-structural-body|FenceToken||279c58bfcb8cc4560e8d008cca9c52f415afd2c6c327fdf548ee95c0522ed88f|1|3291acdb3936a932cf6ae42a0321f999254d8d265686d2a53e900d254b9aa853|definitional prose names a type but supplies no adjacent structural expression"
+source_locations = ["a02:1447"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["top|FenceToken"]
+rationale = "a02:1447: definitional prose names `FenceToken` and supplies no structural body because it is a runtime type, not a durable one. FenceToken is explicitly nonserializable and nonconstructible outside the VFS/commit boundary, and PendingFenceGuard is a linear guard that cannot survive restart; neither is encodable, so neither is a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:b6f908b8122821b649d176365f4deb62078c49b328f0f9848bdec7b7dea770b2"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|definition-without-structural-body|PendingFenceGuard||1f0bc608faddc0c0ecfd60ca30b5a60b1d81d4daed7e54e38115901dde15fc35|1|3a54d9f90df6efa57d6e8a68e3a5c453e780d5b21775fbde9660cf57b943bddf|definitional prose names a type but supplies no adjacent structural expression"
+source_locations = ["a02:1447"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["top|PendingFenceGuard"]
+rationale = "a02:1447: definitional prose names `PendingFenceGuard` and supplies no structural body because it is a runtime type, not a durable one. FenceToken is explicitly nonserializable and nonconstructible outside the VFS/commit boundary, and PendingFenceGuard is a linear guard that cannot survive restart; neither is encodable, so neither is a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:b7095531bad16e02ee36f522e449e2352c619acf383706f42d879b4794d93dc6"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|definition-without-structural-body|SymbolRecord||76d352859de8d9247d0da22ea015d1329c685cfee2bb089500bae5fe4a3f0809|1|48d293b8cad62c698fa7ac5f8249e75e497da321827118e81b20ba54decd8873|definitional prose names a type but supplies no adjacent structural expression"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|SymbolRecord"]
+rationale = "a02:1449: definitional prose names `SymbolRecord` without an adjacent structural expression, because its body is supplied as a fenced record block rather than inline. `SymbolRecord` is a registered physical kind, so the flagged span maps to that registered source form."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:4ccedc0588f7be74f4888666d503fde3bc7bc24371cf1ce1e3626a81d160c577"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.canonical_plaintext_len|c30cb16b42d94ab031378b967734814d2d1c336dfc0af2651fea26257790120e|1|5037208a13e4a9935e71160fa730ea4c9de79f26713d4c07585187e24999cb19|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.canonical_plaintext_len|canonical_plaintext_len"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:09e450db53ed431535948a0409580058cec35c34706c8d2e356e090ba0858523"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.codec_profile|8f6f3471944957612209cd358f31645a79a2c2296c30e7125da906126031b09c|1|b743b73c744d03bebfd399a599d24b036d1f8cfe3d6d3bddacd25dc6a9200b33|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.codec_profile|codec_profile"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:2107f6bb310d1738e09dbc78172590eb86e893bdc1122828d6c89b4872d0dd4c"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.compressed_len|4ca37ffa575d53985b9dc3052f1e93405068450122d22d72a543fcfbd684657d|1|cf0b7605ee455fbd64c805e210b7f2b0033c05da2d0abf5a70396e750858de48|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.compressed_len|compressed_len"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:78bc7d81d3ea77a5f7cbafe8087902fe5408ae96fd0196ccc8853add6213b849"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.data_crypto_profile|20e2fb1140e20ee7f6596d8ba740ce312d4f90980f91db1a1c3c58b41ecbf973|1|3cda350a963893c7dc1fb5b15eb72aa0b7d80bdd36caa19fbf8df058bd4116e9|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.data_crypto_profile|data_crypto_profile"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:01b0e2f905955e3f08d85feea3eaa8ece8b3733508e8bb5f32659f2c5665d2b7"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.dek_id|8af69fe8b94da3d64b510caa0dab1b7e9030eae0b4bb2faac1b7680fc9a7edb1|1|4ee41b6a1e48d72380f52deda275fa0a0199d03bcb9f9f97df92ff5cbfee3e12|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.dek_id|dek_id"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:65f322cfd0c28b197696f849d53882d7a792fd2641775c105f7d6016bfcbdc67"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.logical_oid|fdd9a74312ec7ab8a436466dbb215bc937ed5e6accb9d7b85a22c9c095a2d444|1|305e96c8b0e200c9ffb871882c7f0c13064a8db41a9ba57cb6bcec9e5ce61648|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.logical_oid|logical_oid"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:aff152416fbd814b48c7e182decf54f4e4e8f31a7e39bf85bf7b2c8a35b39ed9"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_kind|f79080c76579371982ec2dfc62593cfbe282dd0d9ec076e5638251fc9ce30909|1|8e2ff580178eedaefde5b39810b1d77293a01f7331155ac6101cef690786555d|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_kind|object_kind"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:3b10032b12d68f801a7a16decacf694eed72525f8432d18257d23fa2974cb862"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_nonce_or_siv|9e3d1c5690ee69b7d69b2bbcda21fe89688d01e6638589bf0ba2201602fee7f3|1|e15fd8e5d6cc706620b71e60b0a6502d09c59127e211fc648c69751dd8402bad|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_nonce_or_siv|object_nonce_or_siv"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:70dd1ce6a619845e395216c30b5cc24523f715d660652f6c59233b2f4a1cdb3b"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_tag_len|56a53094c14d9f87b12c0f75f816189bce109d403ce5ce4557ba55f62a3dc26d|1|9092af5856baa298d7c75230d71fa0adef8d34c510fdc058b609233cfcf5fe1f|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_tag_len|object_tag_len"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:21b51c04904bd6d0f06771ddd3fcff1e8f7dc47b406c10d1d817b81ceee93536"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.ciphertext_digest|639e8bce8cd2107b20eb748abd7a4fa29f62ecd3752dab46977890694061e0f8|1|722428c1c230790a9ac59413eb117bf65c1e1d75b4ece333f40960ed2d569777|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["field|CiphertextRecord|CiphertextRecord.ciphertext_digest|ciphertext_digest"]
+rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:e30d0e52a9b56177e2817418658afed5827dadf120553f44103643ee0f1aae7d"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.ciphertext_id|47142c70021a01c228028cf69cea5c897a6985a67f0ff4234f8aa3bea11a523e|1|be43e8869204157592abe4620b1fc0e68e0b32807ce41252d8dfe1dcb6f5ae6f|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["field|CiphertextRecord|CiphertextRecord.ciphertext_id|ciphertext_id"]
+rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:0b3b432489be5ce60147873ff27823f6a116229dfdc512f64024a49580237c8c"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.descriptor|194b520dc30384b3fc233e123778835e2adc362d91c6e33015ed3db2379d7ea1|1|7436baa9a7e0b2e6206451cbdb69f1f2c764e50b84881992c5d6fe3a5eb63684|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["field|CiphertextRecord|CiphertextRecord.descriptor|descriptor"]
+rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:7e38b5617e877b4c4d04aab2aceb9038d3998e272786e35c565ea11a61fc8402"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.object_tag_digest|01382560e2e7615b048ea5367238388ac8c3f98760dcf5aa408bc874969d60e8|1|36b19f8caa5cbb18ae76302874307e79ed8bff813495ac462c6650761add05d5|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["field|CiphertextRecord|CiphertextRecord.object_tag_digest|object_tag_digest"]
+rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:0239498a2cba36ac46ba1927f4162f60e75399abfbb660542f8d307745300617"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.protected_length|5df4272c5f39dcef78c410b10c536a5704975cc8d6689dc6fbbcbeaed688ecf1|1|3c4a8e7fc8a685980c7a6dc0b8a30b64843e61ab27c873fc7557b449b3f50bf9|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["field|CiphertextRecord|CiphertextRecord.protected_length|protected_length"]
+rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:58efaec60718539e0d6fe9e4a1d057dd06ac699ceb1a3ab48e932808c2fa8133"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.ciphertext_id|47142c70021a01c228028cf69cea5c897a6985a67f0ff4234f8aa3bea11a523e|1|dd2cecd0e5dee5ca3e67bc3256c7c42bcabad0fdcd4ebb823854c9d018a162a0|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.ciphertext_id|ciphertext_id"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:c93e1bddb4c4026b3a846c187e67d3691154bb09a0d2c27549ed13d33c4faee3"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.fec_profile|74ccf82fa92b5a4e6c15745f28c3d0775462b0818f7aa93050d4f0568e8ed621|1|85dce6a6bc9d473b60140804d01abec258698c3b51da34bf2045c3a1aac134b1|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.fec_profile|fec_profile"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:36ce0f3f763b04170b64e17634530ae0b9f94d01676e993e5ed6cdf4f162bbf6"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.oti_common|0a77bbffbc0b36cce883b694852acdece87fb4fefb1006c2adbdc4f3a3297f46|1|d3927a94bcd8c143f407f4d8f237d3d8f99df9cf0476e74e7e467923a259c23a|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.oti_common|oti_common"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:0fd7f1abd9e2c65b77a7b222d54c3da2786eafb0c0a0ef19dbd85113383b17ff"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.oti_scheme|5788580e290dd22ee752c4a5a5215465706ca8ce39bd7e22b82b6d86515bf7ef|1|a30dc1fe345782d10c88ac2653e14e68a96a51feb26acf03cc2d734c9ddbf611|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.oti_scheme|oti_scheme"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:fc15e98ed9b83aca5947f32942eaef36bfe8ac25720614ccf5eccdd473462033"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.source_block_count|97724dac2757b7c0967f14c74e64d862e0f155784e8be5a51139d998ff7b5c2d|1|ce8a174aa4565cdd6f9bccfc9dd6bda35871faf3b5f093ef653f65bdff2bff8e|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.source_block_count|source_block_count"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:91902b26aa0a57dc07f52ad4d764ced91c8abdf107028a2ff451daf3f658b386"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.symbol_auth_profile|b5ca9a965730e32f4994a5ae5c74c26dd2be10d7a6ca2a8aa06d209eb872602e|1|62c55cc5c01501f15aaae35be55d9cac5e09888ac94a7a2e87877da9f074ba2e|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.symbol_auth_profile|symbol_auth_profile"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:74c44cccf917099778495230c0ec66ff6391deb20367e75fccd7315f3ac6b929"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.symbol_size|242fbd1d86c6ee2801babf811c61a4e92c7041af70ad90d5d389b77fc70b844e|1|511ef117f11cb794b1e2b938c1483fe5442fc1e0c5970cb88a0b8d26e0746a75|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.symbol_size|symbol_size"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:e5a35dd4fe8de0fb93b60737c11309eea3fee0445f97b87965f72b1440a46590"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.transfer_length|4e51c1a20220b0bf2903d73b9463e848aab990b6d0d91f58a75a6c3e7a657b56|1|f39cd190f2e4d525773a4f6fce08ac06bec7cb1fff6de92afee0d7225ac571a0|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.transfer_length|transfer_length"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:e950732c0153855d0e18984a9a8efc352d8856cc1fab0222138f4b42cc3bec9a"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.allowed_filesystems_and_mount_predicates|ce1818e711027d4422406814d37e193868e745c8877f1dfd11f476d42cda37d3|1|10d56fc38e379d9089becaa3d13f4665f1042b2645f9f1a392a436c87bd8c287|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.allowed_filesystems_and_mount_predicates|allowed_filesystems_and_mount_predicates"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:3ebc591c25f9c7eeab7a5df0a9850620fcfd9db848142c7c1de3a36f7915d444"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.cache_flush_assumption|9ff7c0f5828e08bc21e18592096512a0d15482208b7178f6cc44aae15502abbe|1|97fb758bc911d5b398581b2d6a4337dac20742e62665d4f3e0c3055748a485c5|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.cache_flush_assumption|cache_flush_assumption"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:4b63359434d412cb4e93da35ec045ceae13989d042b84d7ae6314386df91c871"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.directory_sync_rule|d4562636b62950c0c93e5c684279377698844ffe35d22292955b3dbc31101290|1|606bb654c8091f3d605242aa11bf527ef3f379ce1d52f17e4fdbec206d7879ee|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.directory_sync_rule|directory_sync_rule"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:8873904cf4efb6da4b32353b2091f387b40f93ceff6af9fcf79813cf5644c638"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.file_sync_rule|0371d05b6c37b7aac95282a3f22f6b1a9185ed908faf7cad5f4b426f7972b9a2|1|ed3b5c5d0beea85adbc88bdb964ecf88724ec85ed054b11ca90dc62199cfe9e3|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.file_sync_rule|file_sync_rule"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:1ea7c0f52efa23b6ea05499d6477e99f9ba7b7b7643e237788fff9db535671f4"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.forbidden_layers|c8ebde079ef030df5a539237f8ed8d67364a0b71d0d416da37539dd12d1f4ffc|1|408650ee2f95d250a0851d94fe5ac150093a6cb135344c198822edad80a7060a|noncanonical field separator"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.forbidden_layers|forbidden_layers"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:6b2c1e520545d3f0a9f07781ed9ede4bae5756db2e1f8212a9ec94436cac6cf3"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.os|ad40f30433f81ebb9114a3028258d2823275a69722d1f89e68174998ee803e5b|1|2f3c5639e5a8462a4ebe2ee70b26816f53c9cb40ee5d1504566d1aad5951e95a|noncanonical field separator"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.os|os"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:eef13b4b7a2306d6fe972c7c2d821b7e62ba883e6ffb2a9e6fdd313323849073"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.owner_death_rule|fc404bbd2105c2c91734df8ab4e011dffda15f6824f15aa4598c02ef116721e4|1|245a5b4871bf927401a4179a46d4b7afebae153738d14957eadf82ac078b5ee4|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.owner_death_rule|owner_death_rule"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:f647dad9e7de474a5854ee8f2254e916bee0d666b285d71f678368395354f05d"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.probe_suite_oid|2f2dab6634a79d74afa2c93284569950921d596841ba5de22b91822b6d912f46|1|fc5c4ec760672d249d932845beacb64d66beba03783f857629f25683902ee44e|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.probe_suite_oid|probe_suite_oid"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:bc62521d65078a2781fe44d3efb08cd84e5d65e876b31ea864407d9332cd20fb"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.profile_id|ce3b035fb5251de7d68263e33bfd5b205d3b0f08700e47ddacfa15100e0f6449|1|ff74e4a802afbfdc42e3a73e06bc0694030406ffa5bf085b331852a8289fd74f|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.profile_id|profile_id"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:05ee487e0b125b8d10eb6d1c00f301fff764d0caa5dafe3ec9da98c6477584b9"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.profile_version|a3bd9ac79d5e412794ba14aaf62f1b98fe12272c515693c89bc300f7d05be43b|1|cd38905627aedc6d3b81036eab74c130c1be49f50c66b5f85c79f9008c9ff7d2|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.profile_version|profile_version"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:99f8784a375d4d11bb423cc86fc89929a0674791e65daad040c44ae0e2415060"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.rename_no_replace_rule|4c95eb0388174bd3c74e4c53f12ed2ab9d1be4edf98a0cbbba4b16ba9271fb8c|1|aaa4bedb20e476eb2c5ead883b0de9ceaad7e42c418debb8da9a8783c41bf90e|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.rename_no_replace_rule|rename_no_replace_rule"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:a846ae0b543e13fc45e6a5f69df06c09d4d13aef5289f4195c9e4490b97ccf67"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.required_lock_primitive|af5bb820b74db4e27f19cf09bace97ea2846f777690291c0d0c57f17cf411e99|1|300f0e69f60a3ae8305a7b222e843d87db40955366bf93137d1e30ba81e7886d|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.required_lock_primitive|required_lock_primitive"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:418f3bc0a20a19de8b690a2bf879b4eb13452aca56deb8885b70a3840edba3af"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.slot_write_rule|2023471cf2f8c98fea286195952923e325148c98fc362ac86e2066e1a07fe193|1|da436c3769714a5f3c7a4f6c67982fdf1c84973188e146bd103c2fce3a54d74f|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.slot_write_rule|slot_write_rule"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:010e36ee5de62c235893df457e3727287ec8a3c933e2350f364f259104b82659"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.stable_inode_rule|aa77a140806e960b8932787dd22941e275021bda2f79a25d815d1bb33382a88d|1|3ed4c5d7924a73ccd6426380b00ceae0268f5e636f1a613964ca25435592f091|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.stable_inode_rule|stable_inode_rule"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:dfc4ee027f44f5a6de4cbad5c1e1ea667efc9f0bb8caedc8f3c95090c0a1d3b1"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.canonical_mount_options|bc67468a48d0b2b25cd144358d22b2f9b28c7bbc5de3b255bf9940a232020725|1|462bb37401462e063a37f0f44f2d499128898cc5535e86466755675b5a1be9b8|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemInstanceRecord|FilesystemInstanceRecord.canonical_mount_options|canonical_mount_options"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:59835471a2ee6ac1e9331216d06953e05c349a60ac9784235a02802c2514492c"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.checked_at|3a474f9d10ef022d46a4c5fa68916ab897d3f6df414fc20ded06d6ca6abe6ea2|1|56b07be3d307087ba910513571b5168a5a272dd357f0df7a5d9bfeb8fa8c1ff0|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemInstanceRecord|FilesystemInstanceRecord.checked_at|checked_at"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:55cf4f7028a45ef7d65a28a261fa7d7a3516b7d830592ae65bf7df05e455db6a"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.device_chain_digest|c2dd30f3695cd344641bfc0edfb6a4d90ee8fc47f721a8e8113eaec7c3ab56da|1|8887394b58e771a0b4c269cab515b38550d548b857c6ec52bdf3b9b545d16ca5|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemInstanceRecord|FilesystemInstanceRecord.device_chain_digest|device_chain_digest"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:75f019a44ff22a05c88a94feab810d4ea5e37d5d09199e38e376efb9b35325e5"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.directory_device_inode|9b5832dded09553bfd152b4efe0f762bccfa25c1efcb857c45aa45142942b722|1|daaeb30cc41eb93779ae445e8302b4e6da2c4f43e8acbcc3eaff50b1d9c625ca|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemInstanceRecord|FilesystemInstanceRecord.directory_device_inode|directory_device_inode"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:187c4435bf8b3e3c71d4c9991d9f9aa365586d2a8f5d222afd7f1973e98bdad7"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.filesystem_type|894151384ef1a6b5a3607e2d5eec1a1e40a51dbc958ad5fb9cf488b773173a97|1|21bcb47b89cc7fc8ee5a47d25a55af0aa591b8b9548e773c5db72c627c5a0a2d|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemInstanceRecord|FilesystemInstanceRecord.filesystem_type|filesystem_type"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:58e8995d6dff4c106bde4b883c447df2fb5f23741ff4b27a13dffe03b4f5a846"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.manifest_device_inode|2866e5f15ff1f2ed182e3364c86c9598e47b7902c6b726c47562a04c7f7c614b|1|9ac99f5e20865fd0427845edb373540eb817e56ba63ff43ce069f9a787e30a07|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemInstanceRecord|FilesystemInstanceRecord.manifest_device_inode|manifest_device_inode"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:f0c77d4630f11fdfdb94e63f0eb32f9a5b62ec529eed748cb92e281f73c269d8"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.mount_id|3d420dbf2eb903c3acb9a49ca4fd47e3e1bf34cfd5931b83e92ad931720d3251|1|77dd1159d36ceea361e008570007bd2ada5cde5d3ffbc4c6bbe968dac22c463d|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemInstanceRecord|FilesystemInstanceRecord.mount_id|mount_id"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:37dd75a6f44baa134b14e608eb509469c77653e9bf407141e9a2d456002e58dc"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.probe_suite_oid|2f2dab6634a79d74afa2c93284569950921d596841ba5de22b91822b6d912f46|1|dcbdf629020c7791e9acb9e126428f5d2537b9bd8beed56d3d0152b7021992c9|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemInstanceRecord|FilesystemInstanceRecord.probe_suite_oid|probe_suite_oid"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:7493dcf2c9989d73978202b23a33520b3dae91d9b3322116b24d8c778479c089"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.profile_id|ce3b035fb5251de7d68263e33bfd5b205d3b0f08700e47ddacfa15100e0f6449|1|e164e2a9e2cba7e950c6b1728852dca2736a7bc2802eb305dd9ba80a6bb127e1|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemInstanceRecord|FilesystemInstanceRecord.profile_id|profile_id"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:c9a8f5c62ed9dfd6d2bb96b7d0041ea2070123fe3a64def0a1341d7f47a1b9b7"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.result_digest|7d571540e94c1ac7847e1d3dd315c957f211012bc6ea9f1c622de3af57026aa9|1|d5b325697ef247ef9ef6c0b2feb402bcbff017332ee233e16a96a5fd05acb377|shorthand field has no exact type"
+source_locations = ["a02:1445"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|FilesystemInstanceRecord|FilesystemInstanceRecord.result_digest|result_digest"]
+rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:4589a1a610a23f057f6b5862ea7c6f0237c355edacd39c5d5b1795cf6b0cc5be"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.failure_domain_policy|cac086cbd127ca4950463583208f78f2b54e0a546a2ddf9f8dc803c73f509607|1|a2013f9c7e6167fa838b6210d0af5802a8bd05823d9302fb4972629a91721e74|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.failure_domain_policy|failure_domain_policy"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `PlacementDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:1121451997661af6c018ac5cb8a92e35e459d9cea025b5dfb39f12bc16c38e20"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.location_form|ad90d7ce88045805125a73e6bc382283cee688f7588f54ad0934a1e549bd2f2e|1|245c1d32e02e982689bcb9f2450dd413eea1b427fb02a64c935f969298c2512b|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.location_form|location_form"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `PlacementDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:d6eb0a856c857d051ccc3db1bbbdfc5333456257cab21d9eec3372302d2a44aa"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.placement_epoch|731e2899b0f9a25c8d09c479b12d7b6535c525fa26005898a294c124f5a9605d|1|2ec38c824e850340c4637b45e960c2315b6eb9a9c6f7c71aaab883a1b6a5ee9c|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.placement_epoch|placement_epoch"]
+rationale = "a02:1449: shorthand member carries no inline exact type, but its owner `PlacementDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:200f2d59a98b49a305f74582c258b6b32316c146f35b4b436ec9620d319c2b52"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|PlacementRecord|PlacementRecord.descriptor|194b520dc30384b3fc233e123778835e2adc362d91c6e33015ed3db2379d7ea1|1|9c9c3dd11d91a87637869a7d6463af494cacd6233a48a3b1322b9bba895dcabc|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["field|PlacementRecord|PlacementRecord.descriptor|descriptor"]
+rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `PlacementRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a02:ambiguity-adjudication:f7c039dd333ca9b1bd1e78736d84f3afe200de8795e7791698012f017f5f5f5a"
+slice_id = "a02"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|PlacementRecord|PlacementRecord.placement_id|862e3bc66e01bc7a9dcedb6247960e1e5a9698e6810cb1a0950981231f908ec5|1|c3e5aeaf40b208c2ad9e3dd1981ca72c82afeb04eaa9a0067daa8d8c64bec5b4|shorthand field has no exact type"
+source_locations = ["a02:1449"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["field|PlacementRecord|PlacementRecord.placement_id|placement_id"]
+rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `PlacementRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
