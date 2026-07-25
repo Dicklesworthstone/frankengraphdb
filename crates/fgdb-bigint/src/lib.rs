@@ -2001,4 +2001,195 @@ mod tests {
             }
         }
     }
+
+    /// Round-trip: the canonical limb export is exactly the import form.
+    /// This is the crate's durable-shape identity -- `magnitude_limbs_le` plus
+    /// `sign()` is the only canonical external rendering of a value, so if the
+    /// pair did not reconstruct the original, any consumer that persisted the
+    /// limbs would read back a different number.
+    #[test]
+    fn canonical_limb_export_round_trips_through_import() {
+        for seed in [3u64, 0x5EED, 0xFEED_FACE, u64::MAX - 1] {
+            let mut rng = SplitMix64(seed);
+            for _ in 0..300 {
+                let v = rng.bigint(5);
+                let limbs: Box<[u64]> = v.magnitude_limbs_le().to_vec().into_boxed_slice();
+                let back = BigInt::from_canonical_limbs(v.sign(), limbs, TEST_LIMIT)
+                    .expect("canonical export re-imports");
+                assert_eq!(back, v, "seed={seed} round trip changed the value: {v:?}");
+                assert_eq!(back.sign(), v.sign(), "seed={seed} sign drifted: {v:?}");
+                assert_eq!(
+                    back.magnitude_limbs_le(),
+                    v.magnitude_limbs_le(),
+                    "seed={seed} magnitude drifted: {v:?}"
+                );
+                assert!(back.is_canonical(), "seed={seed} re-import not canonical");
+            }
+        }
+    }
+
+    /// Metamorphic: strict order is preserved by adding the same value to both
+    /// sides. Stated for ANY addend, not only positive ones, because addition
+    /// here is over signed integers where translation invariance is total --
+    /// the documented boundary is the limb budget, not the sign of the addend.
+    #[test]
+    fn comparison_is_translation_invariant_under_addition() {
+        for seed in [7u64, 0xB0A710AD] {
+            let mut rng = SplitMix64(seed);
+            for _ in 0..300 {
+                let a = rng.bigint(4);
+                let b = rng.bigint(4);
+                let c = rng.bigint(4);
+                let ac = a.checked_add(&c, TEST_LIMIT).expect("a + c");
+                let bc = b.checked_add(&c, TEST_LIMIT).expect("b + c");
+                assert_eq!(
+                    a.cmp(&b),
+                    ac.cmp(&bc),
+                    "seed={seed} order changed under +c: a={a:?} b={b:?} c={c:?}"
+                );
+            }
+        }
+    }
+
+    /// Metamorphic inverse pair: subtraction undoes addition exactly.
+    #[test]
+    fn subtraction_inverts_addition_on_random_values() {
+        for seed in [13u64, 0xA11CE] {
+            let mut rng = SplitMix64(seed);
+            for _ in 0..300 {
+                let a = rng.bigint(4);
+                let b = rng.bigint(4);
+                let sum = a.checked_add(&b, TEST_LIMIT).expect("a + b");
+                let recovered = sum.checked_sub(&b, TEST_LIMIT).expect("(a + b) - b");
+                assert_eq!(recovered, a, "seed={seed} a={a:?} b={b:?}");
+                let recovered_other = sum.checked_sub(&a, TEST_LIMIT).expect("(a + b) - a");
+                assert_eq!(recovered_other, b, "seed={seed} a={a:?} b={b:?}");
+            }
+        }
+    }
+
+    /// Metamorphic inverse pair: dividing a constructed product by one factor
+    /// returns the other exactly, with a zero remainder. The existing division
+    /// test pins q*d+r=n for arbitrary pairs; this pins the exact-inverse
+    /// direction, which is the case a truncating bug would still satisfy.
+    #[test]
+    fn division_inverts_multiplication_with_zero_remainder() {
+        for seed in [17u64, 0xC0FFEE] {
+            let mut rng = SplitMix64(seed);
+            for _ in 0..300 {
+                let a = rng.bigint(3);
+                let b = rng.bigint(2);
+                if b.is_zero() {
+                    continue;
+                }
+                let product = a.checked_mul(&b, TEST_LIMIT).expect("a * b");
+                let (quotient, remainder) = product
+                    .checked_div_rem(&b, TEST_LIMIT)
+                    .expect("(a * b) / b");
+                assert!(
+                    remainder.is_zero(),
+                    "seed={seed} exact product left a remainder: a={a:?} b={b:?} r={remainder:?}"
+                );
+                assert_eq!(quotient, a, "seed={seed} a={a:?} b={b:?}");
+            }
+        }
+    }
+
+    /// Zero, one and the widest representable edges are ordinary inputs, not
+    /// special cases: the identity and absorbing laws hold on them with the
+    /// same operators and the same budget as any random value.
+    #[test]
+    fn identity_and_absorbing_elements_are_ordinary_inputs() {
+        let one = BigInt::from_u64(1);
+        let edges = [
+            BigInt::zero(),
+            BigInt::from_u64(1),
+            BigInt::from_i64(-1),
+            BigInt::from_u64(u64::MAX),
+            BigInt::from_u128(u128::MAX),
+            BigInt::from_i128(i128::MIN),
+            BigInt::from_i128(i128::MAX),
+        ];
+        for v in &edges {
+            assert_eq!(
+                &v.checked_add(&BigInt::zero(), TEST_LIMIT).expect("v + 0"),
+                v,
+                "additive identity on {v:?}"
+            );
+            assert_eq!(
+                &v.checked_mul(&one, TEST_LIMIT).expect("v * 1"),
+                v,
+                "multiplicative identity on {v:?}"
+            );
+            assert!(
+                v.checked_mul(&BigInt::zero(), TEST_LIMIT)
+                    .expect("v * 0")
+                    .is_zero(),
+                "absorbing zero on {v:?}"
+            );
+            assert!(
+                v.checked_sub(v, TEST_LIMIT).expect("v - v").is_zero(),
+                "self difference on {v:?}"
+            );
+            let (q, r) = v.checked_div_rem(&one, TEST_LIMIT).expect("v / 1");
+            assert_eq!(&q, v, "division by one on {v:?}");
+            assert!(r.is_zero(), "division by one left a remainder on {v:?}");
+            assert_eq!(
+                &v.checked_neg(TEST_LIMIT)
+                    .expect("-v")
+                    .checked_neg(TEST_LIMIT)
+                    .expect("--v"),
+                v,
+                "double negation on {v:?}"
+            );
+        }
+    }
+
+    /// Limb-boundary behaviour at and either side of the exposed limit: a value
+    /// whose magnitude needs exactly n limbs is admitted by LimbLimit(n) and
+    /// refused by LimbLimit(n-1), with the required width reported exactly.
+    #[test]
+    fn limb_limit_admits_the_required_width_and_refuses_one_less() {
+        for width in 1usize..=5 {
+            let mut limbs = vec![0u64; width];
+            limbs[width - 1] = 1;
+            let exact = BigInt::from_canonical_limbs(
+                Sign::Positive,
+                limbs.clone().into_boxed_slice(),
+                LimbLimit::new(width),
+            )
+            .expect("width fits its own limit");
+            assert_eq!(exact.limb_count(), width);
+
+            // Asserted as a VALUE rather than matched-with-panic. ConstructionError
+            // derives PartialEq, so equality pins the reported required_limbs and
+            // limit exactly and states the whole expectation in one place -- and it
+            // avoids introducing an unwinding macro into a file that has none.
+            assert_eq!(
+                BigInt::from_canonical_limbs(
+                    Sign::Positive,
+                    limbs.into_boxed_slice(),
+                    LimbLimit::new(width - 1),
+                ),
+                Err(ConstructionError::LimbLimitExceeded {
+                    required_limbs: width,
+                    limit: width - 1,
+                }),
+                "width {width} must be refused at limit {} with exact widths reported",
+                width - 1
+            );
+
+            // The same boundary on an allocating operation rather than import.
+            let doubled = exact.checked_add(&exact, LimbLimit::new(width + 1));
+            assert!(doubled.is_ok(), "doubling width {width} fits width+1");
+            assert!(
+                exact.checked_clone(LimbLimit::new(width)).is_ok(),
+                "clone of width {width} fits its own limit"
+            );
+            assert!(
+                exact.checked_clone(LimbLimit::new(width - 1)).is_err(),
+                "clone of width {width} must not fit width-1"
+            );
+        }
+    }
 }
