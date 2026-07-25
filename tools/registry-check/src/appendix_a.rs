@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 1175;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 1182;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "268046cf0cd3142af70d3b2df7ead131a785541a536d1876a54fb192fd86df01";
+    "6cd7b818ba1a3b8519cbff07c5b9ef9298d6ebf2bd56a33ca27307d81307142b";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 89;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "8b0959a648ab56cf265b5a57312cf751c2bd0fe61514563cbd9e45ce160eda9e";
+    "be07fa0bd9bf256dd5c21d72a6f583152aefaf77814976072adef1167074fdaf";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -15643,5 +15643,165 @@ stable_name = "Ready"
                 "{name} is a direct wire mint, not a logical reservation"
             );
         }
+    }
+
+    #[test]
+    fn a04_weak_authority_applied_identity_union_is_exact() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let owner = "WeakAuthorityAppliedIdentity";
+        let owner_slug = "weak-authority-applied-identity";
+        let union_row_id = "a04:union:weak-authority-applied-identity-8f52cac0fe558262";
+
+        let unions = catalog
+            .identity
+            .ordinary_unions
+            .iter()
+            .filter(|union| {
+                union.union_name.eq(owner)
+                    && union.containing_schema.eq(owner)
+                    && union.union_path.eq(owner)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(unions.len(), 1, "{owner} union is unique");
+        let union = unions[0];
+        assert_eq!(union.tag_wire_type, "u8");
+        assert_eq!(union.encoding_context, "closed-tagged");
+        assert_eq!(
+            union
+                .allowed_containing_schemas
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [owner]
+        );
+        assert_eq!(union.role_predicate, "true");
+        assert_eq!(union.version_status, "reserved");
+        assert_eq!(union.max_size_bytes, 16_777_216);
+        assert_eq!(union.arms.len(), 3);
+        assert!(
+            catalog
+                .projection_rows
+                .iter()
+                .any(|row| row.row_id.eq(union_row_id) && row.row_kind.eq("union"))
+        );
+
+        let union_source_key = format!("union|{owner}|{owner}");
+        let union_targets = catalog
+            .targets
+            .iter()
+            .filter(|target| target.source_key.eq(&union_source_key))
+            .collect::<Vec<_>>();
+        assert_eq!(union_targets.len(), 1, "{owner} union target is unique");
+        assert_eq!(union_targets[0].target_row_id, union_row_id);
+        assert_eq!(union_targets[0].target_kind, "union");
+
+        let expected_arms = [
+            (
+                "Local",
+                "local",
+                0x0001,
+                0x00e2,
+                "aa2e8bed1584d985ed1707bcca5ba309adc7c194ef60244601d164e4a54e93f9",
+                "a04:union-arm:weak-authority-applied-identity-local-9cfe069854acb028",
+            ),
+            (
+                "Meta",
+                "meta",
+                0x0002,
+                0x00e3,
+                "d66d4a4c937cd5cc1e401ba3399b5044c4773a7692bae0ee04d9262b6d482865",
+                "a04:union-arm:weak-authority-applied-identity-meta-6eccd808689854c6",
+            ),
+            (
+                "Shard",
+                "shard",
+                0x0003,
+                0x00e4,
+                "1126f8d358d2d7cac029d698aa0e66457118484f25bcc95c6f1562a676652509",
+                "a04:union-arm:weak-authority-applied-identity-shard-09caf1a4f7e5f7dc",
+            ),
+        ];
+        for (source_name, stable_name, tag, code, digest, arm_row_id) in expected_arms {
+            let arm = union
+                .arms
+                .iter()
+                .find(|arm| arm.source_arm_name.eq(source_name))
+                .expect("WeakAuthorityAppliedIdentity arm exists");
+            assert_eq!(arm.arm_tag, tag, "{source_name} tag");
+            assert_eq!(arm.stable_name, stable_name, "{source_name} stable name");
+            assert_eq!(arm.payload_kind, "inline-record");
+            assert_eq!(arm.payload_sha256.as_deref(), Some(digest));
+            assert_eq!(arm.role_predicate, "true");
+            assert_eq!(arm.version_status, "reserved");
+            assert_eq!(arm.max_size_bytes, 16_777_216);
+            assert!(
+                catalog
+                    .projection_rows
+                    .iter()
+                    .any(|row| row.row_id.eq(arm_row_id) && row.row_kind.eq("union-arm"))
+            );
+
+            let wire_name = format!("{owner}.{stable_name}");
+            let variants = catalog
+                .identity
+                .wire
+                .iter()
+                .filter(|wire| wire.name.eq(&wire_name))
+                .collect::<Vec<_>>();
+            assert_eq!(variants.len(), 1, "{wire_name} variant is unique");
+            let variant = variants[0];
+            assert_eq!(variant.wire_type_id, code, "{wire_name} code");
+            assert_eq!(variant.kind, "union_variant");
+            assert_eq!(variant.containing_union.as_deref(), Some(owner));
+            assert_eq!(variant.wire_tag, Some(tag));
+            assert_eq!(variant.status, "reserved");
+            assert_eq!(
+                variant.encoding_context,
+                format!("arm {source_name} of closed union {owner}")
+            );
+            assert_eq!(
+                variant
+                    .allowed_containing_schemas
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                [owner]
+            );
+            assert_eq!(variant.max_size_bytes, 16_777_216);
+
+            let arm_source_key = format!("arm|{owner}|{owner}|{source_name}");
+            let arm_targets = catalog
+                .targets
+                .iter()
+                .filter(|target| target.source_key.eq(&arm_source_key))
+                .collect::<Vec<_>>();
+            assert_eq!(arm_targets.len(), 2, "{wire_name} has arm and wire targets");
+            assert!(arm_targets.iter().any(|target| {
+                target.target_kind.eq("union-arm") && target.target_row_id.eq(arm_row_id)
+            }));
+            assert!(arm_targets.iter().any(|target| {
+                target.target_kind.eq("wire-type")
+                    && target
+                        .target_row_id
+                        .eq(&format!("a04:wire-type:{owner_slug}-{stable_name}"))
+            }));
+            assert!(
+                !catalog
+                    .reservations
+                    .iter()
+                    .any(|reservation| reservation.symbol.eq(&wire_name)),
+                "{wire_name} is a direct wire mint"
+            );
+        }
+
+        assert!(
+            catalog
+                .identity
+                .fields
+                .iter()
+                .all(|field| field.containing_schema != owner),
+            "{owner} remains a value union and does not become a durable-field owner"
+        );
     }
 }

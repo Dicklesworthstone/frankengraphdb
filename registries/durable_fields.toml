@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 32
+registry_epoch = 33
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -4995,6 +4995,17 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+union_name = "WeakAuthorityAppliedIdentity"
+containing_schema = "WeakAuthorityAppliedIdentity"
+union_path = "WeakAuthorityAppliedIdentity"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 union_name = "AllocationValueKind"
 containing_schema = "AllocationValueKind"
@@ -9162,6 +9173,45 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "WeakAuthorityAppliedIdentity"
+containing_schema = "WeakAuthorityAppliedIdentity"
+union_path = "WeakAuthorityAppliedIdentity"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "aa2e8bed1584d985ed1707bcca5ba309adc7c194ef60244601d164e4a54e93f9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "WeakAuthorityAppliedIdentity"
+containing_schema = "WeakAuthorityAppliedIdentity"
+union_path = "WeakAuthorityAppliedIdentity"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "d66d4a4c937cd5cc1e401ba3399b5044c4773a7692bae0ee04d9262b6d482865"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "WeakAuthorityAppliedIdentity"
+containing_schema = "WeakAuthorityAppliedIdentity"
+union_path = "WeakAuthorityAppliedIdentity"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "1126f8d358d2d7cac029d698aa0e66457118484f25bcc95c6f1562a676652509"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[reference_union]]
 union_name = "MandatoryInventoryRef"

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 25
+registry_epoch = 26
 
 [[type]]
 wire_type_id = 0x0001
@@ -2219,4 +2219,37 @@ kind = "record"
 status = "reserved"
 encoding_context = "canonical W12 role-transition/sharding spec record"
 allowed_containing_schemas = ["ShardingServicePrepareSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00e2
+name = "WeakAuthorityAppliedIdentity.local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "WeakAuthorityAppliedIdentity"
+wire_tag = 0x0001
+encoding_context = "arm Local of closed union WeakAuthorityAppliedIdentity"
+allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00e3
+name = "WeakAuthorityAppliedIdentity.meta"
+kind = "union_variant"
+status = "reserved"
+containing_union = "WeakAuthorityAppliedIdentity"
+wire_tag = 0x0002
+encoding_context = "arm Meta of closed union WeakAuthorityAppliedIdentity"
+allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00e4
+name = "WeakAuthorityAppliedIdentity.shard"
+kind = "union_variant"
+status = "reserved"
+containing_union = "WeakAuthorityAppliedIdentity"
+wire_tag = 0x0003
+encoding_context = "arm Shard of closed union WeakAuthorityAppliedIdentity"
+allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
 max_size_bytes = 16777216

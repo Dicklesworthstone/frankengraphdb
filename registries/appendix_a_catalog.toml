@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1175
+target_count = 1182
 projection_fallback_count = 89
-target_source_assignment_sha256 = "8b0959a648ab56cf265b5a57312cf751c2bd0fe61514563cbd9e45ce160eda9e"
+target_source_assignment_sha256 = "be07fa0bd9bf256dd5c21d72a6f583152aefaf77814976072adef1167074fdaf"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 25
+registry_epoch = 26
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 32
+registry_epoch = 33
 
 [[logical_kind]]
 slice_id = "a03"
@@ -6028,6 +6028,45 @@ kind = "record"
 status = "reserved"
 encoding_context = "canonical W12 role-transition/sharding spec record"
 allowed_containing_schemas = ["ShardingServicePrepareSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:weak-authority-applied-identity-local"
+wire_type_id = 0x00e2
+name = "WeakAuthorityAppliedIdentity.local"
+kind = "union_variant"
+containing_union = "WeakAuthorityAppliedIdentity"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm Local of closed union WeakAuthorityAppliedIdentity"
+allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:weak-authority-applied-identity-meta"
+wire_type_id = 0x00e3
+name = "WeakAuthorityAppliedIdentity.meta"
+kind = "union_variant"
+containing_union = "WeakAuthorityAppliedIdentity"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm Meta of closed union WeakAuthorityAppliedIdentity"
+allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a04"
+row_id = "a04:wire-type:weak-authority-applied-identity-shard"
+wire_type_id = 0x00e4
+name = "WeakAuthorityAppliedIdentity.shard"
+kind = "union_variant"
+containing_union = "WeakAuthorityAppliedIdentity"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm Shard of closed union WeakAuthorityAppliedIdentity"
+allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -17142,6 +17181,64 @@ source_arm_name = "LocalActivationProjection"
 stable_name = "local_activation_projection"
 payload_kind = "inline-record"
 payload_sha256 = "90b94d12fa55b562a895625c0efea116065e1b6a0a9b3d42e56b9732b41fce07"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:weak-authority-applied-identity-8f52cac0fe558262"
+union_name = "WeakAuthorityAppliedIdentity"
+containing_schema = "WeakAuthorityAppliedIdentity"
+union_path = "WeakAuthorityAppliedIdentity"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["WeakAuthorityAppliedIdentity"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:weak-authority-applied-identity-local-9cfe069854acb028"
+union_name = "WeakAuthorityAppliedIdentity"
+containing_schema = "WeakAuthorityAppliedIdentity"
+union_path = "WeakAuthorityAppliedIdentity"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "aa2e8bed1584d985ed1707bcca5ba309adc7c194ef60244601d164e4a54e93f9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:weak-authority-applied-identity-meta-6eccd808689854c6"
+union_name = "WeakAuthorityAppliedIdentity"
+containing_schema = "WeakAuthorityAppliedIdentity"
+union_path = "WeakAuthorityAppliedIdentity"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "d66d4a4c937cd5cc1e401ba3399b5044c4773a7692bae0ee04d9262b6d482865"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:weak-authority-applied-identity-shard-09caf1a4f7e5f7dc"
+union_name = "WeakAuthorityAppliedIdentity"
+containing_schema = "WeakAuthorityAppliedIdentity"
+union_path = "WeakAuthorityAppliedIdentity"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "1126f8d358d2d7cac029d698aa0e66457118484f25bcc95c6f1562a676652509"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -46659,6 +46756,62 @@ target_row_id = "a06:union-arm:shard-recovery-checkpoint-basis-local-activation-
 slice_id = "a06"
 source_key = "arm|ShardRecoveryCheckpoint|ShardRecoveryCheckpoint.basis|LocalActivationProjection"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-weak-authority-applied-identity-8f52cac0fe558262"
+target_row_id = "a04:union:weak-authority-applied-identity-8f52cac0fe558262"
+slice_id = "a04"
+source_key = "union|WeakAuthorityAppliedIdentity|WeakAuthorityAppliedIdentity"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-weak-authority-applied-identity-local-9cfe069854acb028"
+target_row_id = "a04:union-arm:weak-authority-applied-identity-local-9cfe069854acb028"
+slice_id = "a04"
+source_key = "arm|WeakAuthorityAppliedIdentity|WeakAuthorityAppliedIdentity|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-weak-authority-applied-identity-local"
+target_row_id = "a04:wire-type:weak-authority-applied-identity-local"
+slice_id = "a04"
+source_key = "arm|WeakAuthorityAppliedIdentity|WeakAuthorityAppliedIdentity|Local"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-weak-authority-applied-identity-meta-6eccd808689854c6"
+target_row_id = "a04:union-arm:weak-authority-applied-identity-meta-6eccd808689854c6"
+slice_id = "a04"
+source_key = "arm|WeakAuthorityAppliedIdentity|WeakAuthorityAppliedIdentity|Meta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-weak-authority-applied-identity-meta"
+target_row_id = "a04:wire-type:weak-authority-applied-identity-meta"
+slice_id = "a04"
+source_key = "arm|WeakAuthorityAppliedIdentity|WeakAuthorityAppliedIdentity|Meta"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-weak-authority-applied-identity-shard-09caf1a4f7e5f7dc"
+target_row_id = "a04:union-arm:weak-authority-applied-identity-shard-09caf1a4f7e5f7dc"
+slice_id = "a04"
+source_key = "arm|WeakAuthorityAppliedIdentity|WeakAuthorityAppliedIdentity|Shard"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:wire-type-weak-authority-applied-identity-shard"
+target_row_id = "a04:wire-type:weak-authority-applied-identity-shard"
+slice_id = "a04"
+source_key = "arm|WeakAuthorityAppliedIdentity|WeakAuthorityAppliedIdentity|Shard"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
