@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 8
+registry_epoch = 9
 
 [[kind]]
 object_kind = 0x0001
@@ -259,6 +259,15 @@ construction_order = 37
 role_predicate = "true"
 max_size_bytes = 1048576
 golden_corpus = "corpus/logical/backup_manifest/"
+
+[[kind]]
+object_kind = 0x0278
+name = "ConfigurationState"
+status = "reserved"
+construction_order = 5
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/configuration_state/"
 
 [[kind]]
 object_kind = 0x0280

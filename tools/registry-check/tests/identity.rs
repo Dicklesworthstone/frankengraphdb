@@ -4248,3 +4248,95 @@ fn appendix_a_pipe_bearing_owner_keys_match_by_reconstruction() {
         "a re-segmented key masqueraded as the exact source"
     );
 }
+
+#[test]
+fn idr_configuration_state_reserved_logical_shell_is_exact() {
+    let identity = real_identity();
+    let logical = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "ConfigurationState")
+        .expect("ConfigurationState logical shell exists");
+    assert_eq!(logical.object_kind, 0x0278);
+    assert_eq!(logical.status, "reserved");
+    assert_eq!(logical.construction_order, 5);
+    // Role-POLYMORPHIC, not role-scoped: a04:1558 carries
+    // `group_role:Local|Meta|Shard{shard_id}` inside the schema itself, so the
+    // kind is legal in every posture and must not be narrowed to one role.
+    assert_eq!(logical.role_predicate, "true");
+    assert_eq!(logical.max_size_bytes, 16_777_216);
+    assert_eq!(logical.golden_corpus, "corpus/logical/configuration_state/");
+
+    // The load-bearing property, and the reason this kind gets its own lock.
+    // ConfigurationState has ZERO outbound strong references and 76 inbound
+    // `StrongRef<ConfigurationState>` sites across the plan, so it must be
+    // constructible before anything that cites it. `dag_future_result` only
+    // catches a violation once a consumer field row exists; pinning the global
+    // minimum here makes an ordering drift fail immediately and attributably,
+    // rather than surfacing later as someone else's unexplained DAG failure.
+    let minimum = identity
+        .logical
+        .iter()
+        .map(|kind| kind.construction_order)
+        .min()
+        .expect("logical registry is non-empty");
+    assert_eq!(
+        logical.construction_order, minimum,
+        "ConfigurationState must remain the unique construction-order floor"
+    );
+    assert!(
+        identity
+            .logical
+            .iter()
+            .filter(|kind| kind.construction_order == minimum)
+            .count()
+            == 1,
+        "no other logical kind may share the floor with ConfigurationState"
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|reservation| reservation.symbol == "ConfigurationState")
+        .expect("ConfigurationState permanent reservation exists");
+    assert_eq!(reservation.row_id, "a04:reservation:configuration-state");
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x0278");
+    assert_eq!(reservation.disposition, "existing");
+
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == "top|ConfigurationState")
+        .expect("ConfigurationState source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == "top|ConfigurationState")
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "source candidate must map exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a04:target:logical-kind-configuration-state"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a04:logical-kind:configuration-state"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+
+    // The shell must not outrun its field types: a04:1558 members are not yet
+    // registered, and no consumer field row may exist before they are.
+    assert!(
+        !identity
+            .fields
+            .iter()
+            .any(|field| field.containing_schema == "ConfigurationState"),
+        "the shell must not outrun its unresolved field types"
+    );
+}

@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 547
+target_count = 548
 projection_fallback_count = 83
-target_source_assignment_sha256 = "aa5d55d4ac3b8bbaa90691ad0d7904d02c70f9b4bd248f4204e2401097436226"
+target_source_assignment_sha256 = "8be4e34c7e4e34ba31bf16db8022e8fc95a4b4cef8a2ebbe3fe4bf5e60c6b6c0"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -580,7 +580,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 8
+registry_epoch = 9
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -909,6 +909,17 @@ construction_order = 37
 role_predicate = "true"
 max_size_bytes = 1048576
 golden_corpus = "corpus/logical/backup_manifest/"
+
+[[logical_kind]]
+slice_id = "a04"
+row_id = "a04:logical-kind:configuration-state"
+object_kind = 0x0278
+name = "ConfigurationState"
+status = "reserved"
+construction_order = 5
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/configuration_state/"
 
 [[logical_kind]]
 slice_id = "a01"
@@ -9687,7 +9698,7 @@ symbol = "ConfigurationState"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0278"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:conflict-overlap-close-proof"
@@ -18016,7 +18027,7 @@ symbol = "ConfigurationState"
 generic_signature = ""
 source_key = "top|ConfigurationState"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a04:1558"]
 
 [[top_level_candidate]]
@@ -28615,6 +28626,14 @@ target_row_id = "a04:field:root-manifest-logical-state-root-ref"
 slice_id = "a04"
 source_key = "projection|durable_fields|RootManifest.logical_state_root_ref"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:logical-kind-configuration-state"
+target_row_id = "a04:logical-kind:configuration-state"
+slice_id = "a04"
+source_key = "top|ConfigurationState"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
