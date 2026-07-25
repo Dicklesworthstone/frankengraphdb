@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 541
+target_count = 542
 projection_fallback_count = 83
-target_source_assignment_sha256 = "b10da4a30439c59aa91e7c316c180876dab5deed0039378527d82db6507aaf2f"
+target_source_assignment_sha256 = "5a0bde716dab55e5bb56b990471e1d0ec760ae5d3323c780deef1e9569c66d58"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -596,7 +596,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 8
+registry_epoch = 9
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -2370,6 +2370,17 @@ containing_union = "KeyDestructionTarget"
 wire_tag = 0x0003
 encoding_context = "reserved inline-record payload; exact consensus_domain, member_id, material_class, and material_identity_digest field registration and bound proof remain required before activation"
 allowed_containing_schemas = ["KeyDestructionTarget"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:key-destruction-operation-plan"
+wire_type_id = 0x003a
+name = "KeyDestructionOperationPlan"
+kind = "record"
+status = "reserved"
+encoding_context = "reserved record {operation_id,idempotency_token_digest,target:KeyDestructionTarget,canonical_request_transcript_digest,required_receipt_profile_oid}; a15:2057 requires plans sorted by target identity with no duplicate target or operation ID; exact member wire-type rows and a source-derived bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyProposal"]
 max_size_bytes = 65536
 
 [[wire_type]]
@@ -20029,7 +20040,7 @@ symbol = "KeyDestructionOperationPlan"
 generic_signature = ""
 source_key = "top|KeyDestructionOperationPlan"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a15:2057"]
 
 [[top_level_candidate]]
@@ -29083,6 +29094,14 @@ row_id = "a15:target:wire-type-key-destruction-target-storage-member-replica"
 target_row_id = "a15:wire-type:key-destruction-target-storage-member-replica"
 slice_id = "a15"
 source_key = "arm|KeyDestructionTarget|KeyDestructionTarget|StorageMemberReplica"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-key-destruction-operation-plan"
+target_row_id = "a15:wire-type:key-destruction-operation-plan"
+slice_id = "a15"
+source_key = "top|KeyDestructionOperationPlan"
 target_kind = "wire-type"
 definition_status = "declared"
 

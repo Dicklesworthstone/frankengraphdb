@@ -2586,6 +2586,77 @@ fn idr_key_destruction_target_consumer_closure_is_exact() {
 }
 
 #[test]
+fn idr_key_destruction_operation_plan_reserved_wire_shell_is_exact() {
+    let identity = real_identity();
+    let wire = identity
+        .wire
+        .iter()
+        .find(|wire| wire.name == "KeyDestructionOperationPlan")
+        .expect("KeyDestructionOperationPlan wire record exists");
+    assert_eq!(wire.wire_type_id, 0x003a);
+    assert_eq!(wire.kind, "record");
+    assert_eq!(wire.status, "reserved");
+    assert_eq!(wire.containing_union, None);
+    assert_eq!(wire.wire_tag, None);
+    assert_eq!(
+        wire.allowed_containing_schemas,
+        vec!["KeyDestroyProposal".to_owned()]
+    );
+    assert_eq!(wire.max_size_bytes, 65_536);
+    for source_member in [
+        "operation_id",
+        "idempotency_token_digest",
+        "target:KeyDestructionTarget",
+        "canonical_request_transcript_digest",
+        "required_receipt_profile_oid",
+    ] {
+        assert!(
+            wire.encoding_context.contains(source_member),
+            "reserved shell lost source member {source_member}"
+        );
+    }
+    assert!(
+        wire.encoding_context.contains("sorted by target identity")
+            && wire
+                .encoding_context
+                .contains("no duplicate target or operation ID"),
+        "reserved shell lost the source ordering or deduplication law"
+    );
+
+    let catalog = real_appendix_catalog();
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == "top|KeyDestructionOperationPlan")
+        .expect("KeyDestructionOperationPlan source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "wire");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == "top|KeyDestructionOperationPlan")
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "source candidate must map exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a15:target:wire-type-key-destruction-operation-plan"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a15:wire-type:key-destruction-operation-plan"
+    );
+    assert_eq!(targets[0].target_kind, "wire-type");
+    assert!(
+        !catalog
+            .reservations
+            .iter()
+            .any(|reservation| reservation.symbol == "KeyDestructionOperationPlan"),
+        "a non-StrongRef wire record must not acquire a type reservation"
+    );
+}
+
+#[test]
 fn idr_role_transition_activation_state_is_a_logical_backed_whole_schema_union() {
     let identity = real_identity();
     let union = identity

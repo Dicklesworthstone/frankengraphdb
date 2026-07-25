@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 8
+registry_epoch = 9
 
 [[type]]
 wire_type_id = 0x0001
@@ -546,4 +546,13 @@ containing_union = "KeyDestructionTarget"
 wire_tag = 0x0003
 encoding_context = "reserved inline-record payload; exact consensus_domain, member_id, material_class, and material_identity_digest field registration and bound proof remain required before activation"
 allowed_containing_schemas = ["KeyDestructionTarget"]
+max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x003a
+name = "KeyDestructionOperationPlan"
+kind = "record"
+status = "reserved"
+encoding_context = "reserved record {operation_id,idempotency_token_digest,target:KeyDestructionTarget,canonical_request_transcript_digest,required_receipt_profile_oid}; a15:2057 requires plans sorted by target identity with no duplicate target or operation ID; exact member wire-type rows and a source-derived bound proof remain required before activation"
+allowed_containing_schemas = ["KeyDestroyProposal"]
 max_size_bytes = 65536
