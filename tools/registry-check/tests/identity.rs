@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 36
+registry_epoch = 38
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 36);
+    assert_eq!(epoch, 38);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -4305,6 +4305,32 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "KeyEnvelopeGrantRecordState"
                 | "KeyGrantRegistryEntries"
                 | "KeyGrantRegistryEntriesTerminalStatus"
+                | "ArchiveLeaseReleaseReceiptOutcome"
+                | "AuthorityOwningRestoreAbandonmentTombstoneProfileAppliedBasis"
+                | "CatalogAuthorityHeadPredecessor"
+                | "CatalogAuthorityHeadState"
+                | "LocalRestoreCompletionEvidence"
+                | "MetaRestoreCompletionEvidence"
+                | "PortableRestoreSourceLeaseAuthorityObservationActionBinding"
+                | "PortableRestoreSourceLeaseAuthorityObservationHeadState"
+                | "PortableRestoreSourceLeaseAuthorityObservationWindowClass"
+                | "RecoveryIncarnationTransformPlanMode"
+                | "RecoveryIncarnationTransformPlanSourcePosture"
+                | "RestoreAbandonOperationRecordPinOwnerPlan"
+                | "RestoreAbandonOperationRecordProfileOperationPlan"
+                | "RestoreAbandonmentReceipt"
+                | "RestoreLeaseOperationTerminalRecordTerminal"
+                | "RestoreRegistry"
+                | "RestoreRegistryLocalActivity"
+                | "RestoreRegistryMetaActivity"
+                | "RestoreRegistryShardActivity"
+                | "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+                | "RestoreTerminalCleanupAuthorityAllowedEffects"
+                | "RestoreTerminalCleanupAuthorityTerminalDisposition"
+                | "RestoreTerminalPhysicalInventoryAvailabilityRequirement"
+                | "RestoreTerminalPinBasis"
+                | "RestoreTerminalPinBasisOperationalAckSubject"
+                | "ShardRestoreSourceAccessClosureSortedSourceAccessMembersRecordTerminalDisposition"
         )
     };
     pre_erratum
@@ -4466,7 +4492,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a04_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 183,
+        pre_erratum.ordinary_unions.len() + 209,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );

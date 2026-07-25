@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1528
+target_count = 1668
 projection_fallback_count = 90
-target_source_assignment_sha256 = "2569cbc9a4e028afa4b09a0c0c9512aeb5da181c61ce617c4c8c23f036ac737d"
+target_source_assignment_sha256 = "e5f06d8ecec2deb8c5c4ceb67201bef88bbc413e067fa0edcea1225e0c980052"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 35
+registry_epoch = 36
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 29
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 37
+registry_epoch = 38
 
 [[logical_kind]]
 slice_id = "a03"
@@ -3701,6 +3701,468 @@ construction_order = 70
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/key_grant_registry/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:archive-lease-release-receipt"
+object_kind = 0x020b
+name = "ArchiveLeaseReleaseReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/archive_lease_release_receipt/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:authority-owning-restore-abandonment-tombstone"
+object_kind = 0x0238
+name = "AuthorityOwningRestoreAbandonmentTombstone"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authority_owning_restore_abandonment_tombstone/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:catalog-authority-head"
+object_kind = 0x0262
+name = "CatalogAuthorityHead"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/catalog_authority_head/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:catalog-tombstone-restore-target-receipt"
+object_kind = 0x0263
+name = "CatalogTombstoneRestoreTargetReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/catalog_tombstone_restore_target_receipt/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:global-restore-abandon-participant-apply-certificate"
+object_kind = 0x02c3
+name = "GlobalRestoreAbandonParticipantApplyCertificate"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_abandon_participant_apply_certificate/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:global-restore-participant-pin-release-completion-certificate"
+object_kind = 0x02c5
+name = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_participant_pin_release_completion_certificate/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:local-restore-completion-evidence"
+object_kind = 0x031c
+name = "LocalRestoreCompletionEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_completion_evidence/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:local-restore-terminal-tombstone"
+object_kind = 0x0320
+name = "LocalRestoreTerminalTombstone"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_terminal_tombstone/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:meta-restore-completion-evidence"
+object_kind = 0x0357
+name = "MetaRestoreCompletionEvidence"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_restore_completion_evidence/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:meta-restore-terminal-tombstone"
+object_kind = 0x035a
+name = "MetaRestoreTerminalTombstone"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_restore_terminal_tombstone/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:portable-restore-source-lease-authority-observation"
+object_kind = 0x038c
+name = "PortableRestoreSourceLeaseAuthorityObservation"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_restore_source_lease_authority_observation/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:portable-restore-source-lease-release-terminal-evidence"
+object_kind = 0x038e
+name = "PortableRestoreSourceLeaseReleaseTerminalEvidence"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_restore_source_lease_release_terminal_evidence/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:recovery-incarnation-transform-plan"
+object_kind = 0x03ac
+name = "RecoveryIncarnationTransformPlan"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_incarnation_transform_plan/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-abandon-operation-record"
+object_kind = 0x03d2
+name = "RestoreAbandonOperationRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandon_operation_record/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-abandonment-manifest"
+object_kind = 0x03d3
+name = "RestoreAbandonmentManifest"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_manifest/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-abandonment-pin-pending-owner"
+object_kind = 0x03d4
+name = "RestoreAbandonmentPinPendingOwner"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_pin_pending_owner/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-abandonment-receipt"
+object_kind = 0x03d5
+name = "RestoreAbandonmentReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_receipt/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-lease-bound-source-access-set"
+object_kind = 0x03da
+name = "RestoreLeaseBoundSourceAccessSet"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_bound_source_access_set/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-lease-operation-terminal-accumulator"
+object_kind = 0x03db
+name = "RestoreLeaseOperationTerminalAccumulator"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_accumulator/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-lease-operation-terminal-index"
+object_kind = 0x03dc
+name = "RestoreLeaseOperationTerminalIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_index/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-lease-operation-terminal-record"
+object_kind = 0x03dd
+name = "RestoreLeaseOperationTerminalRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_record/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-no-target-observation-proof"
+object_kind = 0x03de
+name = "RestoreNoTargetObservationProof"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_no_target_observation_proof/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-registry"
+object_kind = 0x03e3
+name = "RestoreRegistry"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_registry/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-shard-abandon-ack"
+object_kind = 0x03e6
+name = "RestoreShardAbandonAck"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_shard_abandon_ack/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-source-access-revocation-operation-record"
+object_kind = 0x03ee
+name = "RestoreSourceAccessRevocationOperationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_access_revocation_operation_record/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-source-key-access-cleanup-accumulator"
+object_kind = 0x03f2
+name = "RestoreSourceKeyAccessCleanupAccumulator"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_cleanup_accumulator/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-source-key-access-cleanup-progress"
+object_kind = 0x03f3
+name = "RestoreSourceKeyAccessCleanupProgress"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_cleanup_progress/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-source-key-access-cleanup-record"
+object_kind = 0x03f4
+name = "RestoreSourceKeyAccessCleanupRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_cleanup_record/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-source-key-access-inventory"
+object_kind = 0x03f5
+name = "RestoreSourceKeyAccessInventory"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_inventory/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-source-lease-authority-observation-import"
+object_kind = 0x03f7
+name = "RestoreSourceLeaseAuthorityObservationImport"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_authority_observation_import/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-source-lease-release-operation-record"
+object_kind = 0x03fa
+name = "RestoreSourceLeaseReleaseOperationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_release_operation_record/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-source-lease-release-operation-summary"
+object_kind = 0x03fb
+name = "RestoreSourceLeaseReleaseOperationSummary"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_release_operation_summary/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-source-lease-renew-operation-record"
+object_kind = 0x03fc
+name = "RestoreSourceLeaseRenewOperationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_renew_operation_record/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-source-lease-renewal-close-record"
+object_kind = 0x03fe
+name = "RestoreSourceLeaseRenewalCloseRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_renewal_close_record/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-terminal-cleanup-authority"
+object_kind = 0x0400
+name = "RestoreTerminalCleanupAuthority"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_cleanup_authority/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-terminal-physical-inventory"
+object_kind = 0x0401
+name = "RestoreTerminalPhysicalInventory"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_physical_inventory/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-terminal-pin-basis"
+object_kind = 0x0402
+name = "RestoreTerminalPinBasis"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_pin_basis/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-terminal-pin-durability-receipt"
+object_kind = 0x0403
+name = "RestoreTerminalPinDurabilityReceipt"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_pin_durability_receipt/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-terminal-pin-release-authorization"
+object_kind = 0x0404
+name = "RestoreTerminalPinReleaseAuthorization"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_pin_release_authorization/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:shard-restore-abandonment-tombstone"
+object_kind = 0x0471
+name = "ShardRestoreAbandonmentTombstone"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_abandonment_tombstone/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:shard-restore-source-access-closure"
+object_kind = 0x0474
+name = "ShardRestoreSourceAccessClosure"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_source_access_closure/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:shard-restore-terminal-tombstone"
+object_kind = 0x0476
+name = "ShardRestoreTerminalTombstone"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_terminal_tombstone/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -21908,6 +22370,1398 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:archive-lease-release-receipt-outcome-1d6b26f22bd061ff"
+union_name = "ArchiveLeaseReleaseReceiptOutcome"
+containing_schema = "ArchiveLeaseReleaseReceipt"
+union_path = "ArchiveLeaseReleaseReceipt.outcome"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ArchiveLeaseReleaseReceipt"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:archive-lease-release-receipt-outcome-released-742c0e0b4c83674c"
+union_name = "ArchiveLeaseReleaseReceiptOutcome"
+containing_schema = "ArchiveLeaseReleaseReceipt"
+union_path = "ArchiveLeaseReleaseReceipt.outcome"
+arm_tag = 0x0001
+source_arm_name = "Released"
+stable_name = "released"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:archive-lease-release-receipt-outcome-already-released-f33ad43517632cd7"
+union_name = "ArchiveLeaseReleaseReceiptOutcome"
+containing_schema = "ArchiveLeaseReleaseReceipt"
+union_path = "ArchiveLeaseReleaseReceipt.outcome"
+arm_tag = 0x0002
+source_arm_name = "AlreadyReleased"
+stable_name = "already_released"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:archive-lease-release-receipt-outcome-already-expired-32f551781b3d803c"
+union_name = "ArchiveLeaseReleaseReceiptOutcome"
+containing_schema = "ArchiveLeaseReleaseReceipt"
+union_path = "ArchiveLeaseReleaseReceipt.outcome"
+arm_tag = 0x0003
+source_arm_name = "AlreadyExpired"
+stable_name = "already_expired"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:authority-owning-restore-abandonment-tombstone-profile-applied-basis-95b539201bf7e700"
+union_name = "AuthorityOwningRestoreAbandonmentTombstoneProfileAppliedBasis"
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+union_path = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:authority-owning-restore-abandonment-tombstone-profile-applied-basis-external-cas-cataloged-75b7ce335dc4f0a2"
+union_name = "AuthorityOwningRestoreAbandonmentTombstoneProfileAppliedBasis"
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+union_path = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "external_cas_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "b74e864f5367cc7e734845a680316c8aed57570aef9a78a3c1e18f37501e1fd2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:authority-owning-restore-abandonment-tombstone-profile-applied-basis-directory-bound-cataloged-8fb7d1f3c5c6eb96"
+union_name = "AuthorityOwningRestoreAbandonmentTombstoneProfileAppliedBasis"
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+union_path = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "directory_bound_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "d719c7ac4242698da3cd185f0d01d0f61d9cf9bb9971857ea82a851353a373d9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:authority-owning-restore-abandonment-tombstone-profile-applied-basis-directory-bound-embedded-no-catalog-34fe39944886ddc5"
+union_name = "AuthorityOwningRestoreAbandonmentTombstoneProfileAppliedBasis"
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+union_path = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "directory_bound_embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "a1966600103926f245b7dc9250f98e11b8fb3983b75da31bf0ea2904eb10aea1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:catalog-authority-head-predecessor-bd5acc9545a65eca"
+union_name = "CatalogAuthorityHeadPredecessor"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.predecessor"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CatalogAuthorityHead"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:catalog-authority-head-predecessor-absent-f245ffd2348a4c0a"
+union_name = "CatalogAuthorityHeadPredecessor"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.predecessor"
+arm_tag = 0x0001
+source_arm_name = "Absent"
+stable_name = "absent"
+payload_kind = "inline-record"
+payload_sha256 = "17a88445d1fcf7ba3216f844ba6d569d07599c3f2781d2cf3bd72f186b156ca7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:catalog-authority-head-predecessor-prior-eeac9f168540c3e2"
+union_name = "CatalogAuthorityHeadPredecessor"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.predecessor"
+arm_tag = 0x0002
+source_arm_name = "Prior"
+stable_name = "prior"
+payload_kind = "inline-record"
+payload_sha256 = "b4f672258ddf9b3398362b469a3fd9ab698b26f8e74f2fc1d1daf851ada0f9e2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:catalog-authority-head-state-d8a17ab4bdcc60f0"
+union_name = "CatalogAuthorityHeadState"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CatalogAuthorityHead"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:catalog-authority-head-state-reserved-hidden-606dfbbafc35a5fc"
+union_name = "CatalogAuthorityHeadState"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.state"
+arm_tag = 0x0001
+source_arm_name = "ReservedHidden"
+stable_name = "reserved_hidden"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:catalog-authority-head-state-activated-hidden-bc85d7b62a81f3c0"
+union_name = "CatalogAuthorityHeadState"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.state"
+arm_tag = 0x0002
+source_arm_name = "ActivatedHidden"
+stable_name = "activated_hidden"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:catalog-authority-head-state-tombstoned-no-endpoint-565db822664edfab"
+union_name = "CatalogAuthorityHeadState"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.state"
+arm_tag = 0x0003
+source_arm_name = "TombstonedNoEndpoint"
+stable_name = "tombstoned_no_endpoint"
+payload_kind = "inline-record"
+payload_sha256 = "ee780f1fb1f41328cc0c730d63f1154ac28d9b14901ea35c88bb0fd23546ed03"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:local-restore-completion-evidence-18234040960caa36"
+union_name = "LocalRestoreCompletionEvidence"
+containing_schema = "LocalRestoreCompletionEvidence"
+union_path = "LocalRestoreCompletionEvidence"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalRestoreCompletionEvidence"]
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:local-restore-completion-evidence-operational-7eb33df63c473ac4"
+union_name = "LocalRestoreCompletionEvidence"
+containing_schema = "LocalRestoreCompletionEvidence"
+union_path = "LocalRestoreCompletionEvidence"
+arm_tag = 0x0001
+source_arm_name = "Operational"
+stable_name = "operational"
+payload_kind = "inline-record"
+payload_sha256 = "cdc2add0869c6a4183f58462ac62affd533ce8f68c695477a192de8a23171b28"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:local-restore-completion-evidence-abandoned-2e9ae51103ad48aa"
+union_name = "LocalRestoreCompletionEvidence"
+containing_schema = "LocalRestoreCompletionEvidence"
+union_path = "LocalRestoreCompletionEvidence"
+arm_tag = 0x0002
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "inline-record"
+payload_sha256 = "5e8cded0ddb43834031bd8128302975880c27025004b1872d28df12ac9fcedfa"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:meta-restore-completion-evidence-41b4db2af7452734"
+union_name = "MetaRestoreCompletionEvidence"
+containing_schema = "MetaRestoreCompletionEvidence"
+union_path = "MetaRestoreCompletionEvidence"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaRestoreCompletionEvidence"]
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:meta-restore-completion-evidence-operational-dabaf60fd388d79c"
+union_name = "MetaRestoreCompletionEvidence"
+containing_schema = "MetaRestoreCompletionEvidence"
+union_path = "MetaRestoreCompletionEvidence"
+arm_tag = 0x0001
+source_arm_name = "Operational"
+stable_name = "operational"
+payload_kind = "inline-record"
+payload_sha256 = "2c2a306ff02b1a0c7c6377af1501249825e40a2707063aa8e0a6482f2641c9cf"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:meta-restore-completion-evidence-abandoned-90643685219559f1"
+union_name = "MetaRestoreCompletionEvidence"
+containing_schema = "MetaRestoreCompletionEvidence"
+union_path = "MetaRestoreCompletionEvidence"
+arm_tag = 0x0002
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "inline-record"
+payload_sha256 = "bdb8401c3c662a350537b2443d814a963f922a8b84e372113ba0c4d82e72f013"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:portable-restore-source-lease-authority-observation-action-binding-7ac66fdaf5c40f90"
+union_name = "PortableRestoreSourceLeaseAuthorityObservationActionBinding"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.action_binding"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableRestoreSourceLeaseAuthorityObservation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-action-binding-renew-61706730a8dec4cf"
+union_name = "PortableRestoreSourceLeaseAuthorityObservationActionBinding"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.action_binding"
+arm_tag = 0x0001
+source_arm_name = "Renew"
+stable_name = "renew"
+payload_kind = "inline-record"
+payload_sha256 = "ca39fbddf9004d863d45efa8df869f3636fd8e5765232f499be9442994055c39"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-action-binding-release-a411be1bf6259f93"
+union_name = "PortableRestoreSourceLeaseAuthorityObservationActionBinding"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.action_binding"
+arm_tag = 0x0002
+source_arm_name = "Release"
+stable_name = "release"
+payload_kind = "inline-record"
+payload_sha256 = "ca39fbddf9004d863d45efa8df869f3636fd8e5765232f499be9442994055c39"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-action-binding-status-79edcc8e984bf620"
+union_name = "PortableRestoreSourceLeaseAuthorityObservationActionBinding"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.action_binding"
+arm_tag = 0x0003
+source_arm_name = "Status"
+stable_name = "status"
+payload_kind = "inline-record"
+payload_sha256 = "b1c12967be80d49577a98eadc3151f15d4b8a00119abaf1a72423bc9296f133e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:portable-restore-source-lease-authority-observation-head-state-293df0d9d519082c"
+union_name = "PortableRestoreSourceLeaseAuthorityObservationHeadState"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.head_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableRestoreSourceLeaseAuthorityObservation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-head-state-active-023b892dcbeaf0ba"
+union_name = "PortableRestoreSourceLeaseAuthorityObservationHeadState"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.head_state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-head-state-released-02edb1f4e02362b3"
+union_name = "PortableRestoreSourceLeaseAuthorityObservationHeadState"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.head_state"
+arm_tag = 0x0002
+source_arm_name = "Released"
+stable_name = "released"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:portable-restore-source-lease-authority-observation-window-class-9cbb7d5a6fecaa9c"
+union_name = "PortableRestoreSourceLeaseAuthorityObservationWindowClass"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.window_class"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableRestoreSourceLeaseAuthorityObservation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-window-class-usable-3c4a80de3d344c9e"
+union_name = "PortableRestoreSourceLeaseAuthorityObservationWindowClass"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.window_class"
+arm_tag = 0x0001
+source_arm_name = "Usable"
+stable_name = "usable"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-window-class-expired-f9a857bd013d0b84"
+union_name = "PortableRestoreSourceLeaseAuthorityObservationWindowClass"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.window_class"
+arm_tag = 0x0002
+source_arm_name = "Expired"
+stable_name = "expired"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:recovery-incarnation-transform-plan-mode-2edb7a2d33c3d54f"
+union_name = "RecoveryIncarnationTransformPlanMode"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.mode"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RecoveryIncarnationTransformPlan<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:recovery-incarnation-transform-plan-mode-recover-same-identity-bbff53c1658c4af0"
+union_name = "RecoveryIncarnationTransformPlanMode"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.mode"
+arm_tag = 0x0001
+source_arm_name = "RecoverSameIdentity"
+stable_name = "recover_same_identity"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:recovery-incarnation-transform-plan-mode-clone-new-identity-93cff6b21a574c70"
+union_name = "RecoveryIncarnationTransformPlanMode"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.mode"
+arm_tag = 0x0002
+source_arm_name = "CloneNewIdentity"
+stable_name = "clone_new_identity"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:recovery-incarnation-transform-plan-source-posture-af75644209b3601d"
+union_name = "RecoveryIncarnationTransformPlanSourcePosture"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.source_posture"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RecoveryIncarnationTransformPlan<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:recovery-incarnation-transform-plan-source-posture-local-13324964008c6740"
+union_name = "RecoveryIncarnationTransformPlanSourcePosture"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.source_posture"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:recovery-incarnation-transform-plan-source-posture-sharded-0a3c44bee305cc93"
+union_name = "RecoveryIncarnationTransformPlanSourcePosture"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.source_posture"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "sharded"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-abandon-operation-record-pin-owner-plan-94293edb4d3161cd"
+union_name = "RestoreAbandonOperationRecordPinOwnerPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-abandon-operation-record-pin-owner-plan-local-5918657f01fb5f9a"
+union_name = "RestoreAbandonOperationRecordPinOwnerPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "8def1a63b65eacdf7ce04570104d4a923a35eda48ba841f8070da9058e063993"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-abandon-operation-record-pin-owner-plan-meta-84a23bd25b15c04e"
+union_name = "RestoreAbandonOperationRecordPinOwnerPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "5e660cceb9460bf400078921e2cbcb72be07c994399b9a20edb381c059511a61"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-abandon-operation-record-profile-operation-plan-998fc35caab0624a"
+union_name = "RestoreAbandonOperationRecordProfileOperationPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-abandon-operation-record-profile-operation-plan-external-cas-cataloged-efbfbe1ec90cec18"
+union_name = "RestoreAbandonOperationRecordProfileOperationPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "external_cas_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "d9763b72abfa29d9853bb756573123e56869f53ad4910b432fcea7a77b46ad4c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-abandon-operation-record-profile-operation-plan-directory-bound-cataloged-2ded0fd1881fc015"
+union_name = "RestoreAbandonOperationRecordProfileOperationPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "directory_bound_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "6b2cc2a506cfe3cb69bcd2213dfb5de2ce4cf9f50366b16f1e04e1f8c262e555"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-abandon-operation-record-profile-operation-plan-directory-bound-embedded-no-catalog-0bea5e6dd9a91d09"
+union_name = "RestoreAbandonOperationRecordProfileOperationPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "directory_bound_embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "8068d120d7c6b56bf756fb62a93e1fff954e5340be0751955ca691bbe006e255"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-abandonment-receipt-76630daa8e2451b6"
+union_name = "RestoreAbandonmentReceipt"
+containing_schema = "RestoreAbandonmentReceipt"
+union_path = "RestoreAbandonmentReceipt"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreAbandonmentReceipt"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-abandonment-receipt-external-cas-cataloged-e2eee458f1e981eb"
+union_name = "RestoreAbandonmentReceipt"
+containing_schema = "RestoreAbandonmentReceipt"
+union_path = "RestoreAbandonmentReceipt"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "external_cas_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "5fdeb1ff0f4f5bd22e3fb177bc8c5faa90162d80ca164ca2cb245f8e250e1036"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-abandonment-receipt-directory-bound-cataloged-d47791930dadb63f"
+union_name = "RestoreAbandonmentReceipt"
+containing_schema = "RestoreAbandonmentReceipt"
+union_path = "RestoreAbandonmentReceipt"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "directory_bound_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "8d9e0ff26a8649e4c232656de81bf0e356917c81173d4f3f584fb617207b9997"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-abandonment-receipt-directory-bound-embedded-no-catalog-722bbb548a6bb26e"
+union_name = "RestoreAbandonmentReceipt"
+containing_schema = "RestoreAbandonmentReceipt"
+union_path = "RestoreAbandonmentReceipt"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "directory_bound_embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "7a27924f87744a00377e2cf053f3140e427954ee0640b2e855838deaaf97ca4e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-lease-operation-terminal-record-terminal-9f22fdf83d7d959f"
+union_name = "RestoreLeaseOperationTerminalRecordTerminal"
+containing_schema = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
+union_path = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-lease-operation-terminal-record-terminal-applied-e4565087b720d658"
+union_name = "RestoreLeaseOperationTerminalRecordTerminal"
+containing_schema = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
+union_path = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal"
+arm_tag = 0x0001
+source_arm_name = "Applied"
+stable_name = "applied"
+payload_kind = "inline-record"
+payload_sha256 = "994b599c8c6424551aae0f60dbd7c23440d5242456ea2f5ac8bd31050a67ef86"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-lease-operation-terminal-record-terminal-never-sent-16101251861f9299"
+union_name = "RestoreLeaseOperationTerminalRecordTerminal"
+containing_schema = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
+union_path = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal"
+arm_tag = 0x0002
+source_arm_name = "NeverSent"
+stable_name = "never_sent"
+payload_kind = "inline-record"
+payload_sha256 = "144b83acd86092e30e425c2a4e3acb50e6d28c79d4d17460b0c7165929ff8e1d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-lease-operation-terminal-record-terminal-no-effect-09ac4c24864f5683"
+union_name = "RestoreLeaseOperationTerminalRecordTerminal"
+containing_schema = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
+union_path = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal"
+arm_tag = 0x0003
+source_arm_name = "NoEffect"
+stable_name = "no_effect"
+payload_kind = "inline-record"
+payload_sha256 = "2115945bff4e8f4cfe6ba5e6b4d5ff4f52b8f0323350a8e3777e5d738dabb47c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-registry-0d7cbb92cfeaed00"
+union_name = "RestoreRegistry"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreRegistry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-registry-local-04b09141dbd11e64"
+union_name = "RestoreRegistry"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "9fd8449a58756528e0264f433e480f0cec567d563140a4db7decdaa1c68cb77e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-registry-meta-3274759497582aa0"
+union_name = "RestoreRegistry"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "252825dc7aa1483941ac51587465c7556f1aa97c8a042f798c7b7658eeb249b1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-registry-shard-f1520b05e1295626"
+union_name = "RestoreRegistry"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "7f5ec4fbb5c56d47a2f1ac73e6ddb24a9e05f8d4039d18071285ea2fe464cfa0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-registry-local-activity-0a49fa61e8e5d6be"
+union_name = "RestoreRegistryLocalActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Local.activity"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreRegistry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-registry-local-activity-idle-69ab982ad59336b6"
+union_name = "RestoreRegistryLocalActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Local.activity"
+arm_tag = 0x0001
+source_arm_name = "Idle"
+stable_name = "idle"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-registry-local-activity-one-live-57d643597718432d"
+union_name = "RestoreRegistryLocalActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Local.activity"
+arm_tag = 0x0002
+source_arm_name = "OneLive"
+stable_name = "one_live"
+payload_kind = "inline-record"
+payload_sha256 = "4da0f3516fe3e06cbf41b72a22562f1cabb1146cebb7995204a4fc5d12784615"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-registry-meta-activity-5a65ac1f2e727e2a"
+union_name = "RestoreRegistryMetaActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Meta.activity"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreRegistry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-registry-meta-activity-idle-73849a1420176aa3"
+union_name = "RestoreRegistryMetaActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Meta.activity"
+arm_tag = 0x0001
+source_arm_name = "Idle"
+stable_name = "idle"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-registry-meta-activity-one-live-99834f33b201421d"
+union_name = "RestoreRegistryMetaActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Meta.activity"
+arm_tag = 0x0002
+source_arm_name = "OneLive"
+stable_name = "one_live"
+payload_kind = "inline-record"
+payload_sha256 = "4da0f3516fe3e06cbf41b72a22562f1cabb1146cebb7995204a4fc5d12784615"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-registry-shard-activity-5bf568554f4b4647"
+union_name = "RestoreRegistryShardActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Shard.activity"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreRegistry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-registry-shard-activity-idle-2ad419c98e86a5f0"
+union_name = "RestoreRegistryShardActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Shard.activity"
+arm_tag = 0x0001
+source_arm_name = "Idle"
+stable_name = "idle"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-registry-shard-activity-one-live-dec19709dd6046c8"
+union_name = "RestoreRegistryShardActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Shard.activity"
+arm_tag = 0x0002
+source_arm_name = "OneLive"
+stable_name = "one_live"
+payload_kind = "inline-record"
+payload_sha256 = "4da0f3516fe3e06cbf41b72a22562f1cabb1146cebb7995204a4fc5d12784615"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-source-key-access-cleanup-progress-sorted-resource-states-fc9773d6b4ca3e18"
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreSourceKeyAccessCleanupProgress<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-promoted-target-key-terminal-4936d43553f91651"
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0001
+source_arm_name = "PromotedTargetKeyTerminal"
+stable_name = "promoted_target_key_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "15be0d152e57abc11c3e5c4ab560383dfc185e1beb6603114f1f3bbae3010580"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-ephemeral-closed-terminal-6b999918885e89f2"
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0002
+source_arm_name = "EphemeralClosedTerminal"
+stable_name = "ephemeral_closed_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "72f42c9bdfcf22a1ede31e91ef01dcedac94a95ec83e0b02ca56907a872408ad"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-lease-bound-pending-release-da503974de248a51"
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0003
+source_arm_name = "LeaseBoundPendingRelease"
+stable_name = "lease_bound_pending_release"
+payload_kind = "inline-record"
+payload_sha256 = "04e918d39737c6e1a8110c0d7361fc8403f53f7869a7d6db627c1480a1b9d093"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-pending-af89de7afa48b2a2"
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0004
+source_arm_name = "ExplicitRevocationPending"
+stable_name = "explicit_revocation_pending"
+payload_kind = "inline-record"
+payload_sha256 = "c4b395a8f9c4ca05b019de4c6e45517a4d06c71722f754faad64e659c780c978"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-authorized-097f5a4815367938"
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0005
+source_arm_name = "ExplicitRevocationAuthorized"
+stable_name = "explicit_revocation_authorized"
+payload_kind = "inline-record"
+payload_sha256 = "65704ba43ed670db33601ad603d47a27560e8eb56d87c3f576225b88c6268a0d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-pending-after-authorized-never-armed-deb001185b052105"
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0006
+source_arm_name = "ExplicitRevocationPendingAfterAuthorizedNeverArmed"
+stable_name = "explicit_revocation_pending_after_authorized_never_armed"
+payload_kind = "inline-record"
+payload_sha256 = "bcf24ba417c5d9f05df0232b76709d71ba8ee77d6608620f039167993dfe6bc0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-terminal-db7f0598fd7a76a1"
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0007
+source_arm_name = "ExplicitRevocationTerminal"
+stable_name = "explicit_revocation_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "6cb7c4dbcaa3e9a557884672b29c2ebff3e83ef40c7dd6da44d1693b41566b74"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-provider-already-closed-terminal-5b356e4807987a53"
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0008
+source_arm_name = "ProviderAlreadyClosedTerminal"
+stable_name = "provider_already_closed_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "34e8c6313215eb0a9e8afca5587e5092fd5368550e4cacb939d6cee0070bb893"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-terminal-cleanup-authority-allowed-effects-ad64b259062bc307"
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-cleanup-authority-allowed-effects-source-access-cleanup-3d3cc783a79626cc"
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+arm_tag = 0x0001
+source_arm_name = "SourceAccessCleanup"
+stable_name = "source_access_cleanup"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-cleanup-authority-allowed-effects-close-source-lease-renewal-db84f3e18c0ea921"
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+arm_tag = 0x0002
+source_arm_name = "CloseSourceLeaseRenewal"
+stable_name = "close_source_lease_renewal"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-cleanup-authority-allowed-effects-release-source-lease-3552b14bd98dec99"
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+arm_tag = 0x0003
+source_arm_name = "ReleaseSourceLease"
+stable_name = "release_source_lease"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-cleanup-authority-allowed-effects-release-terminal-pins-740fa3ce02b20a1a"
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+arm_tag = 0x0004
+source_arm_name = "ReleaseTerminalPins"
+stable_name = "release_terminal_pins"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-cleanup-authority-allowed-effects-compact-restore-evidence-cbf84064249335c4"
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+arm_tag = 0x0005
+source_arm_name = "CompactRestoreEvidence"
+stable_name = "compact_restore_evidence"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-terminal-cleanup-authority-terminal-disposition-d7ae19b49a4f2896"
+union_name = "RestoreTerminalCleanupAuthorityTerminalDisposition"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.terminal_disposition"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-cleanup-authority-terminal-disposition-operational-ec4948fc2462840e"
+union_name = "RestoreTerminalCleanupAuthorityTerminalDisposition"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.terminal_disposition"
+arm_tag = 0x0001
+source_arm_name = "Operational"
+stable_name = "operational"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-cleanup-authority-terminal-disposition-abandoned-fec918a6ce7b107d"
+union_name = "RestoreTerminalCleanupAuthorityTerminalDisposition"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.terminal_disposition"
+arm_tag = 0x0002
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-terminal-physical-inventory-availability-requirement-4e10afe31a02c456"
+union_name = "RestoreTerminalPhysicalInventoryAvailabilityRequirement"
+containing_schema = "RestoreTerminalPhysicalInventory<Role,Disposition>"
+union_path = "RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreTerminalPhysicalInventory<Role,Disposition>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-physical-inventory-availability-requirement-independent-reopen-02fa7e6611c978ff"
+union_name = "RestoreTerminalPhysicalInventoryAvailabilityRequirement"
+containing_schema = "RestoreTerminalPhysicalInventory<Role,Disposition>"
+union_path = "RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement"
+arm_tag = 0x0001
+source_arm_name = "IndependentReopen"
+stable_name = "independent_reopen"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-physical-inventory-availability-requirement-operational-ack-950196db2db09762"
+union_name = "RestoreTerminalPhysicalInventoryAvailabilityRequirement"
+containing_schema = "RestoreTerminalPhysicalInventory<Role,Disposition>"
+union_path = "RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement"
+arm_tag = 0x0002
+source_arm_name = "OperationalAck"
+stable_name = "operational_ack"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-physical-inventory-availability-requirement-abandonment-forensics-and-safe-gc-eb9946af1ad976f9"
+union_name = "RestoreTerminalPhysicalInventoryAvailabilityRequirement"
+containing_schema = "RestoreTerminalPhysicalInventory<Role,Disposition>"
+union_path = "RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement"
+arm_tag = 0x0003
+source_arm_name = "AbandonmentForensicsAndSafeGc"
+stable_name = "abandonment_forensics_and_safe_gc"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-terminal-pin-basis-e833552caada6ad7"
+union_name = "RestoreTerminalPinBasis"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreTerminalPinBasis<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-pin-basis-operational-241684c2586064c4"
+union_name = "RestoreTerminalPinBasis"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>"
+arm_tag = 0x0001
+source_arm_name = "Operational"
+stable_name = "operational"
+payload_kind = "inline-record"
+payload_sha256 = "65131b70d788e964a1a35c33de64d4b801cbab6d99ce036ffcc79c53771f5a3d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-pin-basis-abandoned-5b9826d6f7fd112f"
+union_name = "RestoreTerminalPinBasis"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>"
+arm_tag = 0x0002
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "inline-record"
+payload_sha256 = "fa5c74299ad21f9bf5657611b2a8c7496848adacddf5f09ba97a367c98785b6c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-terminal-pin-basis-operational-ack-subject-e71b9452cd7dada2"
+union_name = "RestoreTerminalPinBasisOperationalAckSubject"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>.Operational.ack_subject"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreTerminalPinBasis<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-pin-basis-operational-ack-subject-authority-owning-46f9ecd711869de0"
+union_name = "RestoreTerminalPinBasisOperationalAckSubject"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>.Operational.ack_subject"
+arm_tag = 0x0001
+source_arm_name = "AuthorityOwning"
+stable_name = "authority_owning"
+payload_kind = "inline-record"
+payload_sha256 = "1fa3aa42b9aa401319e61d510cd5b7eeba30ccfa7de8302f8a964658d14f9ac4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-terminal-pin-basis-operational-ack-subject-shard-9d2e13cf658759ed"
+union_name = "RestoreTerminalPinBasisOperationalAckSubject"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>.Operational.ack_subject"
+arm_tag = 0x0002
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "f805c7f5fea37fe5e562da4ea6569ac8a98c082e014d5dcc1cd84222f77d4ebf"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-daa42490745f0eb6"
+union_name = "ShardRestoreSourceAccessClosureSortedSourceAccessMembersRecordTerminalDisposition"
+containing_schema = "ShardRestoreSourceAccessClosure"
+union_path = "ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ShardRestoreSourceAccessClosure"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-ephemeral-closed-572b28093e462be2"
+union_name = "ShardRestoreSourceAccessClosureSortedSourceAccessMembersRecordTerminalDisposition"
+containing_schema = "ShardRestoreSourceAccessClosure"
+union_path = "ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition"
+arm_tag = 0x0001
+source_arm_name = "EphemeralClosed"
+stable_name = "ephemeral_closed"
+payload_kind = "inline-record"
+payload_sha256 = "0a459c6fab464671e4376bc9034fed156915e25c065f2752fdf53979dc63c978"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-lease-bound-retained-4b83f56f56d02b45"
+union_name = "ShardRestoreSourceAccessClosureSortedSourceAccessMembersRecordTerminalDisposition"
+containing_schema = "ShardRestoreSourceAccessClosure"
+union_path = "ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition"
+arm_tag = 0x0002
+source_arm_name = "LeaseBoundRetained"
+stable_name = "lease_bound_retained"
+payload_kind = "inline-record"
+payload_sha256 = "89198f4309493bfe8cee0ec221984c1df4c5eb1780e6b3d7f92e457e0eedabac"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-promoted-target-key-54dbcde30ac3250d"
+union_name = "ShardRestoreSourceAccessClosureSortedSourceAccessMembersRecordTerminalDisposition"
+containing_schema = "ShardRestoreSourceAccessClosure"
+union_path = "ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition"
+arm_tag = 0x0003
+source_arm_name = "PromotedTargetKey"
+stable_name = "promoted_target_key"
+payload_kind = "inline-record"
+payload_sha256 = "afee0725bd212d3c3244628cbfb8da9791dabf2d175e2abc30328705565b2b79"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-explicitly-revoked-94aa529c20e6661d"
+union_name = "ShardRestoreSourceAccessClosureSortedSourceAccessMembersRecordTerminalDisposition"
+containing_schema = "ShardRestoreSourceAccessClosure"
+union_path = "ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition"
+arm_tag = 0x0004
+source_arm_name = "ExplicitlyRevoked"
+stable_name = "explicitly_revoked"
+payload_kind = "inline-record"
+payload_sha256 = "dc904bd8839278299f569a2405028874642acf5689792ce2c58838aecd4bd8e9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
 slice_id = "a10"
@@ -22014,7 +23868,7 @@ symbol = "ArchiveLeaseReleaseReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x020b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:archive-profile"
@@ -22527,7 +24381,7 @@ symbol = "AuthorityOwningRestoreAbandonmentTombstone"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0238"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:authorization-decision-record"
@@ -22977,7 +24831,7 @@ symbol = "CatalogAuthorityHead"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0262"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:catalog-tombstone-restore-target-receipt"
@@ -22986,7 +24840,7 @@ symbol = "CatalogTombstoneRestoreTargetReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0263"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a04:reservation:certificate-attempt-ledger"
@@ -24120,7 +25974,7 @@ symbol = "GlobalRestoreAbandonParticipantApplyCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02c3"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:global-restore-activation-certificate"
@@ -24138,7 +25992,7 @@ symbol = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02c5"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a20:reservation:global-restore-service-final-certificate"
@@ -24921,7 +26775,7 @@ symbol = "LocalRestoreCompletionEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x031c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:local-restore-independent-reopen-proof"
@@ -24957,7 +26811,7 @@ symbol = "LocalRestoreTerminalTombstone"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0320"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:local-result-delivery-lease"
@@ -25497,7 +27351,7 @@ symbol = "MetaRestoreCompletionEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0357"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a20:reservation:meta-restore-independent-reopen-proof"
@@ -25524,7 +27378,7 @@ symbol = "MetaRestoreTerminalTombstone"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x035a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:meta-retention-cut-floor"
@@ -26019,7 +27873,7 @@ symbol = "PortableRestoreSourceLeaseAuthorityObservation"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x038c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:portable-restore-source-lease-lineage-proof"
@@ -26037,7 +27891,7 @@ symbol = "PortableRestoreSourceLeaseReleaseTerminalEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x038e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:portable-semantic-visibility-certificate"
@@ -26514,7 +28368,7 @@ symbol = "RecoveryIncarnationTransformPlan"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03ac"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:released-visibility-bijection-proof"
@@ -26874,7 +28728,7 @@ symbol = "RestoreAbandonOperationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03d2"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-abandonment-manifest"
@@ -26883,7 +28737,7 @@ symbol = "RestoreAbandonmentManifest"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03d3"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-abandonment-pin-pending-owner"
@@ -26892,7 +28746,7 @@ symbol = "RestoreAbandonmentPinPendingOwner"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03d4"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-abandonment-receipt"
@@ -26901,7 +28755,7 @@ symbol = "RestoreAbandonmentReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03d5"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a17:reservation:restore-canonical-acquisition-working-set"
@@ -26946,7 +28800,7 @@ symbol = "RestoreLeaseBoundSourceAccessSet"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03da"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-lease-operation-terminal-accumulator"
@@ -26955,7 +28809,7 @@ symbol = "RestoreLeaseOperationTerminalAccumulator"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03db"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-lease-operation-terminal-index"
@@ -26964,7 +28818,7 @@ symbol = "RestoreLeaseOperationTerminalIndex"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03dc"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-lease-operation-terminal-record"
@@ -26973,7 +28827,7 @@ symbol = "RestoreLeaseOperationTerminalRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03dd"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-no-target-observation-proof"
@@ -26982,7 +28836,7 @@ symbol = "RestoreNoTargetObservationProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03de"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-promotion-root-seal"
@@ -27027,7 +28881,7 @@ symbol = "RestoreRegistry"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03e3"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a20:reservation:restore-service-promotion-manifest"
@@ -27054,7 +28908,7 @@ symbol = "RestoreShardAbandonAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03e6"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:restore-shard-activation-ack"
@@ -27126,7 +28980,7 @@ symbol = "RestoreSourceAccessRevocationOperationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03ee"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a17:reservation:restore-source-acquisition-bundle"
@@ -27162,7 +29016,7 @@ symbol = "RestoreSourceKeyAccessCleanupAccumulator"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03f2"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-source-key-access-cleanup-progress"
@@ -27171,7 +29025,7 @@ symbol = "RestoreSourceKeyAccessCleanupProgress"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03f3"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-source-key-access-cleanup-record"
@@ -27180,7 +29034,7 @@ symbol = "RestoreSourceKeyAccessCleanupRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03f4"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-source-key-access-inventory"
@@ -27189,7 +29043,7 @@ symbol = "RestoreSourceKeyAccessInventory"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03f5"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:restore-source-lease-acquire-receipt"
@@ -27207,7 +29061,7 @@ symbol = "RestoreSourceLeaseAuthorityObservationImport"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03f7"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:restore-source-lease-lineage-checkpoint-import"
@@ -27234,7 +29088,7 @@ symbol = "RestoreSourceLeaseReleaseOperationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03fa"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-source-lease-release-operation-summary"
@@ -27243,7 +29097,7 @@ symbol = "RestoreSourceLeaseReleaseOperationSummary"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03fb"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-source-lease-renew-operation-record"
@@ -27252,7 +29106,7 @@ symbol = "RestoreSourceLeaseRenewOperationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03fc"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:restore-source-lease-renew-receipt"
@@ -27270,7 +29124,7 @@ symbol = "RestoreSourceLeaseRenewalCloseRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03fe"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:restore-state"
@@ -27288,7 +29142,7 @@ symbol = "RestoreTerminalCleanupAuthority"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0400"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-terminal-physical-inventory"
@@ -27297,7 +29151,7 @@ symbol = "RestoreTerminalPhysicalInventory"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0401"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-terminal-pin-basis"
@@ -27306,7 +29160,7 @@ symbol = "RestoreTerminalPinBasis"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0402"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-terminal-pin-durability-receipt"
@@ -27315,7 +29169,7 @@ symbol = "RestoreTerminalPinDurabilityReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0403"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-terminal-pin-release-authorization"
@@ -27324,7 +29178,7 @@ symbol = "RestoreTerminalPinReleaseAuthorization"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0404"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:restore-visibility-commit-certificate"
@@ -28395,7 +30249,7 @@ symbol = "ShardRestoreAbandonmentTombstone"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0471"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a20:reservation:shard-restore-independent-reopen-proof"
@@ -28422,7 +30276,7 @@ symbol = "ShardRestoreSourceAccessClosure"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0474"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:shard-restore-source-lease-projection"
@@ -28440,7 +30294,7 @@ symbol = "ShardRestoreTerminalTombstone"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0476"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-retention-cut-floor"
@@ -29532,7 +31386,7 @@ symbol = "ArchiveLeaseReleaseReceipt"
 generic_signature = ""
 source_key = "top|ArchiveLeaseReleaseReceipt"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2409"]
 
 [[top_level_candidate]]
@@ -30212,7 +32066,7 @@ symbol = "AuthorityOwningRestoreAbandonmentTombstone"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2437"]
 
 [[top_level_candidate]]
@@ -31062,7 +32916,7 @@ symbol = "CatalogAuthorityHead"
 generic_signature = ""
 source_key = "top|CatalogAuthorityHead"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2427"]
 
 [[top_level_candidate]]
@@ -31082,7 +32936,7 @@ symbol = "CatalogTombstoneRestoreTargetReceipt"
 generic_signature = "<Contract>"
 source_key = "top|CatalogTombstoneRestoreTargetReceipt<Contract>"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2427"]
 
 [[top_level_candidate]]
@@ -33062,7 +34916,7 @@ symbol = "GlobalRestoreAbandonParticipantApplyCertificate"
 generic_signature = ""
 source_key = "top|GlobalRestoreAbandonParticipantApplyCertificate"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2449"]
 
 [[top_level_candidate]]
@@ -33092,7 +34946,7 @@ symbol = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
 generic_signature = ""
 source_key = "top|GlobalRestoreParticipantPinReleaseCompletionCertificate"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2419"]
 
 [[top_level_candidate]]
@@ -34432,7 +36286,7 @@ symbol = "LocalRestoreCompletionEvidence"
 generic_signature = ""
 source_key = "top|LocalRestoreCompletionEvidence"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2399"]
 
 [[top_level_candidate]]
@@ -34502,7 +36356,7 @@ symbol = "LocalRestoreTerminalTombstone"
 generic_signature = ""
 source_key = "top|LocalRestoreTerminalTombstone"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2411"]
 
 [[top_level_candidate]]
@@ -35032,7 +36886,7 @@ symbol = "MetaRestoreCompletionEvidence"
 generic_signature = ""
 source_key = "top|MetaRestoreCompletionEvidence"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2399"]
 
 [[top_level_candidate]]
@@ -35072,7 +36926,7 @@ symbol = "MetaRestoreTerminalTombstone"
 generic_signature = ""
 source_key = "top|MetaRestoreTerminalTombstone"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2411"]
 
 [[top_level_candidate]]
@@ -35662,7 +37516,7 @@ symbol = "PortableRestoreSourceLeaseAuthorityObservation"
 generic_signature = ""
 source_key = "top|PortableRestoreSourceLeaseAuthorityObservation"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2401"]
 
 [[top_level_candidate]]
@@ -35692,7 +37546,7 @@ symbol = "PortableRestoreSourceLeaseReleaseTerminalEvidence"
 generic_signature = ""
 source_key = "top|PortableRestoreSourceLeaseReleaseTerminalEvidence"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2407"]
 
 [[top_level_candidate]]
@@ -36832,7 +38686,7 @@ symbol = "RecoveryIncarnationTransformPlan"
 generic_signature = "<Role>"
 source_key = "top|RecoveryIncarnationTransformPlan<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2457"]
 
 [[top_level_candidate]]
@@ -37512,7 +39366,7 @@ symbol = "RestoreAbandonOperationRecord"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2435"]
 
 [[top_level_candidate]]
@@ -37572,7 +39426,7 @@ symbol = "RestoreAbandonmentManifest"
 generic_signature = ""
 source_key = "top|RestoreAbandonmentManifest"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2443"]
 
 [[top_level_candidate]]
@@ -37582,7 +39436,7 @@ symbol = "RestoreAbandonmentPinPendingOwner"
 generic_signature = "<Role>"
 source_key = "top|RestoreAbandonmentPinPendingOwner<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2379"]
 
 [[top_level_candidate]]
@@ -37602,7 +39456,7 @@ symbol = "RestoreAbandonmentReceipt"
 generic_signature = ""
 source_key = "top|RestoreAbandonmentReceipt"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2453"]
 
 [[top_level_candidate]]
@@ -37852,7 +39706,7 @@ symbol = "RestoreLeaseBoundSourceAccessSet"
 generic_signature = "<Role>"
 source_key = "top|RestoreLeaseBoundSourceAccessSet<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2355"]
 
 [[top_level_candidate]]
@@ -37882,7 +39736,7 @@ symbol = "RestoreLeaseOperationTerminalAccumulator"
 generic_signature = "<Role>"
 source_key = "top|RestoreLeaseOperationTerminalAccumulator<Role>"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2349"]
 
 [[top_level_candidate]]
@@ -37902,7 +39756,7 @@ symbol = "RestoreLeaseOperationTerminalIndex"
 generic_signature = "<Role>"
 source_key = "top|RestoreLeaseOperationTerminalIndex<Role>"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2349"]
 
 [[top_level_candidate]]
@@ -37912,7 +39766,7 @@ symbol = "RestoreLeaseOperationTerminalRecord"
 generic_signature = "<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
 source_key = "top|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2349"]
 
 [[top_level_candidate]]
@@ -37952,7 +39806,7 @@ symbol = "RestoreNoTargetObservationProof"
 generic_signature = "<Role>"
 source_key = "top|RestoreNoTargetObservationProof<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2421"]
 
 [[top_level_candidate]]
@@ -38072,7 +39926,7 @@ symbol = "RestoreRegistry"
 generic_signature = ""
 source_key = "top|RestoreRegistry"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2349"]
 
 [[top_level_candidate]]
@@ -38142,7 +39996,7 @@ symbol = "RestoreShardAbandonAck"
 generic_signature = ""
 source_key = "top|RestoreShardAbandonAck"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2451"]
 
 [[top_level_candidate]]
@@ -38222,7 +40076,7 @@ symbol = "RestoreSourceAccessRevocationOperationRecord"
 generic_signature = "<Role:AuthorityOwningRole,Kind>"
 source_key = "top|RestoreSourceAccessRevocationOperationRecord<Role:AuthorityOwningRole,Kind>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2359"]
 
 [[top_level_candidate]]
@@ -38292,7 +40146,7 @@ symbol = "RestoreSourceKeyAccessCleanupAccumulator"
 generic_signature = "<Role>"
 source_key = "top|RestoreSourceKeyAccessCleanupAccumulator<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2361"]
 
 [[top_level_candidate]]
@@ -38302,7 +40156,7 @@ symbol = "RestoreSourceKeyAccessCleanupProgress"
 generic_signature = "<Role>"
 source_key = "top|RestoreSourceKeyAccessCleanupProgress<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2359"]
 
 [[top_level_candidate]]
@@ -38312,7 +40166,7 @@ symbol = "RestoreSourceKeyAccessCleanupRecord"
 generic_signature = "<Role>"
 source_key = "top|RestoreSourceKeyAccessCleanupRecord<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2361"]
 
 [[top_level_candidate]]
@@ -38332,7 +40186,7 @@ symbol = "RestoreSourceKeyAccessInventory"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|RestoreSourceKeyAccessInventory<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2355"]
 
 [[top_level_candidate]]
@@ -38392,7 +40246,7 @@ symbol = "RestoreSourceLeaseAuthorityObservationImport"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2401"]
 
 [[top_level_candidate]]
@@ -38452,7 +40306,7 @@ symbol = "RestoreSourceLeaseReleaseOperationRecord"
 generic_signature = "<Role>"
 source_key = "top|RestoreSourceLeaseReleaseOperationRecord<Role>"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2405"]
 
 [[top_level_candidate]]
@@ -38462,7 +40316,7 @@ symbol = "RestoreSourceLeaseReleaseOperationSummary"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2411"]
 
 [[top_level_candidate]]
@@ -38492,7 +40346,7 @@ symbol = "RestoreSourceLeaseRenewOperationRecord"
 generic_signature = "<Role>"
 source_key = "top|RestoreSourceLeaseRenewOperationRecord<Role>"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2393"]
 
 [[top_level_candidate]]
@@ -38512,7 +40366,7 @@ symbol = "RestoreSourceLeaseRenewalCloseRecord"
 generic_signature = "<Role>"
 source_key = "top|RestoreSourceLeaseRenewalCloseRecord<Role>"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2351"]
 
 [[top_level_candidate]]
@@ -38542,7 +40396,7 @@ symbol = "RestoreTerminalCleanupAuthority"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2397"]
 
 [[top_level_candidate]]
@@ -38562,7 +40416,7 @@ symbol = "RestoreTerminalPhysicalInventory"
 generic_signature = "<Role,Disposition>"
 source_key = "top|RestoreTerminalPhysicalInventory<Role,Disposition>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2363"]
 
 [[top_level_candidate]]
@@ -38572,7 +40426,7 @@ symbol = "RestoreTerminalPinBasis"
 generic_signature = "<Role>"
 source_key = "top|RestoreTerminalPinBasis<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2373"]
 
 [[top_level_candidate]]
@@ -38582,7 +40436,7 @@ symbol = "RestoreTerminalPinDurabilityReceipt"
 generic_signature = "<Role,Disposition>"
 source_key = "top|RestoreTerminalPinDurabilityReceipt<Role,Disposition>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2369"]
 
 [[top_level_candidate]]
@@ -38612,7 +40466,7 @@ symbol = "RestoreTerminalPinReleaseAuthorization"
 generic_signature = ""
 source_key = "top|RestoreTerminalPinReleaseAuthorization"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2415"]
 
 [[top_level_candidate]]
@@ -40032,7 +41886,7 @@ symbol = "ShardRestoreAbandonmentTombstone"
 generic_signature = ""
 source_key = "top|ShardRestoreAbandonmentTombstone"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2439"]
 
 [[top_level_candidate]]
@@ -40122,7 +41976,7 @@ symbol = "ShardRestoreSourceAccessClosure"
 generic_signature = ""
 source_key = "top|ShardRestoreSourceAccessClosure"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2387"]
 
 [[top_level_candidate]]
@@ -40182,7 +42036,7 @@ symbol = "ShardRestoreTerminalTombstone"
 generic_signature = ""
 source_key = "top|ShardRestoreTerminalTombstone"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2387"]
 
 [[top_level_candidate]]
@@ -54245,6 +56099,1126 @@ target_row_id = "a04:field:validated-remote-configuration-anchor-consumer-applie
 slice_id = "a04"
 source_key = "field|ValidatedRemoteConfigurationAnchor|ValidatedRemoteConfigurationAnchor.consumer_applied_identity|consumer_applied_identity"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-archive-lease-release-receipt"
+target_row_id = "a18:logical-kind:archive-lease-release-receipt"
+slice_id = "a18"
+source_key = "top|ArchiveLeaseReleaseReceipt"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-authority-owning-restore-abandonment-tombstone"
+target_row_id = "a18:logical-kind:authority-owning-restore-abandonment-tombstone"
+slice_id = "a18"
+source_key = "top|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-catalog-authority-head"
+target_row_id = "a18:logical-kind:catalog-authority-head"
+slice_id = "a18"
+source_key = "top|CatalogAuthorityHead"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-catalog-tombstone-restore-target-receipt"
+target_row_id = "a18:logical-kind:catalog-tombstone-restore-target-receipt"
+slice_id = "a18"
+source_key = "top|CatalogTombstoneRestoreTargetReceipt<Contract>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-global-restore-abandon-participant-apply-certificate"
+target_row_id = "a18:logical-kind:global-restore-abandon-participant-apply-certificate"
+slice_id = "a18"
+source_key = "top|GlobalRestoreAbandonParticipantApplyCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-global-restore-participant-pin-release-completion-certificate"
+target_row_id = "a18:logical-kind:global-restore-participant-pin-release-completion-certificate"
+slice_id = "a18"
+source_key = "top|GlobalRestoreParticipantPinReleaseCompletionCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-local-restore-completion-evidence"
+target_row_id = "a18:logical-kind:local-restore-completion-evidence"
+slice_id = "a18"
+source_key = "top|LocalRestoreCompletionEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-local-restore-terminal-tombstone"
+target_row_id = "a18:logical-kind:local-restore-terminal-tombstone"
+slice_id = "a18"
+source_key = "top|LocalRestoreTerminalTombstone"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-meta-restore-completion-evidence"
+target_row_id = "a18:logical-kind:meta-restore-completion-evidence"
+slice_id = "a18"
+source_key = "top|MetaRestoreCompletionEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-meta-restore-terminal-tombstone"
+target_row_id = "a18:logical-kind:meta-restore-terminal-tombstone"
+slice_id = "a18"
+source_key = "top|MetaRestoreTerminalTombstone"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-portable-restore-source-lease-authority-observation"
+target_row_id = "a18:logical-kind:portable-restore-source-lease-authority-observation"
+slice_id = "a18"
+source_key = "top|PortableRestoreSourceLeaseAuthorityObservation"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-portable-restore-source-lease-release-terminal-evidence"
+target_row_id = "a18:logical-kind:portable-restore-source-lease-release-terminal-evidence"
+slice_id = "a18"
+source_key = "top|PortableRestoreSourceLeaseReleaseTerminalEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-recovery-incarnation-transform-plan"
+target_row_id = "a18:logical-kind:recovery-incarnation-transform-plan"
+slice_id = "a18"
+source_key = "top|RecoveryIncarnationTransformPlan<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-abandon-operation-record"
+target_row_id = "a18:logical-kind:restore-abandon-operation-record"
+slice_id = "a18"
+source_key = "top|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-abandonment-manifest"
+target_row_id = "a18:logical-kind:restore-abandonment-manifest"
+slice_id = "a18"
+source_key = "top|RestoreAbandonmentManifest"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-abandonment-pin-pending-owner"
+target_row_id = "a18:logical-kind:restore-abandonment-pin-pending-owner"
+slice_id = "a18"
+source_key = "top|RestoreAbandonmentPinPendingOwner<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-abandonment-receipt"
+target_row_id = "a18:logical-kind:restore-abandonment-receipt"
+slice_id = "a18"
+source_key = "top|RestoreAbandonmentReceipt"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-lease-bound-source-access-set"
+target_row_id = "a18:logical-kind:restore-lease-bound-source-access-set"
+slice_id = "a18"
+source_key = "top|RestoreLeaseBoundSourceAccessSet<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-lease-operation-terminal-accumulator"
+target_row_id = "a18:logical-kind:restore-lease-operation-terminal-accumulator"
+slice_id = "a18"
+source_key = "top|RestoreLeaseOperationTerminalAccumulator<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-lease-operation-terminal-index"
+target_row_id = "a18:logical-kind:restore-lease-operation-terminal-index"
+slice_id = "a18"
+source_key = "top|RestoreLeaseOperationTerminalIndex<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-lease-operation-terminal-record"
+target_row_id = "a18:logical-kind:restore-lease-operation-terminal-record"
+slice_id = "a18"
+source_key = "top|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-no-target-observation-proof"
+target_row_id = "a18:logical-kind:restore-no-target-observation-proof"
+slice_id = "a18"
+source_key = "top|RestoreNoTargetObservationProof<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-registry"
+target_row_id = "a18:logical-kind:restore-registry"
+slice_id = "a18"
+source_key = "top|RestoreRegistry"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-shard-abandon-ack"
+target_row_id = "a18:logical-kind:restore-shard-abandon-ack"
+slice_id = "a18"
+source_key = "top|RestoreShardAbandonAck"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-source-access-revocation-operation-record"
+target_row_id = "a18:logical-kind:restore-source-access-revocation-operation-record"
+slice_id = "a18"
+source_key = "top|RestoreSourceAccessRevocationOperationRecord<Role:AuthorityOwningRole,Kind>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-source-key-access-cleanup-accumulator"
+target_row_id = "a18:logical-kind:restore-source-key-access-cleanup-accumulator"
+slice_id = "a18"
+source_key = "top|RestoreSourceKeyAccessCleanupAccumulator<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-source-key-access-cleanup-progress"
+target_row_id = "a18:logical-kind:restore-source-key-access-cleanup-progress"
+slice_id = "a18"
+source_key = "top|RestoreSourceKeyAccessCleanupProgress<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-source-key-access-cleanup-record"
+target_row_id = "a18:logical-kind:restore-source-key-access-cleanup-record"
+slice_id = "a18"
+source_key = "top|RestoreSourceKeyAccessCleanupRecord<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-source-key-access-inventory"
+target_row_id = "a18:logical-kind:restore-source-key-access-inventory"
+slice_id = "a18"
+source_key = "top|RestoreSourceKeyAccessInventory<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-source-lease-authority-observation-import"
+target_row_id = "a18:logical-kind:restore-source-lease-authority-observation-import"
+slice_id = "a18"
+source_key = "top|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-source-lease-release-operation-record"
+target_row_id = "a18:logical-kind:restore-source-lease-release-operation-record"
+slice_id = "a18"
+source_key = "top|RestoreSourceLeaseReleaseOperationRecord<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-source-lease-release-operation-summary"
+target_row_id = "a18:logical-kind:restore-source-lease-release-operation-summary"
+slice_id = "a18"
+source_key = "top|RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-source-lease-renew-operation-record"
+target_row_id = "a18:logical-kind:restore-source-lease-renew-operation-record"
+slice_id = "a18"
+source_key = "top|RestoreSourceLeaseRenewOperationRecord<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-source-lease-renewal-close-record"
+target_row_id = "a18:logical-kind:restore-source-lease-renewal-close-record"
+slice_id = "a18"
+source_key = "top|RestoreSourceLeaseRenewalCloseRecord<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-terminal-cleanup-authority"
+target_row_id = "a18:logical-kind:restore-terminal-cleanup-authority"
+slice_id = "a18"
+source_key = "top|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-terminal-physical-inventory"
+target_row_id = "a18:logical-kind:restore-terminal-physical-inventory"
+slice_id = "a18"
+source_key = "top|RestoreTerminalPhysicalInventory<Role,Disposition>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-terminal-pin-basis"
+target_row_id = "a18:logical-kind:restore-terminal-pin-basis"
+slice_id = "a18"
+source_key = "top|RestoreTerminalPinBasis<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-terminal-pin-durability-receipt"
+target_row_id = "a18:logical-kind:restore-terminal-pin-durability-receipt"
+slice_id = "a18"
+source_key = "top|RestoreTerminalPinDurabilityReceipt<Role,Disposition>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-terminal-pin-release-authorization"
+target_row_id = "a18:logical-kind:restore-terminal-pin-release-authorization"
+slice_id = "a18"
+source_key = "top|RestoreTerminalPinReleaseAuthorization"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-shard-restore-abandonment-tombstone"
+target_row_id = "a18:logical-kind:shard-restore-abandonment-tombstone"
+slice_id = "a18"
+source_key = "top|ShardRestoreAbandonmentTombstone"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-shard-restore-source-access-closure"
+target_row_id = "a18:logical-kind:shard-restore-source-access-closure"
+slice_id = "a18"
+source_key = "top|ShardRestoreSourceAccessClosure"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-shard-restore-terminal-tombstone"
+target_row_id = "a18:logical-kind:shard-restore-terminal-tombstone"
+slice_id = "a18"
+source_key = "top|ShardRestoreTerminalTombstone"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-archive-lease-release-receipt-outcome-1d6b26f22bd061ff"
+target_row_id = "a18:union:archive-lease-release-receipt-outcome-1d6b26f22bd061ff"
+slice_id = "a18"
+source_key = "union|ArchiveLeaseReleaseReceipt|ArchiveLeaseReleaseReceipt.outcome"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-archive-lease-release-receipt-outcome-released-742c0e0b4c83674c"
+target_row_id = "a18:union-arm:archive-lease-release-receipt-outcome-released-742c0e0b4c83674c"
+slice_id = "a18"
+source_key = "arm|ArchiveLeaseReleaseReceipt|ArchiveLeaseReleaseReceipt.outcome|Released"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-archive-lease-release-receipt-outcome-already-released-f33ad43517632cd7"
+target_row_id = "a18:union-arm:archive-lease-release-receipt-outcome-already-released-f33ad43517632cd7"
+slice_id = "a18"
+source_key = "arm|ArchiveLeaseReleaseReceipt|ArchiveLeaseReleaseReceipt.outcome|AlreadyReleased"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-archive-lease-release-receipt-outcome-already-expired-32f551781b3d803c"
+target_row_id = "a18:union-arm:archive-lease-release-receipt-outcome-already-expired-32f551781b3d803c"
+slice_id = "a18"
+source_key = "arm|ArchiveLeaseReleaseReceipt|ArchiveLeaseReleaseReceipt.outcome|AlreadyExpired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-authority-owning-restore-abandonment-tombstone-profile-applied-basis-95b539201bf7e700"
+target_row_id = "a18:union:authority-owning-restore-abandonment-tombstone-profile-applied-basis-95b539201bf7e700"
+slice_id = "a18"
+source_key = "union|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-authority-owning-restore-abandonment-tombstone-profile-applied-basis-external-cas-cataloged-75b7ce335dc4f0a2"
+target_row_id = "a18:union-arm:authority-owning-restore-abandonment-tombstone-profile-applied-basis-external-cas-cataloged-75b7ce335dc4f0a2"
+slice_id = "a18"
+source_key = "arm|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis|ExternalCasCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-authority-owning-restore-abandonment-tombstone-profile-applied-basis-directory-bound-cataloged-8fb7d1f3c5c6eb96"
+target_row_id = "a18:union-arm:authority-owning-restore-abandonment-tombstone-profile-applied-basis-directory-bound-cataloged-8fb7d1f3c5c6eb96"
+slice_id = "a18"
+source_key = "arm|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis|DirectoryBoundCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-authority-owning-restore-abandonment-tombstone-profile-applied-basis-directory-bound-embedded-no-catalog-34fe39944886ddc5"
+target_row_id = "a18:union-arm:authority-owning-restore-abandonment-tombstone-profile-applied-basis-directory-bound-embedded-no-catalog-34fe39944886ddc5"
+slice_id = "a18"
+source_key = "arm|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis|DirectoryBoundEmbeddedNoCatalog"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-catalog-authority-head-predecessor-bd5acc9545a65eca"
+target_row_id = "a18:union:catalog-authority-head-predecessor-bd5acc9545a65eca"
+slice_id = "a18"
+source_key = "union|CatalogAuthorityHead|CatalogAuthorityHead.predecessor"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-catalog-authority-head-predecessor-absent-f245ffd2348a4c0a"
+target_row_id = "a18:union-arm:catalog-authority-head-predecessor-absent-f245ffd2348a4c0a"
+slice_id = "a18"
+source_key = "arm|CatalogAuthorityHead|CatalogAuthorityHead.predecessor|Absent"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-catalog-authority-head-predecessor-prior-eeac9f168540c3e2"
+target_row_id = "a18:union-arm:catalog-authority-head-predecessor-prior-eeac9f168540c3e2"
+slice_id = "a18"
+source_key = "arm|CatalogAuthorityHead|CatalogAuthorityHead.predecessor|Prior"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-catalog-authority-head-state-d8a17ab4bdcc60f0"
+target_row_id = "a18:union:catalog-authority-head-state-d8a17ab4bdcc60f0"
+slice_id = "a18"
+source_key = "union|CatalogAuthorityHead|CatalogAuthorityHead.state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-catalog-authority-head-state-reserved-hidden-606dfbbafc35a5fc"
+target_row_id = "a18:union-arm:catalog-authority-head-state-reserved-hidden-606dfbbafc35a5fc"
+slice_id = "a18"
+source_key = "arm|CatalogAuthorityHead|CatalogAuthorityHead.state|ReservedHidden"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-catalog-authority-head-state-activated-hidden-bc85d7b62a81f3c0"
+target_row_id = "a18:union-arm:catalog-authority-head-state-activated-hidden-bc85d7b62a81f3c0"
+slice_id = "a18"
+source_key = "arm|CatalogAuthorityHead|CatalogAuthorityHead.state|ActivatedHidden"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-catalog-authority-head-state-tombstoned-no-endpoint-565db822664edfab"
+target_row_id = "a18:union-arm:catalog-authority-head-state-tombstoned-no-endpoint-565db822664edfab"
+slice_id = "a18"
+source_key = "arm|CatalogAuthorityHead|CatalogAuthorityHead.state|TombstonedNoEndpoint"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-local-restore-completion-evidence-18234040960caa36"
+target_row_id = "a18:union:local-restore-completion-evidence-18234040960caa36"
+slice_id = "a18"
+source_key = "union|LocalRestoreCompletionEvidence|LocalRestoreCompletionEvidence"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-local-restore-completion-evidence-operational-7eb33df63c473ac4"
+target_row_id = "a18:union-arm:local-restore-completion-evidence-operational-7eb33df63c473ac4"
+slice_id = "a18"
+source_key = "arm|LocalRestoreCompletionEvidence|LocalRestoreCompletionEvidence|Operational"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-local-restore-completion-evidence-abandoned-2e9ae51103ad48aa"
+target_row_id = "a18:union-arm:local-restore-completion-evidence-abandoned-2e9ae51103ad48aa"
+slice_id = "a18"
+source_key = "arm|LocalRestoreCompletionEvidence|LocalRestoreCompletionEvidence|Abandoned"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-meta-restore-completion-evidence-41b4db2af7452734"
+target_row_id = "a18:union:meta-restore-completion-evidence-41b4db2af7452734"
+slice_id = "a18"
+source_key = "union|MetaRestoreCompletionEvidence|MetaRestoreCompletionEvidence"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-meta-restore-completion-evidence-operational-dabaf60fd388d79c"
+target_row_id = "a18:union-arm:meta-restore-completion-evidence-operational-dabaf60fd388d79c"
+slice_id = "a18"
+source_key = "arm|MetaRestoreCompletionEvidence|MetaRestoreCompletionEvidence|Operational"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-meta-restore-completion-evidence-abandoned-90643685219559f1"
+target_row_id = "a18:union-arm:meta-restore-completion-evidence-abandoned-90643685219559f1"
+slice_id = "a18"
+source_key = "arm|MetaRestoreCompletionEvidence|MetaRestoreCompletionEvidence|Abandoned"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-portable-restore-source-lease-authority-observation-action-binding-7ac66fdaf5c40f90"
+target_row_id = "a18:union:portable-restore-source-lease-authority-observation-action-binding-7ac66fdaf5c40f90"
+slice_id = "a18"
+source_key = "union|PortableRestoreSourceLeaseAuthorityObservation|PortableRestoreSourceLeaseAuthorityObservation.action_binding"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-portable-restore-source-lease-authority-observation-action-binding-renew-61706730a8dec4cf"
+target_row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-action-binding-renew-61706730a8dec4cf"
+slice_id = "a18"
+source_key = "arm|PortableRestoreSourceLeaseAuthorityObservation|PortableRestoreSourceLeaseAuthorityObservation.action_binding|Renew"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-portable-restore-source-lease-authority-observation-action-binding-release-a411be1bf6259f93"
+target_row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-action-binding-release-a411be1bf6259f93"
+slice_id = "a18"
+source_key = "arm|PortableRestoreSourceLeaseAuthorityObservation|PortableRestoreSourceLeaseAuthorityObservation.action_binding|Release"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-portable-restore-source-lease-authority-observation-action-binding-status-79edcc8e984bf620"
+target_row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-action-binding-status-79edcc8e984bf620"
+slice_id = "a18"
+source_key = "arm|PortableRestoreSourceLeaseAuthorityObservation|PortableRestoreSourceLeaseAuthorityObservation.action_binding|Status"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-portable-restore-source-lease-authority-observation-head-state-293df0d9d519082c"
+target_row_id = "a18:union:portable-restore-source-lease-authority-observation-head-state-293df0d9d519082c"
+slice_id = "a18"
+source_key = "union|PortableRestoreSourceLeaseAuthorityObservation|PortableRestoreSourceLeaseAuthorityObservation.head_state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-portable-restore-source-lease-authority-observation-head-state-active-023b892dcbeaf0ba"
+target_row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-head-state-active-023b892dcbeaf0ba"
+slice_id = "a18"
+source_key = "arm|PortableRestoreSourceLeaseAuthorityObservation|PortableRestoreSourceLeaseAuthorityObservation.head_state|Active"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-portable-restore-source-lease-authority-observation-head-state-released-02edb1f4e02362b3"
+target_row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-head-state-released-02edb1f4e02362b3"
+slice_id = "a18"
+source_key = "arm|PortableRestoreSourceLeaseAuthorityObservation|PortableRestoreSourceLeaseAuthorityObservation.head_state|Released"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-portable-restore-source-lease-authority-observation-window-class-9cbb7d5a6fecaa9c"
+target_row_id = "a18:union:portable-restore-source-lease-authority-observation-window-class-9cbb7d5a6fecaa9c"
+slice_id = "a18"
+source_key = "union|PortableRestoreSourceLeaseAuthorityObservation|PortableRestoreSourceLeaseAuthorityObservation.window_class"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-portable-restore-source-lease-authority-observation-window-class-usable-3c4a80de3d344c9e"
+target_row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-window-class-usable-3c4a80de3d344c9e"
+slice_id = "a18"
+source_key = "arm|PortableRestoreSourceLeaseAuthorityObservation|PortableRestoreSourceLeaseAuthorityObservation.window_class|Usable"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-portable-restore-source-lease-authority-observation-window-class-expired-f9a857bd013d0b84"
+target_row_id = "a18:union-arm:portable-restore-source-lease-authority-observation-window-class-expired-f9a857bd013d0b84"
+slice_id = "a18"
+source_key = "arm|PortableRestoreSourceLeaseAuthorityObservation|PortableRestoreSourceLeaseAuthorityObservation.window_class|Expired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-recovery-incarnation-transform-plan-mode-2edb7a2d33c3d54f"
+target_row_id = "a18:union:recovery-incarnation-transform-plan-mode-2edb7a2d33c3d54f"
+slice_id = "a18"
+source_key = "union|RecoveryIncarnationTransformPlan<Role>|RecoveryIncarnationTransformPlan<Role>.mode"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-recovery-incarnation-transform-plan-mode-recover-same-identity-bbff53c1658c4af0"
+target_row_id = "a18:union-arm:recovery-incarnation-transform-plan-mode-recover-same-identity-bbff53c1658c4af0"
+slice_id = "a18"
+source_key = "arm|RecoveryIncarnationTransformPlan<Role>|RecoveryIncarnationTransformPlan<Role>.mode|RecoverSameIdentity"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-recovery-incarnation-transform-plan-mode-clone-new-identity-93cff6b21a574c70"
+target_row_id = "a18:union-arm:recovery-incarnation-transform-plan-mode-clone-new-identity-93cff6b21a574c70"
+slice_id = "a18"
+source_key = "arm|RecoveryIncarnationTransformPlan<Role>|RecoveryIncarnationTransformPlan<Role>.mode|CloneNewIdentity"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-recovery-incarnation-transform-plan-source-posture-af75644209b3601d"
+target_row_id = "a18:union:recovery-incarnation-transform-plan-source-posture-af75644209b3601d"
+slice_id = "a18"
+source_key = "union|RecoveryIncarnationTransformPlan<Role>|RecoveryIncarnationTransformPlan<Role>.source_posture"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-recovery-incarnation-transform-plan-source-posture-local-13324964008c6740"
+target_row_id = "a18:union-arm:recovery-incarnation-transform-plan-source-posture-local-13324964008c6740"
+slice_id = "a18"
+source_key = "arm|RecoveryIncarnationTransformPlan<Role>|RecoveryIncarnationTransformPlan<Role>.source_posture|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-recovery-incarnation-transform-plan-source-posture-sharded-0a3c44bee305cc93"
+target_row_id = "a18:union-arm:recovery-incarnation-transform-plan-source-posture-sharded-0a3c44bee305cc93"
+slice_id = "a18"
+source_key = "arm|RecoveryIncarnationTransformPlan<Role>|RecoveryIncarnationTransformPlan<Role>.source_posture|Sharded"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-abandon-operation-record-pin-owner-plan-94293edb4d3161cd"
+target_row_id = "a18:union:restore-abandon-operation-record-pin-owner-plan-94293edb4d3161cd"
+slice_id = "a18"
+source_key = "union|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-abandon-operation-record-pin-owner-plan-local-5918657f01fb5f9a"
+target_row_id = "a18:union-arm:restore-abandon-operation-record-pin-owner-plan-local-5918657f01fb5f9a"
+slice_id = "a18"
+source_key = "arm|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-abandon-operation-record-pin-owner-plan-meta-84a23bd25b15c04e"
+target_row_id = "a18:union-arm:restore-abandon-operation-record-pin-owner-plan-meta-84a23bd25b15c04e"
+slice_id = "a18"
+source_key = "arm|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan|Meta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-abandon-operation-record-profile-operation-plan-998fc35caab0624a"
+target_row_id = "a18:union:restore-abandon-operation-record-profile-operation-plan-998fc35caab0624a"
+slice_id = "a18"
+source_key = "union|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-abandon-operation-record-profile-operation-plan-external-cas-cataloged-efbfbe1ec90cec18"
+target_row_id = "a18:union-arm:restore-abandon-operation-record-profile-operation-plan-external-cas-cataloged-efbfbe1ec90cec18"
+slice_id = "a18"
+source_key = "arm|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan|ExternalCasCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-abandon-operation-record-profile-operation-plan-directory-bound-cataloged-2ded0fd1881fc015"
+target_row_id = "a18:union-arm:restore-abandon-operation-record-profile-operation-plan-directory-bound-cataloged-2ded0fd1881fc015"
+slice_id = "a18"
+source_key = "arm|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan|DirectoryBoundCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-abandon-operation-record-profile-operation-plan-directory-bound-embedded-no-catalog-0bea5e6dd9a91d09"
+target_row_id = "a18:union-arm:restore-abandon-operation-record-profile-operation-plan-directory-bound-embedded-no-catalog-0bea5e6dd9a91d09"
+slice_id = "a18"
+source_key = "arm|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan|DirectoryBoundEmbeddedNoCatalog"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-abandonment-receipt-76630daa8e2451b6"
+target_row_id = "a18:union:restore-abandonment-receipt-76630daa8e2451b6"
+slice_id = "a18"
+source_key = "union|RestoreAbandonmentReceipt|RestoreAbandonmentReceipt"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-abandonment-receipt-external-cas-cataloged-e2eee458f1e981eb"
+target_row_id = "a18:union-arm:restore-abandonment-receipt-external-cas-cataloged-e2eee458f1e981eb"
+slice_id = "a18"
+source_key = "arm|RestoreAbandonmentReceipt|RestoreAbandonmentReceipt|ExternalCasCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-abandonment-receipt-directory-bound-cataloged-d47791930dadb63f"
+target_row_id = "a18:union-arm:restore-abandonment-receipt-directory-bound-cataloged-d47791930dadb63f"
+slice_id = "a18"
+source_key = "arm|RestoreAbandonmentReceipt|RestoreAbandonmentReceipt|DirectoryBoundCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-abandonment-receipt-directory-bound-embedded-no-catalog-722bbb548a6bb26e"
+target_row_id = "a18:union-arm:restore-abandonment-receipt-directory-bound-embedded-no-catalog-722bbb548a6bb26e"
+slice_id = "a18"
+source_key = "arm|RestoreAbandonmentReceipt|RestoreAbandonmentReceipt|DirectoryBoundEmbeddedNoCatalog"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-lease-operation-terminal-record-terminal-9f22fdf83d7d959f"
+target_row_id = "a18:union:restore-lease-operation-terminal-record-terminal-9f22fdf83d7d959f"
+slice_id = "a18"
+source_key = "union|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-lease-operation-terminal-record-terminal-applied-e4565087b720d658"
+target_row_id = "a18:union-arm:restore-lease-operation-terminal-record-terminal-applied-e4565087b720d658"
+slice_id = "a18"
+source_key = "arm|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal|Applied"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-lease-operation-terminal-record-terminal-never-sent-16101251861f9299"
+target_row_id = "a18:union-arm:restore-lease-operation-terminal-record-terminal-never-sent-16101251861f9299"
+slice_id = "a18"
+source_key = "arm|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal|NeverSent"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-lease-operation-terminal-record-terminal-no-effect-09ac4c24864f5683"
+target_row_id = "a18:union-arm:restore-lease-operation-terminal-record-terminal-no-effect-09ac4c24864f5683"
+slice_id = "a18"
+source_key = "arm|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal|NoEffect"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-registry-0d7cbb92cfeaed00"
+target_row_id = "a18:union:restore-registry-0d7cbb92cfeaed00"
+slice_id = "a18"
+source_key = "union|RestoreRegistry|RestoreRegistry"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-registry-local-04b09141dbd11e64"
+target_row_id = "a18:union-arm:restore-registry-local-04b09141dbd11e64"
+slice_id = "a18"
+source_key = "arm|RestoreRegistry|RestoreRegistry|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-registry-meta-3274759497582aa0"
+target_row_id = "a18:union-arm:restore-registry-meta-3274759497582aa0"
+slice_id = "a18"
+source_key = "arm|RestoreRegistry|RestoreRegistry|Meta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-registry-shard-f1520b05e1295626"
+target_row_id = "a18:union-arm:restore-registry-shard-f1520b05e1295626"
+slice_id = "a18"
+source_key = "arm|RestoreRegistry|RestoreRegistry|Shard"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-registry-local-activity-0a49fa61e8e5d6be"
+target_row_id = "a18:union:restore-registry-local-activity-0a49fa61e8e5d6be"
+slice_id = "a18"
+source_key = "union|RestoreRegistry|RestoreRegistry.Local.activity"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-registry-local-activity-idle-69ab982ad59336b6"
+target_row_id = "a18:union-arm:restore-registry-local-activity-idle-69ab982ad59336b6"
+slice_id = "a18"
+source_key = "arm|RestoreRegistry|RestoreRegistry.Local.activity|Idle"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-registry-local-activity-one-live-57d643597718432d"
+target_row_id = "a18:union-arm:restore-registry-local-activity-one-live-57d643597718432d"
+slice_id = "a18"
+source_key = "arm|RestoreRegistry|RestoreRegistry.Local.activity|OneLive"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-registry-meta-activity-5a65ac1f2e727e2a"
+target_row_id = "a18:union:restore-registry-meta-activity-5a65ac1f2e727e2a"
+slice_id = "a18"
+source_key = "union|RestoreRegistry|RestoreRegistry.Meta.activity"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-registry-meta-activity-idle-73849a1420176aa3"
+target_row_id = "a18:union-arm:restore-registry-meta-activity-idle-73849a1420176aa3"
+slice_id = "a18"
+source_key = "arm|RestoreRegistry|RestoreRegistry.Meta.activity|Idle"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-registry-meta-activity-one-live-99834f33b201421d"
+target_row_id = "a18:union-arm:restore-registry-meta-activity-one-live-99834f33b201421d"
+slice_id = "a18"
+source_key = "arm|RestoreRegistry|RestoreRegistry.Meta.activity|OneLive"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-registry-shard-activity-5bf568554f4b4647"
+target_row_id = "a18:union:restore-registry-shard-activity-5bf568554f4b4647"
+slice_id = "a18"
+source_key = "union|RestoreRegistry|RestoreRegistry.Shard.activity"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-registry-shard-activity-idle-2ad419c98e86a5f0"
+target_row_id = "a18:union-arm:restore-registry-shard-activity-idle-2ad419c98e86a5f0"
+slice_id = "a18"
+source_key = "arm|RestoreRegistry|RestoreRegistry.Shard.activity|Idle"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-registry-shard-activity-one-live-dec19709dd6046c8"
+target_row_id = "a18:union-arm:restore-registry-shard-activity-one-live-dec19709dd6046c8"
+slice_id = "a18"
+source_key = "arm|RestoreRegistry|RestoreRegistry.Shard.activity|OneLive"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-source-key-access-cleanup-progress-sorted-resource-states-fc9773d6b4ca3e18"
+target_row_id = "a18:union:restore-source-key-access-cleanup-progress-sorted-resource-states-fc9773d6b4ca3e18"
+slice_id = "a18"
+source_key = "union|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-source-key-access-cleanup-progress-sorted-resource-states-promoted-target-key-terminal-4936d43553f91651"
+target_row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-promoted-target-key-terminal-4936d43553f91651"
+slice_id = "a18"
+source_key = "arm|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states|PromotedTargetKeyTerminal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-source-key-access-cleanup-progress-sorted-resource-states-ephemeral-closed-terminal-6b999918885e89f2"
+target_row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-ephemeral-closed-terminal-6b999918885e89f2"
+slice_id = "a18"
+source_key = "arm|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states|EphemeralClosedTerminal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-source-key-access-cleanup-progress-sorted-resource-states-lease-bound-pending-release-da503974de248a51"
+target_row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-lease-bound-pending-release-da503974de248a51"
+slice_id = "a18"
+source_key = "arm|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states|LeaseBoundPendingRelease"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-pending-af89de7afa48b2a2"
+target_row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-pending-af89de7afa48b2a2"
+slice_id = "a18"
+source_key = "arm|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states|ExplicitRevocationPending"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-authorized-097f5a4815367938"
+target_row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-authorized-097f5a4815367938"
+slice_id = "a18"
+source_key = "arm|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states|ExplicitRevocationAuthorized"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-pending-after-authorized-never-armed-deb001185b052105"
+target_row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-pending-after-authorized-never-armed-deb001185b052105"
+slice_id = "a18"
+source_key = "arm|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states|ExplicitRevocationPendingAfterAuthorizedNeverArmed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-terminal-db7f0598fd7a76a1"
+target_row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-explicit-revocation-terminal-db7f0598fd7a76a1"
+slice_id = "a18"
+source_key = "arm|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states|ExplicitRevocationTerminal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-source-key-access-cleanup-progress-sorted-resource-states-provider-already-closed-terminal-5b356e4807987a53"
+target_row_id = "a18:union-arm:restore-source-key-access-cleanup-progress-sorted-resource-states-provider-already-closed-terminal-5b356e4807987a53"
+slice_id = "a18"
+source_key = "arm|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states|ProviderAlreadyClosedTerminal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-terminal-cleanup-authority-allowed-effects-ad64b259062bc307"
+target_row_id = "a18:union:restore-terminal-cleanup-authority-allowed-effects-ad64b259062bc307"
+slice_id = "a18"
+source_key = "union|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-cleanup-authority-allowed-effects-source-access-cleanup-3d3cc783a79626cc"
+target_row_id = "a18:union-arm:restore-terminal-cleanup-authority-allowed-effects-source-access-cleanup-3d3cc783a79626cc"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects|SourceAccessCleanup"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-cleanup-authority-allowed-effects-close-source-lease-renewal-db84f3e18c0ea921"
+target_row_id = "a18:union-arm:restore-terminal-cleanup-authority-allowed-effects-close-source-lease-renewal-db84f3e18c0ea921"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects|CloseSourceLeaseRenewal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-cleanup-authority-allowed-effects-release-source-lease-3552b14bd98dec99"
+target_row_id = "a18:union-arm:restore-terminal-cleanup-authority-allowed-effects-release-source-lease-3552b14bd98dec99"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects|ReleaseSourceLease"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-cleanup-authority-allowed-effects-release-terminal-pins-740fa3ce02b20a1a"
+target_row_id = "a18:union-arm:restore-terminal-cleanup-authority-allowed-effects-release-terminal-pins-740fa3ce02b20a1a"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects|ReleaseTerminalPins"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-cleanup-authority-allowed-effects-compact-restore-evidence-cbf84064249335c4"
+target_row_id = "a18:union-arm:restore-terminal-cleanup-authority-allowed-effects-compact-restore-evidence-cbf84064249335c4"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects|CompactRestoreEvidence"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-terminal-cleanup-authority-terminal-disposition-d7ae19b49a4f2896"
+target_row_id = "a18:union:restore-terminal-cleanup-authority-terminal-disposition-d7ae19b49a4f2896"
+slice_id = "a18"
+source_key = "union|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.terminal_disposition"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-cleanup-authority-terminal-disposition-operational-ec4948fc2462840e"
+target_row_id = "a18:union-arm:restore-terminal-cleanup-authority-terminal-disposition-operational-ec4948fc2462840e"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.terminal_disposition|Operational"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-cleanup-authority-terminal-disposition-abandoned-fec918a6ce7b107d"
+target_row_id = "a18:union-arm:restore-terminal-cleanup-authority-terminal-disposition-abandoned-fec918a6ce7b107d"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.terminal_disposition|Abandoned"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-terminal-physical-inventory-availability-requirement-4e10afe31a02c456"
+target_row_id = "a18:union:restore-terminal-physical-inventory-availability-requirement-4e10afe31a02c456"
+slice_id = "a18"
+source_key = "union|RestoreTerminalPhysicalInventory<Role,Disposition>|RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-physical-inventory-availability-requirement-independent-reopen-02fa7e6611c978ff"
+target_row_id = "a18:union-arm:restore-terminal-physical-inventory-availability-requirement-independent-reopen-02fa7e6611c978ff"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalPhysicalInventory<Role,Disposition>|RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement|IndependentReopen"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-physical-inventory-availability-requirement-operational-ack-950196db2db09762"
+target_row_id = "a18:union-arm:restore-terminal-physical-inventory-availability-requirement-operational-ack-950196db2db09762"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalPhysicalInventory<Role,Disposition>|RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement|OperationalAck"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-physical-inventory-availability-requirement-abandonment-forensics-and-safe-gc-eb9946af1ad976f9"
+target_row_id = "a18:union-arm:restore-terminal-physical-inventory-availability-requirement-abandonment-forensics-and-safe-gc-eb9946af1ad976f9"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalPhysicalInventory<Role,Disposition>|RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement|AbandonmentForensicsAndSafeGc"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-terminal-pin-basis-e833552caada6ad7"
+target_row_id = "a18:union:restore-terminal-pin-basis-e833552caada6ad7"
+slice_id = "a18"
+source_key = "union|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-pin-basis-operational-241684c2586064c4"
+target_row_id = "a18:union-arm:restore-terminal-pin-basis-operational-241684c2586064c4"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>|Operational"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-pin-basis-abandoned-5b9826d6f7fd112f"
+target_row_id = "a18:union-arm:restore-terminal-pin-basis-abandoned-5b9826d6f7fd112f"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>|Abandoned"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-terminal-pin-basis-operational-ack-subject-e71b9452cd7dada2"
+target_row_id = "a18:union:restore-terminal-pin-basis-operational-ack-subject-e71b9452cd7dada2"
+slice_id = "a18"
+source_key = "union|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>.Operational.ack_subject"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-pin-basis-operational-ack-subject-authority-owning-46f9ecd711869de0"
+target_row_id = "a18:union-arm:restore-terminal-pin-basis-operational-ack-subject-authority-owning-46f9ecd711869de0"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>.Operational.ack_subject|AuthorityOwning"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-terminal-pin-basis-operational-ack-subject-shard-9d2e13cf658759ed"
+target_row_id = "a18:union-arm:restore-terminal-pin-basis-operational-ack-subject-shard-9d2e13cf658759ed"
+slice_id = "a18"
+source_key = "arm|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>.Operational.ack_subject|Shard"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-daa42490745f0eb6"
+target_row_id = "a18:union:shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-daa42490745f0eb6"
+slice_id = "a18"
+source_key = "union|ShardRestoreSourceAccessClosure|ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-ephemeral-closed-572b28093e462be2"
+target_row_id = "a18:union-arm:shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-ephemeral-closed-572b28093e462be2"
+slice_id = "a18"
+source_key = "arm|ShardRestoreSourceAccessClosure|ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition|EphemeralClosed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-lease-bound-retained-4b83f56f56d02b45"
+target_row_id = "a18:union-arm:shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-lease-bound-retained-4b83f56f56d02b45"
+slice_id = "a18"
+source_key = "arm|ShardRestoreSourceAccessClosure|ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition|LeaseBoundRetained"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-promoted-target-key-54dbcde30ac3250d"
+target_row_id = "a18:union-arm:shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-promoted-target-key-54dbcde30ac3250d"
+slice_id = "a18"
+source_key = "arm|ShardRestoreSourceAccessClosure|ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition|PromotedTargetKey"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-explicitly-revoked-94aa529c20e6661d"
+target_row_id = "a18:union-arm:shard-restore-source-access-closure-sorted-source-access-members-record-terminal-disposition-explicitly-revoked-94aa529c20e6661d"
+slice_id = "a18"
+source_key = "arm|ShardRestoreSourceAccessClosure|ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition|ExplicitlyRevoked"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

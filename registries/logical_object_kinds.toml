@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 35
+registry_epoch = 36
 
 [[kind]]
 object_kind = 0x0001
@@ -306,6 +306,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/admitted_txn_abort_command/"
 
 [[kind]]
+object_kind = 0x020b
+name = "ArchiveLeaseReleaseReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/archive_lease_release_receipt/"
+
+[[kind]]
 object_kind = 0x022f
 name = "AuditTicketClaimRecord"
 status = "reserved"
@@ -331,6 +340,15 @@ construction_order = 26
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/authenticated_client_result_release_receipt/"
+
+[[kind]]
+object_kind = 0x0238
+name = "AuthorityOwningRestoreAbandonmentTombstone"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authority_owning_restore_abandonment_tombstone/"
 
 [[kind]]
 object_kind = 0x024c
@@ -439,6 +457,24 @@ construction_order = 29
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/capability_migration_consumed_tombstone/"
+
+[[kind]]
+object_kind = 0x0262
+name = "CatalogAuthorityHead"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/catalog_authority_head/"
+
+[[kind]]
+object_kind = 0x0263
+name = "CatalogTombstoneRestoreTargetReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/catalog_tombstone_restore_target_receipt/"
 
 [[kind]]
 object_kind = 0x0265
@@ -700,6 +736,24 @@ construction_order = 40
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_recovery_checkpoint/"
+
+[[kind]]
+object_kind = 0x02c3
+name = "GlobalRestoreAbandonParticipantApplyCertificate"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_abandon_participant_apply_certificate/"
+
+[[kind]]
+object_kind = 0x02c5
+name = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_participant_pin_release_completion_certificate/"
 
 [[kind]]
 object_kind = 0x02c8
@@ -1053,6 +1107,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_prepared_payload_root/"
 
 [[kind]]
+object_kind = 0x031c
+name = "LocalRestoreCompletionEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_completion_evidence/"
+
+[[kind]]
+object_kind = 0x0320
+name = "LocalRestoreTerminalTombstone"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_terminal_tombstone/"
+
+[[kind]]
 object_kind = 0x0321
 name = "LocalResultDeliveryLease"
 status = "reserved"
@@ -1170,6 +1242,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/meta_prepared_command_record/"
 
 [[kind]]
+object_kind = 0x0357
+name = "MetaRestoreCompletionEvidence"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_restore_completion_evidence/"
+
+[[kind]]
+object_kind = 0x035a
+name = "MetaRestoreTerminalTombstone"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_restore_terminal_tombstone/"
+
+[[kind]]
 object_kind = 0x0369
 name = "NeverRegisteredTerminalRecord"
 status = "reserved"
@@ -1260,6 +1350,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/portable_restore_archive_acquisition_receipt/"
 
 [[kind]]
+object_kind = 0x038c
+name = "PortableRestoreSourceLeaseAuthorityObservation"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_restore_source_lease_authority_observation/"
+
+[[kind]]
 object_kind = 0x038d
 name = "PortableRestoreSourceLeaseLineageProof"
 status = "reserved"
@@ -1267,6 +1366,15 @@ construction_order = 27
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/portable_restore_source_lease_lineage_proof/"
+
+[[kind]]
+object_kind = 0x038e
+name = "PortableRestoreSourceLeaseReleaseTerminalEvidence"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_restore_source_lease_release_terminal_evidence/"
 
 [[kind]]
 object_kind = 0x0392
@@ -1375,6 +1483,15 @@ construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/read_participant_routing_certificate/"
+
+[[kind]]
+object_kind = 0x03ac
+name = "RecoveryIncarnationTransformPlan"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_incarnation_transform_plan/"
 
 [[kind]]
 object_kind = 0x03ad
@@ -1548,6 +1665,159 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/remote_trust_compaction_precondition/"
 
 [[kind]]
+object_kind = 0x03d2
+name = "RestoreAbandonOperationRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandon_operation_record/"
+
+[[kind]]
+object_kind = 0x03d3
+name = "RestoreAbandonmentManifest"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_manifest/"
+
+[[kind]]
+object_kind = 0x03d4
+name = "RestoreAbandonmentPinPendingOwner"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_pin_pending_owner/"
+
+[[kind]]
+object_kind = 0x03d5
+name = "RestoreAbandonmentReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_receipt/"
+
+[[kind]]
+object_kind = 0x03da
+name = "RestoreLeaseBoundSourceAccessSet"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_bound_source_access_set/"
+
+[[kind]]
+object_kind = 0x03db
+name = "RestoreLeaseOperationTerminalAccumulator"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_accumulator/"
+
+[[kind]]
+object_kind = 0x03dc
+name = "RestoreLeaseOperationTerminalIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_index/"
+
+[[kind]]
+object_kind = 0x03dd
+name = "RestoreLeaseOperationTerminalRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_record/"
+
+[[kind]]
+object_kind = 0x03de
+name = "RestoreNoTargetObservationProof"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_no_target_observation_proof/"
+
+[[kind]]
+object_kind = 0x03e3
+name = "RestoreRegistry"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_registry/"
+
+[[kind]]
+object_kind = 0x03e6
+name = "RestoreShardAbandonAck"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_shard_abandon_ack/"
+
+[[kind]]
+object_kind = 0x03ee
+name = "RestoreSourceAccessRevocationOperationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_access_revocation_operation_record/"
+
+[[kind]]
+object_kind = 0x03f2
+name = "RestoreSourceKeyAccessCleanupAccumulator"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_cleanup_accumulator/"
+
+[[kind]]
+object_kind = 0x03f3
+name = "RestoreSourceKeyAccessCleanupProgress"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_cleanup_progress/"
+
+[[kind]]
+object_kind = 0x03f4
+name = "RestoreSourceKeyAccessCleanupRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_cleanup_record/"
+
+[[kind]]
+object_kind = 0x03f5
+name = "RestoreSourceKeyAccessInventory"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_key_access_inventory/"
+
+[[kind]]
+object_kind = 0x03f7
+name = "RestoreSourceLeaseAuthorityObservationImport"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_authority_observation_import/"
+
+[[kind]]
 object_kind = 0x03f9
 name = "RestoreSourceLeaseRecord"
 status = "reserved"
@@ -1555,6 +1825,87 @@ construction_order = 45
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_source_lease_record/"
+
+[[kind]]
+object_kind = 0x03fa
+name = "RestoreSourceLeaseReleaseOperationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_release_operation_record/"
+
+[[kind]]
+object_kind = 0x03fb
+name = "RestoreSourceLeaseReleaseOperationSummary"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_release_operation_summary/"
+
+[[kind]]
+object_kind = 0x03fc
+name = "RestoreSourceLeaseRenewOperationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_renew_operation_record/"
+
+[[kind]]
+object_kind = 0x03fe
+name = "RestoreSourceLeaseRenewalCloseRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_renewal_close_record/"
+
+[[kind]]
+object_kind = 0x0400
+name = "RestoreTerminalCleanupAuthority"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_cleanup_authority/"
+
+[[kind]]
+object_kind = 0x0401
+name = "RestoreTerminalPhysicalInventory"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_physical_inventory/"
+
+[[kind]]
+object_kind = 0x0402
+name = "RestoreTerminalPinBasis"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_pin_basis/"
+
+[[kind]]
+object_kind = 0x0403
+name = "RestoreTerminalPinDurabilityReceipt"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_pin_durability_receipt/"
+
+[[kind]]
+object_kind = 0x0404
+name = "RestoreTerminalPinReleaseAuthorization"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_terminal_pin_release_authorization/"
 
 [[kind]]
 object_kind = 0x0408
@@ -1863,6 +2214,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_recovery_checkpoint/"
 
 [[kind]]
+object_kind = 0x0471
+name = "ShardRestoreAbandonmentTombstone"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_abandonment_tombstone/"
+
+[[kind]]
+object_kind = 0x0474
+name = "ShardRestoreSourceAccessClosure"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_source_access_closure/"
+
+[[kind]]
 object_kind = 0x0475
 name = "ShardRestoreSourceLeaseProjection"
 status = "reserved"
@@ -1870,6 +2239,15 @@ construction_order = 50
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_restore_source_lease_projection/"
+
+[[kind]]
+object_kind = 0x0476
+name = "ShardRestoreTerminalTombstone"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_terminal_tombstone/"
 
 [[kind]]
 object_kind = 0x0478

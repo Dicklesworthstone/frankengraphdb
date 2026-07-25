@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 37
+registry_epoch = 38
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -3840,6 +3840,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ArchiveLeaseReleaseReceiptOutcome"
+containing_schema = "ArchiveLeaseReleaseReceipt"
+union_path = "ArchiveLeaseReleaseReceipt.outcome"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ArchiveLeaseReleaseReceipt"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "AttemptFamilyStateActiveGeneration"
 containing_schema = "AttemptFamilyState"
 union_path = "AttemptFamilyState.active_generation"
@@ -3879,6 +3890,17 @@ union_path = "AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>.
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "AuthorityOwningRestoreAbandonmentTombstoneProfileAppliedBasis"
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+union_path = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -3945,6 +3967,28 @@ union_path = "CanonicalConstraintDomainKey"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["CanonicalConstraintDomainKey"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "CatalogAuthorityHeadPredecessor"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.predecessor"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CatalogAuthorityHead"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "CatalogAuthorityHeadState"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CatalogAuthorityHead"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -4864,6 +4908,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "LocalRestoreCompletionEvidence"
+containing_schema = "LocalRestoreCompletionEvidence"
+union_path = "LocalRestoreCompletionEvidence"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalRestoreCompletionEvidence"]
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "LocalResultDeliveryOwner"
 containing_schema = "LocalResultDeliveryOwner"
 union_path = "LocalResultDeliveryOwner"
@@ -5074,6 +5129,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "MetaRestoreCompletionEvidence"
+containing_schema = "MetaRestoreCompletionEvidence"
+union_path = "MetaRestoreCompletionEvidence"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaRestoreCompletionEvidence"]
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "NewDatabaseIdentityTargetCreationCommitment"
 containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
 union_path = "NewDatabaseIdentityTargetCreationCommitment"
@@ -5114,6 +5180,39 @@ field_tag = 0x0009
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["OfflineMacaroonIssuerEpochFenceReceipt"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "PortableRestoreSourceLeaseAuthorityObservationActionBinding"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.action_binding"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableRestoreSourceLeaseAuthorityObservation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "PortableRestoreSourceLeaseAuthorityObservationHeadState"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.head_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableRestoreSourceLeaseAuthorityObservation"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "PortableRestoreSourceLeaseAuthorityObservationWindowClass"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.window_class"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PortableRestoreSourceLeaseAuthorityObservation"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -5275,6 +5374,28 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RecoveryIncarnationTransformPlanMode"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.mode"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RecoveryIncarnationTransformPlan<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RecoveryIncarnationTransformPlanSourcePosture"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.source_posture"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RecoveryIncarnationTransformPlan<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "TrustTransition"
 containing_schema = "RemoteAuthorityConfigurationEvidence"
 union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
@@ -5304,6 +5425,39 @@ union_path = "RequestTerminalAbort.stage"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RequestTerminalAbort"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreAbandonOperationRecordPinOwnerPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreAbandonOperationRecordProfileOperationPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreAbandonmentReceipt"
+containing_schema = "RestoreAbandonmentReceipt"
+union_path = "RestoreAbandonmentReceipt"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreAbandonmentReceipt"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -5342,6 +5496,72 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RestoreLeaseOperationTerminalRecordTerminal"
+containing_schema = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
+union_path = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreRegistry"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreRegistry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreRegistryLocalActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Local.activity"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreRegistry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreRegistryMetaActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Meta.activity"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreRegistry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreRegistryShardActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Shard.activity"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreRegistry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreSourceKeyAccessCleanupProgress<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RestoreSourceLeaseLineageBasis"
 containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
 union_path = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.lineage_basis"
@@ -5373,6 +5593,61 @@ field_tag = 0x0006
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreTerminalCleanupAuthorityTerminalDisposition"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.terminal_disposition"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreTerminalPhysicalInventoryAvailabilityRequirement"
+containing_schema = "RestoreTerminalPhysicalInventory<Role,Disposition>"
+union_path = "RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreTerminalPhysicalInventory<Role,Disposition>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreTerminalPinBasis"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreTerminalPinBasis<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreTerminalPinBasisOperationalAckSubject"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>.Operational.ack_subject"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreTerminalPinBasis<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -5649,6 +5924,17 @@ union_path = "ShardRecoveryCheckpoint.basis"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["ShardRecoveryCheckpoint"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ShardRestoreSourceAccessClosureSortedSourceAccessMembersRecordTerminalDisposition"
+containing_schema = "ShardRestoreSourceAccessClosure"
+union_path = "ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ShardRestoreSourceAccessClosure"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -5951,6 +6237,42 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "ArchiveLeaseReleaseReceiptOutcome"
+containing_schema = "ArchiveLeaseReleaseReceipt"
+union_path = "ArchiveLeaseReleaseReceipt.outcome"
+arm_tag = 0x0001
+source_arm_name = "Released"
+stable_name = "released"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ArchiveLeaseReleaseReceiptOutcome"
+containing_schema = "ArchiveLeaseReleaseReceipt"
+union_path = "ArchiveLeaseReleaseReceipt.outcome"
+arm_tag = 0x0002
+source_arm_name = "AlreadyReleased"
+stable_name = "already_released"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ArchiveLeaseReleaseReceiptOutcome"
+containing_schema = "ArchiveLeaseReleaseReceipt"
+union_path = "ArchiveLeaseReleaseReceipt.outcome"
+arm_tag = 0x0003
+source_arm_name = "AlreadyExpired"
+stable_name = "already_expired"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
 union_name = "AttemptFamilyStateActiveGeneration"
 containing_schema = "AttemptFamilyState"
 union_path = "AttemptFamilyState.active_generation"
@@ -6061,6 +6383,45 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "AuthorityOwningRestoreAbandonmentTombstoneProfileAppliedBasis"
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+union_path = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "external_cas_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "b74e864f5367cc7e734845a680316c8aed57570aef9a78a3c1e18f37501e1fd2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuthorityOwningRestoreAbandonmentTombstoneProfileAppliedBasis"
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+union_path = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "directory_bound_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "d719c7ac4242698da3cd185f0d01d0f61d9cf9bb9971857ea82a851353a373d9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuthorityOwningRestoreAbandonmentTombstoneProfileAppliedBasis"
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+union_path = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.profile_applied_basis"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "directory_bound_embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "a1966600103926f245b7dc9250f98e11b8fb3983b75da31bf0ea2904eb10aea1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "BranchEpochBoundaryReserveSpecOperation"
@@ -6307,6 +6668,69 @@ source_arm_name = "Temporal"
 stable_name = "temporal"
 payload_kind = "inline-record"
 payload_sha256 = "dbcdaa4718bfca3bdd208e2f6b0b0a3f41185e01900f7f8125e8780b5b7157bf"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CatalogAuthorityHeadPredecessor"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.predecessor"
+arm_tag = 0x0001
+source_arm_name = "Absent"
+stable_name = "absent"
+payload_kind = "inline-record"
+payload_sha256 = "17a88445d1fcf7ba3216f844ba6d569d07599c3f2781d2cf3bd72f186b156ca7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CatalogAuthorityHeadPredecessor"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.predecessor"
+arm_tag = 0x0002
+source_arm_name = "Prior"
+stable_name = "prior"
+payload_kind = "inline-record"
+payload_sha256 = "b4f672258ddf9b3398362b469a3fd9ab698b26f8e74f2fc1d1daf851ada0f9e2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CatalogAuthorityHeadState"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.state"
+arm_tag = 0x0001
+source_arm_name = "ReservedHidden"
+stable_name = "reserved_hidden"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "CatalogAuthorityHeadState"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.state"
+arm_tag = 0x0002
+source_arm_name = "ActivatedHidden"
+stable_name = "activated_hidden"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "CatalogAuthorityHeadState"
+containing_schema = "CatalogAuthorityHead"
+union_path = "CatalogAuthorityHead.state"
+arm_tag = 0x0003
+source_arm_name = "TombstonedNoEndpoint"
+stable_name = "tombstoned_no_endpoint"
+payload_kind = "inline-record"
+payload_sha256 = "ee780f1fb1f41328cc0c730d63f1154ac28d9b14901ea35c88bb0fd23546ed03"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -9141,6 +9565,32 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "LocalRestoreCompletionEvidence"
+containing_schema = "LocalRestoreCompletionEvidence"
+union_path = "LocalRestoreCompletionEvidence"
+arm_tag = 0x0001
+source_arm_name = "Operational"
+stable_name = "operational"
+payload_kind = "inline-record"
+payload_sha256 = "cdc2add0869c6a4183f58462ac62affd533ce8f68c695477a192de8a23171b28"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "LocalRestoreCompletionEvidence"
+containing_schema = "LocalRestoreCompletionEvidence"
+union_path = "LocalRestoreCompletionEvidence"
+arm_tag = 0x0002
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "inline-record"
+payload_sha256 = "5e8cded0ddb43834031bd8128302975880c27025004b1872d28df12ac9fcedfa"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "LocalResultDeliveryOwner"
 containing_schema = "LocalResultDeliveryOwner"
 union_path = "LocalResultDeliveryOwner"
@@ -9754,6 +10204,32 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union_arm]]
+union_name = "MetaRestoreCompletionEvidence"
+containing_schema = "MetaRestoreCompletionEvidence"
+union_path = "MetaRestoreCompletionEvidence"
+arm_tag = 0x0001
+source_arm_name = "Operational"
+stable_name = "operational"
+payload_kind = "inline-record"
+payload_sha256 = "2c2a306ff02b1a0c7c6377af1501249825e40a2707063aa8e0a6482f2641c9cf"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaRestoreCompletionEvidence"
+containing_schema = "MetaRestoreCompletionEvidence"
+union_path = "MetaRestoreCompletionEvidence"
+arm_tag = 0x0002
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "inline-record"
+payload_sha256 = "bdb8401c3c662a350537b2443d814a963f922a8b84e372113ba0c4d82e72f013"
+role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "NewDatabaseIdentityTargetCreationCommitment"
 containing_schema = "NewDatabaseIdentityTargetCreationCommitment"
 union_path = "NewDatabaseIdentityTargetCreationCommitment"
@@ -9850,6 +10326,93 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PortableRestoreSourceLeaseAuthorityObservationActionBinding"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.action_binding"
+arm_tag = 0x0001
+source_arm_name = "Renew"
+stable_name = "renew"
+payload_kind = "inline-record"
+payload_sha256 = "ca39fbddf9004d863d45efa8df869f3636fd8e5765232f499be9442994055c39"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PortableRestoreSourceLeaseAuthorityObservationActionBinding"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.action_binding"
+arm_tag = 0x0002
+source_arm_name = "Release"
+stable_name = "release"
+payload_kind = "inline-record"
+payload_sha256 = "ca39fbddf9004d863d45efa8df869f3636fd8e5765232f499be9442994055c39"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PortableRestoreSourceLeaseAuthorityObservationActionBinding"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.action_binding"
+arm_tag = 0x0003
+source_arm_name = "Status"
+stable_name = "status"
+payload_kind = "inline-record"
+payload_sha256 = "b1c12967be80d49577a98eadc3151f15d4b8a00119abaf1a72423bc9296f133e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PortableRestoreSourceLeaseAuthorityObservationHeadState"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.head_state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PortableRestoreSourceLeaseAuthorityObservationHeadState"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.head_state"
+arm_tag = 0x0002
+source_arm_name = "Released"
+stable_name = "released"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PortableRestoreSourceLeaseAuthorityObservationWindowClass"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.window_class"
+arm_tag = 0x0001
+source_arm_name = "Usable"
+stable_name = "usable"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PortableRestoreSourceLeaseAuthorityObservationWindowClass"
+containing_schema = "PortableRestoreSourceLeaseAuthorityObservation"
+union_path = "PortableRestoreSourceLeaseAuthorityObservation.window_class"
+arm_tag = 0x0002
+source_arm_name = "Expired"
+stable_name = "expired"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "PortableRestoreSourceLeaseLineageBasis"
@@ -10379,6 +10942,54 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union_arm]]
+union_name = "RecoveryIncarnationTransformPlanMode"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.mode"
+arm_tag = 0x0001
+source_arm_name = "RecoverSameIdentity"
+stable_name = "recover_same_identity"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RecoveryIncarnationTransformPlanMode"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.mode"
+arm_tag = 0x0002
+source_arm_name = "CloneNewIdentity"
+stable_name = "clone_new_identity"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RecoveryIncarnationTransformPlanSourcePosture"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.source_posture"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RecoveryIncarnationTransformPlanSourcePosture"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+union_path = "RecoveryIncarnationTransformPlan<Role>.source_posture"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "sharded"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
 union_name = "TrustTransition"
 containing_schema = "RemoteAuthorityConfigurationEvidence"
 union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
@@ -10546,6 +11157,110 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union_arm]]
+union_name = "RestoreAbandonOperationRecordPinOwnerPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "8def1a63b65eacdf7ce04570104d4a923a35eda48ba841f8070da9058e063993"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreAbandonOperationRecordPinOwnerPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "5e660cceb9460bf400078921e2cbcb72be07c994399b9a20edb381c059511a61"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreAbandonOperationRecordProfileOperationPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "external_cas_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "d9763b72abfa29d9853bb756573123e56869f53ad4910b432fcea7a77b46ad4c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreAbandonOperationRecordProfileOperationPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "directory_bound_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "6b2cc2a506cfe3cb69bcd2213dfb5de2ce4cf9f50366b16f1e04e1f8c262e555"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreAbandonOperationRecordProfileOperationPlan"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.profile_operation_plan"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "directory_bound_embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "8068d120d7c6b56bf756fb62a93e1fff954e5340be0751955ca691bbe006e255"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreAbandonmentReceipt"
+containing_schema = "RestoreAbandonmentReceipt"
+union_path = "RestoreAbandonmentReceipt"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "external_cas_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "5fdeb1ff0f4f5bd22e3fb177bc8c5faa90162d80ca164ca2cb245f8e250e1036"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreAbandonmentReceipt"
+containing_schema = "RestoreAbandonmentReceipt"
+union_path = "RestoreAbandonmentReceipt"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "directory_bound_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "8d9e0ff26a8649e4c232656de81bf0e356917c81173d4f3f584fb617207b9997"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreAbandonmentReceipt"
+containing_schema = "RestoreAbandonmentReceipt"
+union_path = "RestoreAbandonmentReceipt"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "directory_bound_embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "7a27924f87744a00377e2cf053f3140e427954ee0640b2e855838deaaf97ca4e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "RestoreClaimedTargetAuthorityRecipe"
 containing_schema = "RestoreClaimedTargetAuthorityRecipe"
 union_path = "RestoreClaimedTargetAuthorityRecipe"
@@ -10624,6 +11339,263 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "RestoreLeaseOperationTerminalRecordTerminal"
+containing_schema = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
+union_path = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal"
+arm_tag = 0x0001
+source_arm_name = "Applied"
+stable_name = "applied"
+payload_kind = "inline-record"
+payload_sha256 = "994b599c8c6424551aae0f60dbd7c23440d5242456ea2f5ac8bd31050a67ef86"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreLeaseOperationTerminalRecordTerminal"
+containing_schema = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
+union_path = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal"
+arm_tag = 0x0002
+source_arm_name = "NeverSent"
+stable_name = "never_sent"
+payload_kind = "inline-record"
+payload_sha256 = "144b83acd86092e30e425c2a4e3acb50e6d28c79d4d17460b0c7165929ff8e1d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreLeaseOperationTerminalRecordTerminal"
+containing_schema = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
+union_path = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.terminal"
+arm_tag = 0x0003
+source_arm_name = "NoEffect"
+stable_name = "no_effect"
+payload_kind = "inline-record"
+payload_sha256 = "2115945bff4e8f4cfe6ba5e6b4d5ff4f52b8f0323350a8e3777e5d738dabb47c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreRegistry"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "9fd8449a58756528e0264f433e480f0cec567d563140a4db7decdaa1c68cb77e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreRegistry"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "252825dc7aa1483941ac51587465c7556f1aa97c8a042f798c7b7658eeb249b1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreRegistry"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "7f5ec4fbb5c56d47a2f1ac73e6ddb24a9e05f8d4039d18071285ea2fe464cfa0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreRegistryLocalActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Local.activity"
+arm_tag = 0x0001
+source_arm_name = "Idle"
+stable_name = "idle"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreRegistryLocalActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Local.activity"
+arm_tag = 0x0002
+source_arm_name = "OneLive"
+stable_name = "one_live"
+payload_kind = "inline-record"
+payload_sha256 = "4da0f3516fe3e06cbf41b72a22562f1cabb1146cebb7995204a4fc5d12784615"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreRegistryMetaActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Meta.activity"
+arm_tag = 0x0001
+source_arm_name = "Idle"
+stable_name = "idle"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreRegistryMetaActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Meta.activity"
+arm_tag = 0x0002
+source_arm_name = "OneLive"
+stable_name = "one_live"
+payload_kind = "inline-record"
+payload_sha256 = "4da0f3516fe3e06cbf41b72a22562f1cabb1146cebb7995204a4fc5d12784615"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreRegistryShardActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Shard.activity"
+arm_tag = 0x0001
+source_arm_name = "Idle"
+stable_name = "idle"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreRegistryShardActivity"
+containing_schema = "RestoreRegistry"
+union_path = "RestoreRegistry.Shard.activity"
+arm_tag = 0x0002
+source_arm_name = "OneLive"
+stable_name = "one_live"
+payload_kind = "inline-record"
+payload_sha256 = "4da0f3516fe3e06cbf41b72a22562f1cabb1146cebb7995204a4fc5d12784615"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0001
+source_arm_name = "PromotedTargetKeyTerminal"
+stable_name = "promoted_target_key_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "15be0d152e57abc11c3e5c4ab560383dfc185e1beb6603114f1f3bbae3010580"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0002
+source_arm_name = "EphemeralClosedTerminal"
+stable_name = "ephemeral_closed_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "72f42c9bdfcf22a1ede31e91ef01dcedac94a95ec83e0b02ca56907a872408ad"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0003
+source_arm_name = "LeaseBoundPendingRelease"
+stable_name = "lease_bound_pending_release"
+payload_kind = "inline-record"
+payload_sha256 = "04e918d39737c6e1a8110c0d7361fc8403f53f7869a7d6db627c1480a1b9d093"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0004
+source_arm_name = "ExplicitRevocationPending"
+stable_name = "explicit_revocation_pending"
+payload_kind = "inline-record"
+payload_sha256 = "c4b395a8f9c4ca05b019de4c6e45517a4d06c71722f754faad64e659c780c978"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0005
+source_arm_name = "ExplicitRevocationAuthorized"
+stable_name = "explicit_revocation_authorized"
+payload_kind = "inline-record"
+payload_sha256 = "65704ba43ed670db33601ad603d47a27560e8eb56d87c3f576225b88c6268a0d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0006
+source_arm_name = "ExplicitRevocationPendingAfterAuthorizedNeverArmed"
+stable_name = "explicit_revocation_pending_after_authorized_never_armed"
+payload_kind = "inline-record"
+payload_sha256 = "bcf24ba417c5d9f05df0232b76709d71ba8ee77d6608620f039167993dfe6bc0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0007
+source_arm_name = "ExplicitRevocationTerminal"
+stable_name = "explicit_revocation_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "6cb7c4dbcaa3e9a557884672b29c2ebff3e83ef40c7dd6da44d1693b41566b74"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+union_path = "RestoreSourceKeyAccessCleanupProgress<Role>.sorted_resource_states"
+arm_tag = 0x0008
+source_arm_name = "ProviderAlreadyClosedTerminal"
+stable_name = "provider_already_closed_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "34e8c6313215eb0a9e8afca5587e5092fd5368550e4cacb939d6cee0070bb893"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "RestoreSourceLeaseLineageBasis"
 containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
 union_path = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.lineage_basis"
@@ -10695,6 +11667,178 @@ source_arm_name = "RenewImported"
 stable_name = "renew_imported"
 payload_kind = "inline-record"
 payload_sha256 = "d958e9f3235734c2be454bf2e0095b21e5d46810220284f9a0d7eaeaab045ec2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+arm_tag = 0x0001
+source_arm_name = "SourceAccessCleanup"
+stable_name = "source_access_cleanup"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+arm_tag = 0x0002
+source_arm_name = "CloseSourceLeaseRenewal"
+stable_name = "close_source_lease_renewal"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+arm_tag = 0x0003
+source_arm_name = "ReleaseSourceLease"
+stable_name = "release_source_lease"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+arm_tag = 0x0004
+source_arm_name = "ReleaseTerminalPins"
+stable_name = "release_terminal_pins"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreTerminalCleanupAuthorityAllowedEffects"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.allowed_effects"
+arm_tag = 0x0005
+source_arm_name = "CompactRestoreEvidence"
+stable_name = "compact_restore_evidence"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreTerminalCleanupAuthorityTerminalDisposition"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.terminal_disposition"
+arm_tag = 0x0001
+source_arm_name = "Operational"
+stable_name = "operational"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreTerminalCleanupAuthorityTerminalDisposition"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+union_path = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.terminal_disposition"
+arm_tag = 0x0002
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreTerminalPhysicalInventoryAvailabilityRequirement"
+containing_schema = "RestoreTerminalPhysicalInventory<Role,Disposition>"
+union_path = "RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement"
+arm_tag = 0x0001
+source_arm_name = "IndependentReopen"
+stable_name = "independent_reopen"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreTerminalPhysicalInventoryAvailabilityRequirement"
+containing_schema = "RestoreTerminalPhysicalInventory<Role,Disposition>"
+union_path = "RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement"
+arm_tag = 0x0002
+source_arm_name = "OperationalAck"
+stable_name = "operational_ack"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreTerminalPhysicalInventoryAvailabilityRequirement"
+containing_schema = "RestoreTerminalPhysicalInventory<Role,Disposition>"
+union_path = "RestoreTerminalPhysicalInventory<Role,Disposition>.availability_requirement"
+arm_tag = 0x0003
+source_arm_name = "AbandonmentForensicsAndSafeGc"
+stable_name = "abandonment_forensics_and_safe_gc"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreTerminalPinBasis"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>"
+arm_tag = 0x0001
+source_arm_name = "Operational"
+stable_name = "operational"
+payload_kind = "inline-record"
+payload_sha256 = "65131b70d788e964a1a35c33de64d4b801cbab6d99ce036ffcc79c53771f5a3d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreTerminalPinBasis"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>"
+arm_tag = 0x0002
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "inline-record"
+payload_sha256 = "fa5c74299ad21f9bf5657611b2a8c7496848adacddf5f09ba97a367c98785b6c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreTerminalPinBasisOperationalAckSubject"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>.Operational.ack_subject"
+arm_tag = 0x0001
+source_arm_name = "AuthorityOwning"
+stable_name = "authority_owning"
+payload_kind = "inline-record"
+payload_sha256 = "1fa3aa42b9aa401319e61d510cd5b7eeba30ccfa7de8302f8a964658d14f9ac4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreTerminalPinBasisOperationalAckSubject"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+union_path = "RestoreTerminalPinBasis<Role>.Operational.ack_subject"
+arm_tag = 0x0002
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "f805c7f5fea37fe5e562da4ea6569ac8a98c082e014d5dcc1cd84222f77d4ebf"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -11467,6 +12611,58 @@ source_arm_name = "LocalActivationProjection"
 stable_name = "local_activation_projection"
 payload_kind = "inline-record"
 payload_sha256 = "90b94d12fa55b562a895625c0efea116065e1b6a0a9b3d42e56b9732b41fce07"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ShardRestoreSourceAccessClosureSortedSourceAccessMembersRecordTerminalDisposition"
+containing_schema = "ShardRestoreSourceAccessClosure"
+union_path = "ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition"
+arm_tag = 0x0001
+source_arm_name = "EphemeralClosed"
+stable_name = "ephemeral_closed"
+payload_kind = "inline-record"
+payload_sha256 = "0a459c6fab464671e4376bc9034fed156915e25c065f2752fdf53979dc63c978"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ShardRestoreSourceAccessClosureSortedSourceAccessMembersRecordTerminalDisposition"
+containing_schema = "ShardRestoreSourceAccessClosure"
+union_path = "ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition"
+arm_tag = 0x0002
+source_arm_name = "LeaseBoundRetained"
+stable_name = "lease_bound_retained"
+payload_kind = "inline-record"
+payload_sha256 = "89198f4309493bfe8cee0ec221984c1df4c5eb1780e6b3d7f92e457e0eedabac"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ShardRestoreSourceAccessClosureSortedSourceAccessMembersRecordTerminalDisposition"
+containing_schema = "ShardRestoreSourceAccessClosure"
+union_path = "ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition"
+arm_tag = 0x0003
+source_arm_name = "PromotedTargetKey"
+stable_name = "promoted_target_key"
+payload_kind = "inline-record"
+payload_sha256 = "afee0725bd212d3c3244628cbfb8da9791dabf2d175e2abc30328705565b2b79"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ShardRestoreSourceAccessClosureSortedSourceAccessMembersRecordTerminalDisposition"
+containing_schema = "ShardRestoreSourceAccessClosure"
+union_path = "ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition"
+arm_tag = 0x0004
+source_arm_name = "ExplicitlyRevoked"
+stable_name = "explicitly_revoked"
+payload_kind = "inline-record"
+payload_sha256 = "dc904bd8839278299f569a2405028874642acf5689792ce2c58838aecd4bd8e9"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
