@@ -675,15 +675,6 @@ allowed_containing_schemas = ["LocalStatementPublishedOutput"]
 max_size_bytes = 16777216
 
 [[type]]
-wire_type_id = 0x0048
-name = "ResultAckAuthority"
-kind = "union"
-status = "reserved"
-encoding_context = "closed union: EmbeddedFullyConsumed | ReadyChannelResumeCapability"
-allowed_containing_schemas = ["ResultAckAuthority<Role>"]
-max_size_bytes = 16777216
-
-[[type]]
 wire_type_id = 0x0049
 name = "ResultActivationAppliedRef"
 kind = "union"
@@ -708,13 +699,4 @@ kind = "union"
 status = "reserved"
 encoding_context = "closed union: Local | Sharded"
 allowed_containing_schemas = ["ResultManifestRef"]
-max_size_bytes = 16777216
-
-[[type]]
-wire_type_id = 0x004c
-name = "ResultReleaseEvidence"
-kind = "union"
-status = "reserved"
-encoding_context = "closed union: ClientRelease | LeaseExpired"
-allowed_containing_schemas = ["ResultReleaseEvidence<Local>"]
 max_size_bytes = 16777216

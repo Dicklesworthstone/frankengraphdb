@@ -41,7 +41,7 @@ occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0
 [target_manifest]
 target_count = 565
 projection_fallback_count = 84
-target_source_assignment_sha256 = "f30da9d3b6bf136de24503bfbe45364a1754c3eeb7fa4c17c169928125a3d157"
+target_source_assignment_sha256 = "9a5028f64ee42936ebe89d42e34f3261e6202bd0226fa073561b5bc71ad9eee6"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 11
+registry_epoch = 12
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -1867,6 +1867,28 @@ role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/portable_restore_archive_acquisition_receipt/"
 
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:result-ack-authority"
+object_kind = 0x0528
+name = "ResultAckAuthority"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_ack_authority/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:result-release-evidence"
+object_kind = 0x0529
+name = "ResultReleaseEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_release_evidence/"
+
 [[physical_kind]]
 slice_id = "a02"
 row_id = "a02:physical-kind:ciphertext-record"
@@ -2856,18 +2878,6 @@ max_size_bytes = 16777216
 
 [[wire_type]]
 slice_id = "a03"
-row_id = "a03:wire-type:result-ack-authority"
-wire_type_id = 0x0048
-name = "ResultAckAuthority"
-kind = "union"
-status = "reserved"
-encoding_context = "closed union: EmbeddedFullyConsumed | ReadyChannelResumeCapability"
-allowed_containing_schemas = ["ResultAckAuthority<Role>"]
-max_size_bytes = 16777216
-
-
-[[wire_type]]
-slice_id = "a03"
 row_id = "a03:wire-type:result-activation-applied-ref"
 wire_type_id = 0x0049
 name = "ResultActivationAppliedRef"
@@ -2901,17 +2911,6 @@ encoding_context = "closed union: Local | Sharded"
 allowed_containing_schemas = ["ResultManifestRef"]
 max_size_bytes = 16777216
 
-
-[[wire_type]]
-slice_id = "a03"
-row_id = "a03:wire-type:result-release-evidence"
-wire_type_id = 0x004c
-name = "ResultReleaseEvidence"
-kind = "union"
-status = "reserved"
-encoding_context = "closed union: ClientRelease | LeaseExpired"
-allowed_containing_schemas = ["ResultReleaseEvidence<Local>"]
-max_size_bytes = 16777216
 
 [[field]]
 slice_id = "a03"
@@ -25417,7 +25416,7 @@ symbol = "ResultAckAuthority"
 generic_signature = "<Role>"
 source_key = "top|ResultAckAuthority<Role>"
 source_kind = "confirmed"
-identity_class = "wire"
+identity_class = "logical"
 source_locations = ["a03:1506"]
 
 [[top_level_candidate]]
@@ -25597,7 +25596,7 @@ symbol = "ResultReleaseEvidence"
 generic_signature = "<Local>"
 source_key = "top|ResultReleaseEvidence<Local>"
 source_kind = "confirmed"
-identity_class = "wire"
+identity_class = "logical"
 source_locations = ["a03:1496"]
 
 [[top_level_candidate]]
@@ -25607,7 +25606,7 @@ symbol = "ResultReleaseEvidence"
 generic_signature = "<Meta>"
 source_key = "top|ResultReleaseEvidence<Meta>"
 source_kind = "confirmed"
-identity_class = "wire"
+identity_class = "logical"
 source_locations = ["a07:1734"]
 
 [[top_level_candidate]]
@@ -25617,7 +25616,7 @@ symbol = "ResultReleaseEvidence"
 generic_signature = "<Role>"
 source_key = "top|ResultReleaseEvidence<Role>"
 source_kind = "name-only"
-identity_class = "wire"
+identity_class = "logical"
 source_locations = ["a03:1516"]
 
 [[top_level_candidate]]
@@ -32758,15 +32757,6 @@ definition_status = "declared"
 
 
 [[target]]
-row_id = "a03:target:wire-type-result-ack-authority"
-target_row_id = "a03:wire-type:result-ack-authority"
-slice_id = "a03"
-source_key = "top|ResultAckAuthority<Role>"
-target_kind = "wire-type"
-definition_status = "declared"
-
-
-[[target]]
 row_id = "a03:target:wire-type-result-activation-applied-ref"
 target_row_id = "a03:wire-type:result-activation-applied-ref"
 slice_id = "a03"
@@ -32794,11 +32784,19 @@ definition_status = "declared"
 
 
 [[target]]
-row_id = "a03:target:wire-type-result-release-evidence"
-target_row_id = "a03:wire-type:result-release-evidence"
+row_id = "a03:target:logical-kind-result-ack-authority"
+target_row_id = "a03:logical-kind:result-ack-authority"
+slice_id = "a03"
+source_key = "top|ResultAckAuthority<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-result-release-evidence"
+target_row_id = "a03:logical-kind:result-release-evidence"
 slice_id = "a03"
 source_key = "top|ResultReleaseEvidence<Local>"
-target_kind = "wire-type"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

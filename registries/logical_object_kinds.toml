@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 11
+registry_epoch = 12
 
 [[kind]]
 object_kind = 0x0001
@@ -1006,3 +1006,21 @@ construction_order = 79
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_identity_key_disposition_evidence/"
+
+[[kind]]
+object_kind = 0x0528
+name = "ResultAckAuthority"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_ack_authority/"
+
+[[kind]]
+object_kind = 0x0529
+name = "ResultReleaseEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_release_evidence/"
