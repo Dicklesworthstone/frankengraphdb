@@ -672,4 +672,69 @@ mod tests {
             }
         }
     }
+
+    /// Cross-path agreement: `checked_mul_i128` and `checked_mul` are two
+    /// independent implementations of the same product and must never diverge —
+    /// not in the value, not in the storage variant, and not in the error.
+    ///
+    /// This is pinned because divergence between a scalar fast path and the
+    /// general path is the exact shape of the defect fixed in 8487dcd, where a
+    /// second code path ignored the caller's `LimbLimit`. Before this test the
+    /// scalar path was exercised with two factors only (2 and -2) at a single
+    /// limit, so a fast path that mishandled a boundary factor, a sign, or a
+    /// budget would have gone unnoticed while `checked_mul` stayed correct.
+    #[test]
+    fn scalar_and_general_multiplication_paths_never_diverge() {
+        let operands = [
+            ZWeight::ZERO,
+            ZWeight::ONE,
+            ZWeight::from_i128(-1),
+            ZWeight::from_i128(i128::MIN),
+            ZWeight::from_i128(i128::MAX),
+            ZWeight::from_i128(1i128 << 64),
+            promoted_positive_boundary(),
+            promoted_negative_boundary(),
+        ];
+        let factors = [0i128, 1, -1, 2, -2, 1i128 << 64, i128::MIN, i128::MAX];
+        // Budgets straddling the width these products need, so the two paths are
+        // compared where they SUCCEED and where they are refused.
+        let budgets = [
+            LimbLimit::new(0),
+            LimbLimit::new(1),
+            LimbLimit::new(2),
+            LimbLimit::new(4),
+            TEST_LIMIT,
+        ];
+
+        for operand in &operands {
+            for factor in factors {
+                let factor_weight = ZWeight::from_i128(factor);
+                for budget in budgets {
+                    let scalar = operand.checked_mul_i128(factor, budget);
+                    let general = operand.checked_mul(&factor_weight, budget);
+                    assert_eq!(
+                        scalar, general,
+                        "paths diverged: operand={operand:?} factor={factor} \
+                         budget={budget:?} scalar={scalar:?} general={general:?}"
+                    );
+                    if let Ok(product) = scalar {
+                        assert_canonical(&product);
+                        // Storage must be a function of the VALUE, so both paths
+                        // agreeing numerically is not enough on its own.
+                        let via_general = general.expect("general path agreed above");
+                        assert_eq!(
+                            product.is_promoted(),
+                            via_general.is_promoted(),
+                            "storage variant diverged for {operand:?} * {factor}"
+                        );
+                        assert_eq!(
+                            product.magnitude_limb_count(),
+                            via_general.magnitude_limb_count(),
+                            "limb width diverged for {operand:?} * {factor}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
