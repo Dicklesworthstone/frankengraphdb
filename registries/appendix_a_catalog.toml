@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 634
+target_count = 640
 projection_fallback_count = 84
-target_source_assignment_sha256 = "78afecda6d0b68497f4eb2f23b3c841a12f54c6e12ffb8de90ff3370f7d91458"
+target_source_assignment_sha256 = "d5f0f5d5452a0aae3467de9f291042c82d244f48756d1fc83b55dffff76e7533"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -978,6 +978,28 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/export_leaf/"
 
 [[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:id-range-lease"
+object_kind = 0x02d5
+name = "IdRangeLease"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/id_range_lease/"
+
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:identity-continuity-record"
+object_kind = 0x02d6
+name = "IdentityContinuityRecord"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/identity_continuity_record/"
+
+[[logical_kind]]
 slice_id = "a01"
 row_id = "a01:logical-kind:remote-authority-configuration-evidence"
 object_kind = 0x03ad
@@ -1186,6 +1208,28 @@ role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/payload_availability_certificate/"
 [[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:shard-escaping-allocation-evidence"
+object_kind = 0x044d
+name = "ShardEscapingAllocationEvidence"
+status = "reserved"
+construction_order = 12
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_escaping_allocation_evidence/"
+
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:shard-id-range-lease"
+object_kind = 0x0458
+name = "ShardIdRangeLease"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_id_range_lease/"
+
+[[logical_kind]]
 slice_id = "a16"
 row_id = "a16:logical-kind:time-authority-profile"
 object_kind = 0x049a
@@ -1283,6 +1327,28 @@ construction_order = 41
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/role_time_issuance_reservation_closure/"
+
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:txn-allocation-binding-root"
+object_kind = 0x04b1
+name = "TxnAllocationBindingRoot"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/txn_allocation_binding_root/"
+
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:escaping-allocation-reservation-record"
+object_kind = 0x04e1
+name = "EscapingAllocationReservationRecord"
+status = "reserved"
+construction_order = 14
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/escaping_allocation_reservation_record/"
 
 [[logical_kind]]
 slice_id = "a16"
@@ -11427,7 +11493,7 @@ symbol = "EscapingAllocationReservationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04e1"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:escrow-domain-definition"
@@ -12102,7 +12168,7 @@ symbol = "IdRangeLease"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02d5"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a09:reservation:identity-continuity-record"
@@ -12111,7 +12177,7 @@ symbol = "IdentityContinuityRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02d6"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a04:reservation:initial-protocol-state-recipe"
@@ -15873,7 +15939,7 @@ symbol = "ShardEscapingAllocationEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x044d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a09:reservation:shard-escaping-allocation-reservation-record"
@@ -15981,7 +16047,7 @@ symbol = "ShardIdRangeLease"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0458"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-imported-read-statement-floor"
@@ -16881,7 +16947,7 @@ symbol = "TxnAllocationBindingRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04b1"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:txn-capability-lineage-root"
@@ -20012,7 +20078,7 @@ symbol = "EscapingAllocationReservationRecord"
 generic_signature = ""
 source_key = "top|EscapingAllocationReservationRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a09:1896"]
 
 [[top_level_candidate]]
@@ -21182,7 +21248,7 @@ symbol = "IdRangeLease"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|IdRangeLease<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a09:1892"]
 
 [[top_level_candidate]]
@@ -21192,7 +21258,7 @@ symbol = "IdentityContinuityRecord"
 generic_signature = ""
 source_key = "top|IdentityContinuityRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a09:1892"]
 
 [[top_level_candidate]]
@@ -27502,7 +27568,7 @@ symbol = "ShardEscapingAllocationEvidence"
 generic_signature = ""
 source_key = "top|ShardEscapingAllocationEvidence"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a09:1898"]
 
 [[top_level_candidate]]
@@ -27602,7 +27668,7 @@ symbol = "ShardIdRangeLease"
 generic_signature = ""
 source_key = "top|ShardIdRangeLease"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a09:1892"]
 
 [[top_level_candidate]]
@@ -29042,7 +29108,7 @@ symbol = "TxnAllocationBindingRoot"
 generic_signature = ""
 source_key = "top|TxnAllocationBindingRoot"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a09:1900"]
 
 [[top_level_candidate]]
@@ -34552,6 +34618,54 @@ source_key = "arm|ResultManifestRef|ResultManifestRef|Sharded"
 target_kind = "wire-type"
 definition_status = "declared"
 
+
+[[target]]
+row_id = "a09:target:logical-kind-id-range-lease"
+target_row_id = "a09:logical-kind:id-range-lease"
+slice_id = "a09"
+source_key = "top|IdRangeLease<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-identity-continuity-record"
+target_row_id = "a09:logical-kind:identity-continuity-record"
+slice_id = "a09"
+source_key = "top|IdentityContinuityRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-shard-escaping-allocation-evidence"
+target_row_id = "a09:logical-kind:shard-escaping-allocation-evidence"
+slice_id = "a09"
+source_key = "top|ShardEscapingAllocationEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-shard-id-range-lease"
+target_row_id = "a09:logical-kind:shard-id-range-lease"
+slice_id = "a09"
+source_key = "top|ShardIdRangeLease"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-txn-allocation-binding-root"
+target_row_id = "a09:logical-kind:txn-allocation-binding-root"
+slice_id = "a09"
+source_key = "top|TxnAllocationBindingRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-escaping-allocation-reservation-record"
+target_row_id = "a09:logical-kind:escaping-allocation-reservation-record"
+slice_id = "a09"
+source_key = "top|EscapingAllocationReservationRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
 
 [[source_symbol_disposition]]
 row_id = "a01:source-symbol-disposition:export-leaf"

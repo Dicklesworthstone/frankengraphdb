@@ -315,6 +315,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/group_time_issuance_quiescence_certificate/"
 
 [[kind]]
+object_kind = 0x02d5
+name = "IdRangeLease"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/id_range_lease/"
+
+[[kind]]
+object_kind = 0x02d6
+name = "IdentityContinuityRecord"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/identity_continuity_record/"
+
+[[kind]]
 object_kind = 0x02da
 name = "KeyDestroyProposal"
 status = "reserved"
@@ -693,6 +711,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_continuity_authority_projection/"
 
 [[kind]]
+object_kind = 0x044d
+name = "ShardEscapingAllocationEvidence"
+status = "reserved"
+construction_order = 12
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_escaping_allocation_evidence/"
+
+[[kind]]
+object_kind = 0x0458
+name = "ShardIdRangeLease"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_id_range_lease/"
+
+[[kind]]
 object_kind = 0x0475
 name = "ShardRestoreSourceLeaseProjection"
 status = "reserved"
@@ -900,6 +936,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/transparency_checkpoint_freshness_basis/"
 
 [[kind]]
+object_kind = 0x04b1
+name = "TxnAllocationBindingRoot"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/txn_allocation_binding_root/"
+
+[[kind]]
 object_kind = 0x04b8
 name = "VerifierKeyRetirementFloor"
 status = "reserved"
@@ -907,6 +952,15 @@ construction_order = 62
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/verifier_key_retirement_floor/"
+
+[[kind]]
+object_kind = 0x04e1
+name = "EscapingAllocationReservationRecord"
+status = "reserved"
+construction_order = 14
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/escaping_allocation_reservation_record/"
 
 [[kind]]
 object_kind = 0x04fc
