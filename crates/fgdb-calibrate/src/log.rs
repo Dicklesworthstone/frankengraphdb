@@ -5928,6 +5928,213 @@ mod tests {
     }
 
     #[test]
+    fn ope_evidence_must_agree_with_the_trial_profile_it_claims() -> TestResult {
+        // The fixture sits exactly on several boundaries: identity window
+        // (60,69) has capacity 10, the batch (69,69) is first + observations -
+        // 1, and action_rows 20 is observations * maximum_actions. Each case
+        // below moves ONE field off its boundary.
+        //
+        // Check ORDER is load-bearing here and is why each case is built the
+        // way it is: `statistic.validate()` runs before this cross-check block,
+        // so a perturbation that also breaks an earlier rule would be reported
+        // by that rule instead. Where that applies the companion field is moved
+        // with it, and the comment says so.
+        #[allow(clippy::too_many_arguments)]
+        let ope = |maximum_observations: u64,
+                   observations: u64,
+                   action_rows: u64,
+                   maximum_total_action_rows: u64,
+                   complete: bool,
+                   selection_reason: OpeSelectionReason| {
+            StatisticalStatistic::OffPolicyEvaluation {
+                population_oid: oid(56),
+                strata_oid: oid(57),
+                action_space_oid: oid(58),
+                policy_epoch_oid: oid(59),
+                estimator_oid: oid(51),
+                estimator: OpeEstimator::DoublyRobust,
+                failure_behavior: OpeFailureBehavior::SelectPinnedFallback,
+                clipping_weight_units: 1_000_000,
+                minimum_effective_sample_size: 3,
+                maximum_observations,
+                maximum_actions_per_observation: 2,
+                maximum_total_action_rows,
+                candidate_numerator: 90,
+                fallback_numerator: 70,
+                advantage_numerator: 20,
+                // DERIVED from observations, not fixed. The estimate
+                // denominator must equal observations * PROBABILITY_SCALE *
+                // OUTCOME_SCALE, and that rule is checked BEFORE the ones
+                // below, so a case that moves `observations` while leaving
+                // this at its ten-observation value is reported as a
+                // denominator mismatch and never reaches the rule it meant to
+                // exercise. Holding it consistent is what isolates the others;
+                // the mismatch itself is asserted separately.
+                common_denominator: u128::from(observations) * 1_000_000_000_000_000,
+                candidate_ess_numerator: 400,
+                candidate_ess_denominator: 100,
+                fallback_ess_numerator: 900,
+                fallback_ess_denominator: 100,
+                observations,
+                action_rows,
+                complete,
+                candidate_ess_gate_passed: true,
+                fallback_ess_gate_passed: true,
+                zero_support_exclusions: 0,
+                zero_support_exclusions_digest: empty_ope_support_exclusions_digest(),
+                selection_reason,
+            }
+        };
+        let record = |batch, statistic| {
+            StatisticalLogRecord::try_from_bound_parts(
+                &TEST_IDENTITY_AUTHORITY,
+                StatisticalMonitorKind::OffPolicyEvaluation,
+                oid(51),
+                oid(53),
+                StatisticalBatchRange::try_new(60, 69).expect("ordered window"),
+                batch,
+                9,
+                oid(54),
+                oid(55),
+                oid(54),
+                statistic,
+            )
+        };
+        let batch = StatisticalBatchRange::try_new(69, 69)?;
+        let good = || {
+            ope(
+                10,
+                10,
+                20,
+                20,
+                true,
+                OpeSelectionReason::CandidateEstimatedBetter,
+            )
+        };
+
+        // Control: unperturbed, everything agrees. Without this the rejections
+        // below could be caused by the fixture rather than the perturbation.
+        assert!(record(batch, good()).is_ok());
+
+        // An observation count above the declared profile maximum. This one
+        // also protects an UNCHECKED subtraction: the cross-check computes
+        // `observations - 1`, whose safety rests entirely on the earlier
+        // `observations == 0` rejection in `validate()`. That is a non-local
+        // safety argument, so the bound is worth pinning here.
+        assert_eq!(
+            record(
+                batch,
+                ope(
+                    10,
+                    11,
+                    20,
+                    20,
+                    true,
+                    OpeSelectionReason::CandidateEstimatedBetter
+                )
+            ),
+            Err(StatisticalLogRecordError::OpeObservationCountOutOfBounds {
+                observations: 11,
+                maximum: 10,
+            })
+        );
+
+        // A profile too small to hold the window it claims. `observations` is
+        // lowered with the maximum so the earlier count rule stays satisfied
+        // and this rule is the one that fires.
+        assert_eq!(
+            record(
+                batch,
+                ope(
+                    9,
+                    9,
+                    20,
+                    20,
+                    true,
+                    OpeSelectionReason::CandidateEstimatedBetter
+                )
+            ),
+            Err(
+                StatisticalLogRecordError::OpeProfileCannotContainIdentityWindow {
+                    maximum_observations: 9,
+                    window_capacity: 10,
+                }
+            )
+        );
+
+        // The batch must be the single sequence first + observations - 1, so a
+        // record cannot claim evidence for a batch its own observation count
+        // does not reach.
+        let wrong_batch = StatisticalBatchRange::try_new(68, 68)?;
+        assert_eq!(
+            record(wrong_batch, good()),
+            Err(StatisticalLogRecordError::OpeBatchSequenceMismatch {
+                batch: wrong_batch,
+                expected: 69,
+            })
+        );
+
+        // More action rows than observations * maximum_actions_per_observation.
+        // The total-row ceiling is raised so the earlier row-count rule passes
+        // and the per-observation rule is isolated.
+        assert_eq!(
+            record(
+                batch,
+                ope(
+                    10,
+                    10,
+                    21,
+                    30,
+                    true,
+                    OpeSelectionReason::CandidateEstimatedBetter
+                )
+            ),
+            Err(
+                StatisticalLogRecordError::OpeActionRowsExceedPerObservationProfile {
+                    action_rows: 21,
+                    maximum: 20,
+                }
+            )
+        );
+
+        // Completeness is DERIVED, not asserted: it must equal
+        // observations == window_capacity, so a record cannot under-claim
+        // completeness to dodge the stricter selection rules that follow.
+        assert_eq!(
+            record(
+                batch,
+                ope(
+                    10,
+                    10,
+                    20,
+                    20,
+                    false,
+                    OpeSelectionReason::CandidateEstimatedBetter
+                )
+            ),
+            Err(StatisticalLogRecordError::OpeCompletenessMismatch {
+                complete: false,
+                observations: 10,
+                window_capacity: 10,
+            })
+        );
+
+        // The selection reason is likewise derived from the gates, so a record
+        // cannot claim a reason its own evidence does not produce.
+        assert_eq!(
+            record(
+                batch,
+                ope(10, 10, 20, 20, true, OpeSelectionReason::ZeroSupport)
+            ),
+            Err(StatisticalLogRecordError::OpeSelectionReasonMismatch {
+                expected: OpeSelectionReason::CandidateEstimatedBetter,
+                actual: OpeSelectionReason::ZeroSupport,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
     fn conformal_alpha_is_half_open_and_calibration_bounds_are_ordered() -> TestResult {
         let statistic =
             |alpha_bits: u64, minimum: u64, maximum: u64| StatisticalStatistic::ConformalCoverage {
