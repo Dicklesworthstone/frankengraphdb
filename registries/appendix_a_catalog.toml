@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 513
+target_count = 534
 projection_fallback_count = 83
-target_source_assignment_sha256 = "e00671a6d61fc7c937bce6d0fd0766caa8b26f737b326382737e9490d435bcd1"
+target_source_assignment_sha256 = "12a53d0191da3e7bb8dcf52e083ff1b1872dbedc8bb441e2f27365986252429f"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -600,7 +600,7 @@ registry_epoch = 8
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 16
+registry_epoch = 17
 
 [[logical_kind]]
 slice_id = "a03"
@@ -6119,6 +6119,363 @@ role_predicate = "true"
 retention_and_cut_rule = "closed union Local|Meta|Shard selected by the inventory own role - exactly one union value per inventory (cardinality one); the repeated record_refs live inside the Local/Meta arm payloads, and the Shard arm is deliberately uninhabited-empty (a16:2197)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:continuity-authority-observation-import-role-portable-observation-ref"
+containing_schema = "ContinuityAuthorityObservationImport<Role>"
+field_tag = 0x0003
+stable_name = "portable_observation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableContinuityAuthorityObservation"
+construction_order = 56
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableContinuityAuthorityObservation this ContinuityAuthorityObservationImport commits to; retained while the referrer is retained, and the acyclic order 27 <= 56 keeps the reference backward-only (a16:2227)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:continuity-authority-observation-import-role-time-observation-import-ref"
+containing_schema = "ContinuityAuthorityObservationImport<Role>"
+field_tag = 0x0004
+stable_name = "time_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityObservationImport"
+construction_order = 56
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityObservationImport this ContinuityAuthorityObservationImport commits to; retained while the referrer is retained, and the acyclic order 23 <= 56 keeps the reference backward-only (a16:2227)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:continuity-authority-observation-import-role-time-validation-evidence-ref"
+containing_schema = "ContinuityAuthorityObservationImport<Role>"
+field_tag = 0x0005
+stable_name = "time_validation_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 56
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this ContinuityAuthorityObservationImport commits to; retained while the referrer is retained, and the acyclic order 25 <= 56 keeps the reference backward-only (a16:2227)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:macaroon-root-issuance-record-role-authority-owning-role-issuance-receipt-ref"
+containing_schema = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "issuance_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "MacaroonRootIssuanceReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the MacaroonRootIssuanceReceipt this MacaroonRootIssuanceRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a16:2173)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-grant-lineage-proof-ref"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "grant_lineage_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableArchiveGrantLineageProof"
+construction_order = 45
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableArchiveGrantLineageProof this RestoreSourceLeaseRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 45 keeps the reference backward-only (a16:2237)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-lease-lineage-proof-ref"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "lease_lineage_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableRestoreSourceLeaseLineageProof"
+construction_order = 45
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableRestoreSourceLeaseLineageProof this RestoreSourceLeaseRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 45 keeps the reference backward-only (a16:2237)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:shard-time-authority-retirement-ack-zero-live-old-profile-subject-proof-ref"
+containing_schema = "ShardTimeAuthorityRetirementAck"
+field_tag = 0x0005
+stable_name = "zero_live_old_profile_subject_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardTimeBoundSubjectRetirementProof"
+construction_order = 52
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardTimeBoundSubjectRetirementProof this ShardTimeAuthorityRetirementAck commits to; retained while the referrer is retained, and the acyclic order 36 <= 52 keeps the reference backward-only (a16:2215)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:shard-time-authority-retirement-ack-installed-retirement-floor-ref"
+containing_schema = "ShardTimeAuthorityRetirementAck"
+field_tag = 0x0006
+stable_name = "installed_retirement_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardTimeAuthorityRetirementFloor"
+construction_order = 52
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardTimeAuthorityRetirementFloor this ShardTimeAuthorityRetirementAck commits to; retained while the referrer is retained, and the acyclic order 51 <= 52 keeps the reference backward-only (a16:2215)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:shard-time-authority-retirement-floor-inventory-certificate-ref"
+containing_schema = "ShardTimeAuthorityRetirementFloor"
+field_tag = 0x0004
+stable_name = "inventory_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardTimeBoundSubjectInventoryCertificate"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardTimeBoundSubjectInventoryCertificate this ShardTimeAuthorityRetirementFloor commits to; retained while the referrer is retained, and the acyclic order 35 <= 51 keeps the reference backward-only (a16:2205)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:shard-time-authority-retirement-floor-retirement-proof-ref"
+containing_schema = "ShardTimeAuthorityRetirementFloor"
+field_tag = 0x0005
+stable_name = "retirement_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardTimeBoundSubjectRetirementProof"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardTimeBoundSubjectRetirementProof this ShardTimeAuthorityRetirementFloor commits to; retained while the referrer is retained, and the acyclic order 36 <= 51 keeps the reference backward-only (a16:2205)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-authority-drain-hold-role-authority-owning-role-retiring-profile-ref"
+containing_schema = "TimeAuthorityDrainHold<Role:AuthorityOwningRole>"
+field_tag = 0x0002
+stable_name = "retiring_profile_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityProfile"
+construction_order = 55
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityProfile this TimeAuthorityDrainHold commits to; retained while the referrer is retained, and the acyclic order 20 <= 55 keeps the reference backward-only (a16:2199)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-authority-drain-hold-role-authority-owning-role-issuance-fence-ref"
+containing_schema = "TimeAuthorityDrainHold<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "issuance_fence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityIssuanceFence"
+construction_order = 55
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityIssuanceFence this TimeAuthorityDrainHold commits to; retained while the referrer is retained, and the acyclic order 27 <= 55 keeps the reference backward-only (a16:2199)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-authority-drain-hold-role-authority-owning-role-offline-issuer-verify-only-service-floor-ref"
+containing_schema = "TimeAuthorityDrainHold<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "offline_issuer_verify_only_service_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "OfflineIssuerVerificationServiceFloor"
+construction_order = 55
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the OfflineIssuerVerificationServiceFloor this TimeAuthorityDrainHold commits to; retained while the referrer is retained, and the acyclic order 32 <= 55 keeps the reference backward-only (a16:2199)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-plan-ref"
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityEpochTransitionPlan"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityEpochTransitionPlan this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-registry-dispatch-terminal-evidence-ref"
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "registry_dispatch_terminal_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableTimeAuthorityRegistryTransitionTerminalEvidence"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableTimeAuthorityRegistryTransitionTerminalEvidence this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-receipt-ref"
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0008
+stable_name = "receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityRegistryTransitionReceipt"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityRegistryTransitionReceipt this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 57 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-predecessor-profile-ref"
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "predecessor_profile_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityProfile"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityProfile this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 20 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-successor-profile-ref"
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "successor_profile_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityProfile"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityProfile this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 20 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-issuance-fence-ref"
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "issuance_fence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityIssuanceFence"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityIssuanceFence this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-validation-evidence-profile-ref"
+containing_schema = "TimeValidationEvidence"
+field_tag = 0x0001
+stable_name = "profile_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityProfile"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityProfile this TimeValidationEvidence commits to; retained while the referrer is retained, and the acyclic order 20 <= 25 keeps the reference backward-only (a16:2167)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-validation-evidence-observation-import-ref"
+containing_schema = "TimeValidationEvidence"
+field_tag = 0x0002
+stable_name = "observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityObservationImport"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityObservationImport this TimeValidationEvidence commits to; retained while the referrer is retained, and the acyclic order 23 <= 25 keeps the reference backward-only (a16:2167)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[union]]
 slice_id = "a01"
@@ -31572,6 +31929,174 @@ target_row_id = "a16:union-arm:time-bound-online-macaroon-root-projection-shard-
 slice_id = "a16"
 source_key = "arm|TimeBoundSubjectInventory<Role:Local|Meta|Shard>|TimeBoundSubjectInventory<Role:Local|Meta|Shard>.online_macaroon_roots|Shard"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-continuity-authority-observation-import-role-portable-observation-ref"
+target_row_id = "a16:field:continuity-authority-observation-import-role-portable-observation-ref"
+slice_id = "a16"
+source_key = "field|ContinuityAuthorityObservationImport<Role>|ContinuityAuthorityObservationImport<Role>.portable_observation_ref|portable_observation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-continuity-authority-observation-import-role-time-observation-import-ref"
+target_row_id = "a16:field:continuity-authority-observation-import-role-time-observation-import-ref"
+slice_id = "a16"
+source_key = "field|ContinuityAuthorityObservationImport<Role>|ContinuityAuthorityObservationImport<Role>.time_observation_import_ref|time_observation_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-continuity-authority-observation-import-role-time-validation-evidence-ref"
+target_row_id = "a16:field:continuity-authority-observation-import-role-time-validation-evidence-ref"
+slice_id = "a16"
+source_key = "field|ContinuityAuthorityObservationImport<Role>|ContinuityAuthorityObservationImport<Role>.time_validation_evidence_ref|time_validation_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-macaroon-root-issuance-record-role-authority-owning-role-issuance-receipt-ref"
+target_row_id = "a16:field:macaroon-root-issuance-record-role-authority-owning-role-issuance-receipt-ref"
+slice_id = "a16"
+source_key = "field|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.issuance_receipt_ref|issuance_receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-restore-source-lease-record-role-authority-owning-role-grant-lineage-proof-ref"
+target_row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-grant-lineage-proof-ref"
+slice_id = "a16"
+source_key = "field|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.grant_lineage_proof_ref|grant_lineage_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-restore-source-lease-record-role-authority-owning-role-lease-lineage-proof-ref"
+target_row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-lease-lineage-proof-ref"
+slice_id = "a16"
+source_key = "field|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.lease_lineage_proof_ref|lease_lineage_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-shard-time-authority-retirement-ack-zero-live-old-profile-subject-proof-ref"
+target_row_id = "a16:field:shard-time-authority-retirement-ack-zero-live-old-profile-subject-proof-ref"
+slice_id = "a16"
+source_key = "field|ShardTimeAuthorityRetirementAck|ShardTimeAuthorityRetirementAck.zero_live_old_profile_subject_proof_ref|zero_live_old_profile_subject_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-shard-time-authority-retirement-ack-installed-retirement-floor-ref"
+target_row_id = "a16:field:shard-time-authority-retirement-ack-installed-retirement-floor-ref"
+slice_id = "a16"
+source_key = "field|ShardTimeAuthorityRetirementAck|ShardTimeAuthorityRetirementAck.installed_retirement_floor_ref|installed_retirement_floor_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-shard-time-authority-retirement-floor-inventory-certificate-ref"
+target_row_id = "a16:field:shard-time-authority-retirement-floor-inventory-certificate-ref"
+slice_id = "a16"
+source_key = "field|ShardTimeAuthorityRetirementFloor|ShardTimeAuthorityRetirementFloor.inventory_certificate_ref|inventory_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-shard-time-authority-retirement-floor-retirement-proof-ref"
+target_row_id = "a16:field:shard-time-authority-retirement-floor-retirement-proof-ref"
+slice_id = "a16"
+source_key = "field|ShardTimeAuthorityRetirementFloor|ShardTimeAuthorityRetirementFloor.retirement_proof_ref|retirement_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-authority-drain-hold-role-authority-owning-role-retiring-profile-ref"
+target_row_id = "a16:field:time-authority-drain-hold-role-authority-owning-role-retiring-profile-ref"
+slice_id = "a16"
+source_key = "field|TimeAuthorityDrainHold<Role:AuthorityOwningRole>|TimeAuthorityDrainHold<Role:AuthorityOwningRole>.retiring_profile_ref|retiring_profile_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-authority-drain-hold-role-authority-owning-role-issuance-fence-ref"
+target_row_id = "a16:field:time-authority-drain-hold-role-authority-owning-role-issuance-fence-ref"
+slice_id = "a16"
+source_key = "field|TimeAuthorityDrainHold<Role:AuthorityOwningRole>|TimeAuthorityDrainHold<Role:AuthorityOwningRole>.issuance_fence_ref|issuance_fence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-authority-drain-hold-role-authority-owning-role-offline-issuer-verify-only-service-floor-ref"
+target_row_id = "a16:field:time-authority-drain-hold-role-authority-owning-role-offline-issuer-verify-only-service-floor-ref"
+slice_id = "a16"
+source_key = "field|TimeAuthorityDrainHold<Role:AuthorityOwningRole>|TimeAuthorityDrainHold<Role:AuthorityOwningRole>.offline_issuer_verify_only_service_floor_ref|offline_issuer_verify_only_service_floor_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-authority-epoch-transition-record-role-authority-owning-role-plan-ref"
+target_row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-plan-ref"
+slice_id = "a16"
+source_key = "field|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>.plan_ref|plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-authority-epoch-transition-record-role-authority-owning-role-registry-dispatch-terminal-evidence-ref"
+target_row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-registry-dispatch-terminal-evidence-ref"
+slice_id = "a16"
+source_key = "field|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>.registry_dispatch_terminal_evidence_ref|registry_dispatch_terminal_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-authority-epoch-transition-record-role-authority-owning-role-receipt-ref"
+target_row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-receipt-ref"
+slice_id = "a16"
+source_key = "field|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>.receipt_ref|receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-authority-epoch-transition-record-role-authority-owning-role-predecessor-profile-ref"
+target_row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-predecessor-profile-ref"
+slice_id = "a16"
+source_key = "field|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>.predecessor_profile_ref|predecessor_profile_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-authority-epoch-transition-record-role-authority-owning-role-successor-profile-ref"
+target_row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-successor-profile-ref"
+slice_id = "a16"
+source_key = "field|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>.successor_profile_ref|successor_profile_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-authority-epoch-transition-record-role-authority-owning-role-issuance-fence-ref"
+target_row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-issuance-fence-ref"
+slice_id = "a16"
+source_key = "field|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>.issuance_fence_ref|issuance_fence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-validation-evidence-profile-ref"
+target_row_id = "a16:field:time-validation-evidence-profile-ref"
+slice_id = "a16"
+source_key = "field|TimeValidationEvidence|TimeValidationEvidence.profile_ref|profile_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-validation-evidence-observation-import-ref"
+target_row_id = "a16:field:time-validation-evidence-observation-import-ref"
+slice_id = "a16"
+source_key = "field|TimeValidationEvidence|TimeValidationEvidence.observation_import_ref|observation_import_ref"
+target_kind = "field"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

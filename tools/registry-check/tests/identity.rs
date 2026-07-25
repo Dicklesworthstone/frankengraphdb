@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 16
+registry_epoch = 17
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 16);
+    assert_eq!(epoch, 17);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3219,9 +3219,84 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 )
         )
     };
+    // The a16 field-coverage closure lands plain `StrongRef` rows, which carry
+    // no union name either, so they are matched by (schema, field) identity for
+    // the same reason as the A01 applied-result fields above.
+    let post_erratum_a16_reference_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            (
+                "ContinuityAuthorityObservationImport<Role>",
+                "portable_observation_ref"
+            ) | (
+                "ContinuityAuthorityObservationImport<Role>",
+                "time_observation_import_ref"
+            ) | (
+                "ContinuityAuthorityObservationImport<Role>",
+                "time_validation_evidence_ref"
+            ) | (
+                "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>",
+                "issuance_receipt_ref"
+            ) | (
+                "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>",
+                "grant_lineage_proof_ref"
+            ) | (
+                "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>",
+                "lease_lineage_proof_ref"
+            ) | (
+                "ShardTimeAuthorityRetirementAck",
+                "zero_live_old_profile_subject_proof_ref"
+            ) | (
+                "ShardTimeAuthorityRetirementAck",
+                "installed_retirement_floor_ref"
+            ) | (
+                "ShardTimeAuthorityRetirementFloor",
+                "inventory_certificate_ref"
+            ) | ("ShardTimeAuthorityRetirementFloor", "retirement_proof_ref")
+                | (
+                    "TimeAuthorityDrainHold<Role:AuthorityOwningRole>",
+                    "retiring_profile_ref"
+                )
+                | (
+                    "TimeAuthorityDrainHold<Role:AuthorityOwningRole>",
+                    "issuance_fence_ref"
+                )
+                | (
+                    "TimeAuthorityDrainHold<Role:AuthorityOwningRole>",
+                    "offline_issuer_verify_only_service_floor_ref"
+                )
+                | (
+                    "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+                    "plan_ref"
+                )
+                | (
+                    "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+                    "registry_dispatch_terminal_evidence_ref"
+                )
+                | (
+                    "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+                    "receipt_ref"
+                )
+                | (
+                    "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+                    "predecessor_profile_ref"
+                )
+                | (
+                    "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+                    "successor_profile_ref"
+                )
+                | (
+                    "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+                    "issuance_fence_ref"
+                )
+                | ("TimeValidationEvidence", "profile_ref")
+                | ("TimeValidationEvidence", "observation_import_ref")
+        )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_union(&field.exact_wire_type)
             && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a16_reference_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 28,
@@ -3229,7 +3304,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove exactly the post-erratum A15, A01, and A16 unions"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 14,
+        pre_erratum.fields.len() + 35,
         current_field_count,
         "the historical witness must remove the post-erratum embedded-union anchor fields and the A01 applied-result fields"
     );
@@ -3653,7 +3728,11 @@ fn idr_reference_targets_resolve() {
     // carry field rows, are named as a field target, or appear as union arms.
     let mut load_bearing: BTreeSet<&str> = BTreeSet::new();
     for f in &r.fields {
-        load_bearing.insert(f.containing_schema.as_str());
+        // A field's containing schema resolves by generic-free family, so the
+        // FAMILY row is what a generic-signed field row keeps alive — the same
+        // treatment ordinary-union containers get below.  `target_schema_id`
+        // stays exact: reference-target resolution has no family law.
+        load_bearing.insert(identity::generic_free_family(f.containing_schema.as_str()));
         if let Some(t) = &f.target_schema_id {
             load_bearing.insert(t.as_str());
         }

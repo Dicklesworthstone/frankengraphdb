@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 16
+registry_epoch = 17
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -288,6 +288,51 @@ version_status = "active"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "ContinuityAuthorityObservationImport<Role>"
+field_tag = 0x0003
+stable_name = "portable_observation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableContinuityAuthorityObservation"
+construction_order = 56
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableContinuityAuthorityObservation this ContinuityAuthorityObservationImport commits to; retained while the referrer is retained, and the acyclic order 27 <= 56 keeps the reference backward-only (a16:2227)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ContinuityAuthorityObservationImport<Role>"
+field_tag = 0x0004
+stable_name = "time_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityObservationImport"
+construction_order = 56
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityObservationImport this ContinuityAuthorityObservationImport commits to; retained while the referrer is retained, and the acyclic order 23 <= 56 keeps the reference backward-only (a16:2227)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ContinuityAuthorityObservationImport<Role>"
+field_tag = 0x0005
+stable_name = "time_validation_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 56
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this ContinuityAuthorityObservationImport commits to; retained while the referrer is retained, and the acyclic order 25 <= 56 keeps the reference backward-only (a16:2227)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "ControlCommand"
 field_tag = 0x0001
 stable_name = "control_body"
@@ -464,6 +509,21 @@ construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "absent only at fresh genesis"
 version_status = "active"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "issuance_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "MacaroonRootIssuanceReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the MacaroonRootIssuanceReceipt this MacaroonRootIssuanceRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a16:2173)"
+version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
@@ -2112,6 +2172,36 @@ max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "grant_lineage_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableArchiveGrantLineageProof"
+construction_order = 45
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableArchiveGrantLineageProof this RestoreSourceLeaseRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 45 keeps the reference backward-only (a16:2237)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "lease_lineage_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableRestoreSourceLeaseLineageProof"
+construction_order = 45
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableRestoreSourceLeaseLineageProof this RestoreSourceLeaseRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 45 keeps the reference backward-only (a16:2237)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
 field_tag = 0x000b
 stable_name = "lineage_basis"
 exact_wire_type = "RestoreSourceLeaseLineageBasis"
@@ -3060,6 +3150,201 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "ShardTimeAuthorityRetirementAck"
+field_tag = 0x0005
+stable_name = "zero_live_old_profile_subject_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardTimeBoundSubjectRetirementProof"
+construction_order = 52
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardTimeBoundSubjectRetirementProof this ShardTimeAuthorityRetirementAck commits to; retained while the referrer is retained, and the acyclic order 36 <= 52 keeps the reference backward-only (a16:2215)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardTimeAuthorityRetirementAck"
+field_tag = 0x0006
+stable_name = "installed_retirement_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardTimeAuthorityRetirementFloor"
+construction_order = 52
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardTimeAuthorityRetirementFloor this ShardTimeAuthorityRetirementAck commits to; retained while the referrer is retained, and the acyclic order 51 <= 52 keeps the reference backward-only (a16:2215)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardTimeAuthorityRetirementFloor"
+field_tag = 0x0004
+stable_name = "inventory_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardTimeBoundSubjectInventoryCertificate"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardTimeBoundSubjectInventoryCertificate this ShardTimeAuthorityRetirementFloor commits to; retained while the referrer is retained, and the acyclic order 35 <= 51 keeps the reference backward-only (a16:2205)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardTimeAuthorityRetirementFloor"
+field_tag = 0x0005
+stable_name = "retirement_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardTimeBoundSubjectRetirementProof"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardTimeBoundSubjectRetirementProof this ShardTimeAuthorityRetirementFloor commits to; retained while the referrer is retained, and the acyclic order 36 <= 51 keeps the reference backward-only (a16:2205)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityDrainHold<Role:AuthorityOwningRole>"
+field_tag = 0x0002
+stable_name = "retiring_profile_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityProfile"
+construction_order = 55
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityProfile this TimeAuthorityDrainHold commits to; retained while the referrer is retained, and the acyclic order 20 <= 55 keeps the reference backward-only (a16:2199)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityDrainHold<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "issuance_fence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityIssuanceFence"
+construction_order = 55
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityIssuanceFence this TimeAuthorityDrainHold commits to; retained while the referrer is retained, and the acyclic order 27 <= 55 keeps the reference backward-only (a16:2199)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityDrainHold<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "offline_issuer_verify_only_service_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "OfflineIssuerVerificationServiceFloor"
+construction_order = 55
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the OfflineIssuerVerificationServiceFloor this TimeAuthorityDrainHold commits to; retained while the referrer is retained, and the acyclic order 32 <= 55 keeps the reference backward-only (a16:2199)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityEpochTransitionPlan"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityEpochTransitionPlan this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "registry_dispatch_terminal_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableTimeAuthorityRegistryTransitionTerminalEvidence"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableTimeAuthorityRegistryTransitionTerminalEvidence this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0008
+stable_name = "receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityRegistryTransitionReceipt"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityRegistryTransitionReceipt this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 57 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "predecessor_profile_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityProfile"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityProfile this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 20 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "successor_profile_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityProfile"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityProfile this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 20 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "issuance_fence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityIssuanceFence"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityIssuanceFence this TimeAuthorityEpochTransitionRecord commits to; retained while the referrer is retained, and the acyclic order 27 <= 60 keeps the reference backward-only (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>"
 field_tag = 0x0007
 stable_name = "online_macaroon_roots"
@@ -3086,6 +3371,36 @@ role_predicate = "true"
 retention_and_cut_rule = "closed union Reserved|Published|Burned; the reservation's whole lifecycle position — a reservation is never both published and burned — lives/dies with the reservation object (a16:2191)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "TimeValidationEvidence"
+field_tag = 0x0001
+stable_name = "profile_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityProfile"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityProfile this TimeValidationEvidence commits to; retained while the referrer is retained, and the acyclic order 20 <= 25 keeps the reference backward-only (a16:2167)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeValidationEvidence"
+field_tag = 0x0002
+stable_name = "observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityObservationImport"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityObservationImport this TimeValidationEvidence commits to; retained while the referrer is retained, and the acyclic order 23 <= 25 keeps the reference backward-only (a16:2167)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "TimeValidationEvidence"
