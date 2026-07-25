@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 1182;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 1215;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "6cd7b818ba1a3b8519cbff07c5b9ef9298d6ebf2bd56a33ca27307d81307142b";
+    "8cef43476b45d9ee6301a6831dab50e75f124d39ad1f319d9ef20c7c3e6761fa";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 89;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "be07fa0bd9bf256dd5c21d72a6f583152aefaf77814976072adef1167074fdaf";
+    "041a03822616c77c4314de5efbf25579092b4587473cd6bcdb2039419a7ef145";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -64,11 +64,11 @@ pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 389;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
     "78c2adede17da5eea90ffb344591c7292e7d093c8ef07175c906e7595219639d";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
-pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 188;
-pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 625;
+pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 221;
+pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 592;
 pub const EXPECTED_RESERVATION_HIGH_WATER: u16 = 0x051d;
 pub const EXPECTED_RESERVATION_ASSIGNMENT_SHA256: &str =
-    "5415f5f4b593d0e5ad53af83eab5f1d96b261da7de4f12aaa0e1132d5cdf7826";
+    "ee7aa4b169937ebc6fecf9f1dce0e3d3074660b37332801921cecd5ca238de19";
 pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
 pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_458;
@@ -14818,14 +14818,35 @@ stable_name = "Ready"
             );
         }
         let (a07_keys, a07_targets) = top_level_coverage_for_slice(&catalog, &coverage, "a07");
+        // a07 owns landed top-level targets of its own, so the completing slice's
+        // key set is its real coverage PLUS the reassigned occurrence. Derived from
+        // the catalog rather than assumed empty, so this stays exact as a07 grows.
+        let mut expected_a07_keys: Vec<&str> = catalog
+            .targets
+            .iter()
+            .filter(|target| target.slice_id == "a07" && target.source_key.starts_with("top|"))
+            .map(|target| target.source_key.as_str())
+            .collect();
+        expected_a07_keys.push(expanded_source_key);
+        expected_a07_keys.sort_unstable();
+        expected_a07_keys.dedup();
         assert_eq!(
             a07_keys,
-            [expanded_source_key],
+            expected_a07_keys,
             "the completing source slice must count the exact cross-slice occurrence"
         );
+        let mut expected_a07_targets: Vec<&str> = catalog
+            .targets
+            .iter()
+            .filter(|target| target.slice_id == "a07" && target.source_key.starts_with("top|"))
+            .map(|target| target.target_row_id.as_str())
+            .collect();
+        expected_a07_targets.push(target_row_id);
+        expected_a07_targets.sort_unstable();
+        expected_a07_targets.dedup();
         assert_eq!(
             a07_targets.keys().copied().collect::<Vec<_>>(),
-            [target_row_id]
+            expected_a07_targets
         );
 
         let unapproved = approved_top_level_source_coverage_with(&[], &catalog);

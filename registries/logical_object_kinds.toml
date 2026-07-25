@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 29
+registry_epoch = 30
 
 [[kind]]
 object_kind = 0x0001
@@ -279,6 +279,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/active_meta_projection_root/"
 
 [[kind]]
+object_kind = 0x0205
+name = "AdministrativeAbortAuthorizationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/administrative_abort_authorization_record/"
+
+[[kind]]
 object_kind = 0x0206
 name = "AdmittedTxnAbortCommand"
 status = "reserved"
@@ -286,6 +295,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/admitted_txn_abort_command/"
+
+[[kind]]
+object_kind = 0x022f
+name = "AuditTicketClaimRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_ticket_claim_record/"
 
 [[kind]]
 object_kind = 0x0235
@@ -304,6 +322,24 @@ construction_order = 26
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/authenticated_client_result_release_receipt/"
+
+[[kind]]
+object_kind = 0x024c
+name = "BeginRegionClosedReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/begin_region_closed_receipt/"
+
+[[kind]]
+object_kind = 0x0257
+name = "BufferedResultManifest"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/buffered_result_manifest/"
 
 [[kind]]
 object_kind = 0x025b
@@ -477,6 +513,42 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/genesis_meta_projection_payload/"
 
 [[kind]]
+object_kind = 0x02a4
+name = "GlobalAttemptRegistration"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_attempt_registration/"
+
+[[kind]]
+object_kind = 0x02aa
+name = "GlobalBeginIdempotencyIndex"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_begin_idempotency_index/"
+
+[[kind]]
+object_kind = 0x02ab
+name = "GlobalBeginReservationRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_begin_reservation_record/"
+
+[[kind]]
+object_kind = 0x02ac
+name = "GlobalBeginReservationSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_begin_reservation_spec/"
+
+[[kind]]
 object_kind = 0x02ad
 name = "GlobalBranchKeyDistributionPlan"
 status = "reserved"
@@ -484,6 +556,15 @@ construction_order = 30
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_branch_key_distribution_plan/"
+
+[[kind]]
+object_kind = 0x02b1
+name = "GlobalControlCommand"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_control_command/"
 
 [[kind]]
 object_kind = 0x02b2
@@ -495,6 +576,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_control_record/"
 
 [[kind]]
+object_kind = 0x02b8
+name = "GlobalFinalCertificationReservation"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_final_certification_reservation/"
+
+[[kind]]
+object_kind = 0x02b9
+name = "GlobalFinalCertificationReserveSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_final_certification_reserve_spec/"
+
+[[kind]]
 object_kind = 0x02bd
 name = "GlobalKeyDestructionAuthorizationCertificate"
 status = "reserved"
@@ -504,6 +603,33 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_key_destruction_authorization_certificate/"
 
 [[kind]]
+object_kind = 0x02bf
+name = "GlobalPrepareAdmissionSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_prepare_admission_spec/"
+
+[[kind]]
+object_kind = 0x02c0
+name = "GlobalReadAuthorizationDecisionRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_read_authorization_decision_record/"
+
+[[kind]]
+object_kind = 0x02c1
+name = "GlobalReadCloseSpec"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_read_close_spec/"
+
+[[kind]]
 object_kind = 0x02c2
 name = "GlobalRecoveryCheckpoint"
 status = "reserved"
@@ -511,6 +637,15 @@ construction_order = 40
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_recovery_checkpoint/"
+
+[[kind]]
+object_kind = 0x02c8
+name = "GlobalSequenceNeutralSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_sequence_neutral_spec/"
 
 [[kind]]
 object_kind = 0x02c9
@@ -531,6 +666,42 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_state_root/"
 
 [[kind]]
+object_kind = 0x02cb
+name = "GlobalStatementIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_statement_index/"
+
+[[kind]]
+object_kind = 0x02cc
+name = "GlobalStatementRegistration"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_statement_registration/"
+
+[[kind]]
+object_kind = 0x02ce
+name = "GlobalTxnOutcomePreparationRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_outcome_preparation_record/"
+
+[[kind]]
+object_kind = 0x02cf
+name = "GlobalTxnOutcomeRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_outcome_record/"
+
+[[kind]]
 object_kind = 0x02d0
 name = "GlobalTxnRecord"
 status = "reserved"
@@ -538,6 +709,15 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_txn_record/"
+
+[[kind]]
+object_kind = 0x02d1
+name = "GlobalTxnWorkspaceGeneration"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_workspace_generation/"
 
 [[kind]]
 object_kind = 0x02d4
@@ -711,6 +891,33 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_conflict_index/"
 
 [[kind]]
+object_kind = 0x0309
+name = "LocalFinalCertificationReservation"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_final_certification_reservation/"
+
+[[kind]]
+object_kind = 0x030a
+name = "LocalFinalCertificationReserveSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_final_certification_reserve_spec/"
+
+[[kind]]
+object_kind = 0x0313
+name = "LocalOrderAttemptInput"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_order_attempt_input/"
+
+[[kind]]
 object_kind = 0x0315
 name = "LocalPrepareAdmissionSpec"
 status = "reserved"
@@ -819,6 +1026,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/meta_config_payload_floor/"
 
 [[kind]]
+object_kind = 0x034e
+name = "MetaMaintenanceCommand"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_maintenance_command/"
+
+[[kind]]
+object_kind = 0x0350
+name = "MetaOrderAttemptInput"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_order_attempt_input/"
+
+[[kind]]
 object_kind = 0x0352
 name = "MetaPreparedCommandRecord"
 status = "reserved"
@@ -826,6 +1051,15 @@ construction_order = 35
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/meta_prepared_command_record/"
+
+[[kind]]
+object_kind = 0x0369
+name = "NeverRegisteredTerminalRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/never_registered_terminal_record/"
 
 [[kind]]
 object_kind = 0x0375
@@ -954,6 +1188,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/pre_bootstrap_portable_time_expiry_attestation/"
 
 [[kind]]
+object_kind = 0x0399
+name = "PreparedOrderAttemptRoot"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prepared_order_attempt_root/"
+
+[[kind]]
 object_kind = 0x039c
 name = "PriorIncarnationLeaseCohortWindow"
 status = "reserved"
@@ -997,6 +1240,15 @@ construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/raft_state_root/"
+
+[[kind]]
+object_kind = 0x03a6
+name = "ReadParticipantRoutingCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_participant_routing_certificate/"
 
 [[kind]]
 object_kind = 0x03ad
@@ -1188,6 +1440,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/result_delivery_disposition_proof/"
 
 [[kind]]
+object_kind = 0x0409
+name = "ResultDeliveryLease"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_lease/"
+
+[[kind]]
 object_kind = 0x040a
 name = "ResultDeliveryLeaseTimeBasis"
 status = "reserved"
@@ -1222,6 +1483,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/result_resource_escrow/"
+
+[[kind]]
+object_kind = 0x0411
+name = "ResultSchema"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_schema/"
 
 [[kind]]
 object_kind = 0x0414
@@ -1431,6 +1701,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_protocol_state/"
 
 [[kind]]
+object_kind = 0x046d
+name = "ShardReadWitnessBasis"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_read_witness_basis/"
+
+[[kind]]
 object_kind = 0x046f
 name = "ShardRecoveryCheckpoint"
 status = "reserved"
@@ -1546,6 +1825,24 @@ construction_order = 29
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/sharding_role_transition_plan/"
+
+[[kind]]
+object_kind = 0x048e
+name = "TerminalAbortAuthority"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/terminal_abort_authority/"
+
+[[kind]]
+object_kind = 0x0491
+name = "TerminalCertificationReservationRoot"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/terminal_certification_reservation_root/"
 
 [[kind]]
 object_kind = 0x0493

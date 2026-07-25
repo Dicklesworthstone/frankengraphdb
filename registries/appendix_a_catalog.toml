@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1182
+target_count = 1215
 projection_fallback_count = 89
-target_source_assignment_sha256 = "be07fa0bd9bf256dd5c21d72a6f583152aefaf77814976072adef1167074fdaf"
+target_source_assignment_sha256 = "041a03822616c77c4314de5efbf25579092b4587473cd6bcdb2039419a7ef145"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 29
+registry_epoch = 30
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -3097,6 +3097,369 @@ construction_order = 30
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_constraint_state_root/"
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:administrative-abort-authorization-record"
+object_kind = 0x0205
+name = "AdministrativeAbortAuthorizationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/administrative_abort_authorization_record/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:audit-ticket-claim-record"
+object_kind = 0x022f
+name = "AuditTicketClaimRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_ticket_claim_record/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:begin-region-closed-receipt"
+object_kind = 0x024c
+name = "BeginRegionClosedReceipt"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/begin_region_closed_receipt/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:buffered-result-manifest"
+object_kind = 0x0257
+name = "BufferedResultManifest"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/buffered_result_manifest/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-attempt-registration"
+object_kind = 0x02a4
+name = "GlobalAttemptRegistration"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_attempt_registration/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-begin-idempotency-index"
+object_kind = 0x02aa
+name = "GlobalBeginIdempotencyIndex"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_begin_idempotency_index/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-begin-reservation-record"
+object_kind = 0x02ab
+name = "GlobalBeginReservationRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_begin_reservation_record/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-begin-reservation-spec"
+object_kind = 0x02ac
+name = "GlobalBeginReservationSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_begin_reservation_spec/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-control-command"
+object_kind = 0x02b1
+name = "GlobalControlCommand"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_control_command/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-final-certification-reservation"
+object_kind = 0x02b8
+name = "GlobalFinalCertificationReservation"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_final_certification_reservation/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-final-certification-reserve-spec"
+object_kind = 0x02b9
+name = "GlobalFinalCertificationReserveSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_final_certification_reserve_spec/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-prepare-admission-spec"
+object_kind = 0x02bf
+name = "GlobalPrepareAdmissionSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_prepare_admission_spec/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-read-authorization-decision-record"
+object_kind = 0x02c0
+name = "GlobalReadAuthorizationDecisionRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_read_authorization_decision_record/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-read-close-spec"
+object_kind = 0x02c1
+name = "GlobalReadCloseSpec"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_read_close_spec/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-sequence-neutral-spec"
+object_kind = 0x02c8
+name = "GlobalSequenceNeutralSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_sequence_neutral_spec/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-statement-index"
+object_kind = 0x02cb
+name = "GlobalStatementIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_statement_index/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-statement-registration"
+object_kind = 0x02cc
+name = "GlobalStatementRegistration"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_statement_registration/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-txn-outcome-preparation-record"
+object_kind = 0x02ce
+name = "GlobalTxnOutcomePreparationRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_outcome_preparation_record/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-txn-outcome-record"
+object_kind = 0x02cf
+name = "GlobalTxnOutcomeRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_outcome_record/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-txn-workspace-generation"
+object_kind = 0x02d1
+name = "GlobalTxnWorkspaceGeneration"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_workspace_generation/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:local-final-certification-reservation"
+object_kind = 0x0309
+name = "LocalFinalCertificationReservation"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_final_certification_reservation/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:local-final-certification-reserve-spec"
+object_kind = 0x030a
+name = "LocalFinalCertificationReserveSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_final_certification_reserve_spec/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:local-order-attempt-input"
+object_kind = 0x0313
+name = "LocalOrderAttemptInput"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_order_attempt_input/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:meta-maintenance-command"
+object_kind = 0x034e
+name = "MetaMaintenanceCommand"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_maintenance_command/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:meta-order-attempt-input"
+object_kind = 0x0350
+name = "MetaOrderAttemptInput"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_order_attempt_input/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:never-registered-terminal-record"
+object_kind = 0x0369
+name = "NeverRegisteredTerminalRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/never_registered_terminal_record/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:prepared-order-attempt-root"
+object_kind = 0x0399
+name = "PreparedOrderAttemptRoot"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prepared_order_attempt_root/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:read-participant-routing-certificate"
+object_kind = 0x03a6
+name = "ReadParticipantRoutingCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_participant_routing_certificate/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:result-delivery-lease"
+object_kind = 0x0409
+name = "ResultDeliveryLease"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_lease/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:result-schema"
+object_kind = 0x0411
+name = "ResultSchema"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_schema/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:shard-read-witness-basis"
+object_kind = 0x046d
+name = "ShardReadWitnessBasis"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_read_witness_basis/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:terminal-abort-authority"
+object_kind = 0x048e
+name = "TerminalAbortAuthority"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/terminal_abort_authority/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:terminal-certification-reservation-root"
+object_kind = 0x0491
+name = "TerminalCertificationReservationRoot"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/terminal_certification_reservation_root/"
+
 [[physical_kind]]
 slice_id = "a02"
 row_id = "a02:physical-kind:ciphertext-record"
@@ -17295,7 +17658,7 @@ symbol = "AdministrativeAbortAuthorizationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0205"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:admitted-txn-abort-command"
@@ -17745,7 +18108,7 @@ symbol = "AuditTicketClaimRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x022f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:audit-ticket-resolution"
@@ -18078,7 +18441,7 @@ symbol = "BeginRegionClosedReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x024c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:begin-role-transition-record"
@@ -18195,7 +18558,7 @@ symbol = "BufferedResultManifest"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0257"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:canonical-bulk-logical-batch"
@@ -19167,7 +19530,7 @@ symbol = "GlobalAttemptRegistration"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02a4"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:global-authorization-decision-record"
@@ -19221,7 +19584,7 @@ symbol = "GlobalBeginIdempotencyIndex"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02aa"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-begin-reservation-record"
@@ -19230,7 +19593,7 @@ symbol = "GlobalBeginReservationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02ab"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-begin-reservation-spec"
@@ -19239,7 +19602,7 @@ symbol = "GlobalBeginReservationSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02ac"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:global-branch-key-distribution-plan"
@@ -19284,7 +19647,7 @@ symbol = "GlobalControlCommand"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02b1"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:global-control-record"
@@ -19347,7 +19710,7 @@ symbol = "GlobalFinalCertificationReservation"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02b8"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-final-certification-reserve-spec"
@@ -19356,7 +19719,7 @@ symbol = "GlobalFinalCertificationReserveSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02b9"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:global-gc-authorization-record"
@@ -19419,7 +19782,7 @@ symbol = "GlobalPrepareAdmissionSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02bf"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-read-authorization-decision-record"
@@ -19428,7 +19791,7 @@ symbol = "GlobalReadAuthorizationDecisionRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02c0"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-read-close-spec"
@@ -19437,7 +19800,7 @@ symbol = "GlobalReadCloseSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02c1"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:global-recovery-checkpoint"
@@ -19500,7 +19863,7 @@ symbol = "GlobalSequenceNeutralSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02c8"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:global-state-payload"
@@ -19527,7 +19890,7 @@ symbol = "GlobalStatementIndex"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02cb"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-statement-registration"
@@ -19536,7 +19899,7 @@ symbol = "GlobalStatementRegistration"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02cc"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:global-txn-command"
@@ -19554,7 +19917,7 @@ symbol = "GlobalTxnOutcomePreparationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02ce"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-txn-outcome-record"
@@ -19563,7 +19926,7 @@ symbol = "GlobalTxnOutcomeRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02cf"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:global-txn-record"
@@ -19581,7 +19944,7 @@ symbol = "GlobalTxnWorkspaceGeneration"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02d1"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:graph-intent-batch"
@@ -20085,7 +20448,7 @@ symbol = "LocalFinalCertificationReservation"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0309"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:local-final-certification-reserve-spec"
@@ -20094,7 +20457,7 @@ symbol = "LocalFinalCertificationReserveSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x030a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a14:reservation:local-gc-cancellation-authorization-record"
@@ -20175,7 +20538,7 @@ symbol = "LocalOrderAttemptInput"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0313"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a14:reservation:local-outcome-conflict-floor"
@@ -20751,7 +21114,7 @@ symbol = "MetaMaintenanceCommand"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x034e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:meta-order-attempt-availability-certificate"
@@ -20769,7 +21132,7 @@ symbol = "MetaOrderAttemptInput"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0350"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:meta-pre-command-base-availability-certificate"
@@ -21003,7 +21366,7 @@ symbol = "NeverRegisteredTerminalRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0369"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:new-database-identity-reservation"
@@ -21489,7 +21852,7 @@ symbol = "PreparedOrderAttemptRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0399"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:prepared-query-template"
@@ -21750,7 +22113,7 @@ symbol = "ReadParticipantRoutingCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03a6"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:read-permit-record"
@@ -22713,7 +23076,7 @@ symbol = "ResultDeliveryLease"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0409"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:result-delivery-lease-time-basis"
@@ -22794,7 +23157,7 @@ symbol = "ResultSchema"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0411"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:resume-capability-replay-record"
@@ -23694,7 +24057,7 @@ symbol = "ShardReadWitnessBasis"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x046d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:shard-reconfiguration-authorization-record"
@@ -24081,7 +24444,7 @@ symbol = "TerminalAbortAuthority"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x048e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:terminal-attempt-outcome-proof"
@@ -24108,7 +24471,7 @@ symbol = "TerminalCertificationReservationRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0491"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:terminal-public-projection-bundle"
@@ -24697,7 +25060,7 @@ symbol = "AdministrativeAbortAuthorizationRecord"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|AdministrativeAbortAuthorizationRecord<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1744"]
 
 [[top_level_candidate]]
@@ -25397,7 +25760,7 @@ symbol = "AuditTicketClaimRecord"
 generic_signature = ""
 source_key = "top|AuditTicketClaimRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1706"]
 
 [[top_level_candidate]]
@@ -25857,7 +26220,7 @@ symbol = "BeginRegionClosedReceipt"
 generic_signature = ""
 source_key = "top|BeginRegionClosedReceipt"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1712"]
 
 [[top_level_candidate]]
@@ -26087,7 +26450,7 @@ symbol = "BufferedResultManifest"
 generic_signature = ""
 source_key = "top|BufferedResultManifest"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1728"]
 
 [[top_level_candidate]]
@@ -27877,7 +28240,7 @@ symbol = "GlobalAttemptRegistration"
 generic_signature = ""
 source_key = "top|GlobalAttemptRegistration"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1718"]
 
 [[top_level_candidate]]
@@ -27987,7 +28350,7 @@ symbol = "GlobalBeginIdempotencyIndex"
 generic_signature = ""
 source_key = "top|GlobalBeginIdempotencyIndex"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1710"]
 
 [[top_level_candidate]]
@@ -27997,7 +28360,7 @@ symbol = "GlobalBeginReservationRecord"
 generic_signature = ""
 source_key = "top|GlobalBeginReservationRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1710"]
 
 [[top_level_candidate]]
@@ -28007,7 +28370,7 @@ symbol = "GlobalBeginReservationSpec"
 generic_signature = ""
 source_key = "top|GlobalBeginReservationSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1710"]
 
 [[top_level_candidate]]
@@ -28097,7 +28460,7 @@ symbol = "GlobalControlCommand"
 generic_signature = ""
 source_key = "top|GlobalControlCommand"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1766", "a10:1914"]
 
 [[top_level_candidate]]
@@ -28187,7 +28550,7 @@ symbol = "GlobalFinalCertificationReservation"
 generic_signature = ""
 source_key = "top|GlobalFinalCertificationReservation"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1750"]
 
 [[top_level_candidate]]
@@ -28197,7 +28560,7 @@ symbol = "GlobalFinalCertificationReserveSpec"
 generic_signature = ""
 source_key = "top|GlobalFinalCertificationReserveSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1742", "a07:1748"]
 
 [[top_level_candidate]]
@@ -28337,7 +28700,7 @@ symbol = "GlobalPrepareAdmissionSpec"
 generic_signature = ""
 source_key = "top|GlobalPrepareAdmissionSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1740"]
 
 [[top_level_candidate]]
@@ -28347,7 +28710,7 @@ symbol = "GlobalReadAuthorizationDecisionRecord"
 generic_signature = ""
 source_key = "top|GlobalReadAuthorizationDecisionRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1764", "a21:2627"]
 
 [[top_level_candidate]]
@@ -28357,7 +28720,7 @@ symbol = "GlobalReadCloseSpec"
 generic_signature = ""
 source_key = "top|GlobalReadCloseSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1738", "a07:1766"]
 
 [[top_level_candidate]]
@@ -28497,7 +28860,7 @@ symbol = "GlobalSequenceNeutralSpec"
 generic_signature = ""
 source_key = "top|GlobalSequenceNeutralSpec"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1770"]
 
 [[top_level_candidate]]
@@ -28507,7 +28870,7 @@ symbol = "GlobalSequenceNeutralSpec"
 generic_signature = "<Tag>"
 source_key = "top|GlobalSequenceNeutralSpec<Tag>"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a10:1914"]
 
 [[top_level_candidate]]
@@ -28547,7 +28910,7 @@ symbol = "GlobalStatementIndex"
 generic_signature = ""
 source_key = "top|GlobalStatementIndex"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1784"]
 
 [[top_level_candidate]]
@@ -28567,7 +28930,7 @@ symbol = "GlobalStatementRegistration"
 generic_signature = ""
 source_key = "top|GlobalStatementRegistration"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1726"]
 
 [[top_level_candidate]]
@@ -28617,7 +28980,7 @@ symbol = "GlobalTxnOutcomePreparationRecord"
 generic_signature = ""
 source_key = "top|GlobalTxnOutcomePreparationRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1780"]
 
 [[top_level_candidate]]
@@ -28627,7 +28990,7 @@ symbol = "GlobalTxnOutcomeRecord"
 generic_signature = ""
 source_key = "top|GlobalTxnOutcomeRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1782"]
 
 [[top_level_candidate]]
@@ -28647,7 +29010,7 @@ symbol = "GlobalTxnWorkspaceGeneration"
 generic_signature = ""
 source_key = "top|GlobalTxnWorkspaceGeneration"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1720"]
 
 [[top_level_candidate]]
@@ -29587,7 +29950,7 @@ symbol = "LocalFinalCertificationReservation"
 generic_signature = ""
 source_key = "top|LocalFinalCertificationReservation"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1750"]
 
 [[top_level_candidate]]
@@ -29597,7 +29960,7 @@ symbol = "LocalFinalCertificationReserveSpec"
 generic_signature = ""
 source_key = "top|LocalFinalCertificationReserveSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1748", "a09:1904"]
 
 [[top_level_candidate]]
@@ -29647,7 +30010,7 @@ symbol = "LocalOrderAttemptInput"
 generic_signature = ""
 source_key = "top|LocalOrderAttemptInput"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1758"]
 
 [[top_level_candidate]]
@@ -30287,7 +30650,7 @@ symbol = "MetaMaintenanceCommand"
 generic_signature = ""
 source_key = "top|MetaMaintenanceCommand"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1772"]
 
 [[top_level_candidate]]
@@ -30297,7 +30660,7 @@ symbol = "MetaOrderAttemptInput"
 generic_signature = ""
 source_key = "top|MetaOrderAttemptInput"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1758"]
 
 [[top_level_candidate]]
@@ -30487,7 +30850,7 @@ symbol = "NeverRegisteredTerminalRecord"
 generic_signature = ""
 source_key = "top|NeverRegisteredTerminalRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1714"]
 
 [[top_level_candidate]]
@@ -31487,7 +31850,7 @@ symbol = "PreparedOrderAttemptRoot"
 generic_signature = "<Role>"
 source_key = "top|PreparedOrderAttemptRoot<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1758"]
 
 [[top_level_candidate]]
@@ -31957,7 +32320,7 @@ symbol = "ReadParticipantRoutingCertificate"
 generic_signature = ""
 source_key = "top|ReadParticipantRoutingCertificate"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1724"]
 
 [[top_level_candidate]]
@@ -34057,7 +34420,7 @@ symbol = "ResultDeliveryLease"
 generic_signature = ""
 source_key = "top|ResultDeliveryLease"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1730"]
 
 [[top_level_candidate]]
@@ -34257,7 +34620,7 @@ symbol = "ResultSchema"
 generic_signature = ""
 source_key = "top|ResultSchema"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1728"]
 
 [[top_level_candidate]]
@@ -35307,7 +35670,7 @@ symbol = "ShardReadWitnessBasis"
 generic_signature = ""
 source_key = "top|ShardReadWitnessBasis"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1722"]
 
 [[top_level_candidate]]
@@ -35997,7 +36360,7 @@ symbol = "TerminalAbortAuthority"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|TerminalAbortAuthority<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1744"]
 
 [[top_level_candidate]]
@@ -36057,7 +36420,7 @@ symbol = "TerminalCertificationReservationRoot"
 generic_signature = "<Role>"
 source_key = "top|TerminalCertificationReservationRoot<Role>"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1752"]
 
 [[top_level_candidate]]
@@ -46812,6 +47175,270 @@ target_row_id = "a04:wire-type:weak-authority-applied-identity-shard"
 slice_id = "a04"
 source_key = "arm|WeakAuthorityAppliedIdentity|WeakAuthorityAppliedIdentity|Shard"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-administrative-abort-authorization-record"
+target_row_id = "a07:logical-kind:administrative-abort-authorization-record"
+slice_id = "a07"
+source_key = "top|AdministrativeAbortAuthorizationRecord<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-audit-ticket-claim-record"
+target_row_id = "a07:logical-kind:audit-ticket-claim-record"
+slice_id = "a07"
+source_key = "top|AuditTicketClaimRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-begin-region-closed-receipt"
+target_row_id = "a07:logical-kind:begin-region-closed-receipt"
+slice_id = "a07"
+source_key = "top|BeginRegionClosedReceipt"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-buffered-result-manifest"
+target_row_id = "a07:logical-kind:buffered-result-manifest"
+slice_id = "a07"
+source_key = "top|BufferedResultManifest"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-attempt-registration"
+target_row_id = "a07:logical-kind:global-attempt-registration"
+slice_id = "a07"
+source_key = "top|GlobalAttemptRegistration"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-begin-idempotency-index"
+target_row_id = "a07:logical-kind:global-begin-idempotency-index"
+slice_id = "a07"
+source_key = "top|GlobalBeginIdempotencyIndex"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-begin-reservation-record"
+target_row_id = "a07:logical-kind:global-begin-reservation-record"
+slice_id = "a07"
+source_key = "top|GlobalBeginReservationRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-begin-reservation-spec"
+target_row_id = "a07:logical-kind:global-begin-reservation-spec"
+slice_id = "a07"
+source_key = "top|GlobalBeginReservationSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-control-command"
+target_row_id = "a07:logical-kind:global-control-command"
+slice_id = "a07"
+source_key = "top|GlobalControlCommand"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-final-certification-reservation"
+target_row_id = "a07:logical-kind:global-final-certification-reservation"
+slice_id = "a07"
+source_key = "top|GlobalFinalCertificationReservation"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-final-certification-reserve-spec"
+target_row_id = "a07:logical-kind:global-final-certification-reserve-spec"
+slice_id = "a07"
+source_key = "top|GlobalFinalCertificationReserveSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-prepare-admission-spec"
+target_row_id = "a07:logical-kind:global-prepare-admission-spec"
+slice_id = "a07"
+source_key = "top|GlobalPrepareAdmissionSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-read-authorization-decision-record"
+target_row_id = "a07:logical-kind:global-read-authorization-decision-record"
+slice_id = "a07"
+source_key = "top|GlobalReadAuthorizationDecisionRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-read-close-spec"
+target_row_id = "a07:logical-kind:global-read-close-spec"
+slice_id = "a07"
+source_key = "top|GlobalReadCloseSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-sequence-neutral-spec"
+target_row_id = "a07:logical-kind:global-sequence-neutral-spec"
+slice_id = "a07"
+source_key = "top|GlobalSequenceNeutralSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-statement-index"
+target_row_id = "a07:logical-kind:global-statement-index"
+slice_id = "a07"
+source_key = "top|GlobalStatementIndex"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-statement-registration"
+target_row_id = "a07:logical-kind:global-statement-registration"
+slice_id = "a07"
+source_key = "top|GlobalStatementRegistration"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-txn-outcome-preparation-record"
+target_row_id = "a07:logical-kind:global-txn-outcome-preparation-record"
+slice_id = "a07"
+source_key = "top|GlobalTxnOutcomePreparationRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-txn-outcome-record"
+target_row_id = "a07:logical-kind:global-txn-outcome-record"
+slice_id = "a07"
+source_key = "top|GlobalTxnOutcomeRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-txn-workspace-generation"
+target_row_id = "a07:logical-kind:global-txn-workspace-generation"
+slice_id = "a07"
+source_key = "top|GlobalTxnWorkspaceGeneration"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-local-final-certification-reservation"
+target_row_id = "a07:logical-kind:local-final-certification-reservation"
+slice_id = "a07"
+source_key = "top|LocalFinalCertificationReservation"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-local-final-certification-reserve-spec"
+target_row_id = "a07:logical-kind:local-final-certification-reserve-spec"
+slice_id = "a07"
+source_key = "top|LocalFinalCertificationReserveSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-local-order-attempt-input"
+target_row_id = "a07:logical-kind:local-order-attempt-input"
+slice_id = "a07"
+source_key = "top|LocalOrderAttemptInput"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-meta-maintenance-command"
+target_row_id = "a07:logical-kind:meta-maintenance-command"
+slice_id = "a07"
+source_key = "top|MetaMaintenanceCommand"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-meta-order-attempt-input"
+target_row_id = "a07:logical-kind:meta-order-attempt-input"
+slice_id = "a07"
+source_key = "top|MetaOrderAttemptInput"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-never-registered-terminal-record"
+target_row_id = "a07:logical-kind:never-registered-terminal-record"
+slice_id = "a07"
+source_key = "top|NeverRegisteredTerminalRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-prepared-order-attempt-root"
+target_row_id = "a07:logical-kind:prepared-order-attempt-root"
+slice_id = "a07"
+source_key = "top|PreparedOrderAttemptRoot<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-read-participant-routing-certificate"
+target_row_id = "a07:logical-kind:read-participant-routing-certificate"
+slice_id = "a07"
+source_key = "top|ReadParticipantRoutingCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-result-delivery-lease"
+target_row_id = "a07:logical-kind:result-delivery-lease"
+slice_id = "a07"
+source_key = "top|ResultDeliveryLease"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-result-schema"
+target_row_id = "a07:logical-kind:result-schema"
+slice_id = "a07"
+source_key = "top|ResultSchema"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-shard-read-witness-basis"
+target_row_id = "a07:logical-kind:shard-read-witness-basis"
+slice_id = "a07"
+source_key = "top|ShardReadWitnessBasis"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-terminal-abort-authority"
+target_row_id = "a07:logical-kind:terminal-abort-authority"
+slice_id = "a07"
+source_key = "top|TerminalAbortAuthority<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-terminal-certification-reservation-root"
+target_row_id = "a07:logical-kind:terminal-certification-reservation-root"
+slice_id = "a07"
+source_key = "top|TerminalCertificationReservationRoot<Role>"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
