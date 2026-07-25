@@ -4360,7 +4360,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("CertifiedRoleTransitionRef", "certificate_identity")
                 | ("CertifiedTransitionArtifactRef<T>", "artifact_identity")
                 | ("GenesisMetaProjectionPayload", "consumer_domain")
-                | ("GlobalControlRecord", "resulting_global_state_payload_digest")
+                | (
+                    "GlobalControlRecord",
+                    "resulting_global_state_payload_digest"
+                )
                 | (
                     "LegacyRetentionAuthorityTransferEvidence",
                     "source_transfer_record_identity"
@@ -5726,5 +5729,98 @@ fn idr_canonical_pre_bootstrap_evidence_reencryption_owner_reserved_logical_shel
                 .iter()
                 .any(|row| row.target_row_id == target_row_id),
         "a declared shell must not skip coverage-first sequencing with premature completion rows"
+    );
+}
+
+#[test]
+fn idr_canonical_pre_bootstrap_evidence_reencryption_proof_reserved_logical_shell_is_exact() {
+    let identity = real_identity();
+    let proof = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "CanonicalPreBootstrapEvidenceReencryptionProof")
+        .expect("CanonicalPreBootstrapEvidenceReencryptionProof logical shell exists");
+    let owner = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "CanonicalPreBootstrapEvidenceReencryptionOwner")
+        .expect("CanonicalPreBootstrapEvidenceReencryptionOwner dependency exists");
+    assert_eq!(proof.object_kind, 0x025c);
+    assert_eq!(proof.status, "reserved");
+    assert_eq!(proof.construction_order, owner.construction_order + 1);
+    assert_eq!(proof.construction_order, 7);
+    assert_eq!(proof.role_predicate, "true");
+    assert_eq!(proof.max_size_bytes, 16_777_216);
+    assert_eq!(
+        proof.golden_corpus,
+        "corpus/logical/canonical_pre_bootstrap_evidence_reencryption_proof/"
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|reservation| reservation.symbol == "CanonicalPreBootstrapEvidenceReencryptionProof")
+        .expect("CanonicalPreBootstrapEvidenceReencryptionProof permanent reservation exists");
+    assert_eq!(
+        reservation.row_id,
+        "a17:reservation:canonical-pre-bootstrap-evidence-reencryption-proof"
+    );
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x025c");
+    assert_eq!(reservation.disposition, "existing");
+
+    let source_key = "top|CanonicalPreBootstrapEvidenceReencryptionProof<Role>";
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == source_key)
+        .expect("CanonicalPreBootstrapEvidenceReencryptionProof source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == source_key)
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "source candidate must map exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a17:target:logical-kind-canonical-pre-bootstrap-evidence-reencryption-proof"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a17:logical-kind:canonical-pre-bootstrap-evidence-reencryption-proof"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+    assert_eq!(targets[0].definition_status, "declared");
+
+    assert!(
+        !identity.fields.iter().any(|field| {
+            field.containing_schema == "CanonicalPreBootstrapEvidenceReencryptionProof"
+        }),
+        "the shell increment must not preempt its field census"
+    );
+    assert!(
+        !identity.ordinary_unions.iter().any(|union| {
+            union.containing_schema == "CanonicalPreBootstrapEvidenceReencryptionProof"
+                || union.union_name == "CanonicalPreBootstrapEvidenceReencryptionProof"
+        }) && !identity.unions.iter().any(|union| {
+            union.containing_schema == "CanonicalPreBootstrapEvidenceReencryptionProof"
+                || union.union_name == "CanonicalPreBootstrapEvidenceReencryptionProof"
+        }),
+        "the shell increment must not preempt unions or arms"
+    );
+    assert!(
+        !catalog.ambiguity_adjudications.iter().any(|row| {
+            row.ambiguity_source_key
+                .contains("|CanonicalPreBootstrapEvidenceReencryptionProof|")
+                || row.resolved_source_keys.iter().any(|resolved| {
+                    resolved.contains("|CanonicalPreBootstrapEvidenceReencryptionProof|")
+                })
+        }),
+        "shorthand ambiguities must remain open until exact field types are settled"
     );
 }

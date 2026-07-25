@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1416
+target_count = 1417
 projection_fallback_count = 89
-target_source_assignment_sha256 = "2f0a995d4b6b47c7ca10f25c0738c5148a98238d25b78cb14bbad80245de6d59"
+target_source_assignment_sha256 = "a9c508aef2023163f0817a87e81e55563cd375453d5356bff6a79959d0094693"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 31
+registry_epoch = 32
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -1976,6 +1976,17 @@ construction_order = 6
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/canonical_pre_bootstrap_evidence_reencryption_owner/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:canonical-pre-bootstrap-evidence-reencryption-proof"
+object_kind = 0x025c
+name = "CanonicalPreBootstrapEvidenceReencryptionProof"
+status = "reserved"
+construction_order = 7
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_pre_bootstrap_evidence_reencryption_proof/"
 
 [[logical_kind]]
 slice_id = "a17"
@@ -21399,7 +21410,7 @@ symbol = "CanonicalPreBootstrapEvidenceReencryptionProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x025c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a17:reservation:canonical-restore-plan-availability-copy"
@@ -29357,7 +29368,7 @@ symbol = "CanonicalPreBootstrapEvidenceReencryptionProof"
 generic_signature = "<Role>"
 source_key = "top|CanonicalPreBootstrapEvidenceReencryptionProof<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2297"]
 
 [[top_level_candidate]]
@@ -41213,6 +41224,14 @@ row_id = "a17:target:logical-kind-canonical-pre-bootstrap-evidence-reencryption-
 target_row_id = "a17:logical-kind:canonical-pre-bootstrap-evidence-reencryption-owner"
 slice_id = "a17"
 source_key = "top|CanonicalPreBootstrapEvidenceReencryptionOwner<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-canonical-pre-bootstrap-evidence-reencryption-proof"
+target_row_id = "a17:logical-kind:canonical-pre-bootstrap-evidence-reencryption-proof"
+slice_id = "a17"
+source_key = "top|CanonicalPreBootstrapEvidenceReencryptionProof<Role>"
 target_kind = "logical-kind"
 definition_status = "declared"
 
@@ -61290,4 +61309,3 @@ source_locations = ["a09:1904"]
 resolution = "maps-to-source"
 resolved_source_keys = ["top|LocalFinalCertificationReserveSpec"]
 rationale = "a09:1904: the same span carries a second structural body for `top|LocalFinalCertificationReserveSpec`, whose own definition is a07:1750. a09 references the symbol and shows an installed record inside the same sentence, so the two bodies diverge for one source key. The divergence resolves to the a07 owner's definition; a09 contributes no competing structural claim."
-

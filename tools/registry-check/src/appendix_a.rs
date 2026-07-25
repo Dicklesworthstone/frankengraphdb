@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 1416;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 1417;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "feffa5c6fa5a98acd0236e428473467b4c104e5282939743e033838ed57cf36f";
+    "5311d874c9aa03bcb5d9e33808819fabde85190d7cc157b8f85b96850a242541";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 89;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "2f0a995d4b6b47c7ca10f25c0738c5148a98238d25b78cb14bbad80245de6d59";
+    "a9c508aef2023163f0817a87e81e55563cd375453d5356bff6a79959d0094693";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -64,11 +64,11 @@ pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 391;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
     "3348d0d3b3eb48f7dec6fedde47f2dc380d17134b22e06fc7b8a88181e8b2ffc";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
-pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 221;
-pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 592;
+pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 222;
+pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 591;
 pub const EXPECTED_RESERVATION_HIGH_WATER: u16 = 0x051d;
 pub const EXPECTED_RESERVATION_ASSIGNMENT_SHA256: &str =
-    "ee7aa4b169937ebc6fecf9f1dce0e3d3074660b37332801921cecd5ca238de19";
+    "caa686862e544724f6a380328082714c5e1aa926bfee96f264bd66bdf209eb73";
 pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
 pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_458;
@@ -14849,8 +14849,7 @@ stable_name = "Ready"
         expected_a07_keys.sort_unstable();
         expected_a07_keys.dedup();
         assert_eq!(
-            a07_keys,
-            expected_a07_keys,
+            a07_keys, expected_a07_keys,
             "the completing source slice must count the exact cross-slice occurrence"
         );
         let mut expected_a07_targets: Vec<&str> = catalog
