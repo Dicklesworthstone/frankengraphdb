@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 876
+target_count = 882
 projection_fallback_count = 84
-target_source_assignment_sha256 = "bd17b4ecbe9cc330df90f50fbbf827f9999c49854add3983895780c0212dadc3"
+target_source_assignment_sha256 = "598d66affe135366149cf96e53243d23ffe8b6049d38689ba1e9b5b456b66bda"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,7 +641,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 19
+registry_epoch = 20
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -4346,6 +4346,43 @@ kind = "record"
 status = "reserved"
 encoding_context = "canonical Local result/conflict-plane record"
 allowed_containing_schemas = ["ResultTerminalCommon"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a11"
+row_id = "a11:wire-type:delivery-frontier"
+wire_type_id = 0x008e
+name = "DeliveryFrontier"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Local | Global; internal-only posture-tagged delivery frontier, never a public projection or wire-visible field (a11:1936)"
+allowed_containing_schemas = ["DeliveryFrontier"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a11"
+row_id = "a11:wire-type:delivery-frontier-local"
+wire_type_id = 0x008f
+name = "DeliveryFrontier.local"
+kind = "union_variant"
+containing_union = "DeliveryFrontier"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm Local of closed union DeliveryFrontier"
+allowed_containing_schemas = ["DeliveryFrontier"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a11"
+row_id = "a11:wire-type:delivery-frontier-global"
+wire_type_id = 0x0090
+name = "DeliveryFrontier.global"
+kind = "union_variant"
+containing_union = "DeliveryFrontier"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm Global of closed union DeliveryFrontier"
+allowed_containing_schemas = ["DeliveryFrontier"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -12936,6 +12973,19 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
 
+[[union]]
+slice_id = "a11"
+row_id = "a11:union:delivery-frontier-49c99c0bedca65d6"
+union_name = "DeliveryFrontier"
+containing_schema = "DeliveryFrontier"
+union_path = "DeliveryFrontier"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["DeliveryFrontier"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a09"
 row_id = "a09:union-arm:escaping-allocation-cause-published-statement-result-f5c26519fa874337"
@@ -13005,6 +13055,36 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a11"
+row_id = "a11:union-arm:delivery-frontier-local-4ddbea7fe64b9b30"
+union_name = "DeliveryFrontier"
+containing_schema = "DeliveryFrontier"
+union_path = "DeliveryFrontier"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "ec556d3affb6251426c3346b0ae20019fa3558b55e1dd5e81bb70c2b07cdf00b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a11"
+row_id = "a11:union-arm:delivery-frontier-global-2a6f4c45ce67bbd2"
+union_name = "DeliveryFrontier"
+containing_schema = "DeliveryFrontier"
+union_path = "DeliveryFrontier"
+arm_tag = 0x0002
+source_arm_name = "Global"
+stable_name = "global"
+payload_kind = "inline-record"
+payload_sha256 = "c00485158184c1a0e279bf05c56b7f5e62cd5e5622e69cd559c33cb3d6460dc4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
@@ -22890,7 +22970,7 @@ symbol = "DeliveryFrontier"
 generic_signature = ""
 source_key = "top|DeliveryFrontier"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a11:1936"]
 
 [[top_level_candidate]]
@@ -39912,6 +39992,54 @@ row_id = "a03:target:wire-type-result-terminal-common"
 target_row_id = "a03:wire-type:result-terminal-common"
 slice_id = "a03"
 source_key = "top|ResultTerminalCommon<Role:AuthorityOwningRole>"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:wire-type-delivery-frontier"
+target_row_id = "a11:wire-type:delivery-frontier"
+slice_id = "a11"
+source_key = "top|DeliveryFrontier"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-delivery-frontier-49c99c0bedca65d6"
+target_row_id = "a11:union:delivery-frontier-49c99c0bedca65d6"
+slice_id = "a11"
+source_key = "union|DeliveryFrontier|DeliveryFrontier"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-arm-delivery-frontier-local-4ddbea7fe64b9b30"
+target_row_id = "a11:union-arm:delivery-frontier-local-4ddbea7fe64b9b30"
+slice_id = "a11"
+source_key = "arm|DeliveryFrontier|DeliveryFrontier|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:wire-type-delivery-frontier-local"
+target_row_id = "a11:wire-type:delivery-frontier-local"
+slice_id = "a11"
+source_key = "arm|DeliveryFrontier|DeliveryFrontier|Local"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-arm-delivery-frontier-global-2a6f4c45ce67bbd2"
+target_row_id = "a11:union-arm:delivery-frontier-global-2a6f4c45ce67bbd2"
+slice_id = "a11"
+source_key = "arm|DeliveryFrontier|DeliveryFrontier|Global"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:wire-type-delivery-frontier-global"
+target_row_id = "a11:wire-type:delivery-frontier-global"
+slice_id = "a11"
+source_key = "arm|DeliveryFrontier|DeliveryFrontier|Global"
 target_kind = "wire-type"
 definition_status = "declared"
 

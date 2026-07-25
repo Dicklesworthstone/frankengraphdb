@@ -3632,6 +3632,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "DeliveryFrontier"
+containing_schema = "DeliveryFrontier"
+union_path = "DeliveryFrontier"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["DeliveryFrontier"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "DeliveryLeaseExpiryEvidenceLease"
 containing_schema = "DeliveryLeaseExpiryEvidence"
 union_path = "DeliveryLeaseExpiryEvidence.lease"
@@ -4623,6 +4634,32 @@ source_arm_name = "Shard"
 stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "0fbf822464c53d46addc695e22b32863efb234e069de0966c3535ae2c8c9e2ea"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "DeliveryFrontier"
+containing_schema = "DeliveryFrontier"
+union_path = "DeliveryFrontier"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "ec556d3affb6251426c3346b0ae20019fa3558b55e1dd5e81bb70c2b07cdf00b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "DeliveryFrontier"
+containing_schema = "DeliveryFrontier"
+union_path = "DeliveryFrontier"
+arm_tag = 0x0002
+source_arm_name = "Global"
+stable_name = "global"
+payload_kind = "inline-record"
+payload_sha256 = "c00485158184c1a0e279bf05c56b7f5e62cd5e5622e69cd559c33cb3d6460dc4"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

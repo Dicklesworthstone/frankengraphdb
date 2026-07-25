@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 19
+registry_epoch = 20
 
 [[type]]
 wire_type_id = 0x0001
@@ -1361,4 +1361,35 @@ kind = "record"
 status = "reserved"
 encoding_context = "canonical Local result/conflict-plane record"
 allowed_containing_schemas = ["ResultTerminalCommon"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x008e
+name = "DeliveryFrontier"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Local | Global; internal-only posture-tagged delivery frontier, never a public projection or wire-visible field (a11:1936)"
+allowed_containing_schemas = ["DeliveryFrontier"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x008f
+name = "DeliveryFrontier.local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DeliveryFrontier"
+wire_tag = 0x0001
+encoding_context = "arm Local of closed union DeliveryFrontier"
+allowed_containing_schemas = ["DeliveryFrontier"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0090
+name = "DeliveryFrontier.global"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DeliveryFrontier"
+wire_tag = 0x0002
+encoding_context = "arm Global of closed union DeliveryFrontier"
+allowed_containing_schemas = ["DeliveryFrontier"]
 max_size_bytes = 16777216
