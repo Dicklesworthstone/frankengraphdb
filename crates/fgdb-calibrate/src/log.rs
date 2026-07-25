@@ -4599,6 +4599,146 @@ mod tests {
     }
 
     #[test]
+    fn each_float_domain_validator_accepts_exactly_its_declared_domain() {
+        // Every statistic field is validated by one of five domain rules, and
+        // none of the five had a direct test. The accept/reject sets below
+        // were measured against the real predicates rather than assumed,
+        // because several boundaries are counter-intuitive: `finite or
+        // positive infinity` admits NEGATIVE finite values, and `nonnegative
+        // or positive infinity` admits +inf while plain `nonnegative finite`
+        // refuses it.
+        let bits = f64::to_bits;
+
+        // Non-negative finite: zero in, negatives and both infinities out.
+        assert_eq!(
+            validate_nonnegative_finite(StatisticField::OneObservations, bits(0.0)),
+            Ok(())
+        );
+        assert_eq!(
+            validate_nonnegative_finite(StatisticField::OneObservations, bits(f64::MAX)),
+            Ok(())
+        );
+        for rejected in [-1.0_f64, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                validate_nonnegative_finite(StatisticField::OneObservations, bits(rejected)),
+                Err(StatisticalLogRecordError::StatisticMustBeNonNegative {
+                    field: StatisticField::OneObservations,
+                    bits: bits(rejected),
+                })
+            );
+        }
+
+        // Positive finite: zero is the whole difference from the rule above.
+        assert_eq!(
+            validate_positive_finite(StatisticField::RejectionThreshold, bits(0.5)),
+            Ok(())
+        );
+        for rejected in [0.0_f64, -1.0, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                validate_positive_finite(StatisticField::RejectionThreshold, bits(rejected)),
+                Err(StatisticalLogRecordError::StatisticMustBePositive {
+                    field: StatisticField::RejectionThreshold,
+                    bits: bits(rejected),
+                })
+            );
+        }
+
+        // Non-negative or positive infinity: an unbounded e-value is legal,
+        // a negative one is not.
+        for accepted in [0.0_f64, 1.0, f64::INFINITY, f64::MAX] {
+            assert_eq!(
+                validate_nonnegative_or_positive_infinity(StatisticField::EValue, bits(accepted)),
+                Ok(())
+            );
+        }
+        for rejected in [-1.0_f64, f64::NEG_INFINITY] {
+            assert_eq!(
+                validate_nonnegative_or_positive_infinity(StatisticField::EValue, bits(rejected)),
+                Err(StatisticalLogRecordError::StatisticMustBeNonNegative {
+                    field: StatisticField::EValue,
+                    bits: bits(rejected),
+                })
+            );
+        }
+
+        // Finite or positive infinity: this one constrains MAGNITUDE, not
+        // sign, so a negative finite threshold is admissible and only negative
+        // infinity is refused. Asserting the negative-finite acceptance is the
+        // point — reading the name alone suggests otherwise.
+        for accepted in [-1.0_f64, 0.0, 1.0, f64::INFINITY, f64::MIN] {
+            assert_eq!(
+                validate_finite_or_positive_infinity(
+                    StatisticField::ConformalThreshold,
+                    bits(accepted)
+                ),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            validate_finite_or_positive_infinity(
+                StatisticField::ConformalThreshold,
+                bits(f64::NEG_INFINITY)
+            ),
+            Err(
+                StatisticalLogRecordError::StatisticMustBeFiniteOrPositiveInfinity {
+                    field: StatisticField::ConformalThreshold,
+                    bits: bits(f64::NEG_INFINITY),
+                }
+            )
+        );
+
+        // Unit interval: closed at both ends.
+        for accepted in [0.0_f64, 0.5, 1.0] {
+            assert_eq!(
+                validate_unit_interval(StatisticField::CoverageTarget, bits(accepted)),
+                Ok(())
+            );
+        }
+        for rejected in [-0.5_f64, 1.5, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                validate_unit_interval(StatisticField::CoverageTarget, bits(rejected)),
+                Err(StatisticalLogRecordError::StatisticOutsideUnitInterval {
+                    field: StatisticField::CoverageTarget,
+                    bits: bits(rejected),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn negative_zero_and_nan_are_refused_by_every_domain_rule() {
+        // This is a canonical-encoding law, not a numeric one. -0.0 compares
+        // EQUAL to +0.0 yet has a different bit pattern, so admitting it would
+        // let two distinct byte strings denote one logical value — and a log
+        // whose whole purpose is bit-identical replay cannot allow that. NaN
+        // is refused for the companion reason: it has many bit patterns and
+        // compares equal to none of them, including itself.
+        //
+        // The shared `validate_canonical_float` gate runs before every domain
+        // rule, so the rejection must be uniform across all five. A rule that
+        // checked its own domain first would report the wrong error, and for
+        // -0.0 would wrongly ACCEPT under the non-negative rules.
+        let negative_zero = (-0.0_f64).to_bits();
+        assert_ne!(negative_zero, 0.0_f64.to_bits());
+        assert_eq!(-0.0_f64, 0.0_f64);
+
+        for (field, bits) in [
+            (StatisticField::OneObservations, negative_zero),
+            (StatisticField::OneObservations, f64::NAN.to_bits()),
+        ] {
+            let expected = Err(StatisticalLogRecordError::NonCanonicalFloatBits { field, bits });
+            assert_eq!(validate_nonnegative_finite(field, bits), expected);
+            assert_eq!(validate_positive_finite(field, bits), expected);
+            assert_eq!(
+                validate_nonnegative_or_positive_infinity(field, bits),
+                expected
+            );
+            assert_eq!(validate_finite_or_positive_infinity(field, bits), expected);
+            assert_eq!(validate_unit_interval(field, bits), expected);
+        }
+    }
+
+    #[test]
     fn every_closed_tag_vocabulary_rejects_everything_outside_it() {
         // `record_round_trip_covers_every_closed_statistic_variant` proves the
         // valid values survive a round trip. Nothing proved the complement:
