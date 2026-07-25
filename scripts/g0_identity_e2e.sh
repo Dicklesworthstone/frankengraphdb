@@ -186,11 +186,11 @@ APPENDIX_PROJECTION_PASSES=$(awk '
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_closure_checked"' \
     '"reservations":813' \
-    '"existing_reservations":87' \
-    '"reserved_reservations":726' \
+    '"existing_reservations":88' \
+    '"reserved_reservations":725' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":551' \
+    '"targets":552' \
     '"completion_layer_schemas":4' \
     '"annotations":0' \
     '"semantic_bindings":0' \
@@ -209,12 +209,12 @@ fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_completed"' \
     '"slices":21' \
-    '"projection_rows":551' \
+    '"projection_rows":552' \
     '"projection_files":6' \
     '"reservations":813' \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
-    '"targets":551' \
+    '"targets":552' \
     '"completion_layer_schemas":4' \
     '"annotations":0' \
     '"semantic_bindings":0' \

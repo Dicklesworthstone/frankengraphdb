@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 10
+registry_epoch = 11
 
 [[kind]]
 object_kind = 0x0001
@@ -430,6 +430,15 @@ construction_order = 27
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/portable_continuity_authority_observation/"
+
+[[kind]]
+object_kind = 0x038a
+name = "PortableRestoreArchiveAcquisitionReceipt"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_restore_archive_acquisition_receipt/"
 
 [[kind]]
 object_kind = 0x038d

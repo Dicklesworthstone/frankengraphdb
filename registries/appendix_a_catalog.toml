@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 551
+target_count = 552
 projection_fallback_count = 84
-target_source_assignment_sha256 = "8cb69670ffe3eb5e6fddb1016e19c718e59695255a25126099e346b94ad51f41"
+target_source_assignment_sha256 = "c9beaf6817dce4a2100f4c2f2591bdae8206b096b163dee379a7591b747a5069"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 10
+registry_epoch = 11
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -1855,6 +1855,17 @@ construction_order = 6
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/external_key_destruction_provider_receipt/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:portable-restore-archive-acquisition-receipt"
+object_kind = 0x038a
+name = "PortableRestoreArchiveAcquisitionReceipt"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_restore_archive_acquisition_receipt/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -12590,7 +12601,7 @@ symbol = "PortableRestoreArchiveAcquisitionReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x038a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:portable-restore-continuity-ancestry-proof"
@@ -22201,7 +22212,7 @@ symbol = "PortableRestoreArchiveAcquisitionReceipt"
 generic_signature = ""
 source_key = "top|PortableRestoreArchiveAcquisitionReceipt"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2279"]
 
 [[top_level_candidate]]
@@ -29302,6 +29313,14 @@ target_row_id = "a15:wire-type:key-destruction-operation-plan"
 slice_id = "a15"
 source_key = "top|KeyDestructionOperationPlan"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-portable-restore-archive-acquisition-receipt"
+target_row_id = "a17:logical-kind:portable-restore-archive-acquisition-receipt"
+slice_id = "a17"
+source_key = "top|PortableRestoreArchiveAcquisitionReceipt"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
