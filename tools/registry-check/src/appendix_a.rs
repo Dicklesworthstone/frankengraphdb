@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 508;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 513;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "7864c4b289d77c4d6ca17aa4dcc31c81926cae795df28e8a3a5dfd5de216e5c6";
+    "71fb6f5968409b986fc0893546cee17c97e6174d71a69b6cf7a177931f6f7da1";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 83;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "78a5c3bf658975ab7878c97caf581a8902b3a8035a2023f2275c6971401cb25d";
+    "e00671a6d61fc7c937bce6d0fd0766caa8b26f737b326382737e9490d435bcd1";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -56,9 +56,9 @@ pub const EXPECTED_EXPANSION_BINDING_SHA256: &str =
 pub const EXPECTED_EVIDENCE_BINDING_COUNT: usize = 0;
 pub const EXPECTED_EVIDENCE_BINDING_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 309;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 328;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "4d5d6dfd2c1c51b68ba1e5a6fd49955bbe4dcdc454d2731f4a30a551a27e7141";
+    "0b0240f0a272c8e60442fe2951fbc265e85c9a9b44da7e14fa747980025b3666";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 84;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 729;
@@ -203,7 +203,7 @@ struct AmbiguityAdjudicationContractPin {
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
-static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 309] = [
+static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 328] = [
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:99a87928b4e9051fadedb901f4799986579d307add86f64e1c8848d530e53adf",
         slice_id: "a01",
@@ -3486,6 +3486,215 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 309] 
         resolution: "maps-to-source",
         resolved_source_keys: &["top|GroupTimeIssuanceQuiescenceCertificate"],
         rationale: "a16:2193: the leading `SameGroupCertificateHeader` item is a named closed sub-schema (compact-phrase law, a01:1412) embedded in the group quiescence-certificate body; it belongs to the `top|GroupTimeIssuanceQuiescenceCertificate` candidate.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:f0d112a99c9db91ac5aacac17a50ab039e9d6dda70ea189fd0428ae7e5f6077e",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|MacaroonRootIssuanceRecord|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Expired.time_validation_evidence_ref|9b178669e1dc7f0c6d2955cbafb2c8e40e0bd2350b1dd724bbaa6d8d1c2ff9a8|1|010eafb9984659de247e640a4c9aa5663839b58689a69df38c522cdbe936f5bf|shorthand field has no exact type",
+        source_locations: &["a16:2173"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Expired.time_validation_evidence_ref|time_validation_evidence_ref",
+        ],
+        rationale: "a16:2173: shorthand member `time_validation_evidence_ref` at census path `MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Expired.time_validation_evidence_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state` `Expired` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:27b38b207a4da96fce9484e5d14596a5c429122c2e0b1828fc0d5a30b9df4ba1",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|MacaroonRootIssuanceRecord|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Revoked.revocation_evidence_ref|2fa228f026a9a831a9353e564a92726f6f9557538dafd535de64350017f7b4d6|1|d9e75f3b4f1e029d615b0bab0f11bd402e5f1df6f6f754e9c65ee030ba2d6be4|shorthand field has no exact type",
+        source_locations: &["a16:2173"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Revoked.revocation_evidence_ref|revocation_evidence_ref",
+        ],
+        rationale: "a16:2173: shorthand member `revocation_evidence_ref` at census path `MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Revoked.revocation_evidence_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state` `Revoked` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:d3972d524264e6449e2528313a7976b508eac8acabf9593a4c8ce1ffe06f7c7c",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.receipt_digest|742a7427646cce07c66191aeda9a906cf766c459c8ac499ef03289eaf9d20070|1|38453b1353b2acfc78ce7c8b684a070bd7bc1eb0d9bf34fc5bc36eb5b7d88361|shorthand field has no exact type",
+        source_locations: &["a16:2217"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.receipt_digest|receipt_digest",
+        ],
+        rationale: "a16:2217: shorthand member `receipt_digest` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.receipt_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `AlreadyApplied` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:73143cf7fd34135bee48b34d7acfe28e8d8b7d465f7045f6d3aa6db79174a6f2",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_cas_version|2614fdcd6d71117b6761976ff6a5702485716e43d28a2374a3730418c9c76b0f|1|2d6828fe66bb097c080b4f852752b8a8f6ea8a82a36284371524410733dffa8f|shorthand field has no exact type",
+        source_locations: &["a16:2217"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_cas_version|returned_cas_version",
+        ],
+        rationale: "a16:2217: shorthand member `returned_cas_version` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_cas_version` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `AlreadyApplied` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:40fc6209f306a671ccd4db75f22833ab2aa76d13d8442ebc25674a04196cb132",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_head_digest|e4656807a8ce7931810eff2747a30db1ddda8c35a08b7fe3c285f792610c1f58|1|01b14b25fdf3f7f62d3d52f289f55db6bee5bc3e1ed8c951d471a5e651a9d18b|shorthand field has no exact type",
+        source_locations: &["a16:2217"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_head_digest|returned_head_digest",
+        ],
+        rationale: "a16:2217: shorthand member `returned_head_digest` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_head_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `AlreadyApplied` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:8058b555f1a86c8409f8539532fc03036c349fa2f6fee639571fad438e13358b",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.receipt_digest|742a7427646cce07c66191aeda9a906cf766c459c8ac499ef03289eaf9d20070|1|bb7af1fdc823918ec571e0a75a8e3b76d40faceb15df193831dc07366db4694d|shorthand field has no exact type",
+        source_locations: &["a16:2217"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.receipt_digest|receipt_digest",
+        ],
+        rationale: "a16:2217: shorthand member `receipt_digest` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.receipt_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `Applied` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:e62694631633aa73ecfadb4ad6d290ed730a138cc9e521583c2200708582fc9b",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_cas_version|2614fdcd6d71117b6761976ff6a5702485716e43d28a2374a3730418c9c76b0f|1|cca349f2e71310c743aada705f8e8b5b10f57ce021a2b7cfc856913e9db410ef|shorthand field has no exact type",
+        source_locations: &["a16:2217"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_cas_version|returned_cas_version",
+        ],
+        rationale: "a16:2217: shorthand member `returned_cas_version` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_cas_version` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `Applied` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:7cae16fadad1f0eaafdf3ebaded743a00bd755995d0a1d8db5d6a6d00507d90a",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_head_digest|e4656807a8ce7931810eff2747a30db1ddda8c35a08b7fe3c285f792610c1f58|1|d25ed4bc07e5387a6f0ba6ecff17291241209ff9efcc310755f63c886a0aff43|shorthand field has no exact type",
+        source_locations: &["a16:2217"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_head_digest|returned_head_digest",
+        ],
+        rationale: "a16:2217: shorthand member `returned_head_digest` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_head_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `Applied` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:3f70b6d5956b91cbed5b83cf1c9a008e0582772e43187bbd4307c896c9a58b0f",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreSourceLeaseRecord|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind.AcquireImported.prebootstrap_owner_digest|f772d77a24d4e1d4c6c3692f21b0e41bcfa065760f941fc39d5af6d486aa3755|1|435248a0e8f4327001c517da8850d24f6bacf07fee8c8d06f544c57b7498ed26|shorthand field has no exact type",
+        source_locations: &["a16:2237"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind.AcquireImported.prebootstrap_owner_digest|prebootstrap_owner_digest",
+        ],
+        rationale: "a16:2237: shorthand member `prebootstrap_owner_digest` at census path `RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind.AcquireImported.prebootstrap_owner_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind` `AcquireImported` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:ee2a0d26ffa8fc46b9f93e2f68ff4faec17728d1615fa20416ac52779fb5fe24",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>.state.Burned.typed_no_publication_proof_ref|ee56aecfb1b4e9f2209c71f97b8c7b0c9f90b1004bad7a2242a8f8d3e4210c68|1|930dc77c2095e65fd0834f156b409bdfeb2cbe312b004afdea8ec9d04511e550|shorthand field has no exact type",
+        source_locations: &["a16:2191"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state.Burned.typed_no_publication_proof_ref|typed_no_publication_proof_ref",
+        ],
+        rationale: "a16:2191: shorthand member `typed_no_publication_proof_ref` at census path `TimeSubjectIssuanceReservation<Role>.state.Burned.typed_no_publication_proof_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectIssuanceReservation<Role>.state` `Burned` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:501aac0906acf541265937cca86f1d5e075cbecbad580e128e54fa76e93e0455",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>.state.Published.publication_cut|6b0cefb4f99834c5ae2db3afb18c4c1b0cf2f1a161b855d3b33aaa17aac05d13|1|06b854a977a010c34f23d5c1314135a47c441a3c78ed9be7b5b26ec56e638ae2|shorthand field has no exact type",
+        source_locations: &["a16:2191"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state.Published.publication_cut|publication_cut",
+        ],
+        rationale: "a16:2191: shorthand member `publication_cut` at census path `TimeSubjectIssuanceReservation<Role>.state.Published.publication_cut` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectIssuanceReservation<Role>.state` `Published` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:8762b46c4d850de631aa9c367c2e30c1f082d0306636f98323fdd1d17bfe7b52",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>.state.Published.subject_identity|f51fddc65b81c34d3d8b9598d6adb9315a097e48a82176c749ec4cf5f7e41e7d|1|47ec0cc76ae2a4c363613c7f6353283c688a84b129ed52de356db84bd24748be|shorthand field has no exact type",
+        source_locations: &["a16:2191"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state.Published.subject_identity|subject_identity",
+        ],
+        rationale: "a16:2191: shorthand member `subject_identity` at census path `TimeSubjectIssuanceReservation<Role>.state.Published.subject_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectIssuanceReservation<Role>.state` `Published` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:47ca97c9c1b146df0c47c3f7591362bdb4b898f8ed393ece13b85c505d8d74ca",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>.state.Published.subject_membership_proof_ref|a916ace16d3918cacbdaa1db7231564d36c1b5bc56f7ff9c2f4816b740bc8954|1|447da631e6a613682838d2b959171a1c5dc8d642b80fbb63f06849a0fca44b31|shorthand field has no exact type",
+        source_locations: &["a16:2191"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state.Published.subject_membership_proof_ref|subject_membership_proof_ref",
+        ],
+        rationale: "a16:2191: shorthand member `subject_membership_proof_ref` at census path `TimeSubjectIssuanceReservation<Role>.state.Published.subject_membership_proof_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectIssuanceReservation<Role>.state` `Published` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:fa23a8cbb7abc8dd79d1abab0b34316219cdace6a76e2bff9c4b1e0499a10650",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.Expired.expires_at|a2d000e1977254b1f6671cf27654b07ff556c38c9f077ca7d6c768a5372acc47|1|a7b3837d32fbccba247a581bc0a55e24ee33cdd6c26b1c9edc26b33a971bf3ce|shorthand field has no exact type",
+        source_locations: &["a16:2167"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TimeValidationEvidence|TimeValidationEvidence.classification.Expired.expires_at|expires_at",
+        ],
+        rationale: "a16:2167: shorthand member `expires_at` at census path `TimeValidationEvidence.classification.Expired.expires_at` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `Expired` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:e3b83ea20d0ae098e66e43bf5c550af8f0ef4e5deb0611dff362dc221147dd87",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.NotYetValid.not_before|c7c6f927267eba0536df651c835769a72cd1cb27eca35e937f43af180c0334cb|1|60594276a20029409394d7a7be18b638f82cfe5457f298242da1f00d931a75ef|shorthand field has no exact type",
+        source_locations: &["a16:2167"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TimeValidationEvidence|TimeValidationEvidence.classification.NotYetValid.not_before|not_before",
+        ],
+        rationale: "a16:2167: shorthand member `not_before` at census path `TimeValidationEvidence.classification.NotYetValid.not_before` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `NotYetValid` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:130c006a13e9ca83c0077198adc547325eef648f40464ca11c5b7c361ee50b78",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.expires_at|a2d000e1977254b1f6671cf27654b07ff556c38c9f077ca7d6c768a5372acc47|1|af3256eaf8af3ca7761c65289e9965d6a7fbbd5a4ce4a74c2cdff9ff2538b28e|shorthand field has no exact type",
+        source_locations: &["a16:2167"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.expires_at|expires_at",
+        ],
+        rationale: "a16:2167: shorthand member `expires_at` at census path `TimeValidationEvidence.classification.Usable.expires_at` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `Usable` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:ae09c78d9160d13ccf4f3c6dd11c1519b46645b455ad4719681f09b22eb4a015",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.guard_deadline_local_monotonic_tick|0579565d9bff49955e25c09b78bb899e0d20c48863c6228d6ba3621d3555460e|1|0e1fe264053c6d8844f36297113e0fe5506253b967f8c42d3d6371bdbba67076|shorthand field has no exact type",
+        source_locations: &["a16:2167"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.guard_deadline_local_monotonic_tick|guard_deadline_local_monotonic_tick",
+        ],
+        rationale: "a16:2167: shorthand member `guard_deadline_local_monotonic_tick` at census path `TimeValidationEvidence.classification.Usable.guard_deadline_local_monotonic_tick` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `Usable` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:92d41da0431b14a88135a2a3b5bbedbb281ab58af478f2ad2f04bcb383441774",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.not_before|c7c6f927267eba0536df651c835769a72cd1cb27eca35e937f43af180c0334cb|1|aeed0f574e2eb7e22718a9be2a67e97493fb29783b73ca2ee5ce33ddc08f728a|shorthand field has no exact type",
+        source_locations: &["a16:2167"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.not_before|not_before",
+        ],
+        rationale: "a16:2167: shorthand member `not_before` at census path `TimeValidationEvidence.classification.Usable.not_before` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `Usable` arm, and the single affected census key maps to that source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:e2c84603e3f6477231e1f9b44471df57d2ca0197a763b02659b10b0d5da10fa0",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.validated_process_incarnation_id|3dbeb51887a08703989b5f9a90c13ea3afddf79183638cd200b944187e9fc35b|1|9b76deb6958748bcde12149dba73c45df715be95ff257e1750c02a941c861fa2|shorthand field has no exact type",
+        source_locations: &["a16:2167"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.validated_process_incarnation_id|validated_process_incarnation_id",
+        ],
+        rationale: "a16:2167: shorthand member `validated_process_incarnation_id` at census path `TimeValidationEvidence.classification.Usable.validated_process_incarnation_id` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `Usable` arm, and the single affected census key maps to that source form.",
     },
 ];
 
@@ -9189,6 +9398,7 @@ fn validate_projection_row_derived_identity(row: &ProjectionRowMeta, out: &mut V
 }
 
 fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
+    let expected_keys = expected_structural_keys(catalog);
     let slice_map: BTreeMap<&str, &Slice> = catalog
         .slices
         .iter()
@@ -9439,6 +9649,7 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
                 projection,
                 candidate_by_key.get(row.source_key.as_str()).copied(),
                 ordinary_union_wire_source.as_deref(),
+                &expected_keys,
                 out,
             );
         }
@@ -10058,11 +10269,57 @@ fn ordinary_union_wire_source_key(
     ))
 }
 
+/// Expected structural source keys, rebuilt from the typed catalog identity
+/// rows and indexed by the projection symbol those same components derive.
+///
+/// This exists so `validate_target_source_identity` never has to parse a
+/// `source_key`: the key grammar separates components with `|`, which is also
+/// legal inside a generic signature, so parsing is ambiguous for owners like
+/// `TimeBoundSubjectInventory<Role:Local|Meta|Shard>` (fgdb-tfow).  Unions and
+/// arms reconstruct exactly; fields carry no `path` column, so only their owner
+/// and stable name are recoverable and the field arm anchors on those.
+#[derive(Default)]
+struct ExpectedStructuralKeys {
+    field_owner_and_name: BTreeMap<String, (String, String)>,
+    union_expected: BTreeMap<String, String>,
+    arm_expected: BTreeMap<String, String>,
+}
+
+fn expected_structural_keys(catalog: &Catalog) -> ExpectedStructuralKeys {
+    let mut keys = ExpectedStructuralKeys::default();
+    for field in &catalog.identity.fields {
+        keys.field_owner_and_name.insert(
+            format!("{}.{}", field.containing_schema, field.stable_name),
+            (field.containing_schema.clone(), field.stable_name.clone()),
+        );
+    }
+    for union in &catalog.identity.ordinary_unions {
+        keys.union_expected.insert(
+            format!("{}.{}", union.containing_schema, union.union_path),
+            format!("union|{}|{}", union.containing_schema, union.union_path),
+        );
+        for arm in &union.arms {
+            keys.arm_expected.insert(
+                format!(
+                    "{}.{}.{}",
+                    arm.containing_schema, arm.union_path, arm.source_arm_name
+                ),
+                format!(
+                    "arm|{}|{}|{}",
+                    arm.containing_schema, arm.union_path, arm.source_arm_name
+                ),
+            );
+        }
+    }
+    keys
+}
+
 fn validate_target_source_identity(
     row: &Target,
     projection: &ProjectionRowMeta,
     top_candidate: Option<&TopLevelCandidate>,
     ordinary_union_wire_source: Option<&str>,
+    keys: &ExpectedStructuralKeys,
     out: &mut Vec<Violation>,
 ) {
     let projection_source_key = format!(
@@ -10139,14 +10396,33 @@ fn validate_target_source_identity(
             &row.row_id,
             "top-level projection must map to a matching top-level candidate or reservation-only reference",
         )),
+        // Structural keys are matched by RECONSTRUCTION from the typed catalog
+        // row, never by parsing the key.  `|` is the key separator and is also
+        // legal inside a generic signature (`TimeBoundSubjectInventory<Role:
+        // Local|Meta|Shard>`), so a `split('|')` with a fixed part count
+        // mis-segments such an owner and rejects a byte-exact row (fgdb-tfow).
+        // Rebuilding the key from components and comparing bytes is strictly
+        // stronger than the old parse and has no grammar dependency.
         "field" => {
-            let mut parts = row.source_key.split('|');
-            let source_matches = parts.next() == Some("field")
-                && parts.next().zip(parts.next()).is_some_and(|(schema, _path)| {
-                    parts.next().is_some_and(|stable_name| {
-                        parts.next().is_none()
-                            && projection.canonical_symbol == format!("{schema}.{stable_name}")
-                    })
+            // A field's census `path` is not a catalog column, so the key is
+            // anchored on the two components that are: the owner prefix and the
+            // stable-name suffix.  The interior `path` segment is validated
+            // independently by the source pass, which requires the whole key to
+            // exist in the frozen census.
+            let source_matches = keys
+                .field_owner_and_name
+                .get(projection.canonical_symbol.as_str())
+                .is_some_and(|(schema, stable_name)| {
+                    let prefix = format!("field|{schema}|");
+                    let suffix = format!("|{stable_name}");
+                    row.source_key.starts_with(&prefix)
+                        && row.source_key.ends_with(&suffix)
+                        // The interior path must be present and must itself be
+                        // rooted at the owning schema, the census invariant for
+                        // every field path.
+                        && row.source_key.len() > prefix.len() + suffix.len()
+                        && row.source_key[prefix.len()..row.source_key.len() - suffix.len()]
+                            .starts_with(schema.as_str())
                 });
             if !source_matches {
                 out.push(Violation::new(
@@ -10157,12 +10433,10 @@ fn validate_target_source_identity(
             }
         }
         "union" => {
-            let mut parts = row.source_key.split('|');
-            let source_matches = parts.next() == Some("union")
-                && parts.next().zip(parts.next()).is_some_and(|(schema, path)| {
-                    parts.next().is_none()
-                        && projection.canonical_symbol == format!("{schema}.{path}")
-                });
+            let source_matches = keys
+                .union_expected
+                .get(projection.canonical_symbol.as_str())
+                .is_some_and(|expected| &row.source_key == expected);
             if !source_matches {
                 out.push(Violation::new(
                     "catalog_target_source_identity_mismatch",
@@ -10172,16 +10446,10 @@ fn validate_target_source_identity(
             }
         }
         "union-arm" => {
-            let mut parts = row.source_key.split('|');
-            let source_matches = parts.next() == Some("arm")
-                && parts
-                    .next()
-                    .zip(parts.next())
-                    .zip(parts.next())
-                    .is_some_and(|((schema, path), arm)| {
-                        parts.next().is_none()
-                            && projection.canonical_symbol == format!("{schema}.{path}.{arm}")
-                    });
+            let source_matches = keys
+                .arm_expected
+                .get(projection.canonical_symbol.as_str())
+                .is_some_and(|expected| &row.source_key == expected);
             if !source_matches {
                 out.push(Violation::new(
                     "catalog_target_source_identity_mismatch",

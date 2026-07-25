@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 15
+registry_epoch = 16
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 15);
+    assert_eq!(epoch, 16);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3197,6 +3197,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "RestoreSourceLeasePredecessor"
                 | "RestoreSourceLeaseRecordKind"
                 | "RestoreSourceLeaseLineageBasis"
+                | "TimeBoundOnlineMacaroonRootProjection"
         )
     };
     pre_erratum
@@ -3223,12 +3224,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 27,
+        pre_erratum.ordinary_unions.len() + 28,
         current_union_count,
         "the historical witness must remove exactly the post-erratum A15, A01, and A16 unions"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 13,
+        pre_erratum.fields.len() + 14,
         current_field_count,
         "the historical witness must remove the post-erratum embedded-union anchor fields and the A01 applied-result fields"
     );
@@ -3860,4 +3861,107 @@ fn idr_golden_vector_mutation() {
     mutated.ordinary_unions = ordinary_unions;
     mutated.unions = unions;
     assert!(!identity::validate_identity(&mutated).is_empty());
+}
+
+/// fgdb-tfow: structural source keys are matched by reconstruction from the
+/// typed catalog row, never by splitting the key on `|`.  The separator is also
+/// legal inside a generic signature, so `TimeBoundSubjectInventory<Role:Local|
+/// Meta|Shard>` is the owner that broke the old fixed-arity parse.
+#[test]
+fn appendix_a_pipe_bearing_owner_keys_match_by_reconstruction() {
+    const PIPE_OWNER: &str = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>";
+    const UNION_TARGET: &str =
+        "a16:union:time-bound-online-macaroon-root-projection-75ece215ec471511";
+    const ARM_TARGET: &str =
+        "a16:union-arm:time-bound-online-macaroon-root-projection-local-0a5f193e5c5aaaf4";
+    const FIELD_TARGET: &str =
+        "a16:field:time-bound-subject-inventory-role-local-meta-shard-online-macaroon-roots";
+
+    // 1. The exact rows verify.  The owner's generic signature carries two
+    //    interior pipes, so this is precisely the shape the old parse rejected.
+    let baseline = real_appendix_catalog();
+    let union_key = baseline
+        .targets
+        .iter()
+        .find(|target| target.target_row_id == UNION_TARGET)
+        .expect("pipe-bearing union target exists")
+        .source_key
+        .clone();
+    assert_eq!(
+        union_key.matches('|').count(),
+        2 + 4,
+        "the fixture must keep both the three key separators and the owner's interior pipes"
+    );
+    assert!(
+        !appendix_a::appendix_a_catalog_closure(&baseline)
+            .iter()
+            .any(|violation| violation.code == "catalog_target_source_identity_mismatch"),
+        "an exact pipe-bearing structural row must pass"
+    );
+
+    // 2. Altering ANY reconstructed component fails: the owner, the union path,
+    //    the arm token, and the field's stable name.
+    for (target_row_id, tampered) in [
+        (
+            UNION_TARGET,
+            format!("union|{PIPE_OWNER}|{PIPE_OWNER}.online_macaroon_root"),
+        ),
+        (
+            UNION_TARGET,
+            format!(
+                "union|TimeBoundSubjectInventory<Role:Local|Meta>|{PIPE_OWNER}.online_macaroon_roots"
+            ),
+        ),
+        (
+            ARM_TARGET,
+            format!("arm|{PIPE_OWNER}|{PIPE_OWNER}.online_macaroon_roots|Meta"),
+        ),
+        (
+            FIELD_TARGET,
+            format!("field|{PIPE_OWNER}|{PIPE_OWNER}.online_macaroon_roots|online_macaroon_root"),
+        ),
+    ] {
+        let mut tampered_catalog = real_appendix_catalog();
+        tampered_catalog
+            .targets
+            .iter_mut()
+            .find(|target| target.target_row_id == target_row_id)
+            .expect("pipe-bearing structural target exists")
+            .source_key = tampered.clone();
+        assert!(
+            appendix_a::appendix_a_catalog_closure(&tampered_catalog)
+                .iter()
+                .any(|violation| violation.code == "catalog_target_source_identity_mismatch"),
+            "a tampered component escaped reconstruction: {tampered}"
+        );
+    }
+
+    // 3. A key that re-segments to the SAME `split('|')` parts as the legal key
+    //    must still fail: only byte equality against the reconstruction passes,
+    //    so swapping the owner and path segments cannot masquerade as exact.
+    let mut resegmented = real_appendix_catalog();
+    resegmented
+        .targets
+        .iter_mut()
+        .find(|target| target.target_row_id == UNION_TARGET)
+        .expect("pipe-bearing union target exists")
+        .source_key = format!("union|{PIPE_OWNER}.online_macaroon_roots|{PIPE_OWNER}");
+    assert_eq!(
+        resegmented
+            .targets
+            .iter()
+            .find(|target| target.target_row_id == UNION_TARGET)
+            .expect("target")
+            .source_key
+            .matches('|')
+            .count(),
+        union_key.matches('|').count(),
+        "the re-segmented key must keep the same pipe count as the legal key"
+    );
+    assert!(
+        appendix_a::appendix_a_catalog_closure(&resegmented)
+            .iter()
+            .any(|violation| violation.code == "catalog_target_source_identity_mismatch"),
+        "a re-segmented key masqueraded as the exact source"
+    );
 }

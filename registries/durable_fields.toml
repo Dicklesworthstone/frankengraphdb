@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 15
+registry_epoch = 16
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -3060,6 +3060,20 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>"
+field_tag = 0x0007
+stable_name = "online_macaroon_roots"
+exact_wire_type = "TimeBoundOnlineMacaroonRootProjection"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 33
+role_predicate = "true"
+retention_and_cut_rule = "closed union Local|Meta|Shard selected by the inventory own role - exactly one union value per inventory (cardinality one); the repeated record_refs live inside the Local/Meta arm payloads, and the Shard arm is deliberately uninhabited-empty (a16:2197)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "TimeSubjectIssuanceReservation<Role>"
 field_tag = 0x0008
 stable_name = "state"
@@ -3389,6 +3403,18 @@ union_path = "TimeAuthorityObservationImport"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["TimeAuthorityObservationImport"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "TimeBoundOnlineMacaroonRootProjection"
+containing_schema = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>"
+union_path = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>.online_macaroon_roots"
+field_tag = 0x0007
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TimeBoundSubjectInventory<Role:Local|Meta|Shard>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -4229,6 +4255,45 @@ source_arm_name = "Shard"
 stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "4f792838d90a9b715d2fa615c0c0ea99bbbe83497d548e0c0550a0367a53c8c2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeBoundOnlineMacaroonRootProjection"
+containing_schema = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>"
+union_path = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>.online_macaroon_roots"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "e4f6489678f24c7709306d125bbd6482bdd7ec66db77c40452babd8f9b45f38b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeBoundOnlineMacaroonRootProjection"
+containing_schema = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>"
+union_path = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>.online_macaroon_roots"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "419437c4beb57b6002a1c0a86e3edb5543447ecb64b22b306c3069bb4d07b1ff"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeBoundOnlineMacaroonRootProjection"
+containing_schema = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>"
+union_path = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>.online_macaroon_roots"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "dc3717373512bf8c07ecbc065e855d334f1ceb8aeb2e2689f382c555d94c2c53"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
