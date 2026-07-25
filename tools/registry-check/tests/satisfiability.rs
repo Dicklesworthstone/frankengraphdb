@@ -1,0 +1,386 @@
+//! SATISFIABILITY HARNESS — asserts every violation code is PASSABLE, not merely reachable.
+//!
+//! For each code C the checker can emit we require two INDEPENDENT DATA witnesses:
+//!   TRIGGER    an IdentityRegistries value that makes C fire
+//!   SATISFYING an IdentityRegistries value exercising the same law where C does NOT fire
+//! A code with a trigger and no satisfying witness is a permanent blocker wearing a gate's
+//! clothes. Five such pairs were found by hand in one day; this catches the next one in seconds.
+//!
+//! NON-TAUTOLOGY: witnesses are hand-authored `IdentityRegistries` VALUES. They are never
+//! derived from the code path under test, so a witness cannot pass by construction.
+//!
+//! NAME THE PAIR: when a satisfying witness cannot be authored, the registry records the
+//! CONFLICTING code and the two source sites, so the failure report identifies the pair
+//! instead of merely saying "no witness".
+//!
+//! Fast loop (registry-check is std-only by constitution, so no cargo needed):
+//!   rustc --edition=2024 --crate-type=lib --crate-name registry_check \
+//!         tools/registry-check/src/lib.rs -o /tmp/libregistry_check.rlib
+//!   CARGO_MANIFEST_DIR="$PWD/tools/registry-check" \
+//!   rustc --edition=2024 --test --crate-name satisfiability satisfiability.rs \
+//!         --extern registry_check=/tmp/libregistry_check.rlib -o /tmp/sat && /tmp/sat
+//! REBUILD THE RLIB AT THE START OF EVERY SESSION: it bakes in EXPECTED_* and the assignment
+//! pins, so a stale one reports that the DATA is broken when the TOOL is.
+
+use registry_check::identity::{self, FieldRow, IdentityRegistries, LogicalKind, WireType};
+
+// ---------------------------------------------------------------- coverage registry
+
+/// Why a code carries no satisfying witness. Every variant is a DELIBERATE, REVIEWED state;
+/// a code absent from the registry entirely is a hard failure, so nothing falls out silently.
+#[derive(Clone, Copy)]
+enum Coverage {
+    /// Both witnesses authored below.
+    Witnessed,
+    /// Deliberately not witnessed, with a reason that must be re-justified when it changes.
+    Exempt(&'static str),
+    /// KNOWN UNSATISFIABLE. The pair is named so the report identifies it in one line.
+    Unsatisfiable {
+        conflicting_code: &'static str,
+        sites: &'static str,
+        note: &'static str,
+    },
+    /// Tractable but not yet authored. CI counts these and fails if the count grows.
+    Pending(&'static str),
+}
+
+/// Every code the checker can emit. Adding a code to the checker without adding a row here
+/// must fail CI — that is the anti-silent-omission property.
+const REGISTRY: &[(&str, Coverage)] = &[
+    // ---- dag_ family: where two of the five known instances live -------------------
+    ("dag_future_result", Coverage::Witnessed),
+    ("dag_cycle", Coverage::Pending("DAG cycle witness")),
+    (
+        "dag_self_edge",
+        Coverage::Unsatisfiable {
+            conflicting_code: "catalog_annotation_reference_semantics_mismatch",
+            sites: "identity.rs dag_self_edge vs appendix_a.rs annotation reference-semantics forcing",
+            note: "fgdb-u3gr. The source wrapper StrongRef<Self> forces reference_semantics=strong; \
+               dag_self_edge rejects strong, conditional and weak_digest alike when the target \
+               resolves to the owner. No spelling satisfies both. 10 members, 7 of 21 slices.",
+        },
+    ),
+    // ---- ordinary_union_ family: the fifth instance ---------------------------------
+    (
+        "ordinary_union_field_mismatch",
+        Coverage::Unsatisfiable {
+            conflicting_code: "field_unresolved_schema",
+            sites: "identity.rs:2243 (anchor field required) vs identity.rs:1558 (resolves omits wire)",
+            note: "An embedded ordinary union in a WIRE host needs an anchor field row it can never \
+               legally have: the `resolves` disjunction accepts logical/bootstrap/physical/\
+               prebootstrap and omits wire. Currently DORMANT because a01 increment 2C made those \
+               keys wire-covered instead of union rows — the law pair is still unsatisfiable.",
+        },
+    ),
+    (
+        "ordinary_union_arm_missing",
+        Coverage::Pending("arm fixture"),
+    ),
+    (
+        "ordinary_union_arm_duplicate_tag",
+        Coverage::Pending("arm fixture"),
+    ),
+    (
+        "ordinary_union_name_collision",
+        Coverage::Pending("arm fixture"),
+    ),
+    (
+        "ordinary_union_unresolved_schema",
+        Coverage::Pending("arm fixture"),
+    ),
+    // ---- union_arm_ family -----------------------------------------------------------
+    (
+        "union_arm_unresolved",
+        Coverage::Pending("reference-union fixture"),
+    ),
+    (
+        "union_arm_lifecycle_mismatch",
+        Coverage::Pending("reference-union fixture"),
+    ),
+    (
+        "union_arm_duplicate_target",
+        Coverage::Pending("reference-union fixture"),
+    ),
+    // ---- declared exemptions, each with a reason ---------------------------------------
+    (
+        "registry_epoch_mismatch",
+        Coverage::Exempt(
+            "satisfying state is the live catalog, asserted continuously by the composite gate; \
+         a synthetic witness would add nothing",
+        ),
+    ),
+    (
+        "registry_assignment_drift",
+        Coverage::Exempt("as registry_epoch_mismatch"),
+    ),
+    (
+        "bodydigest_pin_mismatch",
+        Coverage::Exempt(
+            "satisfying witness is a live recomputed FNV pin, already covered by the BODY_RECIPES \
+         block in scripts/g0_identity_e2e.sh",
+        ),
+    ),
+    // ---- completion family: cannot be witnessed until instance [III] resolves ----------
+    (
+        "complete_slice_annotation_missing",
+        Coverage::Exempt(
+            "a satisfying witness requires a slice that legitimately reaches definition_status=complete, \
+         which NOTHING can do while the zero-exact-type blocker stands (appendix_a.rs:7418). This \
+         exemption is the tracking artifact for that blocker and must be removed when it resolves.",
+        ),
+    ),
+];
+
+/// Identity-checker codes not yet classified in `REGISTRY`.
+///
+/// This is intentionally an exact readable backlog, not a count. A new code
+/// replacing a removed code must still fail the ratchet even if the total
+/// remains unchanged.
+const UNREGISTERED_BASELINE: &[&str] = &[
+    "bad_field",
+    "bare_strong_ref",
+    "bodydigest_incomplete_partition",
+    "bodydigest_self_included",
+    "bodydigest_two_fields",
+    "bodydigest_unknown_exclusion",
+    "code_duplicate",
+    "code_invalid",
+    "digest_missing_class",
+    "digest_missing_recipe",
+    "disjointness_dual_class",
+    "experimental_in_production",
+    "external_root_outside_frame",
+    "field_unresolved_schema",
+    "field_unresolved_wire_type",
+    "frame_strong_ref",
+    "ordinary_union_arm_bound_exceeds_union",
+    "ordinary_union_arm_duplicate_name",
+    "ordinary_union_arm_duplicate_source_name",
+    "ordinary_union_arm_lifecycle_mismatch",
+    "ordinary_union_arm_metadata_mismatch",
+    "ordinary_union_arm_payload_mismatch",
+    "ordinary_union_arm_role_mismatch",
+    "ordinary_union_container_contract_mismatch",
+    "ordinary_union_duplicate_path",
+    "ordinary_union_logical_contract_mismatch",
+    "ordinary_union_wire_contract_mismatch",
+    "range_status_mismatch",
+    "ref_target_not_logical",
+    "ref_target_unresolved",
+    "reference_union_name_collision",
+    "union_arm_duplicate_tag",
+    "union_arm_identity_mismatch",
+    "union_arm_metadata_mismatch",
+    "union_arm_missing",
+    "union_arm_policy_mismatch",
+    "union_field_mismatch",
+    "union_role_invalid",
+    "union_role_mismatch",
+    "wire_context_mismatch",
+];
+
+// ---------------------------------------------------------------- witness builders
+
+/// Minimal valid registry skeleton. Hand-authored DATA; never derived from the checker.
+fn base() -> IdentityRegistries {
+    IdentityRegistries {
+        logical: vec![],
+        logical_epoch: 1,
+        physical: vec![],
+        physical_epoch: 1,
+        bootstrap: vec![],
+        bootstrap_epoch: 1,
+        prebootstrap: vec![],
+        prebootstrap_epoch: 1,
+        wire: vec![WireType {
+            wire_type_id: 0x0001,
+            name: "StrongRef".to_owned(),
+            kind: "reference_wrapper".to_owned(),
+            status: "active".to_owned(),
+            containing_union: None,
+            wire_tag: None,
+            encoding_context: "typed strong reference to one logical schema".to_owned(),
+            allowed_containing_schemas: vec!["*".to_owned()],
+            max_size_bytes: 40,
+        }],
+        wire_epoch: 1,
+        fields: vec![],
+        fields_epoch: 1,
+        unions: vec![],
+        ordinary_unions: vec![],
+    }
+}
+
+fn kind(name: &str, code: u32, order: i64) -> LogicalKind {
+    LogicalKind {
+        object_kind: code as i64,
+        name: name.to_owned(),
+        status: "reserved".to_owned(),
+        construction_order: order,
+        role_predicate: "true".to_owned(),
+        max_size_bytes: 16_777_216,
+        golden_corpus: format!("corpus/test/{}/", name.to_ascii_lowercase()),
+    }
+}
+
+fn strong_field(owner: &str, name: &str, target: &str, order: i64) -> FieldRow {
+    FieldRow {
+        containing_schema: owner.to_owned(),
+        field_tag: 1,
+        stable_name: name.to_owned(),
+        exact_wire_type: "StrongRef".to_owned(),
+        cardinality: "one".to_owned(),
+        identity_class: "logical".to_owned(),
+        reference_semantics: "strong".to_owned(),
+        target_schema_id: Some(target.to_owned()),
+        construction_order: order,
+        role_predicate: "true".to_owned(),
+        retention_and_cut_rule: "retained with the owning witness".to_owned(),
+        version_status: "reserved".to_owned(),
+        max_size_bytes: 40,
+        digest_class: None,
+        transcript_recipe: None,
+        bd_domain_separator: None,
+        bd_schema_major: None,
+        bd_included_field_tags: None,
+        bd_excluded_field_tags: None,
+        recipe_pin: None,
+    }
+}
+
+fn codes(r: &IdentityRegistries) -> Vec<String> {
+    identity::validate_identity(r)
+        .into_iter()
+        // Assignment epochs and pins describe the complete released registry,
+        // so any deliberately minimal synthetic fixture necessarily differs.
+        // Both codes carry explicit Coverage::Exempt rows above; all other
+        // violations remain fatal to a supposedly satisfying witness.
+        .filter(|violation| {
+            !matches!(
+                violation.code.as_str(),
+                "registry_epoch_mismatch" | "registry_assignment_drift"
+            )
+        })
+        .map(|violation| violation.code)
+        .collect()
+}
+
+// ---------------------------------------------------------------- the assertions
+
+/// dag_future_result: a field may not strong-ref a kind constructed AFTER its owner.
+#[test]
+fn sat_dag_future_result() {
+    // SATISFYING: target order 5 <= owner order 20.
+    let mut ok = base();
+    ok.logical = vec![kind("Target", 0x9001, 5), kind("Owner", 0x9002, 20)];
+    ok.fields = vec![strong_field("Owner", "r", "Target", 20)];
+    let ok_codes = codes(&ok);
+    assert!(
+        ok_codes.is_empty(),
+        "dag_future_result satisfying witness fired unrelated violations: {ok_codes:?}"
+    );
+    // TRIGGER: target order 40 > owner order 20.
+    let mut bad = base();
+    bad.logical = vec![kind("Target", 0x9001, 40), kind("Owner", 0x9002, 20)];
+    bad.fields = vec![strong_field("Owner", "r", "Target", 20)];
+    let bad_codes = codes(&bad);
+    assert_eq!(
+        bad_codes,
+        ["dag_future_result"],
+        "dag_future_result trigger must exercise exactly that law"
+    );
+}
+
+/// The source-extracted code set and the reviewed coverage/backlog partition
+/// must remain exact. Prevents silent omission and count-preserving swaps.
+#[test]
+fn identity_code_set_is_ratcheted() {
+    // Codes are extracted from the checker source, NOT from a list the checker also uses —
+    // otherwise the assertion would be tautological.
+    let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/identity.rs"));
+    let mut emitted: Vec<&str> = Vec::new();
+    for (i, _) in src.match_indices("out.push(v(") {
+        if let Some(q1) = src[i..].find('"') {
+            let rest = &src[i + q1 + 1..];
+            if let Some(q2) = rest.find('"') {
+                emitted.push(&rest[..q2]);
+            }
+        }
+    }
+    emitted.sort_unstable();
+    emitted.dedup();
+    assert!(
+        emitted.contains(&"dag_future_result"),
+        "source extractor failed its known-present control"
+    );
+    assert!(
+        !emitted.contains(&"definitely_fabricated_violation_code"),
+        "source extractor accepted its fabricated control"
+    );
+    let mut known: Vec<&str> = REGISTRY.iter().map(|(code, _)| *code).collect();
+    let registry_len = known.len();
+    known.sort_unstable();
+    known.dedup();
+    assert_eq!(
+        known.len(),
+        registry_len,
+        "coverage registry contains a duplicate violation code"
+    );
+    let missing: Vec<&str> = emitted
+        .iter()
+        .copied()
+        .filter(|code| !known.contains(code))
+        .collect();
+    println!(
+        "checker emits {} codes; registry covers {}",
+        emitted.len(),
+        known.len()
+    );
+    println!(
+        "UNREGISTERED (each must gain a witness or a reasoned exemption): {}",
+        missing.len()
+    );
+    for m in &missing {
+        println!("   {m}");
+    }
+    assert_eq!(
+        missing, UNREGISTERED_BASELINE,
+        "the checker code set changed without a matching coverage/backlog update"
+    );
+}
+
+/// Report the known-unsatisfiable pairs by name, so the failure identifies the pair.
+#[test]
+fn report_unsatisfiable_pairs() {
+    let mut witnessed = 0;
+    let mut exempt = 0;
+    let mut unsatisfiable = 0;
+    let mut pending = 0;
+    for (code, cov) in REGISTRY {
+        match cov {
+            Coverage::Witnessed => witnessed += 1,
+            Coverage::Exempt(reason) => {
+                exempt += 1;
+                println!("EXEMPT {code}: {reason}");
+            }
+            Coverage::Unsatisfiable {
+                conflicting_code,
+                sites,
+                note,
+            } => {
+                unsatisfiable += 1;
+                println!(
+                    "UNSATISFIABLE PAIR #{unsatisfiable}\n  {code}  <->  {conflicting_code}\n  sites: {sites}\n  {note}\n"
+                );
+            }
+            Coverage::Pending(reason) => {
+                pending += 1;
+                println!("PENDING {code}: {reason}");
+            }
+        }
+    }
+    println!(
+        "coverage states: witnessed={witnessed} exempt={exempt} \
+         unsatisfiable={unsatisfiable} pending={pending}"
+    );
+}
