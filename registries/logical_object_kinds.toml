@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 38
+registry_epoch = 39
 
 [[kind]]
 object_kind = 0x0001
@@ -2923,3 +2923,66 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/result_delivery_state/"
+
+[[kind]]
+object_kind = 0x0539
+name = "RecoveryTransformSourceBasis"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_transform_source_basis/"
+
+[[kind]]
+object_kind = 0x053a
+name = "RestoreAbandonAuthorityProfile"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandon_authority_profile/"
+
+[[kind]]
+object_kind = 0x053b
+name = "RestoreAbandonmentTombstoneRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_tombstone_ref/"
+
+[[kind]]
+object_kind = 0x053c
+name = "RestoreAbandonmentTombstoneSkeletonRecipe"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandonment_tombstone_skeleton_recipe/"
+
+[[kind]]
+object_kind = 0x053d
+name = "RestoreLeaseOperationTerminalHistory"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_history/"
+
+[[kind]]
+object_kind = 0x053e
+name = "RestoreLeaseReleaseEligibility"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_release_eligibility/"
+
+[[kind]]
+object_kind = 0x053f
+name = "RestoreLeaseState"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_state/"

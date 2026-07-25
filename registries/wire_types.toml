@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 29
+registry_epoch = 30
 
 [[type]]
 wire_type_id = 0x0001
@@ -2638,4 +2638,424 @@ containing_union = "RemoteRetentionControlSpec"
 wire_tag = 0x0008
 encoding_context = "arm AdoptLegacyAuthorityTransfer of closed union RemoteRetentionControlSpec"
 allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0109
+name = "CatalogAbandonPredecessor"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union CatalogAbandonPredecessor (a18)"
+allowed_containing_schemas = ["CatalogAbandonPredecessor"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x010a
+name = "LocalRestorePhase"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union LocalRestorePhase (a18)"
+allowed_containing_schemas = ["LocalRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x010b
+name = "LocalRestoreRegistryValue"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union LocalRestoreRegistryValue (a18)"
+allowed_containing_schemas = ["LocalRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x010c
+name = "MetaRestoreRegistryValue"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union MetaRestoreRegistryValue (a18)"
+allowed_containing_schemas = ["MetaRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x010d
+name = "RestoreAbandonmentApplySubjectRecipe"
+kind = "record"
+status = "reserved"
+encoding_context = "inline record carrying the RestoreAbandonmentApplySubjectRecipe field group (a18)"
+allowed_containing_schemas = ["RestoreAbandonmentApplySubjectRecipe"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x010e
+name = "RestoreRegistryCommon"
+kind = "record"
+status = "reserved"
+encoding_context = "inline record carrying the RestoreRegistryCommon field group (a18)"
+allowed_containing_schemas = ["RestoreRegistryCommon"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x010f
+name = "RestoreRegistryTerminalCommon"
+kind = "record"
+status = "reserved"
+encoding_context = "inline record carrying the RestoreRegistryTerminalCommon field group (a18)"
+allowed_containing_schemas = ["RestoreRegistryTerminalCommon"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0110
+name = "RestoreSourceKeyAccessDisposition"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union RestoreSourceKeyAccessDisposition (a18)"
+allowed_containing_schemas = ["RestoreSourceKeyAccessDisposition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0111
+name = "RestoreTerminalPinReleaseAuthorizationBody"
+kind = "record"
+status = "reserved"
+encoding_context = "inline record carrying the RestoreTerminalPinReleaseAuthorizationBody field group (a18)"
+allowed_containing_schemas = ["RestoreTerminalPinReleaseAuthorizationBody"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0112
+name = "ShardRestoreRegistryValue"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union ShardRestoreRegistryValue (a18)"
+allowed_containing_schemas = ["ShardRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0113
+name = "CatalogAbandonPredecessor.authenticated_absent"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CatalogAbandonPredecessor"
+wire_tag = 0x0001
+encoding_context = "arm AuthenticatedAbsent of closed union CatalogAbandonPredecessor"
+allowed_containing_schemas = ["CatalogAbandonPredecessor"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0114
+name = "CatalogAbandonPredecessor.reserved_hidden"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CatalogAbandonPredecessor"
+wire_tag = 0x0002
+encoding_context = "arm ReservedHidden of closed union CatalogAbandonPredecessor"
+allowed_containing_schemas = ["CatalogAbandonPredecessor"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0115
+name = "CatalogAbandonPredecessor.activated_hidden"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CatalogAbandonPredecessor"
+wire_tag = 0x0003
+encoding_context = "arm ActivatedHidden of closed union CatalogAbandonPredecessor"
+allowed_containing_schemas = ["CatalogAbandonPredecessor"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0116
+name = "LocalRestorePhase.active_hidden"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalRestorePhase"
+wire_tag = 0x0001
+encoding_context = "arm ActiveHidden of closed union LocalRestorePhase"
+allowed_containing_schemas = ["LocalRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0117
+name = "LocalRestorePhase.abandon_authorized_hidden"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalRestorePhase"
+wire_tag = 0x0002
+encoding_context = "arm AbandonAuthorizedHidden of closed union LocalRestorePhase"
+allowed_containing_schemas = ["LocalRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0118
+name = "LocalRestorePhase.promoted_awaiting_reopen"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalRestorePhase"
+wire_tag = 0x0003
+encoding_context = "arm PromotedAwaitingReopen of closed union LocalRestorePhase"
+allowed_containing_schemas = ["LocalRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0119
+name = "LocalRestorePhase.abandoned_authority_applied_awaiting_receipt"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalRestorePhase"
+wire_tag = 0x0004
+encoding_context = "arm AbandonedAuthorityAppliedAwaitingReceipt of closed union LocalRestorePhase"
+allowed_containing_schemas = ["LocalRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x011a
+name = "LocalRestorePhase.abandoned_awaiting_terminal_pin"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalRestorePhase"
+wire_tag = 0x0005
+encoding_context = "arm AbandonedAwaitingTerminalPin of closed union LocalRestorePhase"
+allowed_containing_schemas = ["LocalRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x011b
+name = "LocalRestorePhase.awaiting_source_access_cleanup"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalRestorePhase"
+wire_tag = 0x0006
+encoding_context = "arm AwaitingSourceAccessCleanup of closed union LocalRestorePhase"
+allowed_containing_schemas = ["LocalRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x011c
+name = "LocalRestorePhase.awaiting_source_release"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalRestorePhase"
+wire_tag = 0x0007
+encoding_context = "arm AwaitingSourceRelease of closed union LocalRestorePhase"
+allowed_containing_schemas = ["LocalRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x011d
+name = "LocalRestoreRegistryValue.nonterminal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalRestoreRegistryValue"
+wire_tag = 0x0001
+encoding_context = "arm Nonterminal of closed union LocalRestoreRegistryValue"
+allowed_containing_schemas = ["LocalRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x011e
+name = "LocalRestoreRegistryValue.released_terminal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalRestoreRegistryValue"
+wire_tag = 0x0002
+encoding_context = "arm ReleasedTerminal of closed union LocalRestoreRegistryValue"
+allowed_containing_schemas = ["LocalRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x011f
+name = "MetaRestoreRegistryValue.nonterminal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "MetaRestoreRegistryValue"
+wire_tag = 0x0001
+encoding_context = "arm Nonterminal of closed union MetaRestoreRegistryValue"
+allowed_containing_schemas = ["MetaRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0120
+name = "MetaRestoreRegistryValue.source_released_awaiting_pin_release_authorization_publication"
+kind = "union_variant"
+status = "reserved"
+containing_union = "MetaRestoreRegistryValue"
+wire_tag = 0x0002
+encoding_context = "arm SourceReleasedAwaitingPinReleaseAuthorizationPublication of closed union MetaRestoreRegistryValue"
+allowed_containing_schemas = ["MetaRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0121
+name = "MetaRestoreRegistryValue.source_released_awaiting_participant_pin_release"
+kind = "union_variant"
+status = "reserved"
+containing_union = "MetaRestoreRegistryValue"
+wire_tag = 0x0003
+encoding_context = "arm SourceReleasedAwaitingParticipantPinRelease of closed union MetaRestoreRegistryValue"
+allowed_containing_schemas = ["MetaRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0122
+name = "MetaRestoreRegistryValue.released_terminal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "MetaRestoreRegistryValue"
+wire_tag = 0x0004
+encoding_context = "arm ReleasedTerminal of closed union MetaRestoreRegistryValue"
+allowed_containing_schemas = ["MetaRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0123
+name = "RestoreSourceKeyAccessDisposition.promoted_current_target_key"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RestoreSourceKeyAccessDisposition"
+wire_tag = 0x0001
+encoding_context = "arm PromotedCurrentTargetKey of closed union RestoreSourceKeyAccessDisposition"
+allowed_containing_schemas = ["RestoreSourceKeyAccessDisposition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0124
+name = "RestoreSourceKeyAccessDisposition.lease_bound_auto_revoked"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RestoreSourceKeyAccessDisposition"
+wire_tag = 0x0002
+encoding_context = "arm LeaseBoundAutoRevoked of closed union RestoreSourceKeyAccessDisposition"
+allowed_containing_schemas = ["RestoreSourceKeyAccessDisposition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0125
+name = "RestoreSourceKeyAccessDisposition.explicitly_revoked"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RestoreSourceKeyAccessDisposition"
+wire_tag = 0x0003
+encoding_context = "arm ExplicitlyRevoked of closed union RestoreSourceKeyAccessDisposition"
+allowed_containing_schemas = ["RestoreSourceKeyAccessDisposition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0126
+name = "RestoreSourceKeyAccessDisposition.provider_already_closed_no_use"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RestoreSourceKeyAccessDisposition"
+wire_tag = 0x0004
+encoding_context = "arm ProviderAlreadyClosedNoUse of closed union RestoreSourceKeyAccessDisposition"
+allowed_containing_schemas = ["RestoreSourceKeyAccessDisposition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0127
+name = "RestoreSourceKeyAccessDisposition.ephemeral_use_consumed_and_closed"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RestoreSourceKeyAccessDisposition"
+wire_tag = 0x0005
+encoding_context = "arm EphemeralUseConsumedAndClosed of closed union RestoreSourceKeyAccessDisposition"
+allowed_containing_schemas = ["RestoreSourceKeyAccessDisposition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0128
+name = "ShardRestoreRegistryValue.active_hidden"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ShardRestoreRegistryValue"
+wire_tag = 0x0001
+encoding_context = "arm ActiveHidden of closed union ShardRestoreRegistryValue"
+allowed_containing_schemas = ["ShardRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0129
+name = "ShardRestoreRegistryValue.opened_awaiting_independent_reopen"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ShardRestoreRegistryValue"
+wire_tag = 0x0002
+encoding_context = "arm OpenedAwaitingIndependentReopen of closed union ShardRestoreRegistryValue"
+allowed_containing_schemas = ["ShardRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x012a
+name = "ShardRestoreRegistryValue.operational_awaiting_source_access_closure"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ShardRestoreRegistryValue"
+wire_tag = 0x0003
+encoding_context = "arm OperationalAwaitingSourceAccessClosure of closed union ShardRestoreRegistryValue"
+allowed_containing_schemas = ["ShardRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x012b
+name = "ShardRestoreRegistryValue.operational_participant_complete"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ShardRestoreRegistryValue"
+wire_tag = 0x0004
+encoding_context = "arm OperationalParticipantComplete of closed union ShardRestoreRegistryValue"
+allowed_containing_schemas = ["ShardRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x012c
+name = "ShardRestoreRegistryValue.abandoned_awaiting_terminal_pin"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ShardRestoreRegistryValue"
+wire_tag = 0x0005
+encoding_context = "arm AbandonedAwaitingTerminalPin of closed union ShardRestoreRegistryValue"
+allowed_containing_schemas = ["ShardRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x012d
+name = "ShardRestoreRegistryValue.abandoned_awaiting_source_access_closure"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ShardRestoreRegistryValue"
+wire_tag = 0x0006
+encoding_context = "arm AbandonedAwaitingSourceAccessClosure of closed union ShardRestoreRegistryValue"
+allowed_containing_schemas = ["ShardRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x012e
+name = "ShardRestoreRegistryValue.abandoned_participant_complete"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ShardRestoreRegistryValue"
+wire_tag = 0x0007
+encoding_context = "arm AbandonedParticipantComplete of closed union ShardRestoreRegistryValue"
+allowed_containing_schemas = ["ShardRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x012f
+name = "ShardRestoreRegistryValue.participant_terminal_pending_ack"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ShardRestoreRegistryValue"
+wire_tag = 0x0008
+encoding_context = "arm ParticipantTerminalPendingAck of closed union ShardRestoreRegistryValue"
+allowed_containing_schemas = ["ShardRestoreRegistryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0130
+name = "ShardRestoreRegistryValue.participant_terminal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ShardRestoreRegistryValue"
+wire_tag = 0x0009
+encoding_context = "arm ParticipantTerminal of closed union ShardRestoreRegistryValue"
+allowed_containing_schemas = ["ShardRestoreRegistryValue"]
 max_size_bytes = 16777216
