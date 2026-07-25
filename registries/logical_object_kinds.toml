@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 32
+registry_epoch = 33
 
 [[kind]]
 object_kind = 0x0001
@@ -259,6 +259,15 @@ construction_order = 37
 role_predicate = "true"
 max_size_bytes = 1048576
 golden_corpus = "corpus/logical/backup_manifest/"
+
+[[kind]]
+object_kind = 0x0202
+name = "ActivatedRetentionCutSet"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/activated_retention_cut_set/"
 
 [[kind]]
 object_kind = 0x0203
@@ -1215,6 +1224,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/prior_incarnation_lease_cohort_window/"
 
 [[kind]]
+object_kind = 0x03a0
+name = "ProvisionalRetentionCutSet"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/provisional_retention_cut_set/"
+
+[[kind]]
 object_kind = 0x03a1
 name = "RaftConsensusCutProjection"
 status = "reserved"
@@ -1510,6 +1528,24 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/retention_authority_transfer_adoption_spec/"
+
+[[kind]]
+object_kind = 0x0415
+name = "RetentionCutBody"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/retention_cut_body/"
+
+[[kind]]
+object_kind = 0x0416
+name = "RetentionMap"
+status = "reserved"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/retention_map/"
 
 [[kind]]
 object_kind = 0x041c

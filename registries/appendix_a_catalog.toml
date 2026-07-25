@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1417
+target_count = 1421
 projection_fallback_count = 89
-target_source_assignment_sha256 = "a9c508aef2023163f0817a87e81e55563cd375453d5356bff6a79959d0094693"
+target_source_assignment_sha256 = "f3c3451cb1af997dad3f697b4fac6b4afce44fec89059b3ff72a309429f566de"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 32
+registry_epoch = 33
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -3525,6 +3525,50 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/result_delivery_state/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:activated-retention-cut-set"
+object_kind = 0x0202
+name = "ActivatedRetentionCutSet"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/activated_retention_cut_set/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:provisional-retention-cut-set"
+object_kind = 0x03a0
+name = "ProvisionalRetentionCutSet"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/provisional_retention_cut_set/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:retention-cut-body"
+object_kind = 0x0415
+name = "RetentionCutBody"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/retention_cut_body/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:retention-map"
+object_kind = 0x0416
+name = "RetentionMap"
+status = "reserved"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/retention_map/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -20429,7 +20473,7 @@ symbol = "ActivatedRetentionCutSet"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0202"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:activation-meta-projection-payload"
@@ -24848,7 +24892,7 @@ symbol = "ProvisionalRetentionCutSet"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03a0"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a04:reservation:raft-consensus-cut-projection"
@@ -25991,7 +26035,7 @@ symbol = "RetentionCutBody"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0415"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a12:reservation:retention-map"
@@ -26000,7 +26044,7 @@ symbol = "RetentionMap"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0416"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:returning-evaluation-certificate"
@@ -27808,7 +27852,7 @@ symbol = "ActivatedRetentionCutSet"
 generic_signature = ""
 source_key = "top|ActivatedRetentionCutSet"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1972"]
 
 [[top_level_candidate]]
@@ -34868,7 +34912,7 @@ symbol = "ProvisionalRetentionCutSet"
 generic_signature = ""
 source_key = "top|ProvisionalRetentionCutSet"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1970"]
 
 [[top_level_candidate]]
@@ -37478,7 +37522,7 @@ symbol = "RetentionCutBody"
 generic_signature = ""
 source_key = "top|RetentionCutBody"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1968"]
 
 [[top_level_candidate]]
@@ -37488,7 +37532,7 @@ symbol = "RetentionMap"
 generic_signature = ""
 source_key = "top|RetentionMap"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1972"]
 
 [[top_level_candidate]]
@@ -51852,6 +51896,38 @@ row_id = "a07:target:logical-kind-result-delivery-state"
 target_row_id = "a07:logical-kind:result-delivery-state"
 slice_id = "a07"
 source_key = "top|ResultDeliveryState"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-activated-retention-cut-set"
+target_row_id = "a12:logical-kind:activated-retention-cut-set"
+slice_id = "a12"
+source_key = "top|ActivatedRetentionCutSet"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-provisional-retention-cut-set"
+target_row_id = "a12:logical-kind:provisional-retention-cut-set"
+slice_id = "a12"
+source_key = "top|ProvisionalRetentionCutSet"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-retention-cut-body"
+target_row_id = "a12:logical-kind:retention-cut-body"
+slice_id = "a12"
+source_key = "top|RetentionCutBody"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-retention-map"
+target_row_id = "a12:logical-kind:retention-map"
+slice_id = "a12"
+source_key = "top|RetentionMap"
 target_kind = "logical-kind"
 definition_status = "declared"
 
