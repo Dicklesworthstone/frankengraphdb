@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1668
+target_count = 1670
 projection_fallback_count = 90
-target_source_assignment_sha256 = "e5f06d8ecec2deb8c5c4ceb67201bef88bbc413e067fa0edcea1225e0c980052"
+target_source_assignment_sha256 = "42df767a936f473c6da0a53872749b5772bd1c9d03ae9c5c577dda3c0058c839"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 36
+registry_epoch = 37
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -4163,6 +4163,28 @@ construction_order = 20
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_restore_terminal_tombstone/"
+
+[[logical_kind]]
+slice_id = "a14"
+row_id = "a14:logical-kind:gc-decision-record"
+object_kind = 0x029c
+name = "GcDecisionRecord"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_decision_record/"
+
+[[logical_kind]]
+slice_id = "a14"
+row_id = "a14:logical-kind:mandatory-inventory"
+object_kind = 0x0334
+name = "MandatoryInventory"
+status = "reserved"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/mandatory_inventory/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -25614,7 +25636,7 @@ symbol = "GcDecisionRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x029c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:gc-disjointness-proof"
@@ -27018,7 +27040,7 @@ symbol = "MandatoryInventory"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0334"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:merge-capability-operation-authorization-record"
@@ -34256,7 +34278,7 @@ symbol = "GcDecisionRecord"
 generic_signature = ""
 source_key = "top|GcDecisionRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a14:2045"]
 
 [[top_level_candidate]]
@@ -36616,7 +36638,7 @@ symbol = "MandatoryInventory"
 generic_signature = ""
 source_key = "top|MandatoryInventory"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a14:2039"]
 
 [[top_level_candidate]]
@@ -57219,6 +57241,22 @@ target_row_id = "a18:union-arm:shard-restore-source-access-closure-sorted-source
 slice_id = "a18"
 source_key = "arm|ShardRestoreSourceAccessClosure|ShardRestoreSourceAccessClosure.sorted_source_access_members.record.terminal_disposition|ExplicitlyRevoked"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:logical-kind-gc-decision-record"
+target_row_id = "a14:logical-kind:gc-decision-record"
+slice_id = "a14"
+source_key = "top|GcDecisionRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:logical-kind-mandatory-inventory"
+target_row_id = "a14:logical-kind:mandatory-inventory"
+slice_id = "a14"
+source_key = "top|MandatoryInventory"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

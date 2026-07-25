@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 36
+registry_epoch = 37
 
 [[kind]]
 object_kind = 0x0001
@@ -601,6 +601,15 @@ construction_order = 6
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/external_key_destruction_provider_receipt/"
+
+[[kind]]
+object_kind = 0x029c
+name = "GcDecisionRecord"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_decision_record/"
 
 [[kind]]
 object_kind = 0x02a2
@@ -1204,6 +1213,15 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/macaroon_root_issuance_record/"
+
+[[kind]]
+object_kind = 0x0334
+name = "MandatoryInventory"
+status = "reserved"
+construction_order = 25
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/mandatory_inventory/"
 
 [[kind]]
 object_kind = 0x033f
