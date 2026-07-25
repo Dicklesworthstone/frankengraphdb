@@ -680,6 +680,16 @@ impl CalibrationWindow {
         }
         Ok(CalibrationWindow { start_seq, end_seq })
     }
+
+    /// First sequence included in the window.
+    pub const fn start_seq(&self) -> u64 {
+        self.start_seq
+    }
+
+    /// First sequence after the window.
+    pub const fn end_seq(&self) -> u64 {
+        self.end_seq
+    }
 }
 
 /// Typed rejection of an empty or inverted calibration window.
@@ -1415,7 +1425,9 @@ mod tests {
 
     #[test]
     fn windows_reject_empty_and_inverted() {
-        assert!(CalibrationWindow::new(10, 20).is_ok());
+        let window = CalibrationWindow::new(10, 20).unwrap();
+        assert_eq!(window.start_seq(), 10);
+        assert_eq!(window.end_seq(), 20);
         assert_eq!(
             CalibrationWindow::new(20, 10).unwrap_err(),
             InvalidWindow {
@@ -1444,6 +1456,8 @@ mod tests {
         assert_eq!(env.evidence_oid(), oid(1));
         assert_eq!(env.selection_policy_oid(), oid(2));
         assert_eq!(env.calibration_window(), Some(window));
+        assert_eq!(env.calibration_window().unwrap().start_seq(), 100);
+        assert_eq!(env.calibration_window().unwrap().end_seq(), 42_000);
         assert_eq!(env.regime_epoch(), 7);
         assert_eq!(
             env.fallback(),
