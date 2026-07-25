@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1032
+target_count = 1050
 projection_fallback_count = 88
-target_source_assignment_sha256 = "855f7d766a6fdf9d948063257b69eb9c34c6702e6a5e741864cbdd9462f8e67b"
+target_source_assignment_sha256 = "a3dae379d01dd58a5b6acc17aaabadafdad6bc0140e3831c187c53b724844cb8"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 24
+registry_epoch = 25
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -2624,6 +2624,204 @@ construction_order = 35
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/subscription_delivery_transition_spec/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:active-meta-projection-root"
+object_kind = 0x0204
+name = "ActiveMetaProjectionRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/active_meta_projection_root/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:global-branch-key-distribution-plan"
+object_kind = 0x02ad
+name = "GlobalBranchKeyDistributionPlan"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_branch_key_distribution_plan/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:global-key-destruction-authorization-certificate"
+object_kind = 0x02bd
+name = "GlobalKeyDestructionAuthorizationCertificate"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_key_destruction_authorization_certificate/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:global-recovery-checkpoint"
+object_kind = 0x02c2
+name = "GlobalRecoveryCheckpoint"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_recovery_checkpoint/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:local-prepared-payload-root"
+object_kind = 0x0318
+name = "LocalPreparedPayloadRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_prepared_payload_root/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:meta-config-payload-floor"
+object_kind = 0x033f
+name = "MetaConfigPayloadFloor"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_config_payload_floor/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:meta-prepared-command-record"
+object_kind = 0x0352
+name = "MetaPreparedCommandRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_prepared_command_record/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-checkpoint-certificate"
+object_kind = 0x0440
+name = "ShardCheckpointCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_checkpoint_certificate/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-command-record"
+object_kind = 0x0441
+name = "ShardCommandRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_command_record/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-config-payload-floor"
+object_kind = 0x0442
+name = "ShardConfigPayloadFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_config_payload_floor/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-key-material-availability-certificate"
+object_kind = 0x045b
+name = "ShardKeyMaterialAvailabilityCertificate"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_material_availability_certificate/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-key-material-projection"
+object_kind = 0x045c
+name = "ShardKeyMaterialProjection"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_material_projection/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-key-physical-destruction-completion-certificate"
+object_kind = 0x045d
+name = "ShardKeyPhysicalDestructionCompletionCertificate"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_physical_destruction_completion_certificate/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-key-zero-reference-certificate"
+object_kind = 0x045e
+name = "ShardKeyZeroReferenceCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_zero_reference_certificate/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-logical-state-root"
+object_kind = 0x0460
+name = "ShardLogicalStateRoot"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_logical_state_root/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-prepared-payload-record"
+object_kind = 0x0469
+name = "ShardPreparedPayloadRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_prepared_payload_record/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-prepared-payload-root"
+object_kind = 0x046a
+name = "ShardPreparedPayloadRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_prepared_payload_root/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:shard-recovery-checkpoint"
+object_kind = 0x046f
+name = "ShardRecoveryCheckpoint"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_recovery_checkpoint/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -15369,7 +15567,7 @@ symbol = "ActiveMetaProjectionRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0204"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:administrative-abort-authorization-record"
@@ -17331,7 +17529,7 @@ symbol = "GlobalBranchKeyDistributionPlan"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02ad"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:global-closed-attempt-floor-publish-spec"
@@ -17475,7 +17673,7 @@ symbol = "GlobalKeyDestructionAuthorizationCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02bd"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:global-key-envelope-manifest"
@@ -17529,7 +17727,7 @@ symbol = "GlobalRecoveryCheckpoint"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02c2"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:global-restore-abandon-participant-apply-certificate"
@@ -18303,7 +18501,7 @@ symbol = "LocalPreparedPayloadRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0318"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a14:reservation:local-receipt-certificate-signer-floor"
@@ -18699,7 +18897,7 @@ symbol = "MetaConfigPayloadFloor"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x033f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:meta-conflict-overlap-floor"
@@ -18870,7 +19068,7 @@ symbol = "MetaPreparedCommandRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0352"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:meta-prepared-owner-floor"
@@ -21354,7 +21552,7 @@ symbol = "ShardCheckpointCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0440"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-command-record"
@@ -21363,7 +21561,7 @@ symbol = "ShardCommandRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0441"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-config-payload-floor"
@@ -21372,7 +21570,7 @@ symbol = "ShardConfigPayloadFloor"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0442"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:shard-configuration-adoption-evidence"
@@ -21606,7 +21804,7 @@ symbol = "ShardKeyMaterialAvailabilityCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x045b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-key-material-projection"
@@ -21615,7 +21813,7 @@ symbol = "ShardKeyMaterialProjection"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x045c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-key-physical-destruction-completion-certificate"
@@ -21624,7 +21822,7 @@ symbol = "ShardKeyPhysicalDestructionCompletionCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x045d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-key-zero-reference-certificate"
@@ -21633,7 +21831,7 @@ symbol = "ShardKeyZeroReferenceCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x045e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-logical-state-payload"
@@ -21651,7 +21849,7 @@ symbol = "ShardLogicalStateRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0460"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a04:reservation:shard-maintenance-command"
@@ -21741,7 +21939,7 @@ symbol = "ShardPreparedPayloadRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0469"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-prepared-payload-root"
@@ -21750,7 +21948,7 @@ symbol = "ShardPreparedPayloadRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x046a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a04:reservation:shard-protocol-state"
@@ -21795,7 +21993,7 @@ symbol = "ShardRecoveryCheckpoint"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x046f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-remote-trust-release-floor"
@@ -22760,7 +22958,7 @@ symbol = "ActiveMetaProjectionRoot"
 generic_signature = ""
 source_key = "top|ActiveMetaProjectionRoot"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1660"]
 
 [[top_level_candidate]]
@@ -26110,7 +26308,7 @@ symbol = "GlobalBranchKeyDistributionPlan"
 generic_signature = ""
 source_key = "top|GlobalBranchKeyDistributionPlan"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1664"]
 
 [[top_level_candidate]]
@@ -26340,7 +26538,7 @@ symbol = "GlobalKeyDestructionAuthorizationCertificate"
 generic_signature = ""
 source_key = "top|GlobalKeyDestructionAuthorizationCertificate"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1670"]
 
 [[top_level_candidate]]
@@ -26450,7 +26648,7 @@ symbol = "GlobalRecoveryCheckpoint"
 generic_signature = ""
 source_key = "top|GlobalRecoveryCheckpoint"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1678"]
 
 [[top_level_candidate]]
@@ -27780,7 +27978,7 @@ symbol = "LocalPreparedPayloadRoot"
 generic_signature = ""
 source_key = "top|LocalPreparedPayloadRoot"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1694", "a10:1922"]
 
 [[top_level_candidate]]
@@ -28280,7 +28478,7 @@ symbol = "MetaConfigPayloadFloor"
 generic_signature = ""
 source_key = "top|MetaConfigPayloadFloor"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1682"]
 
 [[top_level_candidate]]
@@ -28410,7 +28608,7 @@ symbol = "MetaPreparedCommandRecord"
 generic_signature = ""
 source_key = "top|MetaPreparedCommandRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1698"]
 
 [[top_level_candidate]]
@@ -32920,7 +33118,7 @@ symbol = "ShardCheckpointCertificate"
 generic_signature = ""
 source_key = "top|ShardCheckpointCertificate"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1688"]
 
 [[top_level_candidate]]
@@ -32950,7 +33148,7 @@ symbol = "ShardCommandRecord"
 generic_signature = ""
 source_key = "top|ShardCommandRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1660"]
 
 [[top_level_candidate]]
@@ -32960,7 +33158,7 @@ symbol = "ShardConfigPayloadFloor"
 generic_signature = ""
 source_key = "top|ShardConfigPayloadFloor"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1686"]
 
 [[top_level_candidate]]
@@ -33230,7 +33428,7 @@ symbol = "ShardKeyMaterialAvailabilityCertificate"
 generic_signature = ""
 source_key = "top|ShardKeyMaterialAvailabilityCertificate"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1666"]
 
 [[top_level_candidate]]
@@ -33240,7 +33438,7 @@ symbol = "ShardKeyMaterialProjection"
 generic_signature = ""
 source_key = "top|ShardKeyMaterialProjection"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1666"]
 
 [[top_level_candidate]]
@@ -33260,7 +33458,7 @@ symbol = "ShardKeyPhysicalDestructionCompletionCertificate"
 generic_signature = ""
 source_key = "top|ShardKeyPhysicalDestructionCompletionCertificate"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1674"]
 
 [[top_level_candidate]]
@@ -33280,7 +33478,7 @@ symbol = "ShardKeyZeroReferenceCertificate"
 generic_signature = ""
 source_key = "top|ShardKeyZeroReferenceCertificate"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1672"]
 
 [[top_level_candidate]]
@@ -33300,7 +33498,7 @@ symbol = "ShardLogicalStateRoot"
 generic_signature = ""
 source_key = "top|ShardLogicalStateRoot"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1660"]
 
 [[top_level_candidate]]
@@ -33340,7 +33538,7 @@ symbol = "ShardPreparedPayloadRecord"
 generic_signature = ""
 source_key = "top|ShardPreparedPayloadRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1700"]
 
 [[top_level_candidate]]
@@ -33350,7 +33548,7 @@ symbol = "ShardPreparedPayloadRoot"
 generic_signature = ""
 source_key = "top|ShardPreparedPayloadRoot"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1694"]
 
 [[top_level_candidate]]
@@ -33420,7 +33618,7 @@ symbol = "ShardRecoveryCheckpoint"
 generic_signature = ""
 source_key = "top|ShardRecoveryCheckpoint"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a06:1678"]
 
 [[top_level_candidate]]
@@ -43695,6 +43893,150 @@ row_id = "a11:target:logical-kind-subscription-delivery-transition-spec"
 target_row_id = "a11:logical-kind:subscription-delivery-transition-spec"
 slice_id = "a11"
 source_key = "top|SubscriptionDeliveryTransitionSpec<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-active-meta-projection-root"
+target_row_id = "a06:logical-kind:active-meta-projection-root"
+slice_id = "a06"
+source_key = "top|ActiveMetaProjectionRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-global-branch-key-distribution-plan"
+target_row_id = "a06:logical-kind:global-branch-key-distribution-plan"
+slice_id = "a06"
+source_key = "top|GlobalBranchKeyDistributionPlan"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-global-key-destruction-authorization-certificate"
+target_row_id = "a06:logical-kind:global-key-destruction-authorization-certificate"
+slice_id = "a06"
+source_key = "top|GlobalKeyDestructionAuthorizationCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-global-recovery-checkpoint"
+target_row_id = "a06:logical-kind:global-recovery-checkpoint"
+slice_id = "a06"
+source_key = "top|GlobalRecoveryCheckpoint"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-local-prepared-payload-root"
+target_row_id = "a06:logical-kind:local-prepared-payload-root"
+slice_id = "a06"
+source_key = "top|LocalPreparedPayloadRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-meta-config-payload-floor"
+target_row_id = "a06:logical-kind:meta-config-payload-floor"
+slice_id = "a06"
+source_key = "top|MetaConfigPayloadFloor"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-meta-prepared-command-record"
+target_row_id = "a06:logical-kind:meta-prepared-command-record"
+slice_id = "a06"
+source_key = "top|MetaPreparedCommandRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-checkpoint-certificate"
+target_row_id = "a06:logical-kind:shard-checkpoint-certificate"
+slice_id = "a06"
+source_key = "top|ShardCheckpointCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-command-record"
+target_row_id = "a06:logical-kind:shard-command-record"
+slice_id = "a06"
+source_key = "top|ShardCommandRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-config-payload-floor"
+target_row_id = "a06:logical-kind:shard-config-payload-floor"
+slice_id = "a06"
+source_key = "top|ShardConfigPayloadFloor"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-key-material-availability-certificate"
+target_row_id = "a06:logical-kind:shard-key-material-availability-certificate"
+slice_id = "a06"
+source_key = "top|ShardKeyMaterialAvailabilityCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-key-material-projection"
+target_row_id = "a06:logical-kind:shard-key-material-projection"
+slice_id = "a06"
+source_key = "top|ShardKeyMaterialProjection"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-key-physical-destruction-completion-certificate"
+target_row_id = "a06:logical-kind:shard-key-physical-destruction-completion-certificate"
+slice_id = "a06"
+source_key = "top|ShardKeyPhysicalDestructionCompletionCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-key-zero-reference-certificate"
+target_row_id = "a06:logical-kind:shard-key-zero-reference-certificate"
+slice_id = "a06"
+source_key = "top|ShardKeyZeroReferenceCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-logical-state-root"
+target_row_id = "a06:logical-kind:shard-logical-state-root"
+slice_id = "a06"
+source_key = "top|ShardLogicalStateRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-prepared-payload-record"
+target_row_id = "a06:logical-kind:shard-prepared-payload-record"
+slice_id = "a06"
+source_key = "top|ShardPreparedPayloadRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-prepared-payload-root"
+target_row_id = "a06:logical-kind:shard-prepared-payload-root"
+slice_id = "a06"
+source_key = "top|ShardPreparedPayloadRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-shard-recovery-checkpoint"
+target_row_id = "a06:logical-kind:shard-recovery-checkpoint"
+slice_id = "a06"
+source_key = "top|ShardRecoveryCheckpoint"
 target_kind = "logical-kind"
 definition_status = "declared"
 

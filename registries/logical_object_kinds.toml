@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 24
+registry_epoch = 25
 
 [[kind]]
 object_kind = 0x0001
@@ -261,6 +261,15 @@ max_size_bytes = 1048576
 golden_corpus = "corpus/logical/backup_manifest/"
 
 [[kind]]
+object_kind = 0x0204
+name = "ActiveMetaProjectionRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/active_meta_projection_root/"
+
+[[kind]]
 object_kind = 0x0206
 name = "AdmittedTxnAbortCommand"
 status = "reserved"
@@ -412,6 +421,33 @@ construction_order = 6
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/external_key_destruction_provider_receipt/"
+
+[[kind]]
+object_kind = 0x02ad
+name = "GlobalBranchKeyDistributionPlan"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_branch_key_distribution_plan/"
+
+[[kind]]
+object_kind = 0x02bd
+name = "GlobalKeyDestructionAuthorizationCertificate"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_key_destruction_authorization_certificate/"
+
+[[kind]]
+object_kind = 0x02c2
+name = "GlobalRecoveryCheckpoint"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_recovery_checkpoint/"
 
 [[kind]]
 object_kind = 0x02c9
@@ -585,6 +621,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_prepare_admission_spec/"
 
 [[kind]]
+object_kind = 0x0318
+name = "LocalPreparedPayloadRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_prepared_payload_root/"
+
+[[kind]]
 object_kind = 0x0321
 name = "LocalResultDeliveryLease"
 status = "reserved"
@@ -646,6 +691,24 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/macaroon_root_issuance_record/"
+
+[[kind]]
+object_kind = 0x033f
+name = "MetaConfigPayloadFloor"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_config_payload_floor/"
+
+[[kind]]
+object_kind = 0x0352
+name = "MetaPreparedCommandRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_prepared_command_record/"
 
 [[kind]]
 object_kind = 0x0375
@@ -1089,6 +1152,33 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/root_authority_trust_body/"
 
 [[kind]]
+object_kind = 0x0440
+name = "ShardCheckpointCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_checkpoint_certificate/"
+
+[[kind]]
+object_kind = 0x0441
+name = "ShardCommandRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_command_record/"
+
+[[kind]]
+object_kind = 0x0442
+name = "ShardConfigPayloadFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_config_payload_floor/"
+
+[[kind]]
 object_kind = 0x0445
 name = "ShardContinuityAuthorityProjection"
 status = "reserved"
@@ -1125,6 +1215,69 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_id_range_lease/"
 
 [[kind]]
+object_kind = 0x045b
+name = "ShardKeyMaterialAvailabilityCertificate"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_material_availability_certificate/"
+
+[[kind]]
+object_kind = 0x045c
+name = "ShardKeyMaterialProjection"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_material_projection/"
+
+[[kind]]
+object_kind = 0x045d
+name = "ShardKeyPhysicalDestructionCompletionCertificate"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_physical_destruction_completion_certificate/"
+
+[[kind]]
+object_kind = 0x045e
+name = "ShardKeyZeroReferenceCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_key_zero_reference_certificate/"
+
+[[kind]]
+object_kind = 0x0460
+name = "ShardLogicalStateRoot"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_logical_state_root/"
+
+[[kind]]
+object_kind = 0x0469
+name = "ShardPreparedPayloadRecord"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_prepared_payload_record/"
+
+[[kind]]
+object_kind = 0x046a
+name = "ShardPreparedPayloadRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_prepared_payload_root/"
+
+[[kind]]
 object_kind = 0x046b
 name = "ShardProtocolState"
 status = "reserved"
@@ -1132,6 +1285,15 @@ construction_order = 40
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_protocol_state/"
+
+[[kind]]
+object_kind = 0x046f
+name = "ShardRecoveryCheckpoint"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_recovery_checkpoint/"
 
 [[kind]]
 object_kind = 0x0475
