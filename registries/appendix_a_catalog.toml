@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1805
+target_count = 1843
 projection_fallback_count = 90
-target_source_assignment_sha256 = "a4ccc3f7f2e260b84080885590dcf08cf3b9be40dea468fd2b4890451871f9c0"
+target_source_assignment_sha256 = "47ce6d9d279b6ad2096f96cf94d4697a93d01a7250eee45fa283ff534b730d11"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -4284,6 +4284,424 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_lease_state/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:attempt-compaction-attestation"
+object_kind = 0x0213
+name = "AttemptCompactionAttestation"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/attempt_compaction_attestation/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:audit-event-signer-lock"
+object_kind = 0x021a
+name = "AuditEventSignerLock"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_event_signer_lock/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:audit-event-signing-attempt-plan"
+object_kind = 0x021b
+name = "AuditEventSigningAttemptPlan"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_event_signing_attempt_plan/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:audit-resolution-signer-lock"
+object_kind = 0x0222
+name = "AuditResolutionSignerLock"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_resolution_signer_lock/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:audit-resolution-signing-attempt-plan"
+object_kind = 0x0223
+name = "AuditResolutionSigningAttemptPlan"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_resolution_signing_attempt_plan/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:audit-terminal-attempt-record"
+object_kind = 0x0229
+name = "AuditTerminalAttemptRecord"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_attempt_record/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:audit-terminal-freeze-record"
+object_kind = 0x022b
+name = "AuditTerminalFreezeRecord"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_freeze_record/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:closed-attempt-compaction-spec"
+object_kind = 0x0271
+name = "ClosedAttemptCompactionSpec"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/closed_attempt_compaction_spec/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:closed-attempt-evidence-bundle"
+object_kind = 0x0272
+name = "ClosedAttemptEvidenceBundle"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/closed_attempt_evidence_bundle/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:constraint-reservation-record"
+object_kind = 0x027d
+name = "ConstraintReservationRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_reservation_record/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:distributed-serialization-certificate"
+object_kind = 0x028d
+name = "DistributedSerializationCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/distributed_serialization_certificate/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:global-attempt-compaction-floor"
+object_kind = 0x02a3
+name = "GlobalAttemptCompactionFloor"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_attempt_compaction_floor/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:global-authorization-decision-record"
+object_kind = 0x02a5
+name = "GlobalAuthorizationDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_authorization_decision_record/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:global-closed-attempt-floor-publish-spec"
+object_kind = 0x02ae
+name = "GlobalClosedAttemptFloorPublishSpec"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_closed_attempt_floor_publish_spec/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:global-constraint-reservation-certificate"
+object_kind = 0x02b0
+name = "GlobalConstraintReservationCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_constraint_reservation_certificate/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:global-logical-delta-batch"
+object_kind = 0x02be
+name = "GlobalLogicalDeltaBatch"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_logical_delta_batch/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:meta-constraint-reservation-record"
+object_kind = 0x0341
+name = "MetaConstraintReservationRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_constraint_reservation_record/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:meta-control-projection-certificate"
+object_kind = 0x0343
+name = "MetaControlProjectionCertificate"
+status = "reserved"
+construction_order = 24
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_control_projection_certificate/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:never-registered-evidence"
+object_kind = 0x0366
+name = "NeverRegisteredEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/never_registered_evidence/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:never-registered-floor-spec"
+object_kind = 0x0367
+name = "NeverRegisteredFloorSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/never_registered_floor_spec/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:no-terminal-signature-or-order-proof"
+object_kind = 0x0373
+name = "NoTerminalSignatureOrOrderProof"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_terminal_signature_or_order_proof/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:participant-routing-certificate"
+object_kind = 0x037a
+name = "ParticipantRoutingCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/participant_routing_certificate/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:participant-routing-derivation-proof"
+object_kind = 0x037b
+name = "ParticipantRoutingDerivationProof"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/participant_routing_derivation_proof/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:remote-grant-retirement-plan"
+object_kind = 0x03af
+name = "RemoteGrantRetirementPlan"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_grant_retirement_plan/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-applied-ack"
+object_kind = 0x0438
+name = "ShardAppliedAck"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_applied_ack/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-decision-apply-command"
+object_kind = 0x0448
+name = "ShardDecisionApplyCommand"
+status = "reserved"
+construction_order = 24
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_decision_apply_command/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-effect-basis"
+object_kind = 0x044b
+name = "ShardEffectBasis"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_effect_basis/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-effect-fragment"
+object_kind = 0x044c
+name = "ShardEffectFragment"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_effect_fragment/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-gc-preflight-evidence"
+object_kind = 0x0453
+name = "ShardGcPreflightEvidence"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_gc_preflight_evidence/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-gc-preflight-record"
+object_kind = 0x0454
+name = "ShardGcPreflightRecord"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_gc_preflight_record/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-gc-preflight-spec"
+object_kind = 0x0455
+name = "ShardGcPreflightSpec"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_gc_preflight_spec/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-prepare-command"
+object_kind = 0x0465
+name = "ShardPrepareCommand"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_prepare_command/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-prepare-record"
+object_kind = 0x0466
+name = "ShardPrepareRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_prepare_record/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:topology-attempt-closure-proof"
+object_kind = 0x04a7
+name = "TopologyAttemptClosureProof"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_attempt_closure_proof/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:topology-retirement-floor"
+object_kind = 0x04a9
+name = "TopologyRetirementFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_retirement_floor/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:topology-transfer-ack"
+object_kind = 0x04ab
+name = "TopologyTransferAck"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_transfer_ack/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:topology-transition-record"
+object_kind = 0x04ad
+name = "TopologyTransitionRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_transition_record/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:typed-certified-meta-projection-payload"
+object_kind = 0x04b6
+name = "TypedCertifiedMetaProjectionPayload"
+status = "reserved"
+construction_order = 24
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/typed_certified_meta_projection_payload/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -25841,7 +26259,7 @@ symbol = "AttemptCompactionAttestation"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0213"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:attempt-release-and-overlap-floor"
@@ -25922,7 +26340,7 @@ symbol = "AuditEventSignerLock"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x021a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:audit-event-signing-attempt-plan"
@@ -25931,7 +26349,7 @@ symbol = "AuditEventSigningAttemptPlan"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x021b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:audit-external-batch-cas-receipt"
@@ -26003,7 +26421,7 @@ symbol = "AuditResolutionSignerLock"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0222"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:audit-resolution-signing-attempt-plan"
@@ -26012,7 +26430,7 @@ symbol = "AuditResolutionSigningAttemptPlan"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0223"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:audit-signer-blocking-set-proof"
@@ -26066,7 +26484,7 @@ symbol = "AuditTerminalAttemptRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0229"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:audit-terminal-freeze-index"
@@ -26084,7 +26502,7 @@ symbol = "AuditTerminalFreezeRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x022b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:audit-terminal-plan-abandonment"
@@ -26831,7 +27249,7 @@ symbol = "ClosedAttemptCompactionSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0271"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:closed-attempt-evidence-bundle"
@@ -26840,7 +27258,7 @@ symbol = "ClosedAttemptEvidenceBundle"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0272"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:cluster-incarnation-continuity-record"
@@ -26948,7 +27366,7 @@ symbol = "ConstraintReservationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x027d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a12:reservation:constraint-state-directory-root"
@@ -27182,7 +27600,7 @@ symbol = "DistributedSerializationCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x028d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:dp-committed-output"
@@ -27533,7 +27951,7 @@ symbol = "GlobalAttemptCompactionFloor"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02a3"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-attempt-registration"
@@ -27551,7 +27969,7 @@ symbol = "GlobalAuthorizationDecisionRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02a5"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:global-backup-abort-authorization-certificate"
@@ -27632,7 +28050,7 @@ symbol = "GlobalClosedAttemptFloorPublishSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02ae"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:global-conflict-index"
@@ -27650,7 +28068,7 @@ symbol = "GlobalConstraintReservationCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02b0"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-control-command"
@@ -27785,7 +28203,7 @@ symbol = "GlobalLogicalDeltaBatch"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02be"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-prepare-admission-spec"
@@ -29009,7 +29427,7 @@ symbol = "MetaConstraintReservationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0341"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:meta-continuity-service-floor"
@@ -29027,7 +29445,7 @@ symbol = "MetaControlProjectionCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0343"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:meta-decision-publication-floor"
@@ -29351,7 +29769,7 @@ symbol = "NeverRegisteredEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0366"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:never-registered-floor-spec"
@@ -29360,7 +29778,7 @@ symbol = "NeverRegisteredFloorSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0367"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:never-registered-public-projection-bundle"
@@ -29468,7 +29886,7 @@ symbol = "NoTerminalSignatureOrOrderProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0373"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:no-write-effect-proof"
@@ -29531,7 +29949,7 @@ symbol = "ParticipantRoutingCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x037a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:participant-routing-derivation-proof"
@@ -29540,7 +29958,7 @@ symbol = "ParticipantRoutingDerivationProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x037b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a01:reservation:payload-availability-certificate"
@@ -30260,7 +30678,7 @@ symbol = "RemoteGrantRetirementPlan"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03af"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:remote-key-consumer-release-ack"
@@ -31574,7 +31992,7 @@ symbol = "ShardAppliedAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0438"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:shard-backup-abort-ack"
@@ -31718,7 +32136,7 @@ symbol = "ShardDecisionApplyCommand"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0448"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:shard-derived-component-certificate"
@@ -31745,7 +32163,7 @@ symbol = "ShardEffectBasis"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x044b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:shard-effect-fragment"
@@ -31754,7 +32172,7 @@ symbol = "ShardEffectFragment"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x044c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a09:reservation:shard-escaping-allocation-evidence"
@@ -31817,7 +32235,7 @@ symbol = "ShardGcPreflightEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0453"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:shard-gc-preflight-record"
@@ -31826,7 +32244,7 @@ symbol = "ShardGcPreflightRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0454"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:shard-gc-preflight-spec"
@@ -31835,7 +32253,7 @@ symbol = "ShardGcPreflightSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0455"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-gc-protocol-floor"
@@ -31997,7 +32415,7 @@ symbol = "ShardPrepareCommand"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0465"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:shard-prepare-record"
@@ -32006,7 +32424,7 @@ symbol = "ShardPrepareRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0466"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-prepared-attempt-floor"
@@ -32681,7 +33099,7 @@ symbol = "TopologyAttemptClosureProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04a7"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:topology-retirement-ack"
@@ -32699,7 +33117,7 @@ symbol = "TopologyRetirementFloor"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04a9"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a04:reservation:topology-state"
@@ -32717,7 +33135,7 @@ symbol = "TopologyTransferAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04ab"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:topology-transfer-plan"
@@ -32735,7 +33153,7 @@ symbol = "TopologyTransitionRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04ad"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:transparency-checkpoint"
@@ -32843,7 +33261,7 @@ symbol = "TypedCertifiedMetaProjectionPayload"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04b6"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:valid-time-contract"
@@ -33392,7 +33810,7 @@ symbol = "AttemptCompactionAttestation"
 generic_signature = ""
 source_key = "top|AttemptCompactionAttestation"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1802"]
 
 [[top_level_candidate]]
@@ -33512,7 +33930,7 @@ symbol = "AuditEventSignerLock"
 generic_signature = ""
 source_key = "top|AuditEventSignerLock"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1844"]
 
 [[top_level_candidate]]
@@ -33522,7 +33940,7 @@ symbol = "AuditEventSigningAttemptPlan"
 generic_signature = ""
 source_key = "top|AuditEventSigningAttemptPlan"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1844"]
 
 [[top_level_candidate]]
@@ -33612,7 +34030,7 @@ symbol = "AuditResolutionSignerLock"
 generic_signature = ""
 source_key = "top|AuditResolutionSignerLock"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1846"]
 
 [[top_level_candidate]]
@@ -33622,7 +34040,7 @@ symbol = "AuditResolutionSigningAttemptPlan"
 generic_signature = ""
 source_key = "top|AuditResolutionSigningAttemptPlan"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1846"]
 
 [[top_level_candidate]]
@@ -33662,7 +34080,7 @@ symbol = "AuditTerminalAttemptRecord"
 generic_signature = ""
 source_key = "top|AuditTerminalAttemptRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1850"]
 
 [[top_level_candidate]]
@@ -33682,7 +34100,7 @@ symbol = "AuditTerminalFreezeRecord"
 generic_signature = ""
 source_key = "top|AuditTerminalFreezeRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1832"]
 
 [[top_level_candidate]]
@@ -35012,7 +35430,7 @@ symbol = "ClosedAttemptCompactionSpec"
 generic_signature = ""
 source_key = "top|ClosedAttemptCompactionSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1800"]
 
 [[top_level_candidate]]
@@ -35022,7 +35440,7 @@ symbol = "ClosedAttemptEvidenceBundle"
 generic_signature = ""
 source_key = "top|ClosedAttemptEvidenceBundle"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1800"]
 
 [[top_level_candidate]]
@@ -35312,7 +35730,7 @@ symbol = "ConstraintReservationRecord"
 generic_signature = ""
 source_key = "top|ConstraintReservationRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1856"]
 
 [[top_level_candidate]]
@@ -35692,7 +36110,7 @@ symbol = "DistributedSerializationCertificate"
 generic_signature = ""
 source_key = "top|DistributedSerializationCertificate"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1860"]
 
 [[top_level_candidate]]
@@ -36232,7 +36650,7 @@ symbol = "GlobalAttemptCompactionFloor"
 generic_signature = ""
 source_key = "top|GlobalAttemptCompactionFloor"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1802"]
 
 [[top_level_candidate]]
@@ -36272,7 +36690,7 @@ symbol = "GlobalAuthorizationDecisionRecord"
 generic_signature = ""
 source_key = "top|GlobalAuthorizationDecisionRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1826"]
 
 [[top_level_candidate]]
@@ -36442,7 +36860,7 @@ symbol = "GlobalClosedAttemptFloorPublishSpec"
 generic_signature = ""
 source_key = "top|GlobalClosedAttemptFloorPublishSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1802"]
 
 [[top_level_candidate]]
@@ -36462,7 +36880,7 @@ symbol = "GlobalConstraintReservationCertificate"
 generic_signature = ""
 source_key = "top|GlobalConstraintReservationCertificate"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1856"]
 
 [[top_level_candidate]]
@@ -36672,7 +37090,7 @@ symbol = "GlobalLogicalDeltaBatch"
 generic_signature = ""
 source_key = "top|GlobalLogicalDeltaBatch"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1870"]
 
 [[top_level_candidate]]
@@ -38592,7 +39010,7 @@ symbol = "MetaConstraintReservationRecord"
 generic_signature = ""
 source_key = "top|MetaConstraintReservationRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1858"]
 
 [[top_level_candidate]]
@@ -38612,7 +39030,7 @@ symbol = "MetaControlProjectionCertificate"
 generic_signature = ""
 source_key = "top|MetaControlProjectionCertificate"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1878"]
 
 [[top_level_candidate]]
@@ -38832,7 +39250,7 @@ symbol = "NeverRegisteredEvidence"
 generic_signature = ""
 source_key = "top|NeverRegisteredEvidence"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1796"]
 
 [[top_level_candidate]]
@@ -38852,7 +39270,7 @@ symbol = "NeverRegisteredFloorSpec"
 generic_signature = ""
 source_key = "top|NeverRegisteredFloorSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1796"]
 
 [[top_level_candidate]]
@@ -38932,7 +39350,7 @@ symbol = "NoTerminalSignatureOrOrderProof"
 generic_signature = ""
 source_key = "top|NoTerminalSignatureOrOrderProof"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1838"]
 
 [[top_level_candidate]]
@@ -39052,7 +39470,7 @@ symbol = "ParticipantRoutingCertificate"
 generic_signature = ""
 source_key = "top|ParticipantRoutingCertificate"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1824"]
 
 [[top_level_candidate]]
@@ -39062,7 +39480,7 @@ symbol = "ParticipantRoutingDerivationProof"
 generic_signature = ""
 source_key = "top|ParticipantRoutingDerivationProof"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1824"]
 
 [[top_level_candidate]]
@@ -40632,7 +41050,7 @@ symbol = "RemoteGrantRetirementPlan"
 generic_signature = ""
 source_key = "top|RemoteGrantRetirementPlan"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1808"]
 
 [[top_level_candidate]]
@@ -43132,7 +43550,7 @@ symbol = "ShardAppliedAck"
 generic_signature = ""
 source_key = "top|ShardAppliedAck"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1868"]
 
 [[top_level_candidate]]
@@ -43332,7 +43750,7 @@ symbol = "ShardDecisionApplyCommand"
 generic_signature = ""
 source_key = "top|ShardDecisionApplyCommand"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1866"]
 
 [[top_level_candidate]]
@@ -43372,7 +43790,7 @@ symbol = "ShardEffectBasis"
 generic_signature = ""
 source_key = "top|ShardEffectBasis"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1824"]
 
 [[top_level_candidate]]
@@ -43382,7 +43800,7 @@ symbol = "ShardEffectFragment"
 generic_signature = ""
 source_key = "top|ShardEffectFragment"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1828"]
 
 [[top_level_candidate]]
@@ -43442,7 +43860,7 @@ symbol = "ShardGcPreflightEvidence"
 generic_signature = ""
 source_key = "top|ShardGcPreflightEvidence"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1810"]
 
 [[top_level_candidate]]
@@ -43452,7 +43870,7 @@ symbol = "ShardGcPreflightRecord"
 generic_signature = ""
 source_key = "top|ShardGcPreflightRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1810"]
 
 [[top_level_candidate]]
@@ -43462,7 +43880,7 @@ symbol = "ShardGcPreflightSpec"
 generic_signature = ""
 source_key = "top|ShardGcPreflightSpec"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1810"]
 
 [[top_level_candidate]]
@@ -43612,7 +44030,7 @@ symbol = "ShardPrepareCommand"
 generic_signature = ""
 source_key = "top|ShardPrepareCommand"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1854"]
 
 [[top_level_candidate]]
@@ -43622,7 +44040,7 @@ symbol = "ShardPrepareRecord"
 generic_signature = ""
 source_key = "top|ShardPrepareRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1854"]
 
 [[top_level_candidate]]
@@ -44772,7 +45190,7 @@ symbol = "TopologyAttemptClosureProof"
 generic_signature = ""
 source_key = "top|TopologyAttemptClosureProof"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1886"]
 
 [[top_level_candidate]]
@@ -44822,7 +45240,7 @@ symbol = "TopologyRetirementFloor"
 generic_signature = ""
 source_key = "top|TopologyRetirementFloor"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1886"]
 
 [[top_level_candidate]]
@@ -44842,7 +45260,7 @@ symbol = "TopologyTransferAck"
 generic_signature = ""
 source_key = "top|TopologyTransferAck"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1886"]
 
 [[top_level_candidate]]
@@ -44862,7 +45280,7 @@ symbol = "TopologyTransitionRecord"
 generic_signature = ""
 source_key = "top|TopologyTransitionRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1888"]
 
 [[top_level_candidate]]
@@ -45052,7 +45470,7 @@ symbol = "TypedCertifiedMetaProjectionPayload"
 generic_signature = ""
 source_key = "top|TypedCertifiedMetaProjectionPayload"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1876"]
 
 [[top_level_candidate]]
@@ -60171,6 +60589,310 @@ target_row_id = "a18:wire-type:shard-restore-registry-value-participant-terminal
 slice_id = "a18"
 source_key = "arm|ShardRestoreRegistryValue|ShardRestoreRegistryValue|ParticipantTerminal"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-attempt-compaction-attestation"
+target_row_id = "a08:logical-kind:attempt-compaction-attestation"
+slice_id = "a08"
+source_key = "top|AttemptCompactionAttestation"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-audit-event-signer-lock"
+target_row_id = "a08:logical-kind:audit-event-signer-lock"
+slice_id = "a08"
+source_key = "top|AuditEventSignerLock"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-audit-event-signing-attempt-plan"
+target_row_id = "a08:logical-kind:audit-event-signing-attempt-plan"
+slice_id = "a08"
+source_key = "top|AuditEventSigningAttemptPlan"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-audit-resolution-signer-lock"
+target_row_id = "a08:logical-kind:audit-resolution-signer-lock"
+slice_id = "a08"
+source_key = "top|AuditResolutionSignerLock"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-audit-resolution-signing-attempt-plan"
+target_row_id = "a08:logical-kind:audit-resolution-signing-attempt-plan"
+slice_id = "a08"
+source_key = "top|AuditResolutionSigningAttemptPlan"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-audit-terminal-attempt-record"
+target_row_id = "a08:logical-kind:audit-terminal-attempt-record"
+slice_id = "a08"
+source_key = "top|AuditTerminalAttemptRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-audit-terminal-freeze-record"
+target_row_id = "a08:logical-kind:audit-terminal-freeze-record"
+slice_id = "a08"
+source_key = "top|AuditTerminalFreezeRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-closed-attempt-compaction-spec"
+target_row_id = "a08:logical-kind:closed-attempt-compaction-spec"
+slice_id = "a08"
+source_key = "top|ClosedAttemptCompactionSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-closed-attempt-evidence-bundle"
+target_row_id = "a08:logical-kind:closed-attempt-evidence-bundle"
+slice_id = "a08"
+source_key = "top|ClosedAttemptEvidenceBundle"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-constraint-reservation-record"
+target_row_id = "a08:logical-kind:constraint-reservation-record"
+slice_id = "a08"
+source_key = "top|ConstraintReservationRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-distributed-serialization-certificate"
+target_row_id = "a08:logical-kind:distributed-serialization-certificate"
+slice_id = "a08"
+source_key = "top|DistributedSerializationCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-global-attempt-compaction-floor"
+target_row_id = "a08:logical-kind:global-attempt-compaction-floor"
+slice_id = "a08"
+source_key = "top|GlobalAttemptCompactionFloor"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-global-authorization-decision-record"
+target_row_id = "a08:logical-kind:global-authorization-decision-record"
+slice_id = "a08"
+source_key = "top|GlobalAuthorizationDecisionRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-global-closed-attempt-floor-publish-spec"
+target_row_id = "a08:logical-kind:global-closed-attempt-floor-publish-spec"
+slice_id = "a08"
+source_key = "top|GlobalClosedAttemptFloorPublishSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-global-constraint-reservation-certificate"
+target_row_id = "a08:logical-kind:global-constraint-reservation-certificate"
+slice_id = "a08"
+source_key = "top|GlobalConstraintReservationCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-global-logical-delta-batch"
+target_row_id = "a08:logical-kind:global-logical-delta-batch"
+slice_id = "a08"
+source_key = "top|GlobalLogicalDeltaBatch"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-meta-constraint-reservation-record"
+target_row_id = "a08:logical-kind:meta-constraint-reservation-record"
+slice_id = "a08"
+source_key = "top|MetaConstraintReservationRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-meta-control-projection-certificate"
+target_row_id = "a08:logical-kind:meta-control-projection-certificate"
+slice_id = "a08"
+source_key = "top|MetaControlProjectionCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-never-registered-evidence"
+target_row_id = "a08:logical-kind:never-registered-evidence"
+slice_id = "a08"
+source_key = "top|NeverRegisteredEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-never-registered-floor-spec"
+target_row_id = "a08:logical-kind:never-registered-floor-spec"
+slice_id = "a08"
+source_key = "top|NeverRegisteredFloorSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-no-terminal-signature-or-order-proof"
+target_row_id = "a08:logical-kind:no-terminal-signature-or-order-proof"
+slice_id = "a08"
+source_key = "top|NoTerminalSignatureOrOrderProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-participant-routing-certificate"
+target_row_id = "a08:logical-kind:participant-routing-certificate"
+slice_id = "a08"
+source_key = "top|ParticipantRoutingCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-participant-routing-derivation-proof"
+target_row_id = "a08:logical-kind:participant-routing-derivation-proof"
+slice_id = "a08"
+source_key = "top|ParticipantRoutingDerivationProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-remote-grant-retirement-plan"
+target_row_id = "a08:logical-kind:remote-grant-retirement-plan"
+slice_id = "a08"
+source_key = "top|RemoteGrantRetirementPlan"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-applied-ack"
+target_row_id = "a08:logical-kind:shard-applied-ack"
+slice_id = "a08"
+source_key = "top|ShardAppliedAck"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-decision-apply-command"
+target_row_id = "a08:logical-kind:shard-decision-apply-command"
+slice_id = "a08"
+source_key = "top|ShardDecisionApplyCommand"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-effect-basis"
+target_row_id = "a08:logical-kind:shard-effect-basis"
+slice_id = "a08"
+source_key = "top|ShardEffectBasis"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-effect-fragment"
+target_row_id = "a08:logical-kind:shard-effect-fragment"
+slice_id = "a08"
+source_key = "top|ShardEffectFragment"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-gc-preflight-evidence"
+target_row_id = "a08:logical-kind:shard-gc-preflight-evidence"
+slice_id = "a08"
+source_key = "top|ShardGcPreflightEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-gc-preflight-record"
+target_row_id = "a08:logical-kind:shard-gc-preflight-record"
+slice_id = "a08"
+source_key = "top|ShardGcPreflightRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-gc-preflight-spec"
+target_row_id = "a08:logical-kind:shard-gc-preflight-spec"
+slice_id = "a08"
+source_key = "top|ShardGcPreflightSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-prepare-command"
+target_row_id = "a08:logical-kind:shard-prepare-command"
+slice_id = "a08"
+source_key = "top|ShardPrepareCommand"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-prepare-record"
+target_row_id = "a08:logical-kind:shard-prepare-record"
+slice_id = "a08"
+source_key = "top|ShardPrepareRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-topology-attempt-closure-proof"
+target_row_id = "a08:logical-kind:topology-attempt-closure-proof"
+slice_id = "a08"
+source_key = "top|TopologyAttemptClosureProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-topology-retirement-floor"
+target_row_id = "a08:logical-kind:topology-retirement-floor"
+slice_id = "a08"
+source_key = "top|TopologyRetirementFloor"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-topology-transfer-ack"
+target_row_id = "a08:logical-kind:topology-transfer-ack"
+slice_id = "a08"
+source_key = "top|TopologyTransferAck"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-topology-transition-record"
+target_row_id = "a08:logical-kind:topology-transition-record"
+slice_id = "a08"
+source_key = "top|TopologyTransitionRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-typed-certified-meta-projection-payload"
+target_row_id = "a08:logical-kind:typed-certified-meta-projection-payload"
+slice_id = "a08"
+source_key = "top|TypedCertifiedMetaProjectionPayload"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
