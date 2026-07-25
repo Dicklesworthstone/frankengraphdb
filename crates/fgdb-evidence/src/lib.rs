@@ -666,10 +666,56 @@ impl ReplayCompleteness {
 
 /// Closed, half-open sample window the evidence was computed over, in commit
 /// sequences of the subject database (`[start_seq, end_seq)`).
+///
+/// The validated constructor is the sole public admission path, and the
+/// resulting bounds remain read-only:
+///
+/// ```
+/// use fgdb_claim::EvidenceClaim;
+/// use fgdb_evidence::{CalibrationWindow, EvidenceEnvelope, FallbackBehavior};
+/// use fgdb_types::ObjectId;
+///
+/// let window = CalibrationWindow::new(2, 9).unwrap();
+/// let envelope = EvidenceEnvelope::new(
+///     EvidenceClaim::SafetyInvariant {
+///         invariant_id: "FG-INV-01".into(),
+///     },
+///     ObjectId([1; 32]),
+///     ObjectId([2; 32]),
+///     Some(window),
+///     1,
+///     FallbackBehavior::FailClosed,
+/// );
+/// assert_eq!(envelope.calibration_window(), Some(window));
+/// ```
+///
+/// Direct construction cannot bypass validation or feed an unchecked window
+/// to an [`EvidenceEnvelope`]:
+///
+/// ```compile_fail,E0451
+/// use fgdb_claim::EvidenceClaim;
+/// use fgdb_evidence::{CalibrationWindow, EvidenceEnvelope, FallbackBehavior};
+/// use fgdb_types::ObjectId;
+///
+/// let window = CalibrationWindow {
+///     start_seq: 2,
+///     end_seq: 9,
+/// };
+/// let _ = EvidenceEnvelope::new(
+///     EvidenceClaim::SafetyInvariant {
+///         invariant_id: "FG-INV-01".into(),
+///     },
+///     ObjectId([1; 32]),
+///     ObjectId([2; 32]),
+///     Some(window),
+///     1,
+///     FallbackBehavior::FailClosed,
+/// );
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct CalibrationWindow {
-    pub start_seq: u64,
-    pub end_seq: u64,
+    start_seq: u64,
+    end_seq: u64,
 }
 
 impl CalibrationWindow {
@@ -1440,6 +1486,40 @@ mod tests {
             err.to_string(),
             "calibration window [5, 5) is empty or inverted"
         );
+    }
+
+    #[test]
+    fn invalid_window_cannot_reach_envelope_through_public_api() {
+        let rejected = CalibrationWindow::new(9, 2).map(|window| {
+            EvidenceEnvelope::new(
+                statistical_claim(),
+                oid(1),
+                oid(2),
+                Some(window),
+                7,
+                FallbackBehavior::FailClosed,
+            )
+        });
+        assert_eq!(
+            rejected.unwrap_err(),
+            InvalidWindow {
+                start_seq: 9,
+                end_seq: 2
+            }
+        );
+
+        let window = CalibrationWindow::new(2, 9).unwrap();
+        let envelope = EvidenceEnvelope::new(
+            statistical_claim(),
+            oid(1),
+            oid(2),
+            Some(window),
+            7,
+            FallbackBehavior::FailClosed,
+        );
+        let stored = envelope.calibration_window().unwrap();
+        assert_eq!(stored, window);
+        assert!(stored.start_seq() < stored.end_seq());
     }
 
     #[test]
