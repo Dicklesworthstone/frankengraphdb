@@ -273,7 +273,7 @@ wire_type_id = 0x001e
 name = "PlacementDescriptorWithoutId"
 kind = "record"
 status = "reserved"
-encoding_context = "Appendix A reference-semantics family PlacementDescriptorWithoutId (a01); exact member layout per plan lines 1388-1444"
+encoding_context = "Appendix A reference-semantics family PlacementDescriptorWithoutId; exact member layout per plan line 1449 (a02), which is the authoritative definition: {encoding_id, placement_epoch, failure_domain_policy, location_form}. The a01:1443 rendering is the specialized root-bootstrap RECONSTRUCTION over registered RootBootstrap frame fields, not a competing schema"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 65536
 
