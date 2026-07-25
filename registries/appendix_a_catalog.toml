@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1128
+target_count = 1129
 projection_fallback_count = 89
-target_source_assignment_sha256 = "eea65df5117c8c8fa6f833cebb86572fb45ec7883398939f49378e184db24210"
+target_source_assignment_sha256 = "4dbac44480cd0134effdc6d9ae7228d85c98f198b3fa07bc20b35738d2f0b4a1"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 27
+registry_epoch = 28
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -1965,6 +1965,17 @@ construction_order = 6
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/portable_restore_archive_acquisition_receipt/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:canonical-pre-bootstrap-evidence-reencryption-owner"
+object_kind = 0x025b
+name = "CanonicalPreBootstrapEvidenceReencryptionOwner"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_pre_bootstrap_evidence_reencryption_owner/"
 
 [[logical_kind]]
 slice_id = "a17"
@@ -17488,7 +17499,7 @@ symbol = "CanonicalPreBootstrapEvidenceReencryptionOwner"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x025b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a17:reservation:canonical-pre-bootstrap-evidence-reencryption-proof"
@@ -25445,7 +25456,7 @@ symbol = "CanonicalPreBootstrapEvidenceReencryptionOwner"
 generic_signature = "<Role>"
 source_key = "top|CanonicalPreBootstrapEvidenceReencryptionOwner<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2297"]
 
 [[top_level_candidate]]
@@ -37303,6 +37314,14 @@ row_id = "a17:target:logical-kind-canonical-restore-plan-availability-copy"
 target_row_id = "a17:logical-kind:canonical-restore-plan-availability-copy"
 slice_id = "a17"
 source_key = "top|CanonicalRestorePlanAvailabilityCopy<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-canonical-pre-bootstrap-evidence-reencryption-owner"
+target_row_id = "a17:logical-kind:canonical-pre-bootstrap-evidence-reencryption-owner"
+slice_id = "a17"
+source_key = "top|CanonicalPreBootstrapEvidenceReencryptionOwner<Role>"
 target_kind = "logical-kind"
 definition_status = "declared"
 

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 27
+registry_epoch = 28
 
 [[kind]]
 object_kind = 0x0001
@@ -304,6 +304,15 @@ construction_order = 26
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/authenticated_client_result_release_receipt/"
+
+[[kind]]
+object_kind = 0x025b
+name = "CanonicalPreBootstrapEvidenceReencryptionOwner"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_pre_bootstrap_evidence_reencryption_owner/"
 
 [[kind]]
 object_kind = 0x025d
