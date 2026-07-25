@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1458
+target_count = 1502
 projection_fallback_count = 90
-target_source_assignment_sha256 = "6e89419d4fc39fbc0c87d9f6e6e14a13d2e6e3ebd1b9a0d51c2f294221ef417d"
+target_source_assignment_sha256 = "ddbce71a5b0203c088f8363d0bde90aed5147799d3a3315c1e000b9235ad91c8"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 34
+registry_epoch = 35
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 28
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 35
+registry_epoch = 36
 
 [[logical_kind]]
 slice_id = "a03"
@@ -3580,6 +3580,127 @@ construction_order = 25
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/retention_map/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:branch-epoch-boundary-reservation"
+object_kind = 0x0251
+name = "BranchEpochBoundaryReservation"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_epoch_boundary_reservation/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:branch-epoch-boundary-reserve-spec"
+object_kind = 0x0252
+name = "BranchEpochBoundaryReserveSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_epoch_boundary_reserve_spec/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:branch-fork-bundle"
+object_kind = 0x0253
+name = "BranchForkBundle"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_fork_bundle/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:branch-grant-bundle"
+object_kind = 0x0254
+name = "BranchGrantBundle"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_grant_bundle/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:branch-key-epoch-record"
+object_kind = 0x0255
+name = "BranchKeyEpochRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_key_epoch_record/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:branch-merge-ledger-root"
+object_kind = 0x04cc
+name = "BranchMergeLedgerRoot"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_merge_ledger_root/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:key-envelope-grant-bytes"
+object_kind = 0x02de
+name = "KeyEnvelopeGrantBytes"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_grant_bytes/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:key-envelope-grant-record"
+object_kind = 0x02df
+name = "KeyEnvelopeGrantRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_grant_record/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:key-envelope-node"
+object_kind = 0x02e1
+name = "KeyEnvelopeNode"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_node/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:key-envelope-root"
+object_kind = 0x02e2
+name = "KeyEnvelopeRoot"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_root/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:key-grant-registry"
+object_kind = 0x02e4
+name = "KeyGrantRegistry"
+status = "reserved"
+construction_order = 70
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_grant_registry/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -20960,6 +21081,467 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
 
+[[union]]
+slice_id = "a13"
+row_id = "a13:union:branch-epoch-boundary-reserve-spec-operation-aad7e3ce5b9d71d7"
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BranchEpochBoundaryReserveSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-epoch-boundary-reserve-spec-operation-fork-47d0a415f51ce761"
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+arm_tag = 0x0001
+source_arm_name = "Fork"
+stable_name = "fork"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-epoch-boundary-reserve-spec-operation-snapshot-grant-afe7200caf55f11f"
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+arm_tag = 0x0002
+source_arm_name = "SnapshotGrant"
+stable_name = "snapshot_grant"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-epoch-boundary-reserve-spec-operation-start-or-continue-advancing-grant-58cb7568199b8348"
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+arm_tag = 0x0003
+source_arm_name = "StartOrContinueAdvancingGrant"
+stable_name = "start_or_continue_advancing_grant"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-epoch-boundary-reserve-spec-operation-revoke-advancing-grant-de04a278cfeb4efd"
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+arm_tag = 0x0004
+source_arm_name = "RevokeAdvancingGrant"
+stable_name = "revoke_advancing_grant"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-epoch-boundary-reserve-spec-operation-rotate-bd21d73001dc5412"
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+arm_tag = 0x0005
+source_arm_name = "Rotate"
+stable_name = "rotate"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a13"
+row_id = "a13:union:branch-grant-bundle-operation-bbc8ab3207979c85"
+union_name = "BranchGrantBundleOperation"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+union_path = "BranchGrantBundle<Role:AuthorityOwningRole>.operation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BranchGrantBundle<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-grant-bundle-operation-snapshot-at-head-7f038bc3cf359fb5"
+union_name = "BranchGrantBundleOperation"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+union_path = "BranchGrantBundle<Role:AuthorityOwningRole>.operation"
+arm_tag = 0x0001
+source_arm_name = "SnapshotAtHead"
+stable_name = "snapshot_at_head"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-grant-bundle-operation-start-or-continue-advancing-b3122208aad8e8f4"
+union_name = "BranchGrantBundleOperation"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+union_path = "BranchGrantBundle<Role:AuthorityOwningRole>.operation"
+arm_tag = 0x0002
+source_arm_name = "StartOrContinueAdvancing"
+stable_name = "start_or_continue_advancing"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-grant-bundle-operation-revoke-advancing-f524510db6e8054b"
+union_name = "BranchGrantBundleOperation"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+union_path = "BranchGrantBundle<Role:AuthorityOwningRole>.operation"
+arm_tag = 0x0003
+source_arm_name = "RevokeAdvancing"
+stable_name = "revoke_advancing"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a13"
+row_id = "a13:union:branch-key-epoch-record-kind-e8e2d2a5aafc82e2"
+union_name = "BranchKeyEpochRecordKind"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.kind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BranchKeyEpochRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-key-epoch-record-kind-envelope-ed3f10268dacde39"
+union_name = "BranchKeyEpochRecordKind"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.kind"
+arm_tag = 0x0001
+source_arm_name = "Envelope"
+stable_name = "envelope"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-key-epoch-record-kind-write-1087e89a9737610f"
+union_name = "BranchKeyEpochRecordKind"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.kind"
+arm_tag = 0x0002
+source_arm_name = "Write"
+stable_name = "write"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a13"
+row_id = "a13:union:branch-key-epoch-record-predecessor-e2a6e5469c42f255"
+union_name = "BranchKeyEpochRecordPredecessor"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.predecessor"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BranchKeyEpochRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-key-epoch-record-predecessor-genesis-505b9c41d87d8e3b"
+union_name = "BranchKeyEpochRecordPredecessor"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.predecessor"
+arm_tag = 0x0001
+source_arm_name = "Genesis"
+stable_name = "genesis"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-key-epoch-record-predecessor-same-epoch-lifecycle-e5cf4798deb61ae2"
+union_name = "BranchKeyEpochRecordPredecessor"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.predecessor"
+arm_tag = 0x0002
+source_arm_name = "SameEpochLifecycle"
+stable_name = "same_epoch_lifecycle"
+payload_kind = "inline-record"
+payload_sha256 = "03ca120b78d5b0bcb6f6573ae435f77910dfdbb9a87528e92fe15f9e4c4d8fad"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-key-epoch-record-predecessor-prior-epoch-5cfed07b466d5b84"
+union_name = "BranchKeyEpochRecordPredecessor"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.predecessor"
+arm_tag = 0x0003
+source_arm_name = "PriorEpoch"
+stable_name = "prior_epoch"
+payload_kind = "inline-record"
+payload_sha256 = "8ff07e9ebd3b3a8d55324d363888b34abeee6b629730f61eea9dd0da10fd5636"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a13"
+row_id = "a13:union:branch-key-epoch-record-state-b155583db0b5cfae"
+union_name = "BranchKeyEpochRecordState"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BranchKeyEpochRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-key-epoch-record-state-active-98073c300853a484"
+union_name = "BranchKeyEpochRecordState"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "inline-record"
+payload_sha256 = "2e401043526781251b4e6c0275c6f35e06acee3061fb0075f90a4ad50c1d6522"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:branch-key-epoch-record-state-closed-3b90f2f3a5c4258b"
+union_name = "BranchKeyEpochRecordState"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.state"
+arm_tag = 0x0002
+source_arm_name = "Closed"
+stable_name = "closed"
+payload_kind = "inline-record"
+payload_sha256 = "1e8d9e9d296bcc02400ead75b3e8024ce03e1a24c30a42523f8d5a3ed54d02ee"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a13"
+row_id = "a13:union:key-envelope-grant-bytes-mode-87a52f081c1a277a"
+union_name = "KeyEnvelopeGrantBytesMode"
+containing_schema = "KeyEnvelopeGrantBytes"
+union_path = "KeyEnvelopeGrantBytes.mode"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyEnvelopeGrantBytes"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:key-envelope-grant-bytes-mode-snapshot-at-head-b2bc6da8230cbe66"
+union_name = "KeyEnvelopeGrantBytesMode"
+containing_schema = "KeyEnvelopeGrantBytes"
+union_path = "KeyEnvelopeGrantBytes.mode"
+arm_tag = 0x0001
+source_arm_name = "SnapshotAtHead"
+stable_name = "snapshot_at_head"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:key-envelope-grant-bytes-mode-advancing-branch-09ab9825b870f1db"
+union_name = "KeyEnvelopeGrantBytesMode"
+containing_schema = "KeyEnvelopeGrantBytes"
+union_path = "KeyEnvelopeGrantBytes.mode"
+arm_tag = 0x0002
+source_arm_name = "AdvancingBranch"
+stable_name = "advancing_branch"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a13"
+row_id = "a13:union:key-envelope-grant-record-state-63350a77abe15d2c"
+union_name = "KeyEnvelopeGrantRecordState"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+union_path = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:key-envelope-grant-record-state-current-a1987a73dcafa090"
+union_name = "KeyEnvelopeGrantRecordState"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+union_path = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state"
+arm_tag = 0x0001
+source_arm_name = "Current"
+stable_name = "current"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:key-envelope-grant-record-state-revoked-e65e0566f0fd7a1b"
+union_name = "KeyEnvelopeGrantRecordState"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+union_path = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state"
+arm_tag = 0x0002
+source_arm_name = "Revoked"
+stable_name = "revoked"
+payload_kind = "inline-record"
+payload_sha256 = "2fa228f026a9a831a9353e564a92726f6f9557538dafd535de64350017f7b4d6"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:key-envelope-grant-record-state-expired-fe98cd22dc707a73"
+union_name = "KeyEnvelopeGrantRecordState"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+union_path = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state"
+arm_tag = 0x0003
+source_arm_name = "Expired"
+stable_name = "expired"
+payload_kind = "inline-record"
+payload_sha256 = "9b178669e1dc7f0c6d2955cbafb2c8e40e0bd2350b1dd724bbaa6d8d1c2ff9a8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a13"
+row_id = "a13:union:key-grant-registry-entries-800d6e7a57c16c2c"
+union_name = "KeyGrantRegistryEntries"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyGrantRegistry<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:key-grant-registry-entries-current-record-ref-c2147d9cb51b9f04"
+union_name = "KeyGrantRegistryEntries"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries"
+arm_tag = 0x0001
+source_arm_name = "current_record_ref"
+stable_name = "current_record_ref"
+payload_kind = "inline-record"
+payload_sha256 = "dbba03859b5564805927ca9dbfe94930936f6576f3713290c28840a9b3a435ba"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:key-grant-registry-entries-terminal-a8b0726bb52b00a6"
+union_name = "KeyGrantRegistryEntries"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries"
+arm_tag = 0x0002
+source_arm_name = "Terminal"
+stable_name = "terminal"
+payload_kind = "inline-record"
+payload_sha256 = "cce5f99f3dfac69b221c0b0f0ddef76bcee45bc097bcaf28887cf5d4168e764d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a13"
+row_id = "a13:union:key-grant-registry-entries-terminal-status-b0da7de392c38f81"
+union_name = "KeyGrantRegistryEntriesTerminalStatus"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries.Terminal.status"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyGrantRegistry<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:key-grant-registry-entries-terminal-status-revoked-e1bcd1577278afb7"
+union_name = "KeyGrantRegistryEntriesTerminalStatus"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries.Terminal.status"
+arm_tag = 0x0001
+source_arm_name = "Revoked"
+stable_name = "revoked"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:key-grant-registry-entries-terminal-status-expired-62131bbd6c6efd4f"
+union_name = "KeyGrantRegistryEntriesTerminalStatus"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries.Terminal.status"
+arm_tag = 0x0002
+source_arm_name = "Expired"
+stable_name = "expired"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
 slice_id = "a10"
@@ -21849,7 +22431,7 @@ symbol = "BranchEpochBoundaryReservation"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0251"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a13:reservation:branch-epoch-boundary-reserve-spec"
@@ -21858,7 +22440,7 @@ symbol = "BranchEpochBoundaryReserveSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0252"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a13:reservation:branch-fork-bundle"
@@ -21867,7 +22449,7 @@ symbol = "BranchForkBundle"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0253"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a13:reservation:branch-grant-bundle"
@@ -21876,7 +22458,7 @@ symbol = "BranchGrantBundle"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0254"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a13:reservation:branch-key-epoch-record"
@@ -21885,7 +22467,7 @@ symbol = "BranchKeyEpochRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0255"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a13:reservation:branch-manifest"
@@ -21903,7 +22485,7 @@ symbol = "BranchMergeLedgerRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04cc"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:buffered-result-manifest"
@@ -23415,7 +23997,7 @@ symbol = "KeyEnvelopeGrantBytes"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02de"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a13:reservation:key-envelope-grant-record"
@@ -23424,7 +24006,7 @@ symbol = "KeyEnvelopeGrantRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02df"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:key-envelope-grant-window"
@@ -23442,7 +24024,7 @@ symbol = "KeyEnvelopeNode"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02e1"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a13:reservation:key-envelope-root"
@@ -23451,7 +24033,7 @@ symbol = "KeyEnvelopeRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02e2"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:key-erasure-verification"
@@ -23469,7 +24051,7 @@ symbol = "KeyGrantRegistry"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02e4"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a13:reservation:key-grant-revocation-evidence"
@@ -29714,7 +30296,7 @@ symbol = "BranchEpochBoundaryReservation"
 generic_signature = ""
 source_key = "top|BranchEpochBoundaryReservation"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2002"]
 
 [[top_level_candidate]]
@@ -29724,7 +30306,7 @@ symbol = "BranchEpochBoundaryReserveSpec"
 generic_signature = ""
 source_key = "top|BranchEpochBoundaryReserveSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2002"]
 
 [[top_level_candidate]]
@@ -29734,7 +30316,7 @@ symbol = "BranchForkBundle"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|BranchForkBundle<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2029"]
 
 [[top_level_candidate]]
@@ -29754,7 +30336,7 @@ symbol = "BranchGrantBundle"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|BranchGrantBundle<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2029"]
 
 [[top_level_candidate]]
@@ -29784,7 +30366,7 @@ symbol = "BranchKeyEpochRecord"
 generic_signature = ""
 source_key = "top|BranchKeyEpochRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2004"]
 
 [[top_level_candidate]]
@@ -29794,7 +30376,7 @@ symbol = "BranchMergeLedgerRoot"
 generic_signature = ""
 source_key = "top|BranchMergeLedgerRoot"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2033"]
 
 [[top_level_candidate]]
@@ -32684,7 +33266,7 @@ symbol = "KeyEnvelopeGrantBytes"
 generic_signature = ""
 source_key = "top|KeyEnvelopeGrantBytes"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2025"]
 
 [[top_level_candidate]]
@@ -32694,7 +33276,7 @@ symbol = "KeyEnvelopeGrantRecord"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2027"]
 
 [[top_level_candidate]]
@@ -32714,7 +33296,7 @@ symbol = "KeyEnvelopeNode"
 generic_signature = ""
 source_key = "top|KeyEnvelopeNode"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2006"]
 
 [[top_level_candidate]]
@@ -32724,7 +33306,7 @@ symbol = "KeyEnvelopeRoot"
 generic_signature = ""
 source_key = "top|KeyEnvelopeRoot"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2006"]
 
 [[top_level_candidate]]
@@ -32734,7 +33316,7 @@ symbol = "KeyGrantRegistry"
 generic_signature = "<Role>"
 source_key = "top|KeyGrantRegistry<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2027"]
 
 [[top_level_candidate]]
@@ -52736,6 +53318,358 @@ row_id = "a12:target:union-arm-retention-map-activated-659cec29c8a2103f"
 target_row_id = "a12:union-arm:retention-map-activated-659cec29c8a2103f"
 slice_id = "a12"
 source_key = "arm|RetentionMap|RetentionMap|Activated"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-branch-epoch-boundary-reservation"
+target_row_id = "a13:logical-kind:branch-epoch-boundary-reservation"
+slice_id = "a13"
+source_key = "top|BranchEpochBoundaryReservation"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-branch-epoch-boundary-reserve-spec"
+target_row_id = "a13:logical-kind:branch-epoch-boundary-reserve-spec"
+slice_id = "a13"
+source_key = "top|BranchEpochBoundaryReserveSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-branch-fork-bundle"
+target_row_id = "a13:logical-kind:branch-fork-bundle"
+slice_id = "a13"
+source_key = "top|BranchForkBundle<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-branch-grant-bundle"
+target_row_id = "a13:logical-kind:branch-grant-bundle"
+slice_id = "a13"
+source_key = "top|BranchGrantBundle<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-branch-key-epoch-record"
+target_row_id = "a13:logical-kind:branch-key-epoch-record"
+slice_id = "a13"
+source_key = "top|BranchKeyEpochRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-branch-merge-ledger-root"
+target_row_id = "a13:logical-kind:branch-merge-ledger-root"
+slice_id = "a13"
+source_key = "top|BranchMergeLedgerRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-key-envelope-grant-bytes"
+target_row_id = "a13:logical-kind:key-envelope-grant-bytes"
+slice_id = "a13"
+source_key = "top|KeyEnvelopeGrantBytes"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-key-envelope-grant-record"
+target_row_id = "a13:logical-kind:key-envelope-grant-record"
+slice_id = "a13"
+source_key = "top|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-key-envelope-node"
+target_row_id = "a13:logical-kind:key-envelope-node"
+slice_id = "a13"
+source_key = "top|KeyEnvelopeNode"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-key-envelope-root"
+target_row_id = "a13:logical-kind:key-envelope-root"
+slice_id = "a13"
+source_key = "top|KeyEnvelopeRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-key-grant-registry"
+target_row_id = "a13:logical-kind:key-grant-registry"
+slice_id = "a13"
+source_key = "top|KeyGrantRegistry<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-branch-epoch-boundary-reserve-spec-operation-aad7e3ce5b9d71d7"
+target_row_id = "a13:union:branch-epoch-boundary-reserve-spec-operation-aad7e3ce5b9d71d7"
+slice_id = "a13"
+source_key = "union|BranchEpochBoundaryReserveSpec|BranchEpochBoundaryReserveSpec.operation"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-epoch-boundary-reserve-spec-operation-fork-47d0a415f51ce761"
+target_row_id = "a13:union-arm:branch-epoch-boundary-reserve-spec-operation-fork-47d0a415f51ce761"
+slice_id = "a13"
+source_key = "arm|BranchEpochBoundaryReserveSpec|BranchEpochBoundaryReserveSpec.operation|Fork"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-epoch-boundary-reserve-spec-operation-snapshot-grant-afe7200caf55f11f"
+target_row_id = "a13:union-arm:branch-epoch-boundary-reserve-spec-operation-snapshot-grant-afe7200caf55f11f"
+slice_id = "a13"
+source_key = "arm|BranchEpochBoundaryReserveSpec|BranchEpochBoundaryReserveSpec.operation|SnapshotGrant"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-epoch-boundary-reserve-spec-operation-start-or-continue-advancing-grant-58cb7568199b8348"
+target_row_id = "a13:union-arm:branch-epoch-boundary-reserve-spec-operation-start-or-continue-advancing-grant-58cb7568199b8348"
+slice_id = "a13"
+source_key = "arm|BranchEpochBoundaryReserveSpec|BranchEpochBoundaryReserveSpec.operation|StartOrContinueAdvancingGrant"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-epoch-boundary-reserve-spec-operation-revoke-advancing-grant-de04a278cfeb4efd"
+target_row_id = "a13:union-arm:branch-epoch-boundary-reserve-spec-operation-revoke-advancing-grant-de04a278cfeb4efd"
+slice_id = "a13"
+source_key = "arm|BranchEpochBoundaryReserveSpec|BranchEpochBoundaryReserveSpec.operation|RevokeAdvancingGrant"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-epoch-boundary-reserve-spec-operation-rotate-bd21d73001dc5412"
+target_row_id = "a13:union-arm:branch-epoch-boundary-reserve-spec-operation-rotate-bd21d73001dc5412"
+slice_id = "a13"
+source_key = "arm|BranchEpochBoundaryReserveSpec|BranchEpochBoundaryReserveSpec.operation|Rotate"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-branch-grant-bundle-operation-bbc8ab3207979c85"
+target_row_id = "a13:union:branch-grant-bundle-operation-bbc8ab3207979c85"
+slice_id = "a13"
+source_key = "union|BranchGrantBundle<Role:AuthorityOwningRole>|BranchGrantBundle<Role:AuthorityOwningRole>.operation"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-grant-bundle-operation-snapshot-at-head-7f038bc3cf359fb5"
+target_row_id = "a13:union-arm:branch-grant-bundle-operation-snapshot-at-head-7f038bc3cf359fb5"
+slice_id = "a13"
+source_key = "arm|BranchGrantBundle<Role:AuthorityOwningRole>|BranchGrantBundle<Role:AuthorityOwningRole>.operation|SnapshotAtHead"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-grant-bundle-operation-start-or-continue-advancing-b3122208aad8e8f4"
+target_row_id = "a13:union-arm:branch-grant-bundle-operation-start-or-continue-advancing-b3122208aad8e8f4"
+slice_id = "a13"
+source_key = "arm|BranchGrantBundle<Role:AuthorityOwningRole>|BranchGrantBundle<Role:AuthorityOwningRole>.operation|StartOrContinueAdvancing"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-grant-bundle-operation-revoke-advancing-f524510db6e8054b"
+target_row_id = "a13:union-arm:branch-grant-bundle-operation-revoke-advancing-f524510db6e8054b"
+slice_id = "a13"
+source_key = "arm|BranchGrantBundle<Role:AuthorityOwningRole>|BranchGrantBundle<Role:AuthorityOwningRole>.operation|RevokeAdvancing"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-branch-key-epoch-record-kind-e8e2d2a5aafc82e2"
+target_row_id = "a13:union:branch-key-epoch-record-kind-e8e2d2a5aafc82e2"
+slice_id = "a13"
+source_key = "union|BranchKeyEpochRecord|BranchKeyEpochRecord.kind"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-key-epoch-record-kind-envelope-ed3f10268dacde39"
+target_row_id = "a13:union-arm:branch-key-epoch-record-kind-envelope-ed3f10268dacde39"
+slice_id = "a13"
+source_key = "arm|BranchKeyEpochRecord|BranchKeyEpochRecord.kind|Envelope"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-key-epoch-record-kind-write-1087e89a9737610f"
+target_row_id = "a13:union-arm:branch-key-epoch-record-kind-write-1087e89a9737610f"
+slice_id = "a13"
+source_key = "arm|BranchKeyEpochRecord|BranchKeyEpochRecord.kind|Write"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-branch-key-epoch-record-predecessor-e2a6e5469c42f255"
+target_row_id = "a13:union:branch-key-epoch-record-predecessor-e2a6e5469c42f255"
+slice_id = "a13"
+source_key = "union|BranchKeyEpochRecord|BranchKeyEpochRecord.predecessor"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-key-epoch-record-predecessor-genesis-505b9c41d87d8e3b"
+target_row_id = "a13:union-arm:branch-key-epoch-record-predecessor-genesis-505b9c41d87d8e3b"
+slice_id = "a13"
+source_key = "arm|BranchKeyEpochRecord|BranchKeyEpochRecord.predecessor|Genesis"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-key-epoch-record-predecessor-same-epoch-lifecycle-e5cf4798deb61ae2"
+target_row_id = "a13:union-arm:branch-key-epoch-record-predecessor-same-epoch-lifecycle-e5cf4798deb61ae2"
+slice_id = "a13"
+source_key = "arm|BranchKeyEpochRecord|BranchKeyEpochRecord.predecessor|SameEpochLifecycle"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-key-epoch-record-predecessor-prior-epoch-5cfed07b466d5b84"
+target_row_id = "a13:union-arm:branch-key-epoch-record-predecessor-prior-epoch-5cfed07b466d5b84"
+slice_id = "a13"
+source_key = "arm|BranchKeyEpochRecord|BranchKeyEpochRecord.predecessor|PriorEpoch"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-branch-key-epoch-record-state-b155583db0b5cfae"
+target_row_id = "a13:union:branch-key-epoch-record-state-b155583db0b5cfae"
+slice_id = "a13"
+source_key = "union|BranchKeyEpochRecord|BranchKeyEpochRecord.state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-key-epoch-record-state-active-98073c300853a484"
+target_row_id = "a13:union-arm:branch-key-epoch-record-state-active-98073c300853a484"
+slice_id = "a13"
+source_key = "arm|BranchKeyEpochRecord|BranchKeyEpochRecord.state|Active"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-branch-key-epoch-record-state-closed-3b90f2f3a5c4258b"
+target_row_id = "a13:union-arm:branch-key-epoch-record-state-closed-3b90f2f3a5c4258b"
+slice_id = "a13"
+source_key = "arm|BranchKeyEpochRecord|BranchKeyEpochRecord.state|Closed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-key-envelope-grant-bytes-mode-87a52f081c1a277a"
+target_row_id = "a13:union:key-envelope-grant-bytes-mode-87a52f081c1a277a"
+slice_id = "a13"
+source_key = "union|KeyEnvelopeGrantBytes|KeyEnvelopeGrantBytes.mode"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-key-envelope-grant-bytes-mode-snapshot-at-head-b2bc6da8230cbe66"
+target_row_id = "a13:union-arm:key-envelope-grant-bytes-mode-snapshot-at-head-b2bc6da8230cbe66"
+slice_id = "a13"
+source_key = "arm|KeyEnvelopeGrantBytes|KeyEnvelopeGrantBytes.mode|SnapshotAtHead"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-key-envelope-grant-bytes-mode-advancing-branch-09ab9825b870f1db"
+target_row_id = "a13:union-arm:key-envelope-grant-bytes-mode-advancing-branch-09ab9825b870f1db"
+slice_id = "a13"
+source_key = "arm|KeyEnvelopeGrantBytes|KeyEnvelopeGrantBytes.mode|AdvancingBranch"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-key-envelope-grant-record-state-63350a77abe15d2c"
+target_row_id = "a13:union:key-envelope-grant-record-state-63350a77abe15d2c"
+slice_id = "a13"
+source_key = "union|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-key-envelope-grant-record-state-current-a1987a73dcafa090"
+target_row_id = "a13:union-arm:key-envelope-grant-record-state-current-a1987a73dcafa090"
+slice_id = "a13"
+source_key = "arm|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state|Current"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-key-envelope-grant-record-state-revoked-e65e0566f0fd7a1b"
+target_row_id = "a13:union-arm:key-envelope-grant-record-state-revoked-e65e0566f0fd7a1b"
+slice_id = "a13"
+source_key = "arm|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state|Revoked"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-key-envelope-grant-record-state-expired-fe98cd22dc707a73"
+target_row_id = "a13:union-arm:key-envelope-grant-record-state-expired-fe98cd22dc707a73"
+slice_id = "a13"
+source_key = "arm|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state|Expired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-key-grant-registry-entries-800d6e7a57c16c2c"
+target_row_id = "a13:union:key-grant-registry-entries-800d6e7a57c16c2c"
+slice_id = "a13"
+source_key = "union|KeyGrantRegistry<Role>|KeyGrantRegistry<Role>.entries"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-key-grant-registry-entries-current-record-ref-c2147d9cb51b9f04"
+target_row_id = "a13:union-arm:key-grant-registry-entries-current-record-ref-c2147d9cb51b9f04"
+slice_id = "a13"
+source_key = "arm|KeyGrantRegistry<Role>|KeyGrantRegistry<Role>.entries|current_record_ref"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-key-grant-registry-entries-terminal-a8b0726bb52b00a6"
+target_row_id = "a13:union-arm:key-grant-registry-entries-terminal-a8b0726bb52b00a6"
+slice_id = "a13"
+source_key = "arm|KeyGrantRegistry<Role>|KeyGrantRegistry<Role>.entries|Terminal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-key-grant-registry-entries-terminal-status-b0da7de392c38f81"
+target_row_id = "a13:union:key-grant-registry-entries-terminal-status-b0da7de392c38f81"
+slice_id = "a13"
+source_key = "union|KeyGrantRegistry<Role>|KeyGrantRegistry<Role>.entries.Terminal.status"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-key-grant-registry-entries-terminal-status-revoked-e1bcd1577278afb7"
+target_row_id = "a13:union-arm:key-grant-registry-entries-terminal-status-revoked-e1bcd1577278afb7"
+slice_id = "a13"
+source_key = "arm|KeyGrantRegistry<Role>|KeyGrantRegistry<Role>.entries.Terminal.status|Revoked"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-key-grant-registry-entries-terminal-status-expired-62131bbd6c6efd4f"
+target_row_id = "a13:union-arm:key-grant-registry-entries-terminal-status-expired-62131bbd6c6efd4f"
+slice_id = "a13"
+source_key = "arm|KeyGrantRegistry<Role>|KeyGrantRegistry<Role>.entries.Terminal.status|Expired"
 target_kind = "union-arm"
 definition_status = "declared"
 

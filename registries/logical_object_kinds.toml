@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 34
+registry_epoch = 35
 
 [[kind]]
 object_kind = 0x0001
@@ -340,6 +340,51 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/begin_region_closed_receipt/"
+
+[[kind]]
+object_kind = 0x0251
+name = "BranchEpochBoundaryReservation"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_epoch_boundary_reservation/"
+
+[[kind]]
+object_kind = 0x0252
+name = "BranchEpochBoundaryReserveSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_epoch_boundary_reserve_spec/"
+
+[[kind]]
+object_kind = 0x0253
+name = "BranchForkBundle"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_fork_bundle/"
+
+[[kind]]
+object_kind = 0x0254
+name = "BranchGrantBundle"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_grant_bundle/"
+
+[[kind]]
+object_kind = 0x0255
+name = "BranchKeyEpochRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_key_epoch_record/"
 
 [[kind]]
 object_kind = 0x0257
@@ -792,6 +837,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/key_destruction_authorization/"
 
 [[kind]]
+object_kind = 0x02de
+name = "KeyEnvelopeGrantBytes"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_grant_bytes/"
+
+[[kind]]
+object_kind = 0x02df
+name = "KeyEnvelopeGrantRecord"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_grant_record/"
+
+[[kind]]
 object_kind = 0x02e0
 name = "KeyEnvelopeGrantWindow"
 status = "reserved"
@@ -799,6 +862,33 @@ construction_order = 17
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/key_envelope_grant_window/"
+
+[[kind]]
+object_kind = 0x02e1
+name = "KeyEnvelopeNode"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_node/"
+
+[[kind]]
+object_kind = 0x02e2
+name = "KeyEnvelopeRoot"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_root/"
+
+[[kind]]
+object_kind = 0x02e4
+name = "KeyGrantRegistry"
+status = "reserved"
+construction_order = 70
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_grant_registry/"
 
 [[kind]]
 object_kind = 0x02e8
@@ -2113,6 +2203,15 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/zero_reference_proof/"
+
+[[kind]]
+object_kind = 0x04cc
+name = "BranchMergeLedgerRoot"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_merge_ledger_root/"
 
 [[kind]]
 object_kind = 0x04ce

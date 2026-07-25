@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 35
+registry_epoch = 36
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -3856,6 +3856,61 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BranchEpochBoundaryReserveSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "BranchGrantBundleOperation"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+union_path = "BranchGrantBundle<Role:AuthorityOwningRole>.operation"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BranchGrantBundle<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "BranchKeyEpochRecordKind"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.kind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BranchKeyEpochRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "BranchKeyEpochRecordPredecessor"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.predecessor"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BranchKeyEpochRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "BranchKeyEpochRecordState"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BranchKeyEpochRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "CanonicalConstraintDomainKey"
 containing_schema = "CanonicalConstraintDomainKey"
 union_path = "CanonicalConstraintDomainKey"
@@ -4449,6 +4504,50 @@ allowed_containing_schemas = ["ExternalKeyDestructionOperationRecord", "KeyDestr
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
+
+[[union]]
+union_name = "KeyEnvelopeGrantBytesMode"
+containing_schema = "KeyEnvelopeGrantBytes"
+union_path = "KeyEnvelopeGrantBytes.mode"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyEnvelopeGrantBytes"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "KeyEnvelopeGrantRecordState"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+union_path = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "KeyGrantRegistryEntries"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyGrantRegistry<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "KeyGrantRegistryEntriesTerminalStatus"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries.Terminal.status"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyGrantRegistry<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union]]
 union_name = "LeaseWindowSuccessorProof"
@@ -5912,6 +6011,190 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+arm_tag = 0x0001
+source_arm_name = "Fork"
+stable_name = "fork"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+arm_tag = 0x0002
+source_arm_name = "SnapshotGrant"
+stable_name = "snapshot_grant"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+arm_tag = 0x0003
+source_arm_name = "StartOrContinueAdvancingGrant"
+stable_name = "start_or_continue_advancing_grant"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+arm_tag = 0x0004
+source_arm_name = "RevokeAdvancingGrant"
+stable_name = "revoke_advancing_grant"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchEpochBoundaryReserveSpecOperation"
+containing_schema = "BranchEpochBoundaryReserveSpec"
+union_path = "BranchEpochBoundaryReserveSpec.operation"
+arm_tag = 0x0005
+source_arm_name = "Rotate"
+stable_name = "rotate"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchGrantBundleOperation"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+union_path = "BranchGrantBundle<Role:AuthorityOwningRole>.operation"
+arm_tag = 0x0001
+source_arm_name = "SnapshotAtHead"
+stable_name = "snapshot_at_head"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchGrantBundleOperation"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+union_path = "BranchGrantBundle<Role:AuthorityOwningRole>.operation"
+arm_tag = 0x0002
+source_arm_name = "StartOrContinueAdvancing"
+stable_name = "start_or_continue_advancing"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchGrantBundleOperation"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+union_path = "BranchGrantBundle<Role:AuthorityOwningRole>.operation"
+arm_tag = 0x0003
+source_arm_name = "RevokeAdvancing"
+stable_name = "revoke_advancing"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchKeyEpochRecordKind"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.kind"
+arm_tag = 0x0001
+source_arm_name = "Envelope"
+stable_name = "envelope"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchKeyEpochRecordKind"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.kind"
+arm_tag = 0x0002
+source_arm_name = "Write"
+stable_name = "write"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchKeyEpochRecordPredecessor"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.predecessor"
+arm_tag = 0x0001
+source_arm_name = "Genesis"
+stable_name = "genesis"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "BranchKeyEpochRecordPredecessor"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.predecessor"
+arm_tag = 0x0002
+source_arm_name = "SameEpochLifecycle"
+stable_name = "same_epoch_lifecycle"
+payload_kind = "inline-record"
+payload_sha256 = "03ca120b78d5b0bcb6f6573ae435f77910dfdbb9a87528e92fe15f9e4c4d8fad"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BranchKeyEpochRecordPredecessor"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.predecessor"
+arm_tag = 0x0003
+source_arm_name = "PriorEpoch"
+stable_name = "prior_epoch"
+payload_kind = "inline-record"
+payload_sha256 = "8ff07e9ebd3b3a8d55324d363888b34abeee6b629730f61eea9dd0da10fd5636"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BranchKeyEpochRecordState"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "inline-record"
+payload_sha256 = "2e401043526781251b4e6c0275c6f35e06acee3061fb0075f90a4ad50c1d6522"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BranchKeyEpochRecordState"
+containing_schema = "BranchKeyEpochRecord"
+union_path = "BranchKeyEpochRecord.state"
+arm_tag = 0x0002
+source_arm_name = "Closed"
+stable_name = "closed"
+payload_kind = "inline-record"
+payload_sha256 = "1e8d9e9d296bcc02400ead75b3e8024ce03e1a24c30a42523f8d5a3ed54d02ee"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "CanonicalConstraintDomainKey"
@@ -7866,6 +8149,118 @@ payload_sha256 = "f32a84e2865c970ee0bee0b991fe7297b8fd768f7c93200dbf165de2b67914
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
+
+[[union_arm]]
+union_name = "KeyEnvelopeGrantBytesMode"
+containing_schema = "KeyEnvelopeGrantBytes"
+union_path = "KeyEnvelopeGrantBytes.mode"
+arm_tag = 0x0001
+source_arm_name = "SnapshotAtHead"
+stable_name = "snapshot_at_head"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "KeyEnvelopeGrantBytesMode"
+containing_schema = "KeyEnvelopeGrantBytes"
+union_path = "KeyEnvelopeGrantBytes.mode"
+arm_tag = 0x0002
+source_arm_name = "AdvancingBranch"
+stable_name = "advancing_branch"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "KeyEnvelopeGrantRecordState"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+union_path = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state"
+arm_tag = 0x0001
+source_arm_name = "Current"
+stable_name = "current"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "KeyEnvelopeGrantRecordState"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+union_path = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state"
+arm_tag = 0x0002
+source_arm_name = "Revoked"
+stable_name = "revoked"
+payload_kind = "inline-record"
+payload_sha256 = "2fa228f026a9a831a9353e564a92726f6f9557538dafd535de64350017f7b4d6"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "KeyEnvelopeGrantRecordState"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+union_path = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.state"
+arm_tag = 0x0003
+source_arm_name = "Expired"
+stable_name = "expired"
+payload_kind = "inline-record"
+payload_sha256 = "9b178669e1dc7f0c6d2955cbafb2c8e40e0bd2350b1dd724bbaa6d8d1c2ff9a8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "KeyGrantRegistryEntries"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries"
+arm_tag = 0x0001
+source_arm_name = "current_record_ref"
+stable_name = "current_record_ref"
+payload_kind = "inline-record"
+payload_sha256 = "dbba03859b5564805927ca9dbfe94930936f6576f3713290c28840a9b3a435ba"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "KeyGrantRegistryEntries"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries"
+arm_tag = 0x0002
+source_arm_name = "Terminal"
+stable_name = "terminal"
+payload_kind = "inline-record"
+payload_sha256 = "cce5f99f3dfac69b221c0b0f0ddef76bcee45bc097bcaf28887cf5d4168e764d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "KeyGrantRegistryEntriesTerminalStatus"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries.Terminal.status"
+arm_tag = 0x0001
+source_arm_name = "Revoked"
+stable_name = "revoked"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "KeyGrantRegistryEntriesTerminalStatus"
+containing_schema = "KeyGrantRegistry<Role>"
+union_path = "KeyGrantRegistry<Role>.entries.Terminal.status"
+arm_tag = 0x0002
+source_arm_name = "Expired"
+stable_name = "expired"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "LeaseWindowSuccessorProof"
