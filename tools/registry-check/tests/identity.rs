@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 18
+registry_epoch = 19
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 18);
+    assert_eq!(epoch, 19);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3219,6 +3219,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 )
                 | ("ExportLeaf<T>", "target_identity")
                 | ("ExportLeaf<T>", "local_strong_ref_projection")
+                | ("ExportLeaf<T>", "export_projection_version")
+                | ("ExportLeaf<T>", "object_specific_scalar_projection")
+                | ("ExportLeaf<T>", "target_closure_inventory_digest")
+                | ("ExportLeaf<T>", "authority_ledger_floor")
+                | ("ExportLeaf<T>", "quorum_signatures")
         )
     };
     // The a16 field-coverage closure lands plain `StrongRef` rows, which carry
@@ -3306,7 +3311,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove exactly the post-erratum A15, A01, and A16 unions"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 37,
+        pre_erratum.fields.len() + 42,
         current_field_count,
         "the historical witness must remove the post-erratum embedded-union anchor fields and the A01 applied-result fields"
     );

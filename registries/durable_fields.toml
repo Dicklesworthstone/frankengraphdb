@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 18
+registry_epoch = 19
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -362,6 +362,34 @@ max_size_bytes = 159
 
 [[field]]
 containing_schema = "ExportLeaf<T>"
+field_tag = 0x0003
+stable_name = "export_projection_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "version of the generated projector that produced this leaf (a01:1400); the projector is injectively bound to the canonical digest of T, so the version selects the exact projection contract a consumer must apply"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0004
+stable_name = "object_specific_scalar_projection"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "every verifier-relevant scalar of T preserved verbatim while its authority-local strong references are replaced (a01:1400); the concrete layout is fixed per expansion of T, so the bound here is the declared per-kind ceiling rather than an exact width"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ExportLeaf<T>"
 field_tag = 0x0005
 stable_name = "local_strong_ref_projection"
 exact_wire_type = "RemoteObjectIdentity"
@@ -373,6 +401,49 @@ role_predicate = "true"
 retention_and_cut_rule = "every authority-local strong reference of T replaced by a typed remote identity (a01:1400); the projector is injectively bound to the canonical digest of T, and none of these entries is a local retaining edge"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0006
+stable_name = "target_closure_inventory_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "commitment to the complete target closure inventory this leaf exports (a01:1400); comparison only, and the outer CertifiedRemoteStrongRef and RemotePayloadAvailabilityEvidence must byte-match it"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0007
+stable_name = "authority_ledger_floor"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "authority-side ledger floor below which the exported certificate is no longer retained (a01:1400); the authority ledger, not this leaf, roots the real certificate and receipts"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0008
+stable_name = "quorum_signatures"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "canonically sorted authority quorum signatures over the exported leaf transcript (a01:1400); current-member signatures alone are never a trust root, so validation still resolves the pinned configuration evidence first (a01:1398)"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[field]]
 containing_schema = "GlobalKeyEnvelopeManifest"

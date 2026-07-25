@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 536
+target_count = 541
 projection_fallback_count = 83
-target_source_assignment_sha256 = "65db6b864cd01e57916ed48fc8b11996b72d8c442515f51919a4995a065d52e9"
+target_source_assignment_sha256 = "b10da4a30439c59aa91e7c316c180876dab5deed0039378527d82db6507aaf2f"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -600,7 +600,7 @@ registry_epoch = 8
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 18
+registry_epoch = 19
 
 [[logical_kind]]
 slice_id = "a03"
@@ -4208,6 +4208,87 @@ role_predicate = "true"
 retention_and_cut_rule = "capability-safe permanent floor below which summary and ack leaf stay provable; proving release requires no new releasable grant (a01:1404)"
 version_status = "reserved"
 max_size_bytes = 8
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:export-leaf-t-export-projection-version"
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0003
+stable_name = "export_projection_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "version of the generated projector that produced this leaf (a01:1400); the projector is injectively bound to the canonical digest of T, so the version selects the exact projection contract a consumer must apply"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:export-leaf-t-object-specific-scalar-projection"
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0004
+stable_name = "object_specific_scalar_projection"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "every verifier-relevant scalar of T preserved verbatim while its authority-local strong references are replaced (a01:1400); the concrete layout is fixed per expansion of T, so the bound here is the declared per-kind ceiling rather than an exact width"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:export-leaf-t-target-closure-inventory-digest"
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0006
+stable_name = "target_closure_inventory_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "commitment to the complete target closure inventory this leaf exports (a01:1400); comparison only, and the outer CertifiedRemoteStrongRef and RemotePayloadAvailabilityEvidence must byte-match it"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:export-leaf-t-authority-ledger-floor"
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0007
+stable_name = "authority_ledger_floor"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "authority-side ledger floor below which the exported certificate is no longer retained (a01:1400); the authority ledger, not this leaf, roots the real certificate and receipts"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:export-leaf-t-quorum-signatures"
+containing_schema = "ExportLeaf<T>"
+field_tag = 0x0008
+stable_name = "quorum_signatures"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "canonically sorted authority quorum signatures over the exported leaf transcript (a01:1400); current-member signatures alone are never a trust root, so validation still resolves the pinned configuration evidence first (a01:1398)"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[field]]
 slice_id = "a01"
@@ -30050,6 +30131,46 @@ row_id = "a01:target:field-remote-release-summary-entry-permanent-release-proof-
 target_row_id = "a01:field:remote-release-summary-entry-permanent-release-proof-floor"
 slice_id = "a01"
 source_key = "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.permanent_release_proof_floor|permanent_release_proof_floor"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:field-export-leaf-t-export-projection-version"
+target_row_id = "a01:field:export-leaf-t-export-projection-version"
+slice_id = "a01"
+source_key = "field|ExportLeaf<T>|ExportLeaf<T>.export_projection_version|export_projection_version"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:field-export-leaf-t-object-specific-scalar-projection"
+target_row_id = "a01:field:export-leaf-t-object-specific-scalar-projection"
+slice_id = "a01"
+source_key = "field|ExportLeaf<T>|ExportLeaf<T>.object_specific_scalar_projection|object_specific_scalar_projection"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:field-export-leaf-t-target-closure-inventory-digest"
+target_row_id = "a01:field:export-leaf-t-target-closure-inventory-digest"
+slice_id = "a01"
+source_key = "field|ExportLeaf<T>|ExportLeaf<T>.target_closure_inventory_digest|target_closure_inventory_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:field-export-leaf-t-authority-ledger-floor"
+target_row_id = "a01:field:export-leaf-t-authority-ledger-floor"
+slice_id = "a01"
+source_key = "field|ExportLeaf<T>|ExportLeaf<T>.authority_ledger_floor|authority_ledger_floor"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:field-export-leaf-t-quorum-signatures"
+target_row_id = "a01:field:export-leaf-t-quorum-signatures"
+slice_id = "a01"
+source_key = "field|ExportLeaf<T>|ExportLeaf<T>.quorum_signatures|quorum_signatures"
 target_kind = "field"
 definition_status = "declared"
 
