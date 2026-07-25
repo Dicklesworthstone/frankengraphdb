@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 1411;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 1416;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "69b92b1cb6293208a0870b60bf8cda307e56d03bd00d8b880ccd80d4cc3a21fd";
+    "feffa5c6fa5a98acd0236e428473467b4c104e5282939743e033838ed57cf36f";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 89;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "d5d37be9cbd37de760826ae5636d1163ab42effea73bb890540742c229d79b2b";
+    "2f0a995d4b6b47c7ca10f25c0738c5148a98238d25b78cb14bbad80245de6d59";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -60,9 +60,9 @@ pub const COMPLETION_LAYER_SCHEMA_VERSION: i64 = 1;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT: usize = 4;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 389;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 391;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "78c2adede17da5eea90ffb344591c7292e7d093c8ef07175c906e7595219639d";
+    "3348d0d3b3eb48f7dec6fedde47f2dc380d17134b22e06fc7b8a88181e8b2ffc";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 221;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 592;
@@ -347,7 +347,7 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 0] = [];
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
-static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 389] = [
+static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 391] = [
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459",
         slice_id: "a01",
@@ -4494,6 +4494,24 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 389] 
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["field|PlacementRecord|PlacementRecord.placement_id|placement_id"],
         rationale: "a02:1449: shorthand member carries no inline exact type. Its owner `PlacementRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a09:ambiguity-adjudication:34cf0a3cb4495aaffdd79a0489e1b6a8caa672ad4ed267b7e32b2c42f13e59b1",
+        slice_id: "a09",
+        ambiguity_source_key: "ambiguity|alias-expression-unparsed|LocalFinalCertificationReserveSpec|LocalFinalCertificationReserveSpec|a32bbf40609069648836f761b1fb115433bc2242b4fa4298af19f4278fe9adf4|1|75484acecbb70003eedd8126b4b23fdfad84b05eff09d3b603bdbd9d01a2b071|alias body is neither a top-level pipe union nor a record body",
+        source_locations: &["a09:1904"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &["top|LocalFinalCertificationReserveSpec"],
+        rationale: "a09:1904: the flagged span is the body of `FinalCertificationReservationRecord<Local> {plan_ref,registration_identity,finalization_generation,sorted_mappings,permanent_spent_extension_commitment,applied_control_ref,state:Active}`, which the sentence introduces as the object `LocalFinalCertificationReserveSpec`'s apply INSTALLS. The parser attributes the brace body to the sentence's grammatical subject, so the alias expression is unparsed against that subject rather than against the record. The affected key is the subject itself, which a07 registers as a structural definition at a07:1750 and mints at its reserved code 0x030a.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a09:ambiguity-adjudication:31cc7fb171ebf8e60218481acbf4ae4a9a46c47d0bf7e2636d2c44c14dbd5dcc",
+        slice_id: "a09",
+        ambiguity_source_key: "ambiguity|conflicting-candidate-evidence|LocalFinalCertificationReserveSpec|LocalFinalCertificationReserveSpec|a32bbf40609069648836f761b1fb115433bc2242b4fa4298af19f4278fe9adf4|1|75484acecbb70003eedd8126b4b23fdfad84b05eff09d3b603bdbd9d01a2b071|the same schema source key has divergent structural bodies",
+        source_locations: &["a09:1904"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &["top|LocalFinalCertificationReserveSpec"],
+        rationale: "a09:1904: the same span carries a second structural body for `top|LocalFinalCertificationReserveSpec`, whose own definition is a07:1750. a09 references the symbol and shows an installed record inside the same sentence, so the two bodies diverge for one source key. The divergence resolves to the a07 owner's definition; a09 contributes no competing structural claim.",
     },
 ];
 

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 30
+registry_epoch = 31
 
 [[kind]]
 object_kind = 0x0001
@@ -2311,3 +2311,48 @@ construction_order = 30
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_constraint_state_root/"
+
+[[kind]]
+object_kind = 0x0534
+name = "AttemptFamilyState"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/attempt_family_state/"
+
+[[kind]]
+object_kind = 0x0535
+name = "GlobalAttemptIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_attempt_index/"
+
+[[kind]]
+object_kind = 0x0536
+name = "MetaReadAuditEvidence"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_read_audit_evidence/"
+
+[[kind]]
+object_kind = 0x0537
+name = "NoTerminalPlanLockShareOrOrderProof"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_terminal_plan_lock_share_or_order_proof/"
+
+[[kind]]
+object_kind = 0x0538
+name = "ResultDeliveryState"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_state/"

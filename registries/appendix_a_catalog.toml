@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1411
+target_count = 1416
 projection_fallback_count = 89
-target_source_assignment_sha256 = "d5d37be9cbd37de760826ae5636d1163ab42effea73bb890540742c229d79b2b"
+target_source_assignment_sha256 = "2f0a995d4b6b47c7ca10f25c0738c5148a98238d25b78cb14bbad80245de6d59"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 30
+registry_epoch = 31
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -3459,6 +3459,61 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/terminal_certification_reservation_root/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:attempt-family-state"
+object_kind = 0x0534
+name = "AttemptFamilyState"
+status = "reserved"
+construction_order = 60
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/attempt_family_state/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:global-attempt-index"
+object_kind = 0x0535
+name = "GlobalAttemptIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_attempt_index/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:meta-read-audit-evidence"
+object_kind = 0x0536
+name = "MetaReadAuditEvidence"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_read_audit_evidence/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:no-terminal-plan-lock-share-or-order-proof"
+object_kind = 0x0537
+name = "NoTerminalPlanLockShareOrOrderProof"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_terminal_plan_lock_share_or_order_proof/"
+
+[[logical_kind]]
+slice_id = "a07"
+row_id = "a07:logical-kind:result-delivery-state"
+object_kind = 0x0538
+name = "ResultDeliveryState"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_state/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -28142,7 +28197,7 @@ symbol = "AttemptFamilyState"
 generic_signature = ""
 source_key = "top|AttemptFamilyState"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1716"]
 
 [[top_level_candidate]]
@@ -30962,7 +31017,7 @@ symbol = "GlobalAttemptIndex"
 generic_signature = ""
 source_key = "top|GlobalAttemptIndex"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1784"]
 
 [[top_level_candidate]]
@@ -33442,7 +33497,7 @@ symbol = "MetaReadAuditEvidence"
 generic_signature = ""
 source_key = "top|MetaReadAuditEvidence"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1764"]
 
 [[top_level_candidate]]
@@ -33642,7 +33697,7 @@ symbol = "NoTerminalPlanLockShareOrOrderProof"
 generic_signature = ""
 source_key = "top|NoTerminalPlanLockShareOrOrderProof"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1756"]
 
 [[top_level_candidate]]
@@ -37202,7 +37257,7 @@ symbol = "ResultDeliveryState"
 generic_signature = ""
 source_key = "top|ResultDeliveryState"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a07:1730"]
 
 [[top_level_candidate]]
@@ -51741,6 +51796,46 @@ source_key = "arm|QuotaPath|QuotaPath|Feature"
 target_kind = "wire-type"
 definition_status = "declared"
 
+[[target]]
+row_id = "a07:target:logical-kind-attempt-family-state"
+target_row_id = "a07:logical-kind:attempt-family-state"
+slice_id = "a07"
+source_key = "top|AttemptFamilyState"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-global-attempt-index"
+target_row_id = "a07:logical-kind:global-attempt-index"
+slice_id = "a07"
+source_key = "top|GlobalAttemptIndex"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-meta-read-audit-evidence"
+target_row_id = "a07:logical-kind:meta-read-audit-evidence"
+slice_id = "a07"
+source_key = "top|MetaReadAuditEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-no-terminal-plan-lock-share-or-order-proof"
+target_row_id = "a07:logical-kind:no-terminal-plan-lock-share-or-order-proof"
+slice_id = "a07"
+source_key = "top|NoTerminalPlanLockShareOrOrderProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:logical-kind-result-delivery-state"
+target_row_id = "a07:logical-kind:result-delivery-state"
+slice_id = "a07"
+source_key = "top|ResultDeliveryState"
+target_kind = "logical-kind"
+definition_status = "declared"
+
 [[source_symbol_disposition]]
 row_id = "a01:source-symbol-disposition:export-leaf"
 slice_id = "a01"
@@ -61177,3 +61272,22 @@ source_locations = ["a02:1449"]
 resolution = "not-a-durable-schema"
 resolved_source_keys = ["field|PlacementRecord|PlacementRecord.placement_id|placement_id"]
 rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `PlacementRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a09:ambiguity-adjudication:34cf0a3cb4495aaffdd79a0489e1b6a8caa672ad4ed267b7e32b2c42f13e59b1"
+slice_id = "a09"
+ambiguity_source_key = "ambiguity|alias-expression-unparsed|LocalFinalCertificationReserveSpec|LocalFinalCertificationReserveSpec|a32bbf40609069648836f761b1fb115433bc2242b4fa4298af19f4278fe9adf4|1|75484acecbb70003eedd8126b4b23fdfad84b05eff09d3b603bdbd9d01a2b071|alias body is neither a top-level pipe union nor a record body"
+source_locations = ["a09:1904"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|LocalFinalCertificationReserveSpec"]
+rationale = "a09:1904: the flagged span is the body of `FinalCertificationReservationRecord<Local> {plan_ref,registration_identity,finalization_generation,sorted_mappings,permanent_spent_extension_commitment,applied_control_ref,state:Active}`, which the sentence introduces as the object `LocalFinalCertificationReserveSpec`'s apply INSTALLS. The parser attributes the brace body to the sentence's grammatical subject, so the alias expression is unparsed against that subject rather than against the record. The affected key is the subject itself, which a07 registers as a structural definition at a07:1750 and mints at its reserved code 0x030a."
+
+[[ambiguity_adjudication]]
+row_id = "a09:ambiguity-adjudication:31cc7fb171ebf8e60218481acbf4ae4a9a46c47d0bf7e2636d2c44c14dbd5dcc"
+slice_id = "a09"
+ambiguity_source_key = "ambiguity|conflicting-candidate-evidence|LocalFinalCertificationReserveSpec|LocalFinalCertificationReserveSpec|a32bbf40609069648836f761b1fb115433bc2242b4fa4298af19f4278fe9adf4|1|75484acecbb70003eedd8126b4b23fdfad84b05eff09d3b603bdbd9d01a2b071|the same schema source key has divergent structural bodies"
+source_locations = ["a09:1904"]
+resolution = "maps-to-source"
+resolved_source_keys = ["top|LocalFinalCertificationReserveSpec"]
+rationale = "a09:1904: the same span carries a second structural body for `top|LocalFinalCertificationReserveSpec`, whose own definition is a07:1750. a09 references the symbol and shows an installed record inside the same sentence, so the two bodies diverge for one source key. The divergence resolves to the a07 owner's definition; a09 contributes no competing structural claim."
+
