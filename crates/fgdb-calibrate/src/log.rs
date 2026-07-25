@@ -4599,6 +4599,72 @@ mod tests {
     }
 
     #[test]
+    fn a_reordered_or_repeated_record_stream_is_rejected() -> TestResult {
+        // `append` enforces canonical order, and `decode_canonical` replays it
+        // by routing every decoded record back through `append`. That is a
+        // structural guarantee rather than an advisory one — but nothing
+        // exercised it from OUTSIDE, against bytes this process did not build.
+        // A decoder that trusted the wire order would happily deserialise a log
+        // whose records are out of canonical order, and "nothing is dropped or
+        // reordered" would then hold only for logs assembled in-process, which
+        // is not the claim a replayable decision log makes.
+        let eprocess = eprocess_record(10, 19)?;
+        let conformal = conformal_record(10, 19)?;
+        let mut log = StatisticalDecisionLog::try_new(4)?;
+        log.append(eprocess)?;
+        log.append(conformal)?;
+        let canonical = log.encode_canonical()?;
+        assert_eq!(read_log(&canonical, 4)?, log);
+
+        // Header is magic, version, reserved, maximum_records, record_count;
+        // then one u32-length-prefixed frame per record.
+        const HEADER: usize = LOG_MAGIC.len() + 2 + 2 + 4 + 4;
+        let frame_len = |at: usize| -> usize {
+            let raw: [u8; 4] = canonical[at..at + 4]
+                .try_into()
+                .expect("four length bytes are present");
+            u32::from_le_bytes(raw) as usize
+        };
+        let first_len = frame_len(HEADER);
+        let second_at = HEADER + 4 + first_len;
+        let second_len = frame_len(second_at);
+        // Confirms the frame walk consumed the whole encoding, so the splices
+        // below are operating on real frame boundaries rather than on offsets
+        // that merely happen to parse.
+        assert_eq!(second_at + 4 + second_len, canonical.len());
+        let first_frame = &canonical[HEADER..second_at];
+        let second_frame = &canonical[second_at..];
+
+        // Same two records, same record_count, reversed on the wire.
+        let mut reordered = Vec::new();
+        reordered.extend_from_slice(&canonical[..HEADER]);
+        reordered.extend_from_slice(second_frame);
+        reordered.extend_from_slice(first_frame);
+        assert_eq!(reordered.len(), canonical.len());
+        assert_ne!(reordered, canonical);
+        assert!(matches!(
+            read_log(&reordered, 4),
+            Err(StatisticalLogCodecError::InvalidAppend(
+                StatisticalLogAppendError::RecordNotInCanonicalOrder { .. }
+            ))
+        ));
+
+        // The same frame twice: a stream that would silently double-count one
+        // monitor observation if the decoder trusted its input.
+        let mut repeated = Vec::new();
+        repeated.extend_from_slice(&canonical[..HEADER]);
+        repeated.extend_from_slice(first_frame);
+        repeated.extend_from_slice(first_frame);
+        assert!(matches!(
+            read_log(&repeated, 4),
+            Err(StatisticalLogCodecError::InvalidAppend(
+                StatisticalLogAppendError::DuplicateRecord { .. }
+            ))
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn each_float_domain_validator_accepts_exactly_its_declared_domain() {
         // Every statistic field is validated by one of five domain rules, and
         // none of the five had a direct test. The accept/reject sets below
