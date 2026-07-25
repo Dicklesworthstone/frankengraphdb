@@ -2367,6 +2367,126 @@ mod tests {
     }
 
     #[test]
+    fn every_ann_recall_profile_bound_is_validated_at_construction() -> Result<(), AnnRecallError> {
+        // One perturbation per bound off a known-good baseline. The checks are
+        // ordered, so each input clears every earlier rule and trips only its
+        // own.
+        let build = |top_k, queries, result_ids, exponent, candidate, rebuild| {
+            AnnRecallProfile::try_new(
+                oid(2),
+                top_k,
+                queries,
+                result_ids,
+                exponent,
+                candidate,
+                rebuild,
+                supported_assumptions(),
+            )
+            .map(|_| ())
+        };
+        let half = RECALL_SCALE / 2;
+        let quarter = RECALL_SCALE / 4;
+        assert!(build(4, 8, 64, 1, half, quarter).is_ok());
+
+        assert_eq!(
+            build(0, 8, 64, 1, half, quarter),
+            Err(AnnRecallError::ZeroTopK)
+        );
+        assert_eq!(
+            build(MAX_RECALL_TOP_K + 1, 8, 64, 1, half, quarter),
+            Err(AnnRecallError::TopKTooLarge {
+                actual: MAX_RECALL_TOP_K + 1,
+                maximum: MAX_RECALL_TOP_K,
+            })
+        );
+        assert_eq!(
+            build(4, 0, 64, 1, half, quarter),
+            Err(AnnRecallError::ZeroQueryLimit)
+        );
+        assert_eq!(
+            build(4, MAX_RECALL_QUERIES + 1, 64, 1, half, quarter),
+            Err(AnnRecallError::QueryLimitTooLarge {
+                actual: MAX_RECALL_QUERIES + 1,
+                maximum: MAX_RECALL_QUERIES,
+            })
+        );
+        assert_eq!(
+            build(4, 8, 0, 1, half, quarter),
+            Err(AnnRecallError::ZeroResultIdLimit)
+        );
+        assert_eq!(
+            build(4, 8, MAX_RECALL_RESULT_IDS + 1, 1, half, quarter),
+            Err(AnnRecallError::ResultIdLimitTooLarge {
+                actual: MAX_RECALL_RESULT_IDS + 1,
+                maximum: MAX_RECALL_RESULT_IDS,
+            })
+        );
+
+        // Recall needs the exact baseline and the candidate list for one query,
+        // so a budget below 2*top_k could not measure even a single query.
+        assert_eq!(
+            build(4, 8, 7, 1, half, quarter),
+            Err(AnnRecallError::ResultIdLimitCannotCoverOneQuery {
+                required: 8,
+                maximum: 7,
+            })
+        );
+
+        for exponent in [0, MAX_CONFIDENCE_EXPONENT + 1] {
+            assert_eq!(
+                build(4, 8, 64, exponent, half, quarter),
+                Err(AnnRecallError::InvalidConfidenceExponent {
+                    actual: exponent,
+                    minimum: 1,
+                    maximum: MAX_CONFIDENCE_EXPONENT,
+                })
+            );
+        }
+
+        // Both thresholds are fixed-point fractions, so neither may exceed one.
+        // The two arms are distinguished by field, which is what stops a
+        // decoder from reading one bound in place of the other.
+        assert_eq!(
+            build(4, 8, 64, 1, RECALL_SCALE + 1, quarter),
+            Err(AnnRecallError::RecallThresholdAboveOne {
+                field: RecallThresholdKind::Candidate,
+                actual: RECALL_SCALE + 1,
+            })
+        );
+        assert_eq!(
+            build(4, 8, 64, 1, RECALL_SCALE, RECALL_SCALE + 1),
+            Err(AnnRecallError::RecallThresholdAboveOne {
+                field: RecallThresholdKind::Rebuild,
+                actual: RECALL_SCALE + 1,
+            })
+        );
+
+        // Rebuilding at a recall the candidate gate would already have accepted
+        // is incoherent: the ordering between the two gates is the policy.
+        assert_eq!(
+            build(4, 8, 64, 1, quarter, half),
+            Err(AnnRecallError::RebuildThresholdAboveCandidate {
+                rebuild: half,
+                candidate: quarter,
+            })
+        );
+
+        // Each declared maximum is itself admissible.
+        assert!(
+            build(
+                4,
+                8,
+                64,
+                MAX_CONFIDENCE_EXPONENT,
+                RECALL_SCALE,
+                RECALL_SCALE
+            )
+            .is_ok()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn computes_known_recall_from_result_intersections() -> Result<(), AnnRecallError> {
         let mut ledger =
             AnnRecallLedger::try_new(identity(2)?, profile(2, 4, 0, 0, supported_assumptions())?)?;
