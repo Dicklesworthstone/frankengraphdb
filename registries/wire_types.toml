@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 22
+registry_epoch = 23
 
 [[type]]
 wire_type_id = 0x0001
@@ -1441,4 +1441,103 @@ containing_union = "CommittedDeltaSourceRef"
 wire_tag = 0x0002
 encoding_context = "arm Global of closed union CommittedDeltaSourceRef"
 allowed_containing_schemas = ["CommittedDeltaSourceRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0096
+name = "CheckpointBasis"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["CheckpointBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0097
+name = "GlobalControlOrigin"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["GlobalControlOrigin"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0098
+name = "GlobalOutcomeDirectoryValue"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["GlobalOutcomeDirectoryValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0099
+name = "LegacyDispositionRef"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["LegacyDispositionRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x009a
+name = "LegacyTransferEvidenceRef"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["LegacyTransferEvidenceRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x009b
+name = "PostActivationCapabilityMigrationInitialSubject"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationInitialSubject"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x009c
+name = "PostActivationCapabilityMigrationSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x009d
+name = "PublicTerminalProgressProjection"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["PublicTerminalProgressProjection"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x009e
+name = "RetiredLocalReclamationProgress"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["RetiredLocalReclamationProgress"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x009f
+name = "RetirementReadinessRef"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["RetirementReadinessRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00a0
+name = "TerminalPublicOutcome"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["TerminalPublicOutcome"]
 max_size_bytes = 16777216

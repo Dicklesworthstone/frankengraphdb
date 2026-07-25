@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 897
+target_count = 913
 projection_fallback_count = 85
-target_source_assignment_sha256 = "6b91c2ecf1812409bddc3420faa4d9ebaa9a5529c7630e3add11082ff4c42a64"
+target_source_assignment_sha256 = "5dab3835b7abce23849fa7814ba79402a6b832f8849cc7ba7db6aac8b5a4382d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 21
+registry_epoch = 22
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -641,7 +641,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 22
+registry_epoch = 23
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -2515,6 +2515,61 @@ construction_order = 10
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_escaping_allocation_reservation_record/"
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:capability-migration-index"
+object_kind = 0x04ce
+name = "CapabilityMigrationIndex"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/capability_migration_index/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:certified-legacy-local-artifact-ref"
+object_kind = 0x026b
+name = "CertifiedLegacyLocalArtifactRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certified_legacy_local_artifact_ref/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:global-state-payload"
+object_kind = 0x02c9
+name = "GlobalStatePayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_state_payload/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:global-txn-record"
+object_kind = 0x02d0
+name = "GlobalTxnRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_record/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:sharding-migration-retention-floor"
+object_kind = 0x0487
+name = "ShardingMigrationRetentionFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_migration_retention_floor/"
+
 [[physical_kind]]
 slice_id = "a02"
 row_id = "a02:physical-kind:ciphertext-record"
@@ -4452,6 +4507,127 @@ wire_tag = 0x0002
 status = "reserved"
 encoding_context = "arm Global of closed union CommittedDeltaSourceRef"
 allowed_containing_schemas = ["CommittedDeltaSourceRef"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a05"
+row_id = "a05:wire-type:checkpoint-basis"
+wire_type_id = 0x0096
+name = "CheckpointBasis"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["CheckpointBasis"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a05"
+row_id = "a05:wire-type:global-control-origin"
+wire_type_id = 0x0097
+name = "GlobalControlOrigin"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["GlobalControlOrigin"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a05"
+row_id = "a05:wire-type:global-outcome-directory-value"
+wire_type_id = 0x0098
+name = "GlobalOutcomeDirectoryValue"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["GlobalOutcomeDirectoryValue"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a05"
+row_id = "a05:wire-type:legacy-disposition-ref"
+wire_type_id = 0x0099
+name = "LegacyDispositionRef"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["LegacyDispositionRef"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a05"
+row_id = "a05:wire-type:legacy-transfer-evidence-ref"
+wire_type_id = 0x009a
+name = "LegacyTransferEvidenceRef"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["LegacyTransferEvidenceRef"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a05"
+row_id = "a05:wire-type:post-activation-capability-migration-initial-subject"
+wire_type_id = 0x009b
+name = "PostActivationCapabilityMigrationInitialSubject"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationInitialSubject"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a05"
+row_id = "a05:wire-type:post-activation-capability-migration-spec"
+wire_type_id = 0x009c
+name = "PostActivationCapabilityMigrationSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["PostActivationCapabilityMigrationSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a05"
+row_id = "a05:wire-type:public-terminal-progress-projection"
+wire_type_id = 0x009d
+name = "PublicTerminalProgressProjection"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["PublicTerminalProgressProjection"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a05"
+row_id = "a05:wire-type:retired-local-reclamation-progress"
+wire_type_id = 0x009e
+name = "RetiredLocalReclamationProgress"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["RetiredLocalReclamationProgress"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a05"
+row_id = "a05:wire-type:retirement-readiness-ref"
+wire_type_id = 0x009f
+name = "RetirementReadinessRef"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["RetirementReadinessRef"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a05"
+row_id = "a05:wire-type:terminal-public-outcome"
+wire_type_id = 0x00a0
+name = "TerminalPublicOutcome"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical W12 genesis/role-transition record"
+allowed_containing_schemas = ["TerminalPublicOutcome"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -14342,7 +14518,7 @@ symbol = "CapabilityMigrationIndex"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04ce"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:catalog-authority-head"
@@ -14432,7 +14608,7 @@ symbol = "CertifiedLegacyLocalArtifactRef"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x026b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:certified-role-transition-ref"
@@ -15548,7 +15724,7 @@ symbol = "GlobalStatePayload"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02c9"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:global-state-root"
@@ -15611,7 +15787,7 @@ symbol = "GlobalTxnRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02d0"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-txn-workspace-generation"
@@ -19976,7 +20152,7 @@ symbol = "ShardingMigrationRetentionFloor"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0487"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:sharding-migration-state"
@@ -22396,7 +22572,7 @@ symbol = "CapabilityMigrationIndex"
 generic_signature = ""
 source_key = "top|CapabilityMigrationIndex"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1644"]
 
 [[top_level_candidate]]
@@ -22516,7 +22692,7 @@ symbol = "CertifiedLegacyLocalArtifactRef"
 generic_signature = "<T>"
 source_key = "top|CertifiedLegacyLocalArtifactRef<T>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1604"]
 
 [[top_level_candidate]]
@@ -22566,7 +22742,7 @@ symbol = "CheckpointBasis"
 generic_signature = ""
 source_key = "top|CheckpointBasis"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a05:1624"]
 
 [[top_level_candidate]]
@@ -24156,7 +24332,7 @@ symbol = "GlobalControlOrigin"
 generic_signature = ""
 source_key = "top|GlobalControlOrigin"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a05:1658"]
 
 [[top_level_candidate]]
@@ -24356,7 +24532,7 @@ symbol = "GlobalOutcomeDirectoryValue"
 generic_signature = ""
 source_key = "top|GlobalOutcomeDirectoryValue"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a05:1656"]
 
 [[top_level_candidate]]
@@ -24556,7 +24732,7 @@ symbol = "GlobalStatePayload"
 generic_signature = ""
 source_key = "top|GlobalStatePayload"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1650"]
 
 [[top_level_candidate]]
@@ -24676,7 +24852,7 @@ symbol = "GlobalTxnRecord"
 generic_signature = ""
 source_key = "top|GlobalTxnRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1658"]
 
 [[top_level_candidate]]
@@ -25106,7 +25282,7 @@ symbol = "LegacyDispositionRef"
 generic_signature = ""
 source_key = "top|LegacyDispositionRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a05:1612"]
 
 [[top_level_candidate]]
@@ -25256,7 +25432,7 @@ symbol = "LegacyTransferEvidenceRef"
 generic_signature = ""
 source_key = "top|LegacyTransferEvidenceRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a05:1608"]
 
 [[top_level_candidate]]
@@ -27156,7 +27332,7 @@ symbol = "PostActivationCapabilityMigrationInitialSubject"
 generic_signature = ""
 source_key = "top|PostActivationCapabilityMigrationInitialSubject"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a05:1642"]
 
 [[top_level_candidate]]
@@ -27166,7 +27342,7 @@ symbol = "PostActivationCapabilityMigrationSpec"
 generic_signature = ""
 source_key = "top|PostActivationCapabilityMigrationSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a05:1642"]
 
 [[top_level_candidate]]
@@ -27806,7 +27982,7 @@ symbol = "PublicTerminalProgressProjection"
 generic_signature = ""
 source_key = "top|PublicTerminalProgressProjection"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a05:1654"]
 
 [[top_level_candidate]]
@@ -30416,7 +30592,7 @@ symbol = "RetiredLocalReclamationProgress"
 generic_signature = ""
 source_key = "top|RetiredLocalReclamationProgress"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a05:1620"]
 
 [[top_level_candidate]]
@@ -30436,7 +30612,7 @@ symbol = "RetirementReadinessRef"
 generic_signature = ""
 source_key = "top|RetirementReadinessRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a05:1612"]
 
 [[top_level_candidate]]
@@ -31726,7 +31902,7 @@ symbol = "ShardingMigrationRetentionFloor"
 generic_signature = ""
 source_key = "top|ShardingMigrationRetentionFloor"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1610"]
 
 [[top_level_candidate]]
@@ -32116,7 +32292,7 @@ symbol = "TerminalPublicOutcome"
 generic_signature = ""
 source_key = "top|TerminalPublicOutcome"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a05:1654"]
 
 [[top_level_candidate]]
@@ -40355,6 +40531,134 @@ row_id = "a11:target:wire-type-committed-delta-source-ref-global"
 target_row_id = "a11:wire-type:committed-delta-source-ref-global"
 slice_id = "a11"
 source_key = "arm|CommittedDeltaSourceRef|CommittedDeltaSourceRef|Global"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-capability-migration-index"
+target_row_id = "a05:logical-kind:capability-migration-index"
+slice_id = "a05"
+source_key = "top|CapabilityMigrationIndex"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-certified-legacy-local-artifact-ref"
+target_row_id = "a05:logical-kind:certified-legacy-local-artifact-ref"
+slice_id = "a05"
+source_key = "top|CertifiedLegacyLocalArtifactRef<T>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-global-state-payload"
+target_row_id = "a05:logical-kind:global-state-payload"
+slice_id = "a05"
+source_key = "top|GlobalStatePayload"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-global-txn-record"
+target_row_id = "a05:logical-kind:global-txn-record"
+slice_id = "a05"
+source_key = "top|GlobalTxnRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-sharding-migration-retention-floor"
+target_row_id = "a05:logical-kind:sharding-migration-retention-floor"
+slice_id = "a05"
+source_key = "top|ShardingMigrationRetentionFloor"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:wire-type-checkpoint-basis"
+target_row_id = "a05:wire-type:checkpoint-basis"
+slice_id = "a05"
+source_key = "top|CheckpointBasis"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:wire-type-global-control-origin"
+target_row_id = "a05:wire-type:global-control-origin"
+slice_id = "a05"
+source_key = "top|GlobalControlOrigin"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:wire-type-global-outcome-directory-value"
+target_row_id = "a05:wire-type:global-outcome-directory-value"
+slice_id = "a05"
+source_key = "top|GlobalOutcomeDirectoryValue"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:wire-type-legacy-disposition-ref"
+target_row_id = "a05:wire-type:legacy-disposition-ref"
+slice_id = "a05"
+source_key = "top|LegacyDispositionRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:wire-type-legacy-transfer-evidence-ref"
+target_row_id = "a05:wire-type:legacy-transfer-evidence-ref"
+slice_id = "a05"
+source_key = "top|LegacyTransferEvidenceRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:wire-type-post-activation-capability-migration-initial-subject"
+target_row_id = "a05:wire-type:post-activation-capability-migration-initial-subject"
+slice_id = "a05"
+source_key = "top|PostActivationCapabilityMigrationInitialSubject"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:wire-type-post-activation-capability-migration-spec"
+target_row_id = "a05:wire-type:post-activation-capability-migration-spec"
+slice_id = "a05"
+source_key = "top|PostActivationCapabilityMigrationSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:wire-type-public-terminal-progress-projection"
+target_row_id = "a05:wire-type:public-terminal-progress-projection"
+slice_id = "a05"
+source_key = "top|PublicTerminalProgressProjection"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:wire-type-retired-local-reclamation-progress"
+target_row_id = "a05:wire-type:retired-local-reclamation-progress"
+slice_id = "a05"
+source_key = "top|RetiredLocalReclamationProgress"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:wire-type-retirement-readiness-ref"
+target_row_id = "a05:wire-type:retirement-readiness-ref"
+slice_id = "a05"
+source_key = "top|RetirementReadinessRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:wire-type-terminal-public-outcome"
+target_row_id = "a05:wire-type:terminal-public-outcome"
+slice_id = "a05"
+source_key = "top|TerminalPublicOutcome"
 target_kind = "wire-type"
 definition_status = "declared"
 

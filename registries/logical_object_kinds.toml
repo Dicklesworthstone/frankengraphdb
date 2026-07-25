@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 21
+registry_epoch = 22
 
 [[kind]]
 object_kind = 0x0001
@@ -324,6 +324,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/certificate_signer_lock/"
 
 [[kind]]
+object_kind = 0x026b
+name = "CertifiedLegacyLocalArtifactRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certified_legacy_local_artifact_ref/"
+
+[[kind]]
 object_kind = 0x0278
 name = "ConfigurationState"
 status = "reserved"
@@ -403,6 +412,24 @@ construction_order = 6
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/external_key_destruction_provider_receipt/"
+
+[[kind]]
+object_kind = 0x02c9
+name = "GlobalStatePayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_state_payload/"
+
+[[kind]]
+object_kind = 0x02d0
+name = "GlobalTxnRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_record/"
 
 [[kind]]
 object_kind = 0x02d4
@@ -1143,6 +1170,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_time_bound_subject_retirement_proof/"
 
 [[kind]]
+object_kind = 0x0487
+name = "ShardingMigrationRetentionFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_migration_retention_floor/"
+
+[[kind]]
 object_kind = 0x0488
 name = "ShardingMigrationState"
 status = "reserved"
@@ -1357,6 +1393,15 @@ construction_order = 62
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/verifier_key_retirement_floor/"
+
+[[kind]]
+object_kind = 0x04ce
+name = "CapabilityMigrationIndex"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/capability_migration_index/"
 
 [[kind]]
 object_kind = 0x04d3

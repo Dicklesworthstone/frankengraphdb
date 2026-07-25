@@ -1063,11 +1063,11 @@ pub fn generic_free_family(name: &str) -> &str {
 /// row, reassigning its code/tag, or silently changing a union arm therefore
 /// fails even when the resulting current snapshot is internally consistent.
 pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
-    const LOGICAL: &str = "fnv1a64:68b18f6722b98503";
+    const LOGICAL: &str = "fnv1a64:90ad7db4bbf55d02";
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:61db9d62dd1e0e9f";
+    const WIRE: &str = "fnv1a64:46fdcf53e2ffe125";
     const FIELDS: &str = "fnv1a64:769590295407c4d0";
 
     let logical = rows_pin(
@@ -1190,7 +1190,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     vec![
         AssignmentPin {
             registry: "logical_object_kinds",
-            expected_epoch: 21,
+            expected_epoch: 22,
             actual_epoch: r.logical_epoch,
             expected_pin: LOGICAL,
             actual_pin: logical,
@@ -1218,7 +1218,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "wire_types",
-            expected_epoch: 22,
+            expected_epoch: 23,
             actual_epoch: r.wire_epoch,
             expected_pin: WIRE,
             actual_pin: wire,
