@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 27
+registry_epoch = 28
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 27);
+    assert_eq!(epoch, 28);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3147,6 +3147,28 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "generated union walkers",
         ),
         (
+            0x0008,
+            "generated_scanned_root_inventory_ref",
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("KeyReferenceInventory"),
+            40,
+            "10 <= 80",
+        ),
+        (
+            0x0009,
+            "zero_reference_proof_ref",
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("ZeroReferenceProof"),
+            40,
+            "10 <= 80",
+        ),
+        (
             0x000a,
             "backup_legal_hold_and_external_consumer_ack_refs",
             "KeyDestroyExternalAckRef",
@@ -3156,6 +3178,17 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             None,
             16_777_216,
             "generated union walkers",
+        ),
+        (
+            0x000b,
+            "threshold_authorization_ref",
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("KeyDestructionAuthorization"),
+            40,
+            "10 <= 80",
         ),
         (
             0x000c,
@@ -3172,7 +3205,7 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     assert_eq!(
         proposal_fields.len(),
         expected_fields.len(),
-        "only the fully resolved I7 field cohort may land"
+        "only the fully resolved I7 and I8 field cohorts may land"
     );
     for (
         field,
@@ -3206,6 +3239,63 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         );
     }
 
+    for (name, row_suffix, code, role, slice_id) in [
+        (
+            "KeyDestructionAuthorization",
+            "key-destruction-authorization",
+            0x02dc,
+            "role-local",
+            "a15",
+        ),
+        (
+            "KeyReferenceInventory",
+            "key-reference-inventory",
+            0x02e8,
+            "true",
+            "a06",
+        ),
+        (
+            "ZeroReferenceProof",
+            "zero-reference-proof",
+            0x04bd,
+            "true",
+            "a06",
+        ),
+    ] {
+        let logical = identity
+            .logical
+            .iter()
+            .find(|logical| logical.name == name)
+            .expect("I8 logical shell exists");
+        assert_eq!(logical.object_kind, code);
+        assert_eq!(logical.status, "reserved");
+        assert_eq!(logical.construction_order, 10);
+        assert_eq!(logical.role_predicate, role);
+        assert_eq!(logical.max_size_bytes, 16_777_216);
+
+        let reservation = catalog
+            .reservations
+            .iter()
+            .find(|reservation| reservation.symbol == name)
+            .expect("I8 reservation exists");
+        assert_eq!(reservation.slice_id, slice_id);
+        assert_eq!(reservation.code_reservation, format!("{code:#06x}"));
+        assert_eq!(reservation.disposition, "existing");
+
+        let target_row_id = format!("{slice_id}:logical-kind:{row_suffix}");
+        let target = catalog
+            .targets
+            .iter()
+            .find(|target| target.target_row_id == target_row_id)
+            .expect("I8 projection target exists");
+        assert_eq!(
+            target.source_key,
+            format!("projection|logical_object_kinds|{name}")
+        );
+        assert_eq!(target.target_kind, "logical-kind");
+        assert_eq!(target.definition_status, "declared");
+    }
+
     let mut proposal_field_targets = catalog
         .targets
         .iter()
@@ -3226,15 +3316,27 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "a15:field:key-destroy-proposal-expected-current-configuration-ref",
         ),
         (
+            "field|KeyDestroyProposal|KeyDestroyProposal.generated_scanned_root_inventory_ref|generated_scanned_root_inventory_ref",
+            "a15:field:key-destroy-proposal-generated-scanned-root-inventory-ref",
+        ),
+        (
             "field|KeyDestroyProposal|KeyDestroyProposal.sorted_destruction_operation_plans|sorted_destruction_operation_plans",
             "a15:field:key-destroy-proposal-sorted-destruction-operation-plans",
+        ),
+        (
+            "field|KeyDestroyProposal|KeyDestroyProposal.threshold_authorization_ref|threshold_authorization_ref",
+            "a15:field:key-destroy-proposal-threshold-authorization-ref",
+        ),
+        (
+            "field|KeyDestroyProposal|KeyDestroyProposal.zero_reference_proof_ref|zero_reference_proof_ref",
+            "a15:field:key-destroy-proposal-zero-reference-proof-ref",
         ),
     ];
     expected_target_rows.sort_by_key(|(source_key, _)| *source_key);
     assert_eq!(
         proposal_field_targets.len(),
         expected_target_rows.len(),
-        "each I7 field source key must map exactly once"
+        "each I7/I8 field source key must map exactly once"
     );
     for (target, (source_key, target_row_id)) in
         proposal_field_targets.into_iter().zip(expected_target_rows)
@@ -4153,16 +4255,20 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("TimeValidationEvidence", "observation_import_ref")
         )
     };
-    // A15 I7 adds the first four fully resolved KeyDestroyProposal members.
-    // Remove them as a cohort so the historical witness still reconstructs
-    // the exact namespace predating every post-erratum field increment.
-    let post_erratum_a15_i7_field = |schema: &str, name: &str| {
+    // A15 I7 and I8 add the first seven fully resolved KeyDestroyProposal
+    // members. Remove them as one cohort so the historical witness still
+    // reconstructs the exact namespace predating every post-erratum field
+    // increment.
+    let post_erratum_a15_field = |schema: &str, name: &str| {
         schema == "KeyDestroyProposal"
             && matches!(
                 name,
                 "expected_current_configuration_ref"
                     | "checkpoint_and_configuration_floor_refs"
+                    | "generated_scanned_root_inventory_ref"
+                    | "zero_reference_proof_ref"
                     | "backup_legal_hold_and_external_consumer_ack_refs"
+                    | "threshold_authorization_ref"
                     | "sorted_destruction_operation_plans"
             )
     };
@@ -4170,7 +4276,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         !post_erratum_union(&field.exact_wire_type)
             && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a16_reference_field(&field.containing_schema, &field.stable_name)
-            && !post_erratum_a15_i7_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a15_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 82,
@@ -4178,9 +4284,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove exactly the post-erratum A15, A01, A16, and A03 unions"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 47,
+        pre_erratum.fields.len() + 50,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through A15 I7"
+        "the historical witness must remove every post-erratum field cohort through A15 I8"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

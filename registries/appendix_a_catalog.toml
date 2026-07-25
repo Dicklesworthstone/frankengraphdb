@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 913
-projection_fallback_count = 85
-target_source_assignment_sha256 = "5dab3835b7abce23849fa7814ba79402a6b832f8849cc7ba7db6aac8b5a4382d"
+target_count = 919
+projection_fallback_count = 88
+target_source_assignment_sha256 = "a606ab441e058fd34fc0b2573dd50e607abd9f6ebeacf0b8a2e825c8a22d3bb9"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 22
+registry_epoch = 23
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 23
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 27
+registry_epoch = 28
 
 [[logical_kind]]
 slice_id = "a03"
@@ -1910,6 +1910,39 @@ construction_order = 80
 role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/key_destroy_proposal/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:key-destruction-authorization"
+object_kind = 0x02dc
+name = "KeyDestructionAuthorization"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_destruction_authorization/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:key-reference-inventory"
+object_kind = 0x02e8
+name = "KeyReferenceInventory"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_reference_inventory/"
+
+[[logical_kind]]
+slice_id = "a06"
+row_id = "a06:logical-kind:zero-reference-proof"
+object_kind = 0x04bd
+name = "ZeroReferenceProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/zero_reference_proof/"
 
 [[logical_kind]]
 slice_id = "a15"
@@ -8670,6 +8703,40 @@ max_size_bytes = 16777216
 
 [[field]]
 slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-generated-scanned-root-inventory-ref"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x0008
+stable_name = "generated_scanned_root_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyReferenceInventory"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the complete generated key-reference inventory scanned for the proposal; retained with the proposal, and the acyclic order 10 <= 80 keeps the reference backward-only (a15:2059)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-zero-reference-proof-ref"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x0009
+stable_name = "zero_reference_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ZeroReferenceProof"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the zero-reference proof authenticating the proposal's scanned inventory; retained with the proposal, and the acyclic order 10 <= 80 keeps the reference backward-only (a15:2059)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a15"
 row_id = "a15:field:key-destroy-proposal-backup-legal-hold-and-external-consumer-ack-refs"
 containing_schema = "KeyDestroyProposal"
 field_tag = 0x000a
@@ -8683,6 +8750,23 @@ role_predicate = "role-local"
 retention_and_cut_rule = "closed inline backup/legal-hold/remote-consumer acknowledgement-reference inventory; generated union walkers retain each selected target while the proposal is retained (a15:2057-2059)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-threshold-authorization-ref"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x000b
+stable_name = "threshold_authorization_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyDestructionAuthorization"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the threshold authorization required by the proposal; retained with the proposal, and the acyclic order 10 <= 80 keeps the reference backward-only (a15:2059)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 slice_id = "a15"
@@ -15895,7 +15979,7 @@ symbol = "KeyDestructionAuthorization"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02dc"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:key-destruction-certificate"
@@ -16003,7 +16087,7 @@ symbol = "KeyReferenceInventory"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02e8"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a15:reservation:key-reference-quarantine"
@@ -20773,7 +20857,7 @@ symbol = "ZeroReferenceProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04bd"
-disposition = "reserved"
+disposition = "existing"
 
 [[top_level_candidate]]
 row_id = "a18:top-level-candidate:abandoned-388b2a8e536151d4"
@@ -40660,6 +40744,54 @@ target_row_id = "a05:wire-type:terminal-public-outcome"
 slice_id = "a05"
 source_key = "top|TerminalPublicOutcome"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-key-reference-inventory"
+target_row_id = "a06:logical-kind:key-reference-inventory"
+slice_id = "a06"
+source_key = "projection|logical_object_kinds|KeyReferenceInventory"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:logical-kind-zero-reference-proof"
+target_row_id = "a06:logical-kind:zero-reference-proof"
+slice_id = "a06"
+source_key = "projection|logical_object_kinds|ZeroReferenceProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-key-destruction-authorization"
+target_row_id = "a15:logical-kind:key-destruction-authorization"
+slice_id = "a15"
+source_key = "projection|logical_object_kinds|KeyDestructionAuthorization"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-generated-scanned-root-inventory-ref"
+target_row_id = "a15:field:key-destroy-proposal-generated-scanned-root-inventory-ref"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.generated_scanned_root_inventory_ref|generated_scanned_root_inventory_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-zero-reference-proof-ref"
+target_row_id = "a15:field:key-destroy-proposal-zero-reference-proof-ref"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.zero_reference_proof_ref|zero_reference_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-threshold-authorization-ref"
+target_row_id = "a15:field:key-destroy-proposal-threshold-authorization-ref"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.threshold_authorization_ref|threshold_authorization_ref"
+target_kind = "field"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

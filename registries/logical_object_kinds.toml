@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 22
+registry_epoch = 23
 
 [[kind]]
 object_kind = 0x0001
@@ -477,6 +477,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/key_destroy_proposal/"
 
 [[kind]]
+object_kind = 0x02dc
+name = "KeyDestructionAuthorization"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_destruction_authorization/"
+
+[[kind]]
 object_kind = 0x02e0
 name = "KeyEnvelopeGrantWindow"
 status = "reserved"
@@ -484,6 +493,15 @@ construction_order = 17
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/key_envelope_grant_window/"
+
+[[kind]]
+object_kind = 0x02e8
+name = "KeyReferenceInventory"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_reference_inventory/"
 
 [[kind]]
 object_kind = 0x02ea
@@ -1393,6 +1411,15 @@ construction_order = 62
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/verifier_key_retirement_floor/"
+
+[[kind]]
+object_kind = 0x04bd
+name = "ZeroReferenceProof"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/zero_reference_proof/"
 
 [[kind]]
 object_kind = 0x04ce
