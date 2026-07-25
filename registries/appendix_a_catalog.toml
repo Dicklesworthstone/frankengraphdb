@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 545
+target_count = 547
 projection_fallback_count = 83
-target_source_assignment_sha256 = "897fc92b41d24c0274fb9a302e4394d55dbea64445ce2e708183bb4c198e9a4c"
+target_source_assignment_sha256 = "aa5d55d4ac3b8bbaa90691ad0d7904d02c70f9b4bd248f4204e2401097436226"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -596,7 +596,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 10
+registry_epoch = 11
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -2416,6 +2416,28 @@ status = "active"
 encoding_context = "immutable canonical FEC encoding descriptor carrying no ID: ciphertext ID, FEC profile, transfer length, OTI common, OTI scheme, symbol size, source-block count, symbol auth profile; EncodingId hashes the domain/version plus its COMPLETE canonical bytes, and an ordinary decoder obtains this authenticated descriptor before accepting any symbol"
 allowed_containing_schemas = ["EncodingRecord"]
 max_size_bytes = 256
+
+[[wire_type]]
+slice_id = "a02"
+row_id = "a02:wire-type:filesystem-durability-profile"
+wire_type_id = 0x003d
+name = "FilesystemDurabilityProfile"
+kind = "record"
+status = "reserved"
+encoding_context = "signed, checked-in filesystem durability contract: profile ID and version, OS/kernel range, allowed filesystems and mount predicates, forbidden layers/options, required lock primitive, owner-death rule, stable-inode rule, slot-write rule, file- and directory-sync rules, rename-no-replace rule, cache-flush assumption, probe-suite OID; a profile or mount not matching every predicate is not writable, and FGFS-LINUX-LOCAL-V1 carries exactly the section 5.1 ext4/XFS allowlist"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 65536
+
+[[wire_type]]
+slice_id = "a02"
+row_id = "a02:wire-type:filesystem-instance-record"
+wire_type_id = 0x003e
+name = "FilesystemInstanceRecord"
+kind = "record"
+status = "reserved"
+encoding_context = "local probe result binding one mount to one durability profile: profile ID, probe-suite OID, mount ID, filesystem type, canonical mount options, device-chain digest, directory and manifest device/inode pairs, checked-at, result digest; it is diagnostic evidence only and is never a transferable proof or a semantic root"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 65536
 
 [[wire_type]]
 slice_id = "a01"
@@ -18784,7 +18806,7 @@ symbol = "FilesystemDurabilityProfile"
 generic_signature = ""
 source_key = "top|FilesystemDurabilityProfile"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a02:1445"]
 
 [[top_level_candidate]]
@@ -18794,7 +18816,7 @@ symbol = "FilesystemInstanceRecord"
 generic_signature = ""
 source_key = "top|FilesystemInstanceRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a02:1445"]
 
 [[top_level_candidate]]
@@ -28480,6 +28502,22 @@ row_id = "a02:target:wire-type-encoding-descriptor-without-id"
 target_row_id = "a02:wire-type:encoding-descriptor-without-id"
 slice_id = "a02"
 source_key = "top|EncodingDescriptorWithoutId"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:wire-type-filesystem-durability-profile"
+target_row_id = "a02:wire-type:filesystem-durability-profile"
+slice_id = "a02"
+source_key = "top|FilesystemDurabilityProfile"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:wire-type-filesystem-instance-record"
+target_row_id = "a02:wire-type:filesystem-instance-record"
+slice_id = "a02"
+source_key = "top|FilesystemInstanceRecord"
 target_kind = "wire-type"
 definition_status = "declared"
 

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 10
+registry_epoch = 11
 
 [[type]]
 wire_type_id = 0x0001
@@ -574,3 +574,21 @@ status = "active"
 encoding_context = "immutable canonical FEC encoding descriptor carrying no ID: ciphertext ID, FEC profile, transfer length, OTI common, OTI scheme, symbol size, source-block count, symbol auth profile; EncodingId hashes the domain/version plus its COMPLETE canonical bytes, and an ordinary decoder obtains this authenticated descriptor before accepting any symbol"
 allowed_containing_schemas = ["EncodingRecord"]
 max_size_bytes = 256
+
+[[type]]
+wire_type_id = 0x003d
+name = "FilesystemDurabilityProfile"
+kind = "record"
+status = "reserved"
+encoding_context = "signed, checked-in filesystem durability contract: profile ID and version, OS/kernel range, allowed filesystems and mount predicates, forbidden layers/options, required lock primitive, owner-death rule, stable-inode rule, slot-write rule, file- and directory-sync rules, rename-no-replace rule, cache-flush assumption, probe-suite OID; a profile or mount not matching every predicate is not writable, and FGFS-LINUX-LOCAL-V1 carries exactly the section 5.1 ext4/XFS allowlist"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x003e
+name = "FilesystemInstanceRecord"
+kind = "record"
+status = "reserved"
+encoding_context = "local probe result binding one mount to one durability profile: profile ID, probe-suite OID, mount ID, filesystem type, canonical mount options, device-chain digest, directory and manifest device/inode pairs, checked-at, result digest; it is diagnostic evidence only and is never a transferable proof or a semantic root"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 65536
