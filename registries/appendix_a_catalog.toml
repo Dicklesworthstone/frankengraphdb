@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1050
-projection_fallback_count = 88
-target_source_assignment_sha256 = "a3dae379d01dd58a5b6acc17aaabadafdad6bc0140e3831c187c53b724844cb8"
+target_count = 1051
+projection_fallback_count = 89
+target_source_assignment_sha256 = "5c26f1980a4d16a37f7899c6d223a1a3e76a5d825b2fd58f1ea5ae2b7b2a74af"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 23
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 29
+registry_epoch = 30
 
 [[logical_kind]]
 slice_id = "a03"
@@ -9496,6 +9496,24 @@ role_predicate = "role-local"
 retention_and_cut_rule = "inline authorization recipes sorted by canonical target identity with no duplicate target or operation ID; retained and cut with the proposal (a15:2057-2059)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-txn-record-resulting-global-state-payload-digest"
+containing_schema = "GlobalTxnRecord"
+field_tag = 0x0001
+stable_name = "resulting_global_state_payload_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+target_schema_id = "GlobalStatePayload"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "cross-checks the sibling object; NOT a reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[union]]
 slice_id = "a01"
@@ -44038,6 +44056,14 @@ target_row_id = "a06:logical-kind:shard-recovery-checkpoint"
 slice_id = "a06"
 source_key = "top|ShardRecoveryCheckpoint"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-txn-record-resulting-global-state-payload-digest"
+target_row_id = "a05:field:global-txn-record-resulting-global-state-payload-digest"
+slice_id = "a05"
+source_key = "projection|durable_fields|GlobalTxnRecord.resulting_global_state_payload_digest"
+target_kind = "field"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

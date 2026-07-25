@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 29
+registry_epoch = 30
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -464,6 +464,22 @@ bd_schema_major = 1
 bd_included_field_tags = []
 bd_excluded_field_tags = [1]
 recipe_pin = "fnv1a64:55336bfa5c150521"
+
+[[field]]
+containing_schema = "GlobalTxnRecord"
+field_tag = 0x0001
+stable_name = "resulting_global_state_payload_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+target_schema_id = "GlobalStatePayload"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "cross-checks the sibling object; NOT a reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "KeyDestroyProposal"
