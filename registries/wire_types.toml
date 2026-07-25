@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 12
+registry_epoch = 13
 
 [[type]]
 wire_type_id = 0x0001
@@ -601,3 +601,120 @@ status = "reserved"
 encoding_context = "immutable segment trailer recorded by every sealed segment: database security namespace ID, cluster incarnation, local writer fence epoch, segment ID, sealed length, inventory digest, trailer checksum; the fence epoch is the stale-writer fencing commitment the local VFS checks before any seal, prepared-root update, receipt signature, Raft append acknowledgement or root publication, and the source names this record in prose rather than in CamelCase"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x0040
+name = "DeliveryTransitionAppliedRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: InlineSemanticDetachment | ProtocolMaintenance"
+allowed_containing_schemas = ["DeliveryTransitionAppliedRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0041
+name = "LocalAttemptRegistrationSpec"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Autocommit | ExplicitBegin"
+allowed_containing_schemas = ["LocalAttemptRegistrationSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0042
+name = "LocalAuditTicketOwner"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Control | Operation | Statement"
+allowed_containing_schemas = ["LocalAuditTicketOwner"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0043
+name = "LocalOperationAuditAdmission"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Claimed | NotRequired | PendingUnclaimed"
+allowed_containing_schemas = ["LocalOperationAuditAdmission"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0044
+name = "LocalOutcomeCompactionSpec"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: NeverRegistered | TerminalReady"
+allowed_containing_schemas = ["LocalOutcomeCompactionSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0045
+name = "LocalResultDeliveryOwner"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: AutocommitWriteTerminal | DpResult | Statement | TerminalRead"
+allowed_containing_schemas = ["LocalResultDeliveryOwner"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0046
+name = "LocalResultDeliveryTransitionSpec"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "closed discriminant: Acknowledge | ReleaseUnacked"
+allowed_containing_schemas = ["LocalResultDeliveryTransitionSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0047
+name = "LocalStatementPublishedOutput"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Buffered | NoResult"
+allowed_containing_schemas = ["LocalStatementPublishedOutput"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0048
+name = "ResultAckAuthority"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: EmbeddedFullyConsumed | ReadyChannelResumeCapability"
+allowed_containing_schemas = ["ResultAckAuthority<Role>"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0049
+name = "ResultActivationAppliedRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: InlineSemantic | ProtocolActivation"
+allowed_containing_schemas = ["ResultActivationAppliedRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x004a
+name = "ResultDeliveryServiceAuthority"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: DirectOrdinary | PromotionReceiptRequired"
+allowed_containing_schemas = ["ResultDeliveryServiceAuthority"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x004b
+name = "ResultManifestRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Local | Sharded"
+allowed_containing_schemas = ["ResultManifestRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x004c
+name = "ResultReleaseEvidence"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: ClientRelease | LeaseExpired"
+allowed_containing_schemas = ["ResultReleaseEvidence<Local>"]
+max_size_bytes = 16777216

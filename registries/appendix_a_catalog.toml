@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 552
+target_count = 565
 projection_fallback_count = 84
-target_source_assignment_sha256 = "c9beaf6817dce4a2100f4c2f2591bdae8206b096b163dee379a7591b747a5069"
+target_source_assignment_sha256 = "f30da9d3b6bf136de24503bfbe45364a1754c3eeb7fa4c17c169928125a3d157"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,7 +641,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 12
+registry_epoch = 13
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -2758,6 +2758,161 @@ status = "reserved"
 encoding_context = "Appendix A reference-semantics family WeakShardCommandIdentity (a01); exact member layout per plan lines 1388-1444"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 44
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:delivery-transition-applied-ref"
+wire_type_id = 0x0040
+name = "DeliveryTransitionAppliedRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: InlineSemanticDetachment | ProtocolMaintenance"
+allowed_containing_schemas = ["DeliveryTransitionAppliedRef"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-attempt-registration-spec"
+wire_type_id = 0x0041
+name = "LocalAttemptRegistrationSpec"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Autocommit | ExplicitBegin"
+allowed_containing_schemas = ["LocalAttemptRegistrationSpec"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-audit-ticket-owner"
+wire_type_id = 0x0042
+name = "LocalAuditTicketOwner"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Control | Operation | Statement"
+allowed_containing_schemas = ["LocalAuditTicketOwner"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-operation-audit-admission"
+wire_type_id = 0x0043
+name = "LocalOperationAuditAdmission"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Claimed | NotRequired | PendingUnclaimed"
+allowed_containing_schemas = ["LocalOperationAuditAdmission"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-outcome-compaction-spec"
+wire_type_id = 0x0044
+name = "LocalOutcomeCompactionSpec"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: NeverRegistered | TerminalReady"
+allowed_containing_schemas = ["LocalOutcomeCompactionSpec"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-result-delivery-owner"
+wire_type_id = 0x0045
+name = "LocalResultDeliveryOwner"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: AutocommitWriteTerminal | DpResult | Statement | TerminalRead"
+allowed_containing_schemas = ["LocalResultDeliveryOwner"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-result-delivery-transition-spec"
+wire_type_id = 0x0046
+name = "LocalResultDeliveryTransitionSpec"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "closed discriminant: Acknowledge | ReleaseUnacked"
+allowed_containing_schemas = ["LocalResultDeliveryTransitionSpec"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-statement-published-output"
+wire_type_id = 0x0047
+name = "LocalStatementPublishedOutput"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Buffered | NoResult"
+allowed_containing_schemas = ["LocalStatementPublishedOutput"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:result-ack-authority"
+wire_type_id = 0x0048
+name = "ResultAckAuthority"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: EmbeddedFullyConsumed | ReadyChannelResumeCapability"
+allowed_containing_schemas = ["ResultAckAuthority<Role>"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:result-activation-applied-ref"
+wire_type_id = 0x0049
+name = "ResultActivationAppliedRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: InlineSemantic | ProtocolActivation"
+allowed_containing_schemas = ["ResultActivationAppliedRef"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:result-delivery-service-authority"
+wire_type_id = 0x004a
+name = "ResultDeliveryServiceAuthority"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: DirectOrdinary | PromotionReceiptRequired"
+allowed_containing_schemas = ["ResultDeliveryServiceAuthority"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:result-manifest-ref"
+wire_type_id = 0x004b
+name = "ResultManifestRef"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Local | Sharded"
+allowed_containing_schemas = ["ResultManifestRef"]
+max_size_bytes = 16777216
+
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:result-release-evidence"
+wire_type_id = 0x004c
+name = "ResultReleaseEvidence"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: ClientRelease | LeaseExpired"
+allowed_containing_schemas = ["ResultReleaseEvidence<Local>"]
+max_size_bytes = 16777216
+
 [[field]]
 slice_id = "a03"
 row_id = "a03:field:logical-state-payload-applied-logical-command-seq"
@@ -18422,7 +18577,7 @@ symbol = "DeliveryTransitionAppliedRef"
 generic_signature = ""
 source_key = "top|DeliveryTransitionAppliedRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1512"]
 
 [[top_level_candidate]]
@@ -20572,7 +20727,7 @@ symbol = "LocalAttemptRegistrationSpec"
 generic_signature = ""
 source_key = "top|LocalAttemptRegistrationSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1484"]
 
 [[top_level_candidate]]
@@ -20592,7 +20747,7 @@ symbol = "LocalAuditTicketOwner"
 generic_signature = ""
 source_key = "top|LocalAuditTicketOwner"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1470"]
 
 [[top_level_candidate]]
@@ -20902,7 +21057,7 @@ symbol = "LocalOperationAuditAdmission"
 generic_signature = ""
 source_key = "top|LocalOperationAuditAdmission"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1470"]
 
 [[top_level_candidate]]
@@ -20932,7 +21087,7 @@ symbol = "LocalOutcomeCompactionSpec"
 generic_signature = ""
 source_key = "top|LocalOutcomeCompactionSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1540"]
 
 [[top_level_candidate]]
@@ -21132,7 +21287,7 @@ symbol = "LocalResultDeliveryOwner"
 generic_signature = ""
 source_key = "top|LocalResultDeliveryOwner"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1496"]
 
 [[top_level_candidate]]
@@ -21142,7 +21297,7 @@ symbol = "LocalResultDeliveryTransitionSpec"
 generic_signature = ""
 source_key = "top|LocalResultDeliveryTransitionSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1500"]
 
 [[top_level_candidate]]
@@ -21202,7 +21357,7 @@ symbol = "LocalStatementPublishedOutput"
 generic_signature = ""
 source_key = "top|LocalStatementPublishedOutput"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1488"]
 
 [[top_level_candidate]]
@@ -25262,7 +25417,7 @@ symbol = "ResultAckAuthority"
 generic_signature = "<Role>"
 source_key = "top|ResultAckAuthority<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1506"]
 
 [[top_level_candidate]]
@@ -25282,7 +25437,7 @@ symbol = "ResultActivationAppliedRef"
 generic_signature = ""
 source_key = "top|ResultActivationAppliedRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1496"]
 
 [[top_level_candidate]]
@@ -25362,7 +25517,7 @@ symbol = "ResultDeliveryServiceAuthority"
 generic_signature = ""
 source_key = "top|ResultDeliveryServiceAuthority"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1490"]
 
 [[top_level_candidate]]
@@ -25432,7 +25587,7 @@ symbol = "ResultManifestRef"
 generic_signature = ""
 source_key = "top|ResultManifestRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1510"]
 
 [[top_level_candidate]]
@@ -25442,7 +25597,7 @@ symbol = "ResultReleaseEvidence"
 generic_signature = "<Local>"
 source_key = "top|ResultReleaseEvidence<Local>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1496"]
 
 [[top_level_candidate]]
@@ -25452,7 +25607,7 @@ symbol = "ResultReleaseEvidence"
 generic_signature = "<Meta>"
 source_key = "top|ResultReleaseEvidence<Meta>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a07:1734"]
 
 [[top_level_candidate]]
@@ -25462,7 +25617,7 @@ symbol = "ResultReleaseEvidence"
 generic_signature = "<Role>"
 source_key = "top|ResultReleaseEvidence<Role>"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1516"]
 
 [[top_level_candidate]]
@@ -32528,6 +32683,122 @@ target_row_id = "a16:field:time-validation-evidence-observation-import-ref"
 slice_id = "a16"
 source_key = "field|TimeValidationEvidence|TimeValidationEvidence.observation_import_ref|observation_import_ref"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-delivery-transition-applied-ref"
+target_row_id = "a03:wire-type:delivery-transition-applied-ref"
+slice_id = "a03"
+source_key = "top|DeliveryTransitionAppliedRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-local-attempt-registration-spec"
+target_row_id = "a03:wire-type:local-attempt-registration-spec"
+slice_id = "a03"
+source_key = "top|LocalAttemptRegistrationSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-local-audit-ticket-owner"
+target_row_id = "a03:wire-type:local-audit-ticket-owner"
+slice_id = "a03"
+source_key = "top|LocalAuditTicketOwner"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-local-operation-audit-admission"
+target_row_id = "a03:wire-type:local-operation-audit-admission"
+slice_id = "a03"
+source_key = "top|LocalOperationAuditAdmission"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-local-outcome-compaction-spec"
+target_row_id = "a03:wire-type:local-outcome-compaction-spec"
+slice_id = "a03"
+source_key = "top|LocalOutcomeCompactionSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-local-result-delivery-owner"
+target_row_id = "a03:wire-type:local-result-delivery-owner"
+slice_id = "a03"
+source_key = "top|LocalResultDeliveryOwner"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-local-result-delivery-transition-spec"
+target_row_id = "a03:wire-type:local-result-delivery-transition-spec"
+slice_id = "a03"
+source_key = "top|LocalResultDeliveryTransitionSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-local-statement-published-output"
+target_row_id = "a03:wire-type:local-statement-published-output"
+slice_id = "a03"
+source_key = "top|LocalStatementPublishedOutput"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-result-ack-authority"
+target_row_id = "a03:wire-type:result-ack-authority"
+slice_id = "a03"
+source_key = "top|ResultAckAuthority<Role>"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-result-activation-applied-ref"
+target_row_id = "a03:wire-type:result-activation-applied-ref"
+slice_id = "a03"
+source_key = "top|ResultActivationAppliedRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-result-delivery-service-authority"
+target_row_id = "a03:wire-type:result-delivery-service-authority"
+slice_id = "a03"
+source_key = "top|ResultDeliveryServiceAuthority"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-result-manifest-ref"
+target_row_id = "a03:wire-type:result-manifest-ref"
+slice_id = "a03"
+source_key = "top|ResultManifestRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+
+[[target]]
+row_id = "a03:target:wire-type-result-release-evidence"
+target_row_id = "a03:wire-type:result-release-evidence"
+slice_id = "a03"
+source_key = "top|ResultReleaseEvidence<Local>"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
