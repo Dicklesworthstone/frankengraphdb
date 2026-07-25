@@ -25,20 +25,152 @@ use std::marker::PhantomData;
 
 use crate::ids::{BranchId, CommitSeq, GraphId, ObjectId};
 
+const LOGICAL_OBJECT_KIND_REGISTRY: &[u8] =
+    include_bytes!("../../../registries/logical_object_kinds.toml");
+const ACTIVE_STATUS_ROW: &[u8] = b"status = \"active\"";
+
+const fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+
+    let mut start = 0;
+    while start <= haystack.len() - needle.len() {
+        let mut offset = 0;
+        while offset < needle.len() && haystack[start + offset] == needle[offset] {
+            offset += 1;
+        }
+        if offset == needle.len() {
+            return true;
+        }
+        start += 1;
+    }
+    false
+}
+
+const fn count_bytes(haystack: &[u8], needle: &[u8]) -> usize {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return 0;
+    }
+
+    let mut count = 0;
+    let mut start = 0;
+    while start <= haystack.len() - needle.len() {
+        let mut offset = 0;
+        while offset < needle.len() && haystack[start + offset] == needle[offset] {
+            offset += 1;
+        }
+        if offset == needle.len() {
+            count += 1;
+            start += needle.len();
+        } else {
+            start += 1;
+        }
+    }
+    count
+}
+
+macro_rules! active_logical_object_kinds {
+    ($($variant:ident = $code:literal => $name:literal),+ $(,)?) => {
+        /// Closed descriptor for every active row in
+        /// `registries/logical_object_kinds.toml`.
+        ///
+        /// Code and name are one value, so a [`LogicalObjectKind`] implementation
+        /// cannot pair a registered code with the wrong name or invent an
+        /// unregistered active code. The declarations below are checked against
+        /// the generated registry projection during compilation using only
+        /// `include_bytes!` and const evaluation.
+        #[repr(u16)]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+        pub enum LogicalObjectKindCode {
+            $($variant = $code),+
+        }
+
+        impl LogicalObjectKindCode {
+            /// Active kinds in canonical registry-code order.
+            pub const ALL_ACTIVE: &'static [Self] = &[$(Self::$variant),+];
+
+            /// The exact registered `object_kind` value.
+            pub const fn code(self) -> u16 {
+                self as u16
+            }
+
+            /// The exact registered name paired with this code.
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name),+
+                }
+            }
+
+            /// Decodes an active registered code. Reserved and unknown codes
+            /// remain unavailable until their registry row is activated.
+            pub const fn from_code(code: u16) -> Option<Self> {
+                match code {
+                    $($code => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+
+        $(
+            const _: () = assert!(contains_bytes(
+                LOGICAL_OBJECT_KIND_REGISTRY,
+                concat!(
+                    "object_kind = ",
+                    stringify!($code),
+                    "\nname = \"",
+                    $name,
+                    "\"\nstatus = \"active\""
+                )
+                .as_bytes(),
+            ));
+        )+
+
+        const _: () = assert!(
+            count_bytes(LOGICAL_OBJECT_KIND_REGISTRY, ACTIVE_STATUS_ROW)
+                == LogicalObjectKindCode::ALL_ACTIVE.len()
+        );
+    };
+}
+
+active_logical_object_kinds! {
+    LogicalStatePayload = 0x0001 => "LogicalStatePayload",
+    LogicalCommandRecord = 0x0002 => "LogicalCommandRecord",
+    LogicalStateRoot = 0x0003 => "LogicalStateRoot",
+    CommitCommand = 0x0004 => "CommitCommand",
+    ControlCommand = 0x0005 => "ControlCommand",
+    CommitMarker = 0x0006 => "CommitMarker",
+    RootManifest = 0x0007 => "RootManifest",
+    AuthorityBindingRecord = 0x0008 => "AuthorityBindingRecord",
+    CommitCapsule = 0x000a => "CommitCapsule",
+    PreparedCommitRecord = 0x000b => "PreparedCommitRecord",
+}
+
 /// Implemented by every durable logical object type that references can
-/// target. `OBJECT_KIND` must equal the type's registered code in
-/// `registries/logical_object_kinds.toml`; the registry-check tooling owns
-/// cross-checking codes against the registry, and unit tests here only pin
-/// local distinctness of whatever kinds are linked into a build.
+/// target. Implementors select one closed [`LogicalObjectKindCode`] value, so
+/// code/name consistency and active registry membership are compile-time
+/// properties rather than parallel raw constants.
+///
+/// ```compile_fail
+/// use fgdb_types::{LogicalObjectKind, LogicalObjectKindCode};
+///
+/// struct UnregisteredObject;
+///
+/// impl LogicalObjectKind for UnregisteredObject {
+///     const OBJECT_KIND: LogicalObjectKindCode = 0xffff;
+/// }
+/// ```
 pub trait LogicalObjectKind {
-    const OBJECT_KIND: u16;
-    const KIND_NAME: &'static str;
+    const OBJECT_KIND: LogicalObjectKindCode;
 }
 
 macro_rules! fmt_ref_debug {
     ($name:literal) => {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, concat!($name, "<{}>"), T::KIND_NAME)
+            write!(f, concat!($name, "<{}>"), T::OBJECT_KIND.name())
         }
     };
 }
@@ -63,7 +195,7 @@ impl<T: LogicalObjectKind> StrongRef<T> {
 
     /// The registered kind code of the target type.
     pub const fn target_kind() -> u16 {
-        T::OBJECT_KIND
+        T::OBJECT_KIND.code()
     }
 }
 
@@ -223,14 +355,12 @@ mod tests {
 
     struct CommitCapsule;
     impl LogicalObjectKind for CommitCapsule {
-        const OBJECT_KIND: u16 = 0x0001;
-        const KIND_NAME: &'static str = "CommitCapsule";
+        const OBJECT_KIND: LogicalObjectKindCode = LogicalObjectKindCode::CommitCapsule;
     }
 
     struct CommitMarker;
     impl LogicalObjectKind for CommitMarker {
-        const OBJECT_KIND: u16 = 0x0006;
-        const KIND_NAME: &'static str = "CommitMarker";
+        const OBJECT_KIND: LogicalObjectKindCode = LogicalObjectKindCode::CommitMarker;
     }
 
     fn oid(fill: u8) -> ObjectId {
@@ -248,8 +378,24 @@ mod tests {
             StrongRef::<CommitCapsule>::target_kind(),
             StrongRef::<CommitMarker>::target_kind()
         );
+        assert_eq!(StrongRef::<CommitCapsule>::target_kind(), 0x000a);
         assert_eq!(a.oid(), b.oid());
         assert_eq!(format!("{a:?}"), "StrongRef<CommitCapsule>");
+    }
+
+    #[test]
+    fn active_kind_descriptors_round_trip_in_registry_order() {
+        let mut previous = None;
+        for &kind in LogicalObjectKindCode::ALL_ACTIVE {
+            assert_eq!(LogicalObjectKindCode::from_code(kind.code()), Some(kind));
+            assert!(!kind.name().is_empty());
+            if let Some(previous) = previous {
+                assert!(previous < kind.code());
+            }
+            previous = Some(kind.code());
+        }
+        assert_eq!(LogicalObjectKindCode::from_code(0x0009), None);
+        assert_eq!(LogicalObjectKindCode::from_code(0xffff), None);
     }
 
     #[test]

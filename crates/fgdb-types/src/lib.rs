@@ -36,7 +36,7 @@ pub use ids::{
 };
 pub use refs::{
     CommandRef, ConditionalCoordinateRef, ConditionalMarkerAxis, ConditionalMarkerRef,
-    LogicalObjectKind, MarkerRef, StrongRef, WeakDigest,
+    LogicalObjectKind, LogicalObjectKindCode, MarkerRef, StrongRef, WeakDigest,
 };
 pub use scalar::{
     CanonicalBytes, CanonicalF64, CanonicalScalar, CanonicalScalarResolver, MAX_SCALAR_BYTES,
