@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 20
+registry_epoch = 21
 
 [[kind]]
 object_kind = 0x0001
@@ -1060,6 +1060,15 @@ construction_order = 12
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_escaping_allocation_evidence/"
+
+[[kind]]
+object_kind = 0x044e
+name = "ShardEscapingAllocationReservationRecord"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_escaping_allocation_reservation_record/"
 
 [[kind]]
 object_kind = 0x0458

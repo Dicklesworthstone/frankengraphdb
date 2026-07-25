@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 20
+registry_epoch = 21
 
 [[type]]
 wire_type_id = 0x0001
@@ -1392,4 +1392,22 @@ containing_union = "DeliveryFrontier"
 wire_tag = 0x0002
 encoding_context = "arm Global of closed union DeliveryFrontier"
 allowed_containing_schemas = ["DeliveryFrontier"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0091
+name = "TxnAllocationSlotKey"
+kind = "record"
+status = "reserved"
+encoding_context = "inline key record for one transaction allocation slot; never a client value (a09:1894)"
+allowed_containing_schemas = ["TxnAllocationSlotKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0092
+name = "EscapingAllocationBinding"
+kind = "record"
+status = "reserved"
+encoding_context = "inline binding record from one escaped allocation slot key to its permanent value (a09:1894)"
+allowed_containing_schemas = ["EscapingAllocationBinding"]
 max_size_bytes = 16777216

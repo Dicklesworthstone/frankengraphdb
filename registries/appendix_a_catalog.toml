@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 882
-projection_fallback_count = 84
-target_source_assignment_sha256 = "598d66affe135366149cf96e53243d23ffe8b6049d38689ba1e9b5b456b66bda"
+target_count = 891
+projection_fallback_count = 85
+target_source_assignment_sha256 = "37b9acbda13a3ee33e99ef4026df6f65b138cb7776d1b412aaa2f5de208c2b80"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 20
+registry_epoch = 21
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 20
+registry_epoch = 21
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 26
+registry_epoch = 27
 
 [[logical_kind]]
 slice_id = "a03"
@@ -2505,6 +2505,16 @@ role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_derived_component/"
 
+[[logical_kind]]
+slice_id = "a09"
+row_id = "a09:logical-kind:shard-escaping-allocation-reservation-record"
+object_kind = 0x044e
+name = "ShardEscapingAllocationReservationRecord"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_escaping_allocation_reservation_record/"
 [[physical_kind]]
 slice_id = "a02"
 row_id = "a02:physical-kind:ciphertext-record"
@@ -4383,6 +4393,28 @@ wire_tag = 0x0002
 status = "reserved"
 encoding_context = "arm Global of closed union DeliveryFrontier"
 allowed_containing_schemas = ["DeliveryFrontier"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:txn-allocation-slot-key"
+wire_type_id = 0x0091
+name = "TxnAllocationSlotKey"
+kind = "record"
+status = "reserved"
+encoding_context = "inline key record for one transaction allocation slot; never a client value (a09:1894)"
+allowed_containing_schemas = ["TxnAllocationSlotKey"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a09"
+row_id = "a09:wire-type:escaping-allocation-binding"
+wire_type_id = 0x0092
+name = "EscapingAllocationBinding"
+kind = "record"
+status = "reserved"
+encoding_context = "inline binding record from one escaped allocation slot key to its permanent value (a09:1894)"
+allowed_containing_schemas = ["EscapingAllocationBinding"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -13086,6 +13118,90 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a09"
+row_id = "a09:union:txn-allocation-slot-key-posture-71db5de318ac2939"
+union_name = "TxnAllocationSlotKeyPosture"
+containing_schema = "TxnAllocationSlotKey"
+union_path = "TxnAllocationSlotKey.posture"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TxnAllocationSlotKey"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:txn-allocation-slot-key-posture-local-ddde173e814dbc6e"
+union_name = "TxnAllocationSlotKeyPosture"
+containing_schema = "TxnAllocationSlotKey"
+union_path = "TxnAllocationSlotKey.posture"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:txn-allocation-slot-key-posture-sharded-e24f00658d3ed102"
+union_name = "TxnAllocationSlotKeyPosture"
+containing_schema = "TxnAllocationSlotKey"
+union_path = "TxnAllocationSlotKey.posture"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "sharded"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a09"
+row_id = "a09:union:escaping-allocation-binding-lease-ref-e092fd30f2384b42"
+union_name = "EscapingAllocationBindingLeaseRef"
+containing_schema = "EscapingAllocationBinding"
+union_path = "EscapingAllocationBinding.lease_ref"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["EscapingAllocationBinding"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:escaping-allocation-binding-lease-ref-local-120a5688e2f71b5b"
+union_name = "EscapingAllocationBindingLeaseRef"
+containing_schema = "EscapingAllocationBinding"
+union_path = "EscapingAllocationBinding.lease_ref"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "c2f9e5ba8f2e2e2e55466ee4bd76717deae67cf82a98a53aecee265a991481cf"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a09"
+row_id = "a09:union-arm:escaping-allocation-binding-lease-ref-shard-32693c7aa5d6ec51"
+union_name = "EscapingAllocationBindingLeaseRef"
+containing_schema = "EscapingAllocationBinding"
+union_path = "EscapingAllocationBinding.lease_ref"
+arm_tag = 0x0002
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "3bade59fc760ff4fbfb6f9abf72e7a8106980e12fd524e5e3c60b4a697e46df3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
 slice_id = "a10"
@@ -19240,7 +19356,7 @@ symbol = "ShardEscapingAllocationReservationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x044e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-external-key-destruction-operation-record"
@@ -23350,7 +23466,7 @@ symbol = "EscapingAllocationBinding"
 generic_signature = ""
 source_key = "top|EscapingAllocationBinding"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a09:1894"]
 
 [[top_level_candidate]]
@@ -32410,7 +32526,7 @@ symbol = "TxnAllocationSlotKey"
 generic_signature = ""
 source_key = "top|TxnAllocationSlotKey"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a09:1894"]
 
 [[top_level_candidate]]
@@ -40041,6 +40157,77 @@ target_row_id = "a11:wire-type:delivery-frontier-global"
 slice_id = "a11"
 source_key = "arm|DeliveryFrontier|DeliveryFrontier|Global"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:logical-kind-shard-escaping-allocation-reservation-record"
+target_row_id = "a09:logical-kind:shard-escaping-allocation-reservation-record"
+slice_id = "a09"
+source_key = "projection|logical_object_kinds|ShardEscapingAllocationReservationRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+[[target]]
+row_id = "a09:target:wire-type-txn-allocation-slot-key"
+target_row_id = "a09:wire-type:txn-allocation-slot-key"
+slice_id = "a09"
+source_key = "top|TxnAllocationSlotKey"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-txn-allocation-slot-key-posture-71db5de318ac2939"
+target_row_id = "a09:union:txn-allocation-slot-key-posture-71db5de318ac2939"
+slice_id = "a09"
+source_key = "union|TxnAllocationSlotKey|TxnAllocationSlotKey.posture"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-txn-allocation-slot-key-posture-local-ddde173e814dbc6e"
+target_row_id = "a09:union-arm:txn-allocation-slot-key-posture-local-ddde173e814dbc6e"
+slice_id = "a09"
+source_key = "arm|TxnAllocationSlotKey|TxnAllocationSlotKey.posture|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-txn-allocation-slot-key-posture-sharded-e24f00658d3ed102"
+target_row_id = "a09:union-arm:txn-allocation-slot-key-posture-sharded-e24f00658d3ed102"
+slice_id = "a09"
+source_key = "arm|TxnAllocationSlotKey|TxnAllocationSlotKey.posture|Sharded"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:wire-type-escaping-allocation-binding"
+target_row_id = "a09:wire-type:escaping-allocation-binding"
+slice_id = "a09"
+source_key = "top|EscapingAllocationBinding"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-escaping-allocation-binding-lease-ref-e092fd30f2384b42"
+target_row_id = "a09:union:escaping-allocation-binding-lease-ref-e092fd30f2384b42"
+slice_id = "a09"
+source_key = "union|EscapingAllocationBinding|EscapingAllocationBinding.lease_ref"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-escaping-allocation-binding-lease-ref-local-120a5688e2f71b5b"
+target_row_id = "a09:union-arm:escaping-allocation-binding-lease-ref-local-120a5688e2f71b5b"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationBinding|EscapingAllocationBinding.lease_ref|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a09:target:union-arm-escaping-allocation-binding-lease-ref-shard-32693c7aa5d6ec51"
+target_row_id = "a09:union-arm:escaping-allocation-binding-lease-ref-shard-32693c7aa5d6ec51"
+slice_id = "a09"
+source_key = "arm|EscapingAllocationBinding|EscapingAllocationBinding.lease_ref|Shard"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

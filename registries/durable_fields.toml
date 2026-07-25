@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 26
+registry_epoch = 27
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -3687,6 +3687,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "EscapingAllocationBindingLeaseRef"
+containing_schema = "EscapingAllocationBinding"
+union_path = "EscapingAllocationBinding.lease_ref"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["EscapingAllocationBinding"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "EscapingAllocationCause"
 containing_schema = "EscapingAllocationCause"
 union_path = "EscapingAllocationCause"
@@ -4491,6 +4502,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "TxnAllocationSlotKeyPosture"
+containing_schema = "TxnAllocationSlotKey"
+union_path = "TxnAllocationSlotKey.posture"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TxnAllocationSlotKey"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "TxnOutcomeRecordAuditState"
 containing_schema = "TxnOutcomeRecord"
 union_path = "TxnOutcomeRecord.audit_state"
@@ -4775,6 +4797,32 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "EscapingAllocationBindingLeaseRef"
+containing_schema = "EscapingAllocationBinding"
+union_path = "EscapingAllocationBinding.lease_ref"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "c2f9e5ba8f2e2e2e55466ee4bd76717deae67cf82a98a53aecee265a991481cf"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "EscapingAllocationBindingLeaseRef"
+containing_schema = "EscapingAllocationBinding"
+union_path = "EscapingAllocationBinding.lease_ref"
+arm_tag = 0x0002
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "3bade59fc760ff4fbfb6f9abf72e7a8106980e12fd524e5e3c60b4a697e46df3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "EscapingAllocationCause"
@@ -7076,6 +7124,30 @@ union_path = "TxnAbortSpec.required_abort_source"
 arm_tag = 0x0002
 source_arm_name = "Administrative"
 stable_name = "administrative"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "TxnAllocationSlotKeyPosture"
+containing_schema = "TxnAllocationSlotKey"
+union_path = "TxnAllocationSlotKey.posture"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "TxnAllocationSlotKeyPosture"
+containing_schema = "TxnAllocationSlotKey"
+union_path = "TxnAllocationSlotKey.posture"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "sharded"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
