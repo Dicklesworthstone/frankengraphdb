@@ -1133,20 +1133,20 @@ impl DecisionPolicyEpoch {
         let window = envelope
             .calibration_window()
             .ok_or(DecisionPolicyEpochError::RegimeEvidenceWindowMissing)?;
-        if window.start_seq != expected_start || window.end_seq != expected_end {
+        if window.start_seq() != expected_start || window.end_seq() != expected_end {
             return Err(DecisionPolicyEpochError::RegimeEvidenceWindowMismatch {
                 expected_start,
                 expected_end,
-                actual_start: window.start_seq,
-                actual_end: window.end_seq,
+                actual_start: window.start_seq(),
+                actual_end: window.end_seq(),
             });
         }
-        if fallback_sequence < window.start_seq || fallback_sequence >= window.end_seq {
+        if fallback_sequence < window.start_seq() || fallback_sequence >= window.end_seq() {
             return Err(
                 DecisionPolicyEpochError::RegimeFallbackSequenceOutsideWindow {
                     fallback_sequence,
-                    window_start: window.start_seq,
-                    window_end: window.end_seq,
+                    window_start: window.start_seq(),
+                    window_end: window.end_seq(),
                 },
             );
         }
