@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 7
+registry_epoch = 8
 
 [[kind]]
 object_kind = 0x0001
@@ -295,6 +295,15 @@ construction_order = 39
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/group_time_issuance_quiescence_certificate/"
+
+[[kind]]
+object_kind = 0x02da
+name = "KeyDestroyProposal"
+status = "reserved"
+construction_order = 80
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_destroy_proposal/"
 
 [[kind]]
 object_kind = 0x02e0

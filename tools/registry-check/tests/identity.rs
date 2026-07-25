@@ -2657,6 +2657,89 @@ fn idr_key_destruction_operation_plan_reserved_wire_shell_is_exact() {
 }
 
 #[test]
+fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
+    let identity = real_identity();
+    let logical = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "KeyDestroyProposal")
+        .expect("KeyDestroyProposal logical shell exists");
+    assert_eq!(logical.object_kind, 0x02da);
+    assert_eq!(logical.status, "reserved");
+    assert_eq!(logical.construction_order, 80);
+    assert_eq!(logical.role_predicate, "role-local");
+    assert_eq!(logical.max_size_bytes, 16_777_216);
+    assert_eq!(
+        logical.golden_corpus,
+        "corpus/logical/key_destroy_proposal/"
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|reservation| reservation.symbol == "KeyDestroyProposal")
+        .expect("KeyDestroyProposal permanent reservation exists");
+    assert_eq!(reservation.row_id, "a15:reservation:key-destroy-proposal");
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x02da");
+    assert_eq!(reservation.disposition, "existing");
+
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == "top|KeyDestroyProposal")
+        .expect("KeyDestroyProposal source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == "top|KeyDestroyProposal")
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "source candidate must map exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a15:target:logical-kind-key-destroy-proposal"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a15:logical-kind:key-destroy-proposal"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+
+    assert!(
+        !identity
+            .fields
+            .iter()
+            .any(|field| field.containing_schema == "KeyDestroyProposal"),
+        "the shell must not outrun its unresolved field types or unminted strong targets"
+    );
+    assert!(
+        !identity.ordinary_unions.iter().any(|union| {
+            union.containing_schema == "KeyDestroyProposal"
+                || union.union_name == "KeyDestroyProposal"
+        }) && !identity
+            .unions
+            .iter()
+            .any(|union| union.containing_schema == "KeyDestroyProposal"),
+        "the shell increment must not invent proposal unions"
+    );
+    assert!(
+        !catalog.ambiguity_adjudications.iter().any(|row| {
+            row.ambiguity_source_key.contains("|KeyDestroyProposal|")
+                || row
+                    .resolved_source_keys
+                    .iter()
+                    .any(|source_key| source_key.contains("|KeyDestroyProposal|"))
+        }),
+        "proposal shorthand ambiguities must remain open until exact field types are settled"
+    );
+}
+
+#[test]
 fn idr_role_transition_activation_state_is_a_logical_backed_whole_schema_union() {
     let identity = real_identity();
     let union = identity
