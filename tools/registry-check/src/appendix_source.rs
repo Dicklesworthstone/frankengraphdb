@@ -901,6 +901,62 @@ fn split_top_level(text: &str, delimiters: &[u8]) -> Result<Vec<SplitSpan>, Deli
     Ok(spans)
 }
 
+fn top_level_arrow(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if matches!(byte, b'\'' | b'"') {
+            let quote = byte;
+            let mut escaped = false;
+            cursor += 1;
+            while cursor < bytes.len() {
+                let quoted = bytes[cursor];
+                cursor += 1;
+                if escaped {
+                    escaped = false;
+                } else if quoted == b'\\' {
+                    escaped = true;
+                } else if quoted == quote {
+                    break;
+                }
+            }
+            continue;
+        }
+        if matches!(byte, b'{' | b'[' | b'(')
+            || (byte == b'<' && is_generic_angle_open(text, cursor))
+        {
+            cursor = matching_delimiter(text, cursor).ok()? + 1;
+            continue;
+        }
+        if bytes.get(cursor..cursor + 2) == Some(b"->") {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn indexed_map_value(mapped: &MappedText) -> Option<MappedText> {
+    let trimmed = trim_range(&mapped.text, 0..mapped.text.len());
+    let open = trimmed.start;
+    if mapped.text.as_bytes().get(open) != Some(&b'[') {
+        return None;
+    }
+    let close = matching_delimiter(&mapped.text, open).ok()?;
+    if close + 1 != trimmed.end {
+        return None;
+    }
+    let interior_start = open + 1;
+    let arrow = interior_start + top_level_arrow(&mapped.text[interior_start..close])?;
+    let key = trim_range(&mapped.text, interior_start..arrow);
+    let value = trim_range(&mapped.text, arrow + 2..close);
+    if key.is_empty() || value.is_empty() {
+        return None;
+    }
+    Some(mapped.subrange(value))
+}
+
 fn parse_type_display(text: &str) -> Option<(String, usize)> {
     let bytes = text.as_bytes();
     let start = skip_ascii_whitespace(bytes, 0);
@@ -2014,6 +2070,7 @@ fn parse_union(
     owner_key: &StructuralCandidateKey,
     rows: &mut StructuralOccurrences,
     depth: usize,
+    allow_typed_scalar_payload: bool,
 ) -> bool {
     if depth > MAX_STRUCTURAL_NESTING {
         push_nesting_ambiguity(schema, union_path, mapped, owner_key, &mut rows.ambiguities);
@@ -2176,20 +2233,36 @@ fn parse_union(
                 token.end..alternative_mapped.text.len(),
             );
             if !trailing.is_empty() {
-                let trailing = alternative_mapped.subrange(trailing);
-                rows.ambiguities.push(AmbiguityOccurrence {
-                    kind: AmbiguityKind::UnparsedTrailingTokens,
-                    schema_family: Some(schema.key.family.clone()),
-                    path: Some(format!("{union_path}.{arm_name}")),
-                    raw: normalize_whitespace(&trailing.text),
-                    reason:
-                        "tokens after a union arm name are not part of the closed source grammar"
-                            .to_owned(),
-                    affected_source_keys: affected_source_key(StructuralCandidateKey::Arm(
-                        arm_key.clone(),
-                    )),
-                    source_range: trailing.source_range(0..trailing.text.len()),
-                });
+                let typed_payload = allow_typed_scalar_payload
+                    && alternative_mapped.text.as_bytes().get(trailing.start) == Some(&b':')
+                    && {
+                        let payload_range =
+                            trim_range(&alternative_mapped.text, trailing.start + 1..trailing.end);
+                        if payload_range.is_empty() {
+                            false
+                        } else {
+                            payload = Some(normalize_whitespace(
+                                &alternative_mapped.text[payload_range],
+                            ));
+                            true
+                        }
+                    };
+                if !typed_payload {
+                    let trailing = alternative_mapped.subrange(trailing);
+                    rows.ambiguities.push(AmbiguityOccurrence {
+                        kind: AmbiguityKind::UnparsedTrailingTokens,
+                        schema_family: Some(schema.key.family.clone()),
+                        path: Some(format!("{union_path}.{arm_name}")),
+                        raw: normalize_whitespace(&trailing.text),
+                        reason:
+                            "tokens after a union arm name are not part of the closed source grammar"
+                                .to_owned(),
+                        affected_source_keys: affected_source_key(StructuralCandidateKey::Arm(
+                            arm_key.clone(),
+                        )),
+                        source_range: trailing.source_range(0..trailing.text.len()),
+                    });
+                }
             }
         }
         rows.arms.push(ArmOccurrence {
@@ -2378,6 +2451,19 @@ fn parse_record_fields(
             continue;
         };
         let exact_mapped = field_mapped.subrange(exact_range);
+        if let Some(value_mapped) = indexed_map_value(&exact_mapped)
+            && parse_union(
+                schema,
+                &value_mapped,
+                &field_path,
+                &structural_field_key,
+                rows,
+                depth + 1,
+                true,
+            )
+        {
+            continue;
+        }
         if parse_union(
             schema,
             &exact_mapped,
@@ -2385,6 +2471,7 @@ fn parse_record_fields(
             &structural_field_key,
             rows,
             depth + 1,
+            false,
         ) {
             continue;
         }
@@ -2482,6 +2569,7 @@ fn extract_fields_and_arms(
                 &structural_schema_key,
                 &mut rows,
                 0,
+                false,
             ) {
                 continue;
             }
@@ -3412,7 +3500,7 @@ mod tests {
         AmbiguityCandidate, AmbiguityKind, AmbiguityOccurrence, CensusErrorKind, FieldCandidateKey,
         SchemaCandidateKey, SourceMap, SourceSliceSpec, StructuralCandidateKey,
         affected_source_key, canonical_ambiguities, census_appendix_source, matching_delimiter,
-        normalize_whitespace, source_key_transcript, split_top_level,
+        normalize_whitespace, sha256_hex, source_key_transcript, split_top_level,
     };
 
     fn assert_ambiguity_relation_digest(candidate: &AmbiguityCandidate) {
@@ -3547,6 +3635,80 @@ mod tests {
                 .iter()
                 .all(|candidate| !candidate.locations.is_empty())
         );
+    }
+
+    #[test]
+    fn indexed_map_value_unions_are_first_class_without_reclassifying_plain_maps() {
+        let source = concat!(
+            "`Indexed = {entries:[u16 -> Empty|Record{value:u8}|",
+            "typed_ref:StrongRef<T>],plain:[u8 -> u16],",
+            "nested:[u8 -> Wrapper{state:Open|Closed}]}`.\n",
+        );
+        let slices = [SourceSliceSpec {
+            id: "indexed",
+            start_line: 60,
+            end_line: 60,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 60, &slices)
+            .expect("indexed map value unions must census");
+
+        let entries = census
+            .unions
+            .iter()
+            .find(|union| union.key.union_path == "Indexed.entries")
+            .expect("the indexed-map value is a first-class union");
+        assert_eq!(
+            entries.arm_names,
+            [
+                "Empty".to_owned(),
+                "Record".to_owned(),
+                "typed_ref".to_owned()
+            ]
+        );
+        assert!(
+            census
+                .fields
+                .iter()
+                .any(|field| field.key.path == "Indexed.entries.Record.value"),
+            "record-arm field paths remain unchanged"
+        );
+
+        let typed = census
+            .arms
+            .iter()
+            .find(|arm| arm.key.arm_name == "typed_ref")
+            .expect("a typed scalar value arm remains source-visible");
+        assert_eq!(
+            typed.payload_sha256s,
+            [sha256_hex(b"StrongRef<T>")],
+            "the exact type is committed as the arm payload"
+        );
+
+        assert!(
+            census
+                .unions
+                .iter()
+                .all(|union| union.key.union_path != "Indexed.plain"),
+            "a plain indexed map is not a union"
+        );
+        assert!(
+            census
+                .unions
+                .iter()
+                .all(|union| union.key.union_path != "Indexed.nested"),
+            "a map-to-record with a nested union is not a map-value union"
+        );
+        assert!(
+            census
+                .unions
+                .iter()
+                .any(|union| union.key.union_path == "Indexed.nested.Wrapper.state"),
+            "the nested record union remains visible at its existing path"
+        );
+        assert_eq!(census.counts.field_candidates, 5);
+        assert_eq!(census.counts.union_candidates, 2);
+        assert_eq!(census.counts.arm_candidates, 5);
+        assert_eq!(census.counts.ambiguities, 0);
     }
 
     #[test]
