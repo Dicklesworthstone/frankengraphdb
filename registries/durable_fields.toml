@@ -5328,6 +5328,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RetentionMap"
+containing_schema = "RetentionMap"
+union_path = "RetentionMap"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RetentionMap"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RetiredLocalReclamationProgressState"
 containing_schema = "RetiredLocalReclamationProgress"
 union_path = "RetiredLocalReclamationProgress.state"
@@ -10393,6 +10404,30 @@ payload_sha256 = "a99dfe70cd547545af4db7a66ffbe214b75117c3f670bbee140d09de818de1
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RetentionMap"
+containing_schema = "RetentionMap"
+union_path = "RetentionMap"
+arm_tag = 0x0001
+source_arm_name = "Provisional"
+stable_name = "provisional"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RetentionMap"
+containing_schema = "RetentionMap"
+union_path = "RetentionMap"
+arm_tag = 0x0002
+source_arm_name = "Activated"
+stable_name = "activated"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "RetiredLocalReclamationProgressState"

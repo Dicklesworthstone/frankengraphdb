@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1455
+target_count = 1458
 projection_fallback_count = 90
-target_source_assignment_sha256 = "853fa192d424163e495d5b4ffca3f1ab8ad5b0536ffa7c639b7d0c9efaa86e04"
+target_source_assignment_sha256 = "6e89419d4fc39fbc0c87d9f6e6e14a13d2e6e3ebd1b9a0d51c2f294221ef417d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -20890,6 +20890,19 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:retention-map-ba05f95815f50033"
+union_name = "RetentionMap"
+containing_schema = "RetentionMap"
+union_path = "RetentionMap"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RetentionMap"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a07"
 row_id = "a07:union-arm:result-delivery-state-not-applicable-terminal-ccb5cb0b2e4ecdc3"
@@ -20918,6 +20931,34 @@ payload_sha256 = "956f9197eec6303d51438cfbf7b68d9247ece73f9800378321a074a2d6d625
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:retention-map-provisional-202ba90b415795aa"
+union_name = "RetentionMap"
+containing_schema = "RetentionMap"
+union_path = "RetentionMap"
+arm_tag = 0x0001
+source_arm_name = "Provisional"
+stable_name = "provisional"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:retention-map-activated-659cec29c8a2103f"
+union_name = "RetentionMap"
+containing_schema = "RetentionMap"
+union_path = "RetentionMap"
+arm_tag = 0x0002
+source_arm_name = "Activated"
+stable_name = "activated"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
@@ -52671,6 +52712,30 @@ row_id = "a07:target:union-arm-result-delivery-state-detached-to-protocol-retent
 target_row_id = "a07:union-arm:result-delivery-state-detached-to-protocol-retention-ee2b27f09ae42a37"
 slice_id = "a07"
 source_key = "arm|ResultDeliveryState|ResultDeliveryState|DetachedToProtocolRetention"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-retention-map-ba05f95815f50033"
+target_row_id = "a12:union:retention-map-ba05f95815f50033"
+slice_id = "a12"
+source_key = "union|RetentionMap|RetentionMap"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-retention-map-provisional-202ba90b415795aa"
+target_row_id = "a12:union-arm:retention-map-provisional-202ba90b415795aa"
+slice_id = "a12"
+source_key = "arm|RetentionMap|RetentionMap|Provisional"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-retention-map-activated-659cec29c8a2103f"
+target_row_id = "a12:union-arm:retention-map-activated-659cec29c8a2103f"
+slice_id = "a12"
+source_key = "arm|RetentionMap|RetentionMap|Activated"
 target_kind = "union-arm"
 definition_status = "declared"
 
