@@ -3369,6 +3369,58 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
 }
 
 #[test]
+fn idr_key_reference_quarantine_reserved_logical_shell_is_exact() {
+    let identity = real_identity();
+    let logical = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "KeyReferenceQuarantine")
+        .expect("KeyReferenceQuarantine logical shell exists");
+    assert_eq!(logical.object_kind, 0x02e9);
+    assert_eq!(logical.status, "reserved");
+    assert_eq!(logical.construction_order, 10);
+    assert_eq!(logical.role_predicate, "role-local");
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|reservation| reservation.symbol == "KeyReferenceQuarantine")
+        .expect("KeyReferenceQuarantine permanent reservation exists");
+    assert_eq!(reservation.code_reservation, "0x02e9");
+    assert_eq!(reservation.disposition, "existing");
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == "top|KeyReferenceQuarantine")
+        .expect("KeyReferenceQuarantine source candidate exists");
+    assert_eq!(candidate.source_kind, "ambiguous");
+    assert_eq!(candidate.identity_class, "logical");
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| {
+            target.source_key == "projection|logical_object_kinds|KeyReferenceQuarantine"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(
+        targets[0].target_row_id,
+        "a15:logical-kind:key-reference-quarantine"
+    );
+    assert!(
+        !catalog.ambiguity_adjudications.iter().any(|row| {
+            row.ambiguity_source_key
+                .contains("|KeyReferenceQuarantine|")
+                || row
+                    .resolved_source_keys
+                    .iter()
+                    .any(|source_key| source_key.contains("|KeyReferenceQuarantine|"))
+        }),
+        "the shell mint must not pre-adjudicate the ambiguous source body"
+    );
+}
+
+#[test]
 fn idr_external_key_destruction_provider_receipt_reserved_logical_shell_is_exact() {
     let identity = real_identity();
     let logical = identity

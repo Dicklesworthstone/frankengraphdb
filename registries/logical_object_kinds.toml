@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 33
+registry_epoch = 34
 
 [[kind]]
 object_kind = 0x0001
@@ -808,6 +808,15 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/key_reference_inventory/"
+
+[[kind]]
+object_kind = 0x02e9
+name = "KeyReferenceQuarantine"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_reference_quarantine/"
 
 [[kind]]
 object_kind = 0x02ea

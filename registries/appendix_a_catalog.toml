@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1454
-projection_fallback_count = 89
-target_source_assignment_sha256 = "036273b7b884bb70711746a61f77ba856ecfaef0b6aeb7d0b2867bb0dd0ba09e"
+target_count = 1455
+projection_fallback_count = 90
+target_source_assignment_sha256 = "853fa192d424163e495d5b4ffca3f1ab8ad5b0536ffa7c639b7d0c9efaa86e04"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 33
+registry_epoch = 34
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -1932,6 +1932,17 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/key_reference_inventory/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:key-reference-quarantine"
+object_kind = 0x02e9
+name = "KeyReferenceQuarantine"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_reference_quarantine/"
 
 [[logical_kind]]
 slice_id = "a06"
@@ -23462,7 +23473,7 @@ symbol = "KeyReferenceQuarantine"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02e9"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:lease-window-successor-proof"
@@ -32692,7 +32703,7 @@ symbol = "KeyReferenceQuarantine"
 generic_signature = ""
 source_key = "top|KeyReferenceQuarantine"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a15:2059"]
 
 [[top_level_candidate]]
@@ -48133,6 +48144,14 @@ row_id = "a06:target:logical-kind-key-reference-inventory"
 target_row_id = "a06:logical-kind:key-reference-inventory"
 slice_id = "a06"
 source_key = "projection|logical_object_kinds|KeyReferenceInventory"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-key-reference-quarantine"
+target_row_id = "a15:logical-kind:key-reference-quarantine"
+slice_id = "a15"
+source_key = "projection|logical_object_kinds|KeyReferenceQuarantine"
 target_kind = "logical-kind"
 definition_status = "declared"
 
