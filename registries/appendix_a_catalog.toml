@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1389
+target_count = 1411
 projection_fallback_count = 89
-target_source_assignment_sha256 = "5616054a8af5735fc6c4a5a3f192246fa8f45f3ee53d5e838a1445b14518eedf"
+target_source_assignment_sha256 = "d5d37be9cbd37de760826ae5636d1163ab42effea73bb890540742c229d79b2b"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,7 +641,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 27
+registry_epoch = 28
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -6607,6 +6607,145 @@ status = "reserved"
 encoding_context = "arm SetTemporalInterval of closed union ConstraintStateMutation"
 allowed_containing_schemas = ["ConstraintStateMutation"]
 max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:constraint-state-value"
+wire_type_id = 0x00f3
+name = "ConstraintStateValue"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: EqualityOwner | CardinalityAggregate | ReferenceAggregate | TemporalIntervalSet; the registered constraint state value (a12:1964-1999)"
+allowed_containing_schemas = ["ConstraintStateValue"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:constraint-state-value-equality-owner"
+wire_type_id = 0x00f4
+name = "ConstraintStateValue.equality_owner"
+kind = "union_variant"
+containing_union = "ConstraintStateValue"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm EqualityOwner of closed union ConstraintStateValue"
+allowed_containing_schemas = ["ConstraintStateValue"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:constraint-state-value-cardinality-aggregate"
+wire_type_id = 0x00f5
+name = "ConstraintStateValue.cardinality_aggregate"
+kind = "union_variant"
+containing_union = "ConstraintStateValue"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm CardinalityAggregate of closed union ConstraintStateValue"
+allowed_containing_schemas = ["ConstraintStateValue"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:constraint-state-value-reference-aggregate"
+wire_type_id = 0x00f6
+name = "ConstraintStateValue.reference_aggregate"
+kind = "union_variant"
+containing_union = "ConstraintStateValue"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm ReferenceAggregate of closed union ConstraintStateValue"
+allowed_containing_schemas = ["ConstraintStateValue"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:constraint-state-value-temporal-interval-set"
+wire_type_id = 0x00f7
+name = "ConstraintStateValue.temporal_interval_set"
+kind = "union_variant"
+containing_union = "ConstraintStateValue"
+wire_tag = 0x0004
+status = "reserved"
+encoding_context = "arm TemporalIntervalSet of closed union ConstraintStateValue"
+allowed_containing_schemas = ["ConstraintStateValue"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:quota-path"
+wire_type_id = 0x00f8
+name = "QuotaPath"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "closed union: Database | Tenant | Graph | Branch | Feature; one segment of the canonical nonempty root-to-leaf quota path (a12:1964-1999)"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:quota-path-database"
+wire_type_id = 0x00f9
+name = "QuotaPath.database"
+kind = "union_variant"
+containing_union = "QuotaPath"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm Database of closed union QuotaPath"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:quota-path-tenant"
+wire_type_id = 0x00fa
+name = "QuotaPath.tenant"
+kind = "union_variant"
+containing_union = "QuotaPath"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm Tenant of closed union QuotaPath"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:quota-path-graph"
+wire_type_id = 0x00fb
+name = "QuotaPath.graph"
+kind = "union_variant"
+containing_union = "QuotaPath"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm Graph of closed union QuotaPath"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:quota-path-branch"
+wire_type_id = 0x00fc
+name = "QuotaPath.branch"
+kind = "union_variant"
+containing_union = "QuotaPath"
+wire_tag = 0x0004
+status = "reserved"
+encoding_context = "arm Branch of closed union QuotaPath"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:quota-path-feature"
+wire_type_id = 0x00fd
+name = "QuotaPath.feature"
+kind = "union_variant"
+containing_union = "QuotaPath"
+wire_tag = 0x0005
+status = "reserved"
+encoding_context = "arm Feature of closed union QuotaPath"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 1
 
 [[field]]
 slice_id = "a03"
@@ -19777,6 +19916,32 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:constraint-state-value-271fb14c5c7e4905"
+union_name = "ConstraintStateValue"
+containing_schema = "ConstraintStateValue"
+union_path = "ConstraintStateValue"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateValue"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:quota-path-4f6e3243ad7b834b"
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["QuotaPath"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a07"
 row_id = "a07:union-arm:terminal-abort-authority-source-correctness-required-registered-reason-serialization-failure-9b9d33fea15956dd"
@@ -20038,6 +20203,136 @@ union_path = "ConstraintStateMutation.SetTemporalInterval.after"
 arm_tag = 0x0002
 source_arm_name = "CanonicalInterval"
 stable_name = "canonical_interval"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-value-equality-owner-92e5f3b596419fab"
+union_name = "ConstraintStateValue"
+containing_schema = "ConstraintStateValue"
+union_path = "ConstraintStateValue"
+arm_tag = 0x0001
+source_arm_name = "EqualityOwner"
+stable_name = "equality_owner"
+payload_kind = "inline-record"
+payload_sha256 = "51d6646a30600009a3c89e44fa344731a3df35260cc21d70f74fa8e169ac7190"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-value-cardinality-aggregate-a63fc93fc0fe2d4d"
+union_name = "ConstraintStateValue"
+containing_schema = "ConstraintStateValue"
+union_path = "ConstraintStateValue"
+arm_tag = 0x0002
+source_arm_name = "CardinalityAggregate"
+stable_name = "cardinality_aggregate"
+payload_kind = "inline-record"
+payload_sha256 = "00e5b33f53324a92deb534f930258bb394cda86871ece2edfb970d1f70eca817"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-value-reference-aggregate-22fbed1f8e7255ab"
+union_name = "ConstraintStateValue"
+containing_schema = "ConstraintStateValue"
+union_path = "ConstraintStateValue"
+arm_tag = 0x0003
+source_arm_name = "ReferenceAggregate"
+stable_name = "reference_aggregate"
+payload_kind = "inline-record"
+payload_sha256 = "6feec312b456482de125e535ef5904a15cf691a70d3f98be46d367299efa3f85"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:constraint-state-value-temporal-interval-set-a137521a33bb2f56"
+union_name = "ConstraintStateValue"
+containing_schema = "ConstraintStateValue"
+union_path = "ConstraintStateValue"
+arm_tag = 0x0004
+source_arm_name = "TemporalIntervalSet"
+stable_name = "temporal_interval_set"
+payload_kind = "inline-record"
+payload_sha256 = "a91ca4085952c0a3d7e7026f7b1ce9f4942fb986ba1d37e0209ffa0bfc0d68d2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:quota-path-database-778fba0d77640f49"
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+arm_tag = 0x0001
+source_arm_name = "Database"
+stable_name = "database"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:quota-path-tenant-4127212116ed68c4"
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+arm_tag = 0x0002
+source_arm_name = "Tenant"
+stable_name = "tenant"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:quota-path-graph-e98f3278ebc1bfbf"
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+arm_tag = 0x0003
+source_arm_name = "Graph"
+stable_name = "graph"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:quota-path-branch-898f01ab6f4189f7"
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+arm_tag = 0x0004
+source_arm_name = "Branch"
+stable_name = "branch"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:quota-path-feature-26804d635c173914"
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+arm_tag = 0x0005
+source_arm_name = "Feature"
+stable_name = "feature"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
@@ -29797,7 +30092,7 @@ symbol = "ConstraintStateValue"
 generic_signature = ""
 source_key = "top|ConstraintStateValue"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a12:1978"]
 
 [[top_level_candidate]]
@@ -34607,7 +34902,7 @@ symbol = "QuotaPath"
 generic_signature = ""
 source_key = "top|QuotaPath"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a12:1988"]
 
 [[top_level_candidate]]
@@ -51268,6 +51563,182 @@ target_row_id = "a12:union-arm:constraint-state-mutation-set-temporal-interval-a
 slice_id = "a12"
 source_key = "arm|ConstraintStateMutation|ConstraintStateMutation.SetTemporalInterval.after|CanonicalInterval"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-constraint-state-value"
+target_row_id = "a12:wire-type:constraint-state-value"
+slice_id = "a12"
+source_key = "top|ConstraintStateValue"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-constraint-state-value-271fb14c5c7e4905"
+target_row_id = "a12:union:constraint-state-value-271fb14c5c7e4905"
+slice_id = "a12"
+source_key = "union|ConstraintStateValue|ConstraintStateValue"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-value-equality-owner-92e5f3b596419fab"
+target_row_id = "a12:union-arm:constraint-state-value-equality-owner-92e5f3b596419fab"
+slice_id = "a12"
+source_key = "arm|ConstraintStateValue|ConstraintStateValue|EqualityOwner"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-constraint-state-value-equality-owner"
+target_row_id = "a12:wire-type:constraint-state-value-equality-owner"
+slice_id = "a12"
+source_key = "arm|ConstraintStateValue|ConstraintStateValue|EqualityOwner"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-value-cardinality-aggregate-a63fc93fc0fe2d4d"
+target_row_id = "a12:union-arm:constraint-state-value-cardinality-aggregate-a63fc93fc0fe2d4d"
+slice_id = "a12"
+source_key = "arm|ConstraintStateValue|ConstraintStateValue|CardinalityAggregate"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-constraint-state-value-cardinality-aggregate"
+target_row_id = "a12:wire-type:constraint-state-value-cardinality-aggregate"
+slice_id = "a12"
+source_key = "arm|ConstraintStateValue|ConstraintStateValue|CardinalityAggregate"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-value-reference-aggregate-22fbed1f8e7255ab"
+target_row_id = "a12:union-arm:constraint-state-value-reference-aggregate-22fbed1f8e7255ab"
+slice_id = "a12"
+source_key = "arm|ConstraintStateValue|ConstraintStateValue|ReferenceAggregate"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-constraint-state-value-reference-aggregate"
+target_row_id = "a12:wire-type:constraint-state-value-reference-aggregate"
+slice_id = "a12"
+source_key = "arm|ConstraintStateValue|ConstraintStateValue|ReferenceAggregate"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-constraint-state-value-temporal-interval-set-a137521a33bb2f56"
+target_row_id = "a12:union-arm:constraint-state-value-temporal-interval-set-a137521a33bb2f56"
+slice_id = "a12"
+source_key = "arm|ConstraintStateValue|ConstraintStateValue|TemporalIntervalSet"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-constraint-state-value-temporal-interval-set"
+target_row_id = "a12:wire-type:constraint-state-value-temporal-interval-set"
+slice_id = "a12"
+source_key = "arm|ConstraintStateValue|ConstraintStateValue|TemporalIntervalSet"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-quota-path"
+target_row_id = "a12:wire-type:quota-path"
+slice_id = "a12"
+source_key = "top|QuotaPath"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-quota-path-4f6e3243ad7b834b"
+target_row_id = "a12:union:quota-path-4f6e3243ad7b834b"
+slice_id = "a12"
+source_key = "union|QuotaPath|QuotaPath"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-quota-path-database-778fba0d77640f49"
+target_row_id = "a12:union-arm:quota-path-database-778fba0d77640f49"
+slice_id = "a12"
+source_key = "arm|QuotaPath|QuotaPath|Database"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-quota-path-database"
+target_row_id = "a12:wire-type:quota-path-database"
+slice_id = "a12"
+source_key = "arm|QuotaPath|QuotaPath|Database"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-quota-path-tenant-4127212116ed68c4"
+target_row_id = "a12:union-arm:quota-path-tenant-4127212116ed68c4"
+slice_id = "a12"
+source_key = "arm|QuotaPath|QuotaPath|Tenant"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-quota-path-tenant"
+target_row_id = "a12:wire-type:quota-path-tenant"
+slice_id = "a12"
+source_key = "arm|QuotaPath|QuotaPath|Tenant"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-quota-path-graph-e98f3278ebc1bfbf"
+target_row_id = "a12:union-arm:quota-path-graph-e98f3278ebc1bfbf"
+slice_id = "a12"
+source_key = "arm|QuotaPath|QuotaPath|Graph"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-quota-path-graph"
+target_row_id = "a12:wire-type:quota-path-graph"
+slice_id = "a12"
+source_key = "arm|QuotaPath|QuotaPath|Graph"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-quota-path-branch-898f01ab6f4189f7"
+target_row_id = "a12:union-arm:quota-path-branch-898f01ab6f4189f7"
+slice_id = "a12"
+source_key = "arm|QuotaPath|QuotaPath|Branch"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-quota-path-branch"
+target_row_id = "a12:wire-type:quota-path-branch"
+slice_id = "a12"
+source_key = "arm|QuotaPath|QuotaPath|Branch"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-quota-path-feature-26804d635c173914"
+target_row_id = "a12:union-arm:quota-path-feature-26804d635c173914"
+slice_id = "a12"
+source_key = "arm|QuotaPath|QuotaPath|Feature"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-quota-path-feature"
+target_row_id = "a12:wire-type:quota-path-feature"
+slice_id = "a12"
+source_key = "arm|QuotaPath|QuotaPath|Feature"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

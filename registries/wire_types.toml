@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 27
+registry_epoch = 28
 
 [[type]]
 wire_type_id = 0x0001
@@ -2401,3 +2401,120 @@ wire_tag = 0x0004
 encoding_context = "arm SetTemporalInterval of closed union ConstraintStateMutation"
 allowed_containing_schemas = ["ConstraintStateMutation"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00f3
+name = "ConstraintStateValue"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: EqualityOwner | CardinalityAggregate | ReferenceAggregate | TemporalIntervalSet; the registered constraint state value (a12:1964-1999)"
+allowed_containing_schemas = ["ConstraintStateValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00f4
+name = "ConstraintStateValue.equality_owner"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ConstraintStateValue"
+wire_tag = 0x0001
+encoding_context = "arm EqualityOwner of closed union ConstraintStateValue"
+allowed_containing_schemas = ["ConstraintStateValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00f5
+name = "ConstraintStateValue.cardinality_aggregate"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ConstraintStateValue"
+wire_tag = 0x0002
+encoding_context = "arm CardinalityAggregate of closed union ConstraintStateValue"
+allowed_containing_schemas = ["ConstraintStateValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00f6
+name = "ConstraintStateValue.reference_aggregate"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ConstraintStateValue"
+wire_tag = 0x0003
+encoding_context = "arm ReferenceAggregate of closed union ConstraintStateValue"
+allowed_containing_schemas = ["ConstraintStateValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00f7
+name = "ConstraintStateValue.temporal_interval_set"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ConstraintStateValue"
+wire_tag = 0x0004
+encoding_context = "arm TemporalIntervalSet of closed union ConstraintStateValue"
+allowed_containing_schemas = ["ConstraintStateValue"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00f8
+name = "QuotaPath"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "closed union: Database | Tenant | Graph | Branch | Feature; one segment of the canonical nonempty root-to-leaf quota path (a12:1964-1999)"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x00f9
+name = "QuotaPath.database"
+kind = "union_variant"
+status = "reserved"
+containing_union = "QuotaPath"
+wire_tag = 0x0001
+encoding_context = "arm Database of closed union QuotaPath"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00fa
+name = "QuotaPath.tenant"
+kind = "union_variant"
+status = "reserved"
+containing_union = "QuotaPath"
+wire_tag = 0x0002
+encoding_context = "arm Tenant of closed union QuotaPath"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00fb
+name = "QuotaPath.graph"
+kind = "union_variant"
+status = "reserved"
+containing_union = "QuotaPath"
+wire_tag = 0x0003
+encoding_context = "arm Graph of closed union QuotaPath"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00fc
+name = "QuotaPath.branch"
+kind = "union_variant"
+status = "reserved"
+containing_union = "QuotaPath"
+wire_tag = 0x0004
+encoding_context = "arm Branch of closed union QuotaPath"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x00fd
+name = "QuotaPath.feature"
+kind = "union_variant"
+status = "reserved"
+containing_union = "QuotaPath"
+wire_tag = 0x0005
+encoding_context = "arm Feature of closed union QuotaPath"
+allowed_containing_schemas = ["QuotaPath"]
+max_size_bytes = 1

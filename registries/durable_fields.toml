@@ -3988,6 +3988,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ConstraintStateValue"
+containing_schema = "ConstraintStateValue"
+union_path = "ConstraintStateValue"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConstraintStateValue"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "ContinuityAuthorityCurrentBasis<Role>"
 containing_schema = "ContinuityAuthorityCurrentBasis<Role>"
 union_path = "ContinuityAuthorityCurrentBasis<Role>"
@@ -5000,6 +5011,17 @@ union_path = "PublicTerminalProgressProjection.Sharded.terminal.ReadClose.final_
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["PublicTerminalProgressProjection"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["QuotaPath"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -6192,6 +6214,58 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConstraintStateValue"
+containing_schema = "ConstraintStateValue"
+union_path = "ConstraintStateValue"
+arm_tag = 0x0001
+source_arm_name = "EqualityOwner"
+stable_name = "equality_owner"
+payload_kind = "inline-record"
+payload_sha256 = "51d6646a30600009a3c89e44fa344731a3df35260cc21d70f74fa8e169ac7190"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConstraintStateValue"
+containing_schema = "ConstraintStateValue"
+union_path = "ConstraintStateValue"
+arm_tag = 0x0002
+source_arm_name = "CardinalityAggregate"
+stable_name = "cardinality_aggregate"
+payload_kind = "inline-record"
+payload_sha256 = "00e5b33f53324a92deb534f930258bb394cda86871ece2edfb970d1f70eca817"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConstraintStateValue"
+containing_schema = "ConstraintStateValue"
+union_path = "ConstraintStateValue"
+arm_tag = 0x0003
+source_arm_name = "ReferenceAggregate"
+stable_name = "reference_aggregate"
+payload_kind = "inline-record"
+payload_sha256 = "6feec312b456482de125e535ef5904a15cf691a70d3f98be46d367299efa3f85"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConstraintStateValue"
+containing_schema = "ConstraintStateValue"
+union_path = "ConstraintStateValue"
+arm_tag = 0x0004
+source_arm_name = "TemporalIntervalSet"
+stable_name = "temporal_interval_set"
+payload_kind = "inline-record"
+payload_sha256 = "a91ca4085952c0a3d7e7026f7b1ce9f4942fb986ba1d37e0209ffa0bfc0d68d2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "ContinuityAuthorityCurrentBasis<Role>"
@@ -9355,6 +9429,66 @@ payload_sha256 = "ae9b4dc27025001966e929f6d6c6540893c82c90c767ce08f55c711a710707
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+arm_tag = 0x0001
+source_arm_name = "Database"
+stable_name = "database"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+arm_tag = 0x0002
+source_arm_name = "Tenant"
+stable_name = "tenant"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+arm_tag = 0x0003
+source_arm_name = "Graph"
+stable_name = "graph"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+arm_tag = 0x0004
+source_arm_name = "Branch"
+stable_name = "branch"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "QuotaPath"
+containing_schema = "QuotaPath"
+union_path = "QuotaPath"
+arm_tag = 0x0005
+source_arm_name = "Feature"
+stable_name = "feature"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "ReadParticipantRoutingCertificateExecutionScope"
