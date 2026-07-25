@@ -393,7 +393,8 @@ pub(crate) fn reserve_encoded_output(expected: usize) -> Result<Vec<u8>, Bitpack
 ///
 /// The accessor is evaluated in ascending index order during validation and
 /// again during packing. Internal callers must return the same value for an
-/// index in both passes.
+/// index in both passes. Packing rechecks the selected width so accessor drift
+/// cannot silently discard high bits.
 pub(crate) fn encode_by_index<ValueAt>(
     count: usize,
     width: u8,
@@ -416,7 +417,8 @@ where
 /// The accessor is evaluated in ascending index order during validation and
 /// again during packing. Internal callers must return the same value for an
 /// index in both passes. This lets projected fields be packed without a
-/// `count`-sized staging allocation.
+/// `count`-sized staging allocation. Packing rechecks the selected width so
+/// accessor drift cannot silently discard high bits.
 pub(crate) fn encode_for_by_index<ValueAt>(
     count: usize,
     base: u64,
@@ -560,9 +562,18 @@ where
         return Ok(());
     }
 
+    let exclusive_limit = (width != MAX_BIT_WIDTH).then(|| 1_u64 << width);
     let mut bit_cursor = 0_usize;
     for index in 0..count {
-        pack_value(value_at(index), count, width, output, &mut bit_cursor)?;
+        let value = value_at(index);
+        if exclusive_limit.is_some_and(|limit| value >= limit) {
+            return Err(BitpackError::ValueOutOfRange {
+                index,
+                value,
+                width,
+            });
+        }
+        pack_value(value, count, width, output, &mut bit_cursor)?;
     }
     Ok(())
 }
@@ -581,12 +592,20 @@ where
         return Ok(());
     }
 
+    let exclusive_limit = (width != MAX_BIT_WIDTH).then(|| 1_u64 << width);
     let mut bit_cursor = 0_usize;
     for index in 0..count {
         let value = value_at(index);
         let delta = value
             .checked_sub(base)
             .ok_or(BitpackError::ValueBelowBase { index, value, base })?;
+        if exclusive_limit.is_some_and(|limit| delta >= limit) {
+            return Err(BitpackError::ValueOutOfRange {
+                index,
+                value: delta,
+                width,
+            });
+        }
         pack_value(delta, count, width, output, &mut bit_cursor)?;
     }
     Ok(())
@@ -976,6 +995,47 @@ mod tests {
                 index: 1,
                 value: 16,
                 width: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn second_pass_accessor_drift_cannot_silently_truncate() {
+        let values = [1_u64, 2];
+        let calls = Cell::new(0_usize);
+        assert_eq!(
+            encode_by_index(values.len(), 3, |index| {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call == values.len() {
+                    8
+                } else {
+                    values[index]
+                }
+            }),
+            Err(BitpackError::ValueOutOfRange {
+                index: 0,
+                value: 8,
+                width: 3,
+            })
+        );
+
+        let values = [10_u64, 11];
+        let calls = Cell::new(0_usize);
+        assert_eq!(
+            encode_for_by_index(values.len(), 10, 3, |index| {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call == values.len() {
+                    18
+                } else {
+                    values[index]
+                }
+            }),
+            Err(BitpackError::ValueOutOfRange {
+                index: 0,
+                value: 8,
+                width: 3,
             })
         );
     }
