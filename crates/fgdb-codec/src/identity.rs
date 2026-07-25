@@ -173,6 +173,19 @@ mod sealed {
 ///     IdentityColumnLimits::new(1, 1, 16),
 /// );
 /// ```
+///
+/// ```
+/// use fgdb_codec::identity::{IdentityColumn, IdentityColumnLimits};
+/// use fgdb_types::VId;
+///
+/// let values = [VId(1)];
+/// let column = IdentityColumn::try_new(
+///     &values,
+///     IdentityColumnLimits::new(1, 1, 16),
+/// )
+/// .expect("VId is an accepted element identity");
+/// assert_eq!(column.get(0), Some(VId(1)));
+/// ```
 pub trait ElementIdentity: sealed::Sealed + Copy + Eq + Ord {
     #[doc(hidden)]
     fn from_identity_bits(bits: u128) -> Self;
