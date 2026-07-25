@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2128
+target_count = 2156
 projection_fallback_count = 90
-target_source_assignment_sha256 = "a175000e22271777919276713fb2dd81dd75800d35b7bc8d416e30d08111c363"
+target_source_assignment_sha256 = "6b7dd5b3ee4edeeb754975acbbf14638d8231f3f6246730dafc8de84cb9f98ab"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 31
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 42
+registry_epoch = 43
 
 [[logical_kind]]
 slice_id = "a03"
@@ -24215,6 +24215,397 @@ payload_sha256 = "4c46a602c0e8e0b7d889479e1e1653fd8100270a9d673acc3fde6ba1392466
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:certificate-attempt-abandon-spec-expected-ledger-state-5c2230701fab3d8f"
+union_name = "CertificateAttemptAbandonSpecExpectedLedgerState"
+containing_schema = "CertificateAttemptAbandonSpec"
+union_path = "CertificateAttemptAbandonSpec.expected_ledger_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CertificateAttemptAbandonSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:certificate-attempt-abandon-spec-expected-ledger-state-planned-9a62ca2b5bce4403"
+union_name = "CertificateAttemptAbandonSpecExpectedLedgerState"
+containing_schema = "CertificateAttemptAbandonSpec"
+union_path = "CertificateAttemptAbandonSpec.expected_ledger_state"
+arm_tag = 0x0001
+source_arm_name = "Planned"
+stable_name = "planned"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:certificate-attempt-abandon-spec-expected-ledger-state-collecting-e49a0faee69ed88d"
+union_name = "CertificateAttemptAbandonSpecExpectedLedgerState"
+containing_schema = "CertificateAttemptAbandonSpec"
+union_path = "CertificateAttemptAbandonSpec.expected_ledger_state"
+arm_tag = 0x0002
+source_arm_name = "Collecting"
+stable_name = "collecting"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:configuration-state-form-840b24854ff9a0bf"
+union_name = "ConfigurationStateForm"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.form"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConfigurationState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:configuration-state-form-stable-0a1bbc58b118c9e6"
+union_name = "ConfigurationStateForm"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.form"
+arm_tag = 0x0001
+source_arm_name = "Stable"
+stable_name = "stable"
+payload_kind = "inline-record"
+payload_sha256 = "b6e8e6ad98769662d78540154c1332ea2d66f166c2a7993e5f1d0c7b589d7184"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:configuration-state-form-joint-148afbbccd39558c"
+union_name = "ConfigurationStateForm"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.form"
+arm_tag = 0x0002
+source_arm_name = "Joint"
+stable_name = "joint"
+payload_kind = "inline-record"
+payload_sha256 = "6f32cb135bd2043ea757a832c39c463574a659df954b7b492a5e721d3b468532"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:configuration-state-group-role-39941bc69b54e8f0"
+union_name = "ConfigurationStateGroupRole"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.group_role"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConfigurationState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:configuration-state-group-role-local-011e6147798568d3"
+union_name = "ConfigurationStateGroupRole"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.group_role"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:configuration-state-group-role-meta-28c900d938eb1fe8"
+union_name = "ConfigurationStateGroupRole"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.group_role"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:configuration-state-group-role-shard-88a6f20588cad95e"
+union_name = "ConfigurationStateGroupRole"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.group_role"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:initial-protocol-state-recipe-inherited-or-empty-audit-queue-recipe-5f373115dd89816b"
+union_name = "InitialProtocolStateRecipeInheritedOrEmptyAuditQueueRecipe"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.inherited_or_empty_audit_queue_recipe"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["InitialProtocolStateRecipe<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:initial-protocol-state-recipe-inherited-or-empty-audit-queue-recipe-local-meta-only-e70f6d2ea318f9b1"
+union_name = "InitialProtocolStateRecipeInheritedOrEmptyAuditQueueRecipe"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.inherited_or_empty_audit_queue_recipe"
+arm_tag = 0x0001
+source_arm_name = "LocalMetaOnly"
+stable_name = "local_meta_only"
+payload_kind = "inline-record"
+payload_sha256 = "bbfe4022391fbb3aed5eaa42361b10611c40c7766790d8ea77c8585683fc9849"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:initial-protocol-state-recipe-inherited-or-empty-audit-queue-recipe-shard-inapplicable-1f852c97961d5bbc"
+union_name = "InitialProtocolStateRecipeInheritedOrEmptyAuditQueueRecipe"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.inherited_or_empty_audit_queue_recipe"
+arm_tag = 0x0002
+source_arm_name = "ShardInapplicable"
+stable_name = "shard_inapplicable"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:initial-protocol-state-recipe-source-kind-af3b491970b0c7a6"
+union_name = "InitialProtocolStateRecipeSourceKind"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.source_kind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["InitialProtocolStateRecipe<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:initial-protocol-state-recipe-source-kind-fresh-genesis-c7d6943bc8cd9a39"
+union_name = "InitialProtocolStateRecipeSourceKind"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.source_kind"
+arm_tag = 0x0001
+source_arm_name = "FreshGenesis"
+stable_name = "fresh_genesis"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:initial-protocol-state-recipe-source-kind-restore-d15fd94b35ea9055"
+union_name = "InitialProtocolStateRecipeSourceKind"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.source_kind"
+arm_tag = 0x0002
+source_arm_name = "Restore"
+stable_name = "restore"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:initial-protocol-state-recipe-source-kind-role-transition-d2a132d0b14573ad"
+union_name = "InitialProtocolStateRecipeSourceKind"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.source_kind"
+arm_tag = 0x0003
+source_arm_name = "RoleTransition"
+stable_name = "role_transition"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:initial-protocol-state-recipe-source-kind-takeover-b65d39c9ccd7dde9"
+union_name = "InitialProtocolStateRecipeSourceKind"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.source_kind"
+arm_tag = 0x0004
+source_arm_name = "Takeover"
+stable_name = "takeover"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:topology-state-form-540ccdf539eefc5f"
+union_name = "TopologyStateForm"
+containing_schema = "TopologyState"
+union_path = "TopologyState.form"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TopologyState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:topology-state-form-stable-002c78f29f89cddd"
+union_name = "TopologyStateForm"
+containing_schema = "TopologyState"
+union_path = "TopologyState.form"
+arm_tag = 0x0001
+source_arm_name = "Stable"
+stable_name = "stable"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:topology-state-form-joint-aceadb1499727e6b"
+union_name = "TopologyStateForm"
+containing_schema = "TopologyState"
+union_path = "TopologyState.form"
+arm_tag = 0x0002
+source_arm_name = "Joint"
+stable_name = "joint"
+payload_kind = "inline-record"
+payload_sha256 = "e78dee7f8b7950ddba2bfe3662ed28c920f7383aff310ad74b1c2e8f54a54fd5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:topology-state-partition-scheme-d0adef28c0cc023f"
+union_name = "TopologyStatePartitionScheme"
+containing_schema = "TopologyState"
+union_path = "TopologyState.partition_scheme"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TopologyState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:topology-state-partition-scheme-source-range-ec7b6ee66d9922b4"
+union_name = "TopologyStatePartitionScheme"
+containing_schema = "TopologyState"
+union_path = "TopologyState.partition_scheme"
+arm_tag = 0x0001
+source_arm_name = "SourceRange"
+stable_name = "source_range"
+payload_kind = "inline-record"
+payload_sha256 = "3ebfa60a25d4fc2e659e1b70a3278d0d508213e53f57f1798a0c26dfa899c782"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:topology-state-partition-scheme-hub-vertex-cut-aa12649d42dde09f"
+union_name = "TopologyStatePartitionScheme"
+containing_schema = "TopologyState"
+union_path = "TopologyState.partition_scheme"
+arm_tag = 0x0002
+source_arm_name = "HubVertexCut"
+stable_name = "hub_vertex_cut"
+payload_kind = "inline-record"
+payload_sha256 = "cbb21363227f6dd51a2fb2dff2da95afef311dce6e0416b4bd98b21c8189d91f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:topology-state-sorted-shards-record-state-0c8a00bfdaee009f"
+union_name = "TopologyStateSortedShardsRecordState"
+containing_schema = "TopologyState"
+union_path = "TopologyState.sorted_shards.record.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TopologyState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:topology-state-sorted-shards-record-state-active-8ae0fa54e9e6369f"
+union_name = "TopologyStateSortedShardsRecordState"
+containing_schema = "TopologyState"
+union_path = "TopologyState.sorted_shards.record.state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:topology-state-sorted-shards-record-state-joining-889a7ad707b1c1ac"
+union_name = "TopologyStateSortedShardsRecordState"
+containing_schema = "TopologyState"
+union_path = "TopologyState.sorted_shards.record.state"
+arm_tag = 0x0002
+source_arm_name = "Joining"
+stable_name = "joining"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:topology-state-sorted-shards-record-state-draining-50d9afc57de5df11"
+union_name = "TopologyStateSortedShardsRecordState"
+containing_schema = "TopologyState"
+union_path = "TopologyState.sorted_shards.record.state"
+arm_tag = 0x0003
+source_arm_name = "Draining"
+stable_name = "draining"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union]]
 slice_id = "a18"
@@ -62246,6 +62637,230 @@ target_row_id = "a04:wire-type:remote-retention-control-spec-adopt-legacy-author
 slice_id = "a04"
 source_key = "arm|RemoteRetentionControlSpec|RemoteRetentionControlSpec|AdoptLegacyAuthorityTransfer"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-certificate-attempt-abandon-spec-expected-ledger-state-5c2230701fab3d8f"
+target_row_id = "a04:union:certificate-attempt-abandon-spec-expected-ledger-state-5c2230701fab3d8f"
+slice_id = "a04"
+source_key = "union|CertificateAttemptAbandonSpec|CertificateAttemptAbandonSpec.expected_ledger_state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-certificate-attempt-abandon-spec-expected-ledger-state-planned-9a62ca2b5bce4403"
+target_row_id = "a04:union-arm:certificate-attempt-abandon-spec-expected-ledger-state-planned-9a62ca2b5bce4403"
+slice_id = "a04"
+source_key = "arm|CertificateAttemptAbandonSpec|CertificateAttemptAbandonSpec.expected_ledger_state|Planned"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-certificate-attempt-abandon-spec-expected-ledger-state-collecting-e49a0faee69ed88d"
+target_row_id = "a04:union-arm:certificate-attempt-abandon-spec-expected-ledger-state-collecting-e49a0faee69ed88d"
+slice_id = "a04"
+source_key = "arm|CertificateAttemptAbandonSpec|CertificateAttemptAbandonSpec.expected_ledger_state|Collecting"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-configuration-state-form-840b24854ff9a0bf"
+target_row_id = "a04:union:configuration-state-form-840b24854ff9a0bf"
+slice_id = "a04"
+source_key = "union|ConfigurationState|ConfigurationState.form"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-configuration-state-form-stable-0a1bbc58b118c9e6"
+target_row_id = "a04:union-arm:configuration-state-form-stable-0a1bbc58b118c9e6"
+slice_id = "a04"
+source_key = "arm|ConfigurationState|ConfigurationState.form|Stable"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-configuration-state-form-joint-148afbbccd39558c"
+target_row_id = "a04:union-arm:configuration-state-form-joint-148afbbccd39558c"
+slice_id = "a04"
+source_key = "arm|ConfigurationState|ConfigurationState.form|Joint"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-configuration-state-group-role-39941bc69b54e8f0"
+target_row_id = "a04:union:configuration-state-group-role-39941bc69b54e8f0"
+slice_id = "a04"
+source_key = "union|ConfigurationState|ConfigurationState.group_role"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-configuration-state-group-role-local-011e6147798568d3"
+target_row_id = "a04:union-arm:configuration-state-group-role-local-011e6147798568d3"
+slice_id = "a04"
+source_key = "arm|ConfigurationState|ConfigurationState.group_role|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-configuration-state-group-role-meta-28c900d938eb1fe8"
+target_row_id = "a04:union-arm:configuration-state-group-role-meta-28c900d938eb1fe8"
+slice_id = "a04"
+source_key = "arm|ConfigurationState|ConfigurationState.group_role|Meta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-configuration-state-group-role-shard-88a6f20588cad95e"
+target_row_id = "a04:union-arm:configuration-state-group-role-shard-88a6f20588cad95e"
+slice_id = "a04"
+source_key = "arm|ConfigurationState|ConfigurationState.group_role|Shard"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-initial-protocol-state-recipe-inherited-or-empty-audit-queue-recipe-5f373115dd89816b"
+target_row_id = "a04:union:initial-protocol-state-recipe-inherited-or-empty-audit-queue-recipe-5f373115dd89816b"
+slice_id = "a04"
+source_key = "union|InitialProtocolStateRecipe<Role>|InitialProtocolStateRecipe<Role>.inherited_or_empty_audit_queue_recipe"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-initial-protocol-state-recipe-inherited-or-empty-audit-queue-recipe-local-meta-only-e70f6d2ea318f9b1"
+target_row_id = "a04:union-arm:initial-protocol-state-recipe-inherited-or-empty-audit-queue-recipe-local-meta-only-e70f6d2ea318f9b1"
+slice_id = "a04"
+source_key = "arm|InitialProtocolStateRecipe<Role>|InitialProtocolStateRecipe<Role>.inherited_or_empty_audit_queue_recipe|LocalMetaOnly"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-initial-protocol-state-recipe-inherited-or-empty-audit-queue-recipe-shard-inapplicable-1f852c97961d5bbc"
+target_row_id = "a04:union-arm:initial-protocol-state-recipe-inherited-or-empty-audit-queue-recipe-shard-inapplicable-1f852c97961d5bbc"
+slice_id = "a04"
+source_key = "arm|InitialProtocolStateRecipe<Role>|InitialProtocolStateRecipe<Role>.inherited_or_empty_audit_queue_recipe|ShardInapplicable"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-initial-protocol-state-recipe-source-kind-af3b491970b0c7a6"
+target_row_id = "a04:union:initial-protocol-state-recipe-source-kind-af3b491970b0c7a6"
+slice_id = "a04"
+source_key = "union|InitialProtocolStateRecipe<Role>|InitialProtocolStateRecipe<Role>.source_kind"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-initial-protocol-state-recipe-source-kind-fresh-genesis-c7d6943bc8cd9a39"
+target_row_id = "a04:union-arm:initial-protocol-state-recipe-source-kind-fresh-genesis-c7d6943bc8cd9a39"
+slice_id = "a04"
+source_key = "arm|InitialProtocolStateRecipe<Role>|InitialProtocolStateRecipe<Role>.source_kind|FreshGenesis"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-initial-protocol-state-recipe-source-kind-restore-d15fd94b35ea9055"
+target_row_id = "a04:union-arm:initial-protocol-state-recipe-source-kind-restore-d15fd94b35ea9055"
+slice_id = "a04"
+source_key = "arm|InitialProtocolStateRecipe<Role>|InitialProtocolStateRecipe<Role>.source_kind|Restore"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-initial-protocol-state-recipe-source-kind-role-transition-d2a132d0b14573ad"
+target_row_id = "a04:union-arm:initial-protocol-state-recipe-source-kind-role-transition-d2a132d0b14573ad"
+slice_id = "a04"
+source_key = "arm|InitialProtocolStateRecipe<Role>|InitialProtocolStateRecipe<Role>.source_kind|RoleTransition"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-initial-protocol-state-recipe-source-kind-takeover-b65d39c9ccd7dde9"
+target_row_id = "a04:union-arm:initial-protocol-state-recipe-source-kind-takeover-b65d39c9ccd7dde9"
+slice_id = "a04"
+source_key = "arm|InitialProtocolStateRecipe<Role>|InitialProtocolStateRecipe<Role>.source_kind|Takeover"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-topology-state-form-540ccdf539eefc5f"
+target_row_id = "a04:union:topology-state-form-540ccdf539eefc5f"
+slice_id = "a04"
+source_key = "union|TopologyState|TopologyState.form"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-topology-state-form-stable-002c78f29f89cddd"
+target_row_id = "a04:union-arm:topology-state-form-stable-002c78f29f89cddd"
+slice_id = "a04"
+source_key = "arm|TopologyState|TopologyState.form|Stable"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-topology-state-form-joint-aceadb1499727e6b"
+target_row_id = "a04:union-arm:topology-state-form-joint-aceadb1499727e6b"
+slice_id = "a04"
+source_key = "arm|TopologyState|TopologyState.form|Joint"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-topology-state-partition-scheme-d0adef28c0cc023f"
+target_row_id = "a04:union:topology-state-partition-scheme-d0adef28c0cc023f"
+slice_id = "a04"
+source_key = "union|TopologyState|TopologyState.partition_scheme"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-topology-state-partition-scheme-source-range-ec7b6ee66d9922b4"
+target_row_id = "a04:union-arm:topology-state-partition-scheme-source-range-ec7b6ee66d9922b4"
+slice_id = "a04"
+source_key = "arm|TopologyState|TopologyState.partition_scheme|SourceRange"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-topology-state-partition-scheme-hub-vertex-cut-aa12649d42dde09f"
+target_row_id = "a04:union-arm:topology-state-partition-scheme-hub-vertex-cut-aa12649d42dde09f"
+slice_id = "a04"
+source_key = "arm|TopologyState|TopologyState.partition_scheme|HubVertexCut"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-topology-state-sorted-shards-record-state-0c8a00bfdaee009f"
+target_row_id = "a04:union:topology-state-sorted-shards-record-state-0c8a00bfdaee009f"
+slice_id = "a04"
+source_key = "union|TopologyState|TopologyState.sorted_shards.record.state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-topology-state-sorted-shards-record-state-active-8ae0fa54e9e6369f"
+target_row_id = "a04:union-arm:topology-state-sorted-shards-record-state-active-8ae0fa54e9e6369f"
+slice_id = "a04"
+source_key = "arm|TopologyState|TopologyState.sorted_shards.record.state|Active"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-topology-state-sorted-shards-record-state-joining-889a7ad707b1c1ac"
+target_row_id = "a04:union-arm:topology-state-sorted-shards-record-state-joining-889a7ad707b1c1ac"
+slice_id = "a04"
+source_key = "arm|TopologyState|TopologyState.sorted_shards.record.state|Joining"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-topology-state-sorted-shards-record-state-draining-50d9afc57de5df11"
+target_row_id = "a04:union-arm:topology-state-sorted-shards-record-state-draining-50d9afc57de5df11"
+slice_id = "a04"
+source_key = "arm|TopologyState|TopologyState.sorted_shards.record.state|Draining"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[target]]

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 42
+registry_epoch = 43
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -4101,6 +4101,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "CertificateAttemptAbandonSpecExpectedLedgerState"
+containing_schema = "CertificateAttemptAbandonSpec"
+union_path = "CertificateAttemptAbandonSpec.expected_ledger_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CertificateAttemptAbandonSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "CertifiedLegacyLocalArtifactRef<T>"
 containing_schema = "CertifiedLegacyLocalArtifactRef<T>"
 union_path = "CertifiedLegacyLocalArtifactRef<T>"
@@ -4151,6 +4162,28 @@ union_path = "CommittedDeltaSourceRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["CommittedDeltaSourceRef"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ConfigurationStateForm"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.form"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConfigurationState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ConfigurationStateGroupRole"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.group_role"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConfigurationState"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -4691,6 +4724,28 @@ union_path = "GlobalTxnWorkspaceGeneration.authority_relation_to_registration"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["GlobalTxnWorkspaceGeneration"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "InitialProtocolStateRecipeInheritedOrEmptyAuditQueueRecipe"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.inherited_or_empty_audit_queue_recipe"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["InitialProtocolStateRecipe<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "InitialProtocolStateRecipeSourceKind"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.source_kind"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["InitialProtocolStateRecipe<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -6919,6 +6974,39 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "TopologyStateForm"
+containing_schema = "TopologyState"
+union_path = "TopologyState.form"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TopologyState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "TopologyStatePartitionScheme"
+containing_schema = "TopologyState"
+union_path = "TopologyState.partition_scheme"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TopologyState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "TopologyStateSortedShardsRecordState"
+containing_schema = "TopologyState"
+union_path = "TopologyState.sorted_shards.record.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TopologyState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "TopologyTransitionRecordPhase"
 containing_schema = "TopologyTransitionRecord"
 union_path = "TopologyTransitionRecord.phase"
@@ -7915,6 +8003,30 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "CertificateAttemptAbandonSpecExpectedLedgerState"
+containing_schema = "CertificateAttemptAbandonSpec"
+union_path = "CertificateAttemptAbandonSpec.expected_ledger_state"
+arm_tag = 0x0001
+source_arm_name = "Planned"
+stable_name = "planned"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "CertificateAttemptAbandonSpecExpectedLedgerState"
+containing_schema = "CertificateAttemptAbandonSpec"
+union_path = "CertificateAttemptAbandonSpec.expected_ledger_state"
+arm_tag = 0x0002
+source_arm_name = "Collecting"
+stable_name = "collecting"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
 union_name = "CertifiedLegacyLocalArtifactRef<T>"
 containing_schema = "CertifiedLegacyLocalArtifactRef<T>"
 union_path = "CertifiedLegacyLocalArtifactRef<T>"
@@ -8111,6 +8223,69 @@ source_arm_name = "Global"
 stable_name = "global"
 payload_kind = "inline-record"
 payload_sha256 = "0d76de718152db77b3c6e2aae639ff58e5aaae777b7bc0ed297243c762f1f89d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConfigurationStateForm"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.form"
+arm_tag = 0x0001
+source_arm_name = "Stable"
+stable_name = "stable"
+payload_kind = "inline-record"
+payload_sha256 = "b6e8e6ad98769662d78540154c1332ea2d66f166c2a7993e5f1d0c7b589d7184"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConfigurationStateForm"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.form"
+arm_tag = 0x0002
+source_arm_name = "Joint"
+stable_name = "joint"
+payload_kind = "inline-record"
+payload_sha256 = "6f32cb135bd2043ea757a832c39c463574a659df954b7b492a5e721d3b468532"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConfigurationStateGroupRole"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.group_role"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConfigurationStateGroupRole"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.group_role"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConfigurationStateGroupRole"
+containing_schema = "ConfigurationState"
+union_path = "ConfigurationState.group_role"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -9836,6 +10011,79 @@ payload_sha256 = "f53b50e4446adbf4a41be75d3b9ce48033ed51036e059f9b6e7be144720083
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "InitialProtocolStateRecipeInheritedOrEmptyAuditQueueRecipe"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.inherited_or_empty_audit_queue_recipe"
+arm_tag = 0x0001
+source_arm_name = "LocalMetaOnly"
+stable_name = "local_meta_only"
+payload_kind = "inline-record"
+payload_sha256 = "bbfe4022391fbb3aed5eaa42361b10611c40c7766790d8ea77c8585683fc9849"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "InitialProtocolStateRecipeInheritedOrEmptyAuditQueueRecipe"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.inherited_or_empty_audit_queue_recipe"
+arm_tag = 0x0002
+source_arm_name = "ShardInapplicable"
+stable_name = "shard_inapplicable"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "InitialProtocolStateRecipeSourceKind"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.source_kind"
+arm_tag = 0x0001
+source_arm_name = "FreshGenesis"
+stable_name = "fresh_genesis"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "InitialProtocolStateRecipeSourceKind"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.source_kind"
+arm_tag = 0x0002
+source_arm_name = "Restore"
+stable_name = "restore"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "InitialProtocolStateRecipeSourceKind"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.source_kind"
+arm_tag = 0x0003
+source_arm_name = "RoleTransition"
+stable_name = "role_transition"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "InitialProtocolStateRecipeSourceKind"
+containing_schema = "InitialProtocolStateRecipe<Role>"
+union_path = "InitialProtocolStateRecipe<Role>.source_kind"
+arm_tag = 0x0004
+source_arm_name = "Takeover"
+stable_name = "takeover"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "KeyDestroyExternalAckRef"
@@ -16903,6 +17151,93 @@ payload_sha256 = "9014dac0ca75b7ca0fb49a31176fd244678c4841ec6fede891223a652a504d
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TopologyStateForm"
+containing_schema = "TopologyState"
+union_path = "TopologyState.form"
+arm_tag = 0x0001
+source_arm_name = "Stable"
+stable_name = "stable"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "TopologyStateForm"
+containing_schema = "TopologyState"
+union_path = "TopologyState.form"
+arm_tag = 0x0002
+source_arm_name = "Joint"
+stable_name = "joint"
+payload_kind = "inline-record"
+payload_sha256 = "e78dee7f8b7950ddba2bfe3662ed28c920f7383aff310ad74b1c2e8f54a54fd5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TopologyStatePartitionScheme"
+containing_schema = "TopologyState"
+union_path = "TopologyState.partition_scheme"
+arm_tag = 0x0001
+source_arm_name = "SourceRange"
+stable_name = "source_range"
+payload_kind = "inline-record"
+payload_sha256 = "3ebfa60a25d4fc2e659e1b70a3278d0d508213e53f57f1798a0c26dfa899c782"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TopologyStatePartitionScheme"
+containing_schema = "TopologyState"
+union_path = "TopologyState.partition_scheme"
+arm_tag = 0x0002
+source_arm_name = "HubVertexCut"
+stable_name = "hub_vertex_cut"
+payload_kind = "inline-record"
+payload_sha256 = "cbb21363227f6dd51a2fb2dff2da95afef311dce6e0416b4bd98b21c8189d91f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TopologyStateSortedShardsRecordState"
+containing_schema = "TopologyState"
+union_path = "TopologyState.sorted_shards.record.state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "TopologyStateSortedShardsRecordState"
+containing_schema = "TopologyState"
+union_path = "TopologyState.sorted_shards.record.state"
+arm_tag = 0x0002
+source_arm_name = "Joining"
+stable_name = "joining"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "TopologyStateSortedShardsRecordState"
+containing_schema = "TopologyState"
+union_path = "TopologyState.sorted_shards.record.state"
+arm_tag = 0x0003
+source_arm_name = "Draining"
+stable_name = "draining"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "TopologyTransitionRecordPhase"

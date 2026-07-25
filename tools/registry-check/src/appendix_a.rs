@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2128;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2156;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "fdc6bf53aad794abc78fde71a82993803dbf3d39ad0cd77abdcd9e3a0405f7a3";
+    "ef33c354d9549ba2eb9827a33807bdd621ec19729013b95ba4be96ce2a7a8864";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 90;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "a175000e22271777919276713fb2dd81dd75800d35b7bc8d416e30d08111c363";
+    "6b7dd5b3ee4edeeb754975acbbf14638d8231f3f6246730dafc8de84cb9f98ab";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -16184,6 +16184,138 @@ stable_name = "Ready"
             assert_eq!(targets[0].target_row_id, row_id);
             assert_eq!(targets[0].target_kind, "field");
             assert_eq!(targets[0].definition_status, "declared");
+        }
+    }
+
+    #[test]
+    fn a04_source_ordered_embedded_union_targets_are_exact() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let expected = [
+            (
+                "CertificateAttemptAbandonSpecExpectedLedgerState",
+                "CertificateAttemptAbandonSpec",
+                "CertificateAttemptAbandonSpec.expected_ledger_state",
+                &[("Planned", 0x0001), ("Collecting", 0x0002)][..],
+            ),
+            (
+                "ConfigurationStateForm",
+                "ConfigurationState",
+                "ConfigurationState.form",
+                &[("Stable", 0x0001), ("Joint", 0x0002)][..],
+            ),
+            (
+                "ConfigurationStateGroupRole",
+                "ConfigurationState",
+                "ConfigurationState.group_role",
+                &[("Local", 0x0001), ("Meta", 0x0002), ("Shard", 0x0003)][..],
+            ),
+            (
+                "InitialProtocolStateRecipeInheritedOrEmptyAuditQueueRecipe",
+                "InitialProtocolStateRecipe<Role>",
+                "InitialProtocolStateRecipe<Role>.inherited_or_empty_audit_queue_recipe",
+                &[("LocalMetaOnly", 0x0001), ("ShardInapplicable", 0x0002)][..],
+            ),
+            (
+                "InitialProtocolStateRecipeSourceKind",
+                "InitialProtocolStateRecipe<Role>",
+                "InitialProtocolStateRecipe<Role>.source_kind",
+                &[
+                    ("FreshGenesis", 0x0001),
+                    ("Restore", 0x0002),
+                    ("RoleTransition", 0x0003),
+                    ("Takeover", 0x0004),
+                ][..],
+            ),
+            (
+                "TopologyStateForm",
+                "TopologyState",
+                "TopologyState.form",
+                &[("Stable", 0x0001), ("Joint", 0x0002)][..],
+            ),
+            (
+                "TopologyStatePartitionScheme",
+                "TopologyState",
+                "TopologyState.partition_scheme",
+                &[("SourceRange", 0x0001), ("HubVertexCut", 0x0002)][..],
+            ),
+            (
+                "TopologyStateSortedShardsRecordState",
+                "TopologyState",
+                "TopologyState.sorted_shards.record.state",
+                &[
+                    ("Active", 0x0001),
+                    ("Joining", 0x0002),
+                    ("Draining", 0x0003),
+                ][..],
+            ),
+        ];
+
+        for (name, containing_schema, union_path, expected_arms) in expected {
+            let matches = catalog
+                .identity
+                .ordinary_unions
+                .iter()
+                .filter(|union| union.union_name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1, "{name} union must be unique");
+            let union = matches[0];
+            assert_eq!(union.containing_schema, containing_schema);
+            assert_eq!(union.union_path, union_path);
+            assert_eq!(union.field_tag, None);
+            assert_eq!(union.tag_wire_type, "u8");
+            assert_eq!(union.encoding_context, "closed-tagged");
+            assert!(
+                !identity::ordinary_union_has_top_level_shape(union),
+                "{name} is field-level, including on a generic host"
+            );
+            assert!(
+                !identity::BUILTIN_WIRE_TYPES.contains(&name)
+                    && !catalog.identity.wire.iter().any(|wire| wire.name == name),
+                "{name} must not claim the top-level wire-backed collision exception"
+            );
+
+            let actual_arms = union
+                .arms
+                .iter()
+                .map(|arm| (arm.source_arm_name.as_str(), arm.arm_tag))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual_arms, expected_arms,
+                "{name} tags must follow Appendix A source spelling order"
+            );
+
+            let union_source_key = format!("union|{containing_schema}|{union_path}");
+            let union_targets = catalog
+                .targets
+                .iter()
+                .filter(|target| target.source_key == union_source_key)
+                .collect::<Vec<_>>();
+            assert_eq!(union_targets.len(), 1, "{name} union target must be unique");
+            assert_eq!(union_targets[0].target_kind, "union");
+            assert_eq!(union_targets[0].definition_status, "declared");
+            assert!(catalog.projection_rows.iter().any(|row| {
+                row.row_id == union_targets[0].target_row_id && row.row_kind == "union"
+            }));
+
+            for (source_arm_name, _) in expected_arms {
+                let source_key = format!("arm|{containing_schema}|{union_path}|{source_arm_name}");
+                let targets = catalog
+                    .targets
+                    .iter()
+                    .filter(|target| target.source_key == source_key)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    targets.len(),
+                    1,
+                    "{name}.{source_arm_name} target must be unique"
+                );
+                assert_eq!(targets[0].target_kind, "union-arm");
+                assert_eq!(targets[0].definition_status, "declared");
+                assert!(catalog.projection_rows.iter().any(|row| {
+                    row.row_id == targets[0].target_row_id && row.row_kind == "union-arm"
+                }));
+            }
         }
     }
 }
