@@ -634,6 +634,69 @@ mod tests {
     }
 
     #[test]
+    fn merge_is_additive_and_not_idempotent() {
+        // `merge_is_checked_commutative_and_associative` cannot constrain this
+        // kernel: max is ALSO commutative and associative, so replacing counter
+        // addition with max leaves that test green. Verified by mutation --
+        // the whole crate suite passed under exactly that substitution.
+        //
+        // Two relations separate the operators. Both are asserted here because
+        // either alone leaves a gap.
+        fn part(values: &[u64]) -> DegreeHistogram {
+            let mut histogram = DegreeHistogram::new(100);
+            for &value in values {
+                histogram.try_observe(value).expect("within ceiling");
+            }
+            histogram
+        }
+
+        // 1. NON-IDEMPOTENCE. Merging a histogram with itself must DOUBLE its
+        // counts; under max it would be a no-op. This is the discriminator
+        // label_counts already relies on, and it is the cheapest one that
+        // distinguishes addition from any absorbing operator.
+        let single = part(&[1, 1, 5]);
+        let mut doubled = single.clone();
+        doubled.try_merge(&single).expect("matching profile");
+        assert_ne!(
+            doubled, single,
+            "merging a histogram with itself must not be a no-op: addition is \
+             not idempotent, and a merge that absorbs would be indistinguishable \
+             from max"
+        );
+        assert_eq!(doubled.len(), single.len() * 2);
+        for (bucket, count) in doubled.canonical_counts().iter().enumerate() {
+            assert_eq!(
+                *count,
+                single.canonical_counts()[bucket] * 2,
+                "bucket {bucket} must double under self-merge"
+            );
+        }
+
+        // 2. MASS CONSERVATION over a disjoint split. Partitioning a stream and
+        // merging must equal accumulating it whole -- the property distributed
+        // StatsSegment accumulation rests on. Asserted on canonical bytes, not
+        // just totals, so a merge that moved mass between buckets while keeping
+        // the sum right would still fail.
+        let left = [0_u64, 1, 3, 1];
+        let right = [2_u64, 8, 9, 1];
+        let mut whole = DegreeHistogram::new(100);
+        for &value in left.iter().chain(right.iter()) {
+            whole.try_observe(value).expect("within ceiling");
+        }
+        let mut split = part(&left);
+        split.try_merge(&part(&right)).expect("matching profile");
+        assert_eq!(
+            split.to_canonical_bytes(),
+            whole.to_canonical_bytes(),
+            "splitting the stream and merging must equal accumulating it whole"
+        );
+        assert_eq!(
+            split.len(),
+            u64::try_from(left.len() + right.len()).expect("fixture length fits u64")
+        );
+    }
+
+    #[test]
     fn merge_is_checked_commutative_and_associative() {
         fn part(values: &[u64]) -> DegreeHistogram {
             let mut histogram = DegreeHistogram::new(100);
