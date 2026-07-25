@@ -9,6 +9,20 @@ name = "durable_fields"
 registry_epoch = 34
 
 [[field]]
+containing_schema = "ActivationMetaProjectionPayload"
+field_tag = 0x0003
+stable_name = "consumer_domain"
+exact_wire_type = "ConsensusDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline consumer domain of the activation Meta projection payload; retained with the payload and carries no reachability edge (a05:1622)"
+version_status = "reserved"
+max_size_bytes = 93
+
+[[field]]
 containing_schema = "AuthorityBindingRecord"
 field_tag = 0x0001
 stable_name = "role"
@@ -215,6 +229,34 @@ role_predicate = "true"
 retention_and_cut_rule = "signatures over the separately identified body"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "CertifiedRoleTransitionRef"
+field_tag = 0x0001
+stable_name = "certificate_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "inline remote identity of the role-transition certificate this bootstrap leaf imports; names a foreign-group object and is never followed as a local edge (a05:1604)"
+version_status = "reserved"
+max_size_bytes = 159
+
+[[field]]
+containing_schema = "CertifiedTransitionArtifactRef<T>"
+field_tag = 0x0002
+stable_name = "artifact_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline remote identity of the certified transition artifact; names a Local-group object from the destination and is never a local reachability edge (a05:1604)"
+version_status = "reserved"
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "CheckpointStateVector"
@@ -460,6 +502,35 @@ version_status = "reserved"
 max_size_bytes = 65536
 
 [[field]]
+containing_schema = "GenesisMetaProjectionPayload"
+field_tag = 0x0002
+stable_name = "consumer_domain"
+exact_wire_type = "ConsensusDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline consumer domain of the Genesis Meta projection payload; retained with the payload and carries no reachability edge (a05:1590)"
+version_status = "reserved"
+max_size_bytes = 93
+
+[[field]]
+containing_schema = "GlobalControlRecord"
+field_tag = 0x0007
+stable_name = "resulting_global_state_payload_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "cross-checks the sibling object; NOT a reachability edge (a05:1658)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
 containing_schema = "GlobalKeyEnvelopeManifest"
 field_tag = 0x0001
 stable_name = "body_digest"
@@ -596,6 +667,62 @@ role_predicate = "role-local"
 retention_and_cut_rule = "inline authorization recipes sorted by canonical target identity with no duplicate target or operation ID; retained and cut with the proposal (a15:2057-2059)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LegacyRetentionAuthorityTransferEvidence"
+field_tag = 0x0002
+stable_name = "source_transfer_record_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "inline remote identity of the Local transfer record this Meta evidence attests; names a Local-group object and is never a local reachability edge (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 159
+
+[[field]]
+containing_schema = "LegacyRetentionAuthorityTransferPlan"
+field_tag = 0x0002
+stable_name = "old_local_domain"
+exact_wire_type = "ConsensusDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline old Local authority domain of the pre-order transfer plan; retained with the plan and carries no reachability edge (a05:1606)"
+version_status = "reserved"
+max_size_bytes = 93
+
+[[field]]
+containing_schema = "LegacyRetentionAuthorityTransferPlan"
+field_tag = 0x0003
+stable_name = "new_meta_domain"
+exact_wire_type = "ConsensusDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline new Meta authority domain of the pre-order transfer plan; retained with the plan and carries no reachability edge (a05:1606)"
+version_status = "reserved"
+max_size_bytes = 93
+
+[[field]]
+containing_schema = "LocalToShardProjection"
+field_tag = 0x0002
+stable_name = "target_shard_domain"
+exact_wire_type = "ConsensusDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline target shard domain of the one-way Local-to-shard projection; retained with the projection and carries no reachability edge (a05:1622)"
+version_status = "reserved"
+max_size_bytes = 93
 
 [[field]]
 containing_schema = "LogicalCommandRecord"

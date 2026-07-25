@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1380
+target_count = 1389
 projection_fallback_count = 89
-target_source_assignment_sha256 = "ea336daaa698cd25b516bedc95b7ee097b5471cd4124a340fbe8bd4a3312727d"
+target_source_assignment_sha256 = "5616054a8af5735fc6c4a5a3f192246fa8f45f3ee53d5e838a1445b14518eedf"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -10746,6 +10746,151 @@ retention_and_cut_rule = "cross-checks the sibling object; NOT a reachability ed
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:activation-meta-projection-payload-consumer-domain"
+containing_schema = "ActivationMetaProjectionPayload"
+field_tag = 0x0003
+stable_name = "consumer_domain"
+exact_wire_type = "ConsensusDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline consumer domain of the activation Meta projection payload; retained with the payload and carries no reachability edge (a05:1622)"
+version_status = "reserved"
+max_size_bytes = 93
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:certified-role-transition-ref-certificate-identity"
+containing_schema = "CertifiedRoleTransitionRef"
+field_tag = 0x0001
+stable_name = "certificate_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "inline remote identity of the role-transition certificate this bootstrap leaf imports; names a foreign-group object and is never followed as a local edge (a05:1604)"
+version_status = "reserved"
+max_size_bytes = 159
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:certified-transition-artifact-ref-t-artifact-identity"
+containing_schema = "CertifiedTransitionArtifactRef<T>"
+field_tag = 0x0002
+stable_name = "artifact_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline remote identity of the certified transition artifact; names a Local-group object from the destination and is never a local reachability edge (a05:1604)"
+version_status = "reserved"
+max_size_bytes = 159
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:genesis-meta-projection-payload-consumer-domain"
+containing_schema = "GenesisMetaProjectionPayload"
+field_tag = 0x0002
+stable_name = "consumer_domain"
+exact_wire_type = "ConsensusDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline consumer domain of the Genesis Meta projection payload; retained with the payload and carries no reachability edge (a05:1590)"
+version_status = "reserved"
+max_size_bytes = 93
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-control-record-resulting-global-state-payload-digest"
+containing_schema = "GlobalControlRecord"
+field_tag = 0x0007
+stable_name = "resulting_global_state_payload_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "cross-checks the sibling object; NOT a reachability edge (a05:1658)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:legacy-retention-authority-transfer-evidence-source-transfer-record-identity"
+containing_schema = "LegacyRetentionAuthorityTransferEvidence"
+field_tag = 0x0002
+stable_name = "source_transfer_record_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "inline remote identity of the Local transfer record this Meta evidence attests; names a Local-group object and is never a local reachability edge (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 159
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:legacy-retention-authority-transfer-plan-old-local-domain"
+containing_schema = "LegacyRetentionAuthorityTransferPlan"
+field_tag = 0x0002
+stable_name = "old_local_domain"
+exact_wire_type = "ConsensusDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline old Local authority domain of the pre-order transfer plan; retained with the plan and carries no reachability edge (a05:1606)"
+version_status = "reserved"
+max_size_bytes = 93
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:legacy-retention-authority-transfer-plan-new-meta-domain"
+containing_schema = "LegacyRetentionAuthorityTransferPlan"
+field_tag = 0x0003
+stable_name = "new_meta_domain"
+exact_wire_type = "ConsensusDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline new Meta authority domain of the pre-order transfer plan; retained with the plan and carries no reachability edge (a05:1606)"
+version_status = "reserved"
+max_size_bytes = 93
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:local-to-shard-projection-target-shard-domain"
+containing_schema = "LocalToShardProjection"
+field_tag = 0x0002
+stable_name = "target_shard_domain"
+exact_wire_type = "ConsensusDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline target shard domain of the one-way Local-to-shard projection; retained with the projection and carries no reachability edge (a05:1622)"
+version_status = "reserved"
+max_size_bytes = 93
 
 [[field]]
 slice_id = "a11"
@@ -48427,6 +48572,78 @@ row_id = "a05:target:field-global-txn-record-resulting-global-state-payload-dige
 target_row_id = "a05:field:global-txn-record-resulting-global-state-payload-digest"
 slice_id = "a05"
 source_key = "projection|durable_fields|GlobalTxnRecord.resulting_global_state_payload_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-activation-meta-projection-payload-consumer-domain"
+target_row_id = "a05:field:activation-meta-projection-payload-consumer-domain"
+slice_id = "a05"
+source_key = "field|ActivationMetaProjectionPayload|ActivationMetaProjectionPayload.consumer_domain|consumer_domain"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-certified-role-transition-ref-certificate-identity"
+target_row_id = "a05:field:certified-role-transition-ref-certificate-identity"
+slice_id = "a05"
+source_key = "field|CertifiedRoleTransitionRef|CertifiedRoleTransitionRef.certificate_identity|certificate_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-certified-transition-artifact-ref-t-artifact-identity"
+target_row_id = "a05:field:certified-transition-artifact-ref-t-artifact-identity"
+slice_id = "a05"
+source_key = "field|CertifiedTransitionArtifactRef<T>|CertifiedTransitionArtifactRef<T>.artifact_identity|artifact_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-genesis-meta-projection-payload-consumer-domain"
+target_row_id = "a05:field:genesis-meta-projection-payload-consumer-domain"
+slice_id = "a05"
+source_key = "field|GenesisMetaProjectionPayload|GenesisMetaProjectionPayload.consumer_domain|consumer_domain"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-control-record-resulting-global-state-payload-digest"
+target_row_id = "a05:field:global-control-record-resulting-global-state-payload-digest"
+slice_id = "a05"
+source_key = "field|GlobalControlRecord|GlobalControlRecord.resulting_global_state_payload_digest|resulting_global_state_payload_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-legacy-retention-authority-transfer-evidence-source-transfer-record-identity"
+target_row_id = "a05:field:legacy-retention-authority-transfer-evidence-source-transfer-record-identity"
+slice_id = "a05"
+source_key = "field|LegacyRetentionAuthorityTransferEvidence|LegacyRetentionAuthorityTransferEvidence.source_transfer_record_identity|source_transfer_record_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-legacy-retention-authority-transfer-plan-old-local-domain"
+target_row_id = "a05:field:legacy-retention-authority-transfer-plan-old-local-domain"
+slice_id = "a05"
+source_key = "field|LegacyRetentionAuthorityTransferPlan|LegacyRetentionAuthorityTransferPlan.old_local_domain|old_local_domain"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-legacy-retention-authority-transfer-plan-new-meta-domain"
+target_row_id = "a05:field:legacy-retention-authority-transfer-plan-new-meta-domain"
+slice_id = "a05"
+source_key = "field|LegacyRetentionAuthorityTransferPlan|LegacyRetentionAuthorityTransferPlan.new_meta_domain|new_meta_domain"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-local-to-shard-projection-target-shard-domain"
+target_row_id = "a05:field:local-to-shard-projection-target-shard-domain"
+slice_id = "a05"
+source_key = "field|LocalToShardProjection|LocalToShardProjection.target_shard_domain|target_shard_domain"
 target_kind = "field"
 definition_status = "declared"
 

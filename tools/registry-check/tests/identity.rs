@@ -4354,6 +4354,18 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         matches!(
             (schema, name),
             ("GlobalTxnRecord", "resulting_global_state_payload_digest")
+                | ("ActivationMetaProjectionPayload", "consumer_domain")
+                | ("CertifiedRoleTransitionRef", "certificate_identity")
+                | ("CertifiedTransitionArtifactRef<T>", "artifact_identity")
+                | ("GenesisMetaProjectionPayload", "consumer_domain")
+                | ("GlobalControlRecord", "resulting_global_state_payload_digest")
+                | (
+                    "LegacyRetentionAuthorityTransferEvidence",
+                    "source_transfer_record_identity"
+                )
+                | ("LegacyRetentionAuthorityTransferPlan", "old_local_domain")
+                | ("LegacyRetentionAuthorityTransferPlan", "new_meta_domain")
+                | ("LocalToShardProjection", "target_shard_domain")
         )
     };
     pre_erratum.fields.retain(|field| {
@@ -4369,7 +4381,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove exactly the post-erratum A15, A01, A16, and A03 unions"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 52,
+        pre_erratum.fields.len() + 61,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through A15 I8"
     );
