@@ -793,6 +793,71 @@ mod tests {
     }
 
     #[test]
+    fn merge_preserves_sorted_order_and_is_split_exact() {
+        // `merge_is_commutative_and_associative` cannot constrain this kernel.
+        // The merge walks two sorted runs and picks a side each step; reversing
+        // that choice still yields a commutative, associative merge of the same
+        // multiset -- just in the wrong ORDER. Verified by mutation: flipping
+        // `left_value <= right_value` to `>=` left the entire crate suite green.
+        //
+        // Order is not cosmetic here. `select` and `quantile` index into the
+        // values array, so an unsorted merge silently returns the wrong
+        // quantile rather than failing.
+        fn part(values: &[u64]) -> ExactQuantileSketch {
+            let mut sketch =
+                ExactQuantileSketch::try_with_capacity(64, 16).expect("bounded capacity");
+            for &value in values {
+                sketch.try_observe(value).expect("within ceiling");
+            }
+            sketch
+        }
+
+        // 1. SORTEDNESS. Interleaved runs are used deliberately: two runs whose
+        // ranges do not overlap would merge correctly under either choice, so
+        // they could not distinguish the operators.
+        let mut left = part(&[1, 4, 6, 9]);
+        let right = part(&[2, 3, 7, 8]);
+        left.try_merge(&right).expect("matching profile");
+        let merged = left.canonical_values();
+        assert!(
+            merged.windows(2).all(|pair| pair[0] <= pair[1]),
+            "merged values must be sorted ascending, got {merged:?}"
+        );
+        assert_eq!(merged, &[1, 2, 3, 4, 6, 7, 8, 9]);
+
+        // Duplicates must survive: this is a multiset, so a merge that deduped
+        // would change every quantile above the duplicate.
+        let mut dup_left = part(&[5, 5, 7]);
+        dup_left
+            .try_merge(&part(&[5, 6]))
+            .expect("matching profile");
+        assert_eq!(dup_left.canonical_values(), &[5, 5, 5, 6, 7]);
+
+        // 2. SPLIT EXACTNESS, on canonical bytes. Partitioning a stream and
+        // merging must equal accumulating it whole -- asserted on bytes rather
+        // than on a selected quantile, since two different orderings can agree
+        // at one ordinal and disagree elsewhere.
+        let a = [9_u64, 1, 6, 4];
+        let b = [3_u64, 8, 2, 7];
+        let mut whole = ExactQuantileSketch::try_with_capacity(64, 16).expect("bounded capacity");
+        for &value in a.iter().chain(b.iter()) {
+            whole.try_observe(value).expect("within ceiling");
+        }
+        let mut split = part(&a);
+        split.try_merge(&part(&b)).expect("matching profile");
+        assert_eq!(
+            split.try_to_canonical_bytes().expect("canonical bytes"),
+            whole.try_to_canonical_bytes().expect("canonical bytes"),
+            "splitting the stream and merging must equal accumulating it whole"
+        );
+
+        // 3. The quantile actually read through the public selector, so the
+        // ordering law is tied to the observable it protects.
+        assert_eq!(split.select(0), Some(1));
+        assert_eq!(split.select(7), Some(9));
+    }
+
+    #[test]
     fn merge_is_commutative_and_associative() {
         let a = summary(&[9, 1, 5]);
         let b = summary(&[4, 4, 8]);
