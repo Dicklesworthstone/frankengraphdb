@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 550
+target_count = 551
 projection_fallback_count = 84
-target_source_assignment_sha256 = "e9412093e4d314d45831fe01c2ddcf23d4cf1a5f1b11dbb089e0fd970e1fb36c"
+target_source_assignment_sha256 = "8cb69670ffe3eb5e6fddb1016e19c718e59695255a25126099e346b94ad51f41"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 9
+registry_epoch = 10
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -1844,6 +1844,17 @@ construction_order = 80
 role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/key_destroy_proposal/"
+
+[[logical_kind]]
+slice_id = "a15"
+row_id = "a15:logical-kind:external-key-destruction-provider-receipt"
+object_kind = 0x0297
+name = "ExternalKeyDestructionProviderReceipt"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/external_key_destruction_provider_receipt/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -10257,7 +10268,7 @@ symbol = "ExternalKeyDestructionProviderReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0297"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:external-privacy-charge-receipt"
@@ -18860,7 +18871,7 @@ symbol = "ExternalKeyDestructionProviderReceipt"
 generic_signature = ""
 source_key = "top|ExternalKeyDestructionProviderReceipt"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a15:2063"]
 
 [[top_level_candidate]]
@@ -31969,6 +31980,14 @@ row_id = "a15:target:logical-kind-key-destroy-proposal"
 target_row_id = "a15:logical-kind:key-destroy-proposal"
 slice_id = "a15"
 source_key = "top|KeyDestroyProposal"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:logical-kind-external-key-destruction-provider-receipt"
+target_row_id = "a15:logical-kind:external-key-destruction-provider-receipt"
+slice_id = "a15"
+source_key = "top|ExternalKeyDestructionProviderReceipt"
 target_kind = "logical-kind"
 definition_status = "declared"
 

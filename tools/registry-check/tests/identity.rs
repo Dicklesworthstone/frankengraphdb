@@ -436,8 +436,8 @@ fn appendix_a_catalog_parse_is_closed_and_versioned() {
         (
             "unknown projection epoch key",
             source.replacen(
-                "registry_epoch = 1",
-                "registry_epoch = 1\nunknown_projection_epoch_key = true",
+                "registry_epoch = 1\n",
+                "registry_epoch = 1\nunknown_projection_epoch_key = true\n",
                 1,
             ),
             "catalog_unknown_key",
@@ -3014,6 +3014,123 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
                     .any(|source_key| source_key.contains("|KeyDestroyProposal|"))
         }),
         "proposal shorthand ambiguities must remain open until exact field types are settled"
+    );
+}
+
+#[test]
+fn idr_external_key_destruction_provider_receipt_reserved_logical_shell_is_exact() {
+    let identity = real_identity();
+    let logical = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "ExternalKeyDestructionProviderReceipt")
+        .expect("ExternalKeyDestructionProviderReceipt logical shell exists");
+    assert_eq!(logical.object_kind, 0x0297);
+    assert_eq!(logical.status, "reserved");
+    assert_eq!(logical.construction_order, 6);
+    assert_eq!(logical.role_predicate, "true");
+    assert_eq!(logical.max_size_bytes, 16_777_216);
+    assert_eq!(
+        logical.golden_corpus,
+        "corpus/logical/external_key_destruction_provider_receipt/"
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|reservation| reservation.symbol == "ExternalKeyDestructionProviderReceipt")
+        .expect("ExternalKeyDestructionProviderReceipt permanent reservation exists");
+    assert_eq!(
+        reservation.row_id,
+        "a15:reservation:external-key-destruction-provider-receipt"
+    );
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x0297");
+    assert_eq!(reservation.disposition, "existing");
+
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == "top|ExternalKeyDestructionProviderReceipt")
+        .expect("ExternalKeyDestructionProviderReceipt source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == "top|ExternalKeyDestructionProviderReceipt")
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "source candidate must map exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a15:target:logical-kind-external-key-destruction-provider-receipt"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a15:logical-kind:external-key-destruction-provider-receipt"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+    assert_eq!(targets[0].definition_status, "declared");
+
+    assert!(
+        !identity
+            .fields
+            .iter()
+            .any(|field| { field.containing_schema == "ExternalKeyDestructionProviderReceipt" }),
+        "the shell increment must not preempt its receipt-field census"
+    );
+    assert!(
+        !identity.ordinary_unions.iter().any(|union| {
+            union.containing_schema == "ExternalKeyDestructionProviderReceipt"
+                || union.union_name == "ExternalKeyDestructionProviderReceipt"
+        }) && !identity.unions.iter().any(|union| {
+            union.containing_schema == "ExternalKeyDestructionProviderReceipt"
+                || union.union_name == "ExternalKeyDestructionProviderReceipt"
+        }),
+        "the shell increment must not preempt receipt unions or arms"
+    );
+    assert!(
+        !catalog.ambiguity_adjudications.iter().any(|row| {
+            row.ambiguity_source_key
+                .contains("|ExternalKeyDestructionProviderReceipt|")
+                || row.resolved_source_keys.iter().any(|source_key| {
+                    source_key.contains("|ExternalKeyDestructionProviderReceipt|")
+                })
+        }),
+        "receipt shorthand ambiguities must remain open until exact field types are settled"
+    );
+
+    let target_row_id = "a15:logical-kind:external-key-destruction-provider-receipt";
+    let a15 = catalog
+        .slices
+        .iter()
+        .find(|slice| slice.id == "a15")
+        .expect("a15 slice exists");
+    assert_eq!(
+        a15.definition_status, "declared",
+        "coverage must close before completion-layer authoring"
+    );
+    assert!(
+        !catalog
+            .annotations
+            .iter()
+            .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .semantic_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .expansion_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .evidence
+                .iter()
+                .any(|row| row.target_row_id == target_row_id),
+        "a declared shell must not skip coverage-first sequencing with premature completion rows"
     );
 }
 
