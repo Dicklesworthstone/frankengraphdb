@@ -4432,6 +4432,39 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union]]
+union_name = "GcDecisionRecordDecision"
+containing_schema = "GcDecisionRecord"
+union_path = "GcDecisionRecord.decision"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GcDecisionRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "GcPhysicalDispositionImportSpec<Role>"
+containing_schema = "GcPhysicalDispositionImportSpec<Role>"
+union_path = "GcPhysicalDispositionImportSpec<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GcPhysicalDispositionImportSpec<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GcSemanticState<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "GlobalAttemptCompactionFloorLastUpdate"
 containing_schema = "GlobalAttemptCompactionFloor"
 union_path = "GlobalAttemptCompactionFloor.last_update"
@@ -5297,6 +5330,17 @@ field_tag = 0x0013
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "MandatoryInventoryRole"
+containing_schema = "MandatoryInventory"
+union_path = "MandatoryInventory.role"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MandatoryInventory"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -8988,6 +9032,121 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union_arm]]
+union_name = "GcDecisionRecordDecision"
+containing_schema = "GcDecisionRecord"
+union_path = "GcDecisionRecord.decision"
+arm_tag = 0x0001
+source_arm_name = "Rejected"
+stable_name = "rejected"
+payload_kind = "inline-record"
+payload_sha256 = "32b155e8c41ca4222deb77c5a9bcdd801c72da3ee9e4927518984a144ebf8e03"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "GcDecisionRecordDecision"
+containing_schema = "GcDecisionRecord"
+union_path = "GcDecisionRecord.decision"
+arm_tag = 0x0002
+source_arm_name = "Accepted"
+stable_name = "accepted"
+payload_kind = "inline-record"
+payload_sha256 = "611e954e622c4d5c08fbf6f82773191167e7e3c1597afed9fc04a319794f8490"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "GcPhysicalDispositionImportSpec<Role>"
+containing_schema = "GcPhysicalDispositionImportSpec<Role>"
+union_path = "GcPhysicalDispositionImportSpec<Role>"
+arm_tag = 0x0001
+source_arm_name = "Completed"
+stable_name = "completed"
+payload_kind = "inline-record"
+payload_sha256 = "84dea7ae0449afda52abb1e04ad565d1ec6aca0b13c299ce8acdf2a145551a6c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "GcPhysicalDispositionImportSpec<Role>"
+containing_schema = "GcPhysicalDispositionImportSpec<Role>"
+union_path = "GcPhysicalDispositionImportSpec<Role>"
+arm_tag = 0x0002
+source_arm_name = "Cancelled"
+stable_name = "cancelled"
+payload_kind = "inline-record"
+payload_sha256 = "5c3b7f368584a3c6b30ae94f2c5c60472b0ecbfb0ef4531d7fe485c9c4158a9a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+arm_tag = 0x0001
+source_arm_name = "ProposedOrRejected"
+stable_name = "proposed_or_rejected"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+arm_tag = 0x0002
+source_arm_name = "Quarantined"
+stable_name = "quarantined"
+payload_kind = "inline-record"
+payload_sha256 = "af247f729f138801bbcea0c58203e810afacc72a81b763debcdef680561716cb"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+arm_tag = 0x0003
+source_arm_name = "PhysicalCompletedPendingCut"
+stable_name = "physical_completed_pending_cut"
+payload_kind = "inline-record"
+payload_sha256 = "48f4f488d01a31617569edaabb8cf681de937ba28e5e43f3e3d85510152fc982"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+arm_tag = 0x0004
+source_arm_name = "CancelledBeforePhysicalStart"
+stable_name = "cancelled_before_physical_start"
+payload_kind = "inline-record"
+payload_sha256 = "48f4f488d01a31617569edaabb8cf681de937ba28e5e43f3e3d85510152fc982"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+arm_tag = 0x0005
+source_arm_name = "Retired"
+stable_name = "retired"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
 union_name = "GlobalAttemptCompactionFloorLastUpdate"
 containing_schema = "GlobalAttemptCompactionFloor"
 union_path = "GlobalAttemptCompactionFloor.last_update"
@@ -11720,6 +11879,43 @@ source_arm_name = "Expired"
 stable_name = "expired"
 payload_kind = "inline-record"
 payload_sha256 = "9b178669e1dc7f0c6d2955cbafb2c8e40e0bd2350b1dd724bbaa6d8d1c2ff9a8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MandatoryInventoryRole"
+containing_schema = "MandatoryInventory"
+union_path = "MandatoryInventory.role"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "MandatoryInventoryRole"
+containing_schema = "MandatoryInventory"
+union_path = "MandatoryInventory.role"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "MandatoryInventoryRole"
+containing_schema = "MandatoryInventory"
+union_path = "MandatoryInventory.role"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

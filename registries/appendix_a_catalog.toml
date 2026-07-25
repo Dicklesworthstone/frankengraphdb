@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2160
+target_count = 2176
 projection_fallback_count = 90
-target_source_assignment_sha256 = "bcf085cdee280ff7cc552cc4c6bed50d6be87eeabba232768beb65b966520e2e"
+target_source_assignment_sha256 = "108a0dd937796543a1cd3eddcfc408efdafb70ed79f7413982df1406b9d24d66"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -29478,6 +29478,58 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a14"
+row_id = "a14:union:gc-decision-record-decision-f2eb86b26bf4ede9"
+union_name = "GcDecisionRecordDecision"
+containing_schema = "GcDecisionRecord"
+union_path = "GcDecisionRecord.decision"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GcDecisionRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a14"
+row_id = "a14:union:gc-physical-disposition-import-spec-role-0ccd5bdd72b1b2ba"
+union_name = "GcPhysicalDispositionImportSpec<Role>"
+containing_schema = "GcPhysicalDispositionImportSpec<Role>"
+union_path = "GcPhysicalDispositionImportSpec<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GcPhysicalDispositionImportSpec<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a14"
+row_id = "a14:union:gc-semantic-state-role-ee302f0f4ddf7648"
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GcSemanticState<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a14"
+row_id = "a14:union:mandatory-inventory-role-265cf33f3496616a"
+union_name = "MandatoryInventoryRole"
+containing_schema = "MandatoryInventory"
+union_path = "MandatoryInventory.role"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MandatoryInventory"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a19"
 row_id = "a19:union-arm:restore-state-shard-phase-reconciling-eaf9dfc1e7e1eb1f"
@@ -30343,6 +30395,182 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:gc-decision-record-decision-rejected-f2527ef00013bfd6"
+union_name = "GcDecisionRecordDecision"
+containing_schema = "GcDecisionRecord"
+union_path = "GcDecisionRecord.decision"
+arm_tag = 0x0001
+source_arm_name = "Rejected"
+stable_name = "rejected"
+payload_kind = "inline-record"
+payload_sha256 = "32b155e8c41ca4222deb77c5a9bcdd801c72da3ee9e4927518984a144ebf8e03"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:gc-decision-record-decision-accepted-5e2166083d33266b"
+union_name = "GcDecisionRecordDecision"
+containing_schema = "GcDecisionRecord"
+union_path = "GcDecisionRecord.decision"
+arm_tag = 0x0002
+source_arm_name = "Accepted"
+stable_name = "accepted"
+payload_kind = "inline-record"
+payload_sha256 = "611e954e622c4d5c08fbf6f82773191167e7e3c1597afed9fc04a319794f8490"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:gc-physical-disposition-import-spec-role-completed-890c8e17cb830895"
+union_name = "GcPhysicalDispositionImportSpec<Role>"
+containing_schema = "GcPhysicalDispositionImportSpec<Role>"
+union_path = "GcPhysicalDispositionImportSpec<Role>"
+arm_tag = 0x0001
+source_arm_name = "Completed"
+stable_name = "completed"
+payload_kind = "inline-record"
+payload_sha256 = "84dea7ae0449afda52abb1e04ad565d1ec6aca0b13c299ce8acdf2a145551a6c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:gc-physical-disposition-import-spec-role-cancelled-9bad7360fcbd9ef8"
+union_name = "GcPhysicalDispositionImportSpec<Role>"
+containing_schema = "GcPhysicalDispositionImportSpec<Role>"
+union_path = "GcPhysicalDispositionImportSpec<Role>"
+arm_tag = 0x0002
+source_arm_name = "Cancelled"
+stable_name = "cancelled"
+payload_kind = "inline-record"
+payload_sha256 = "5c3b7f368584a3c6b30ae94f2c5c60472b0ecbfb0ef4531d7fe485c9c4158a9a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:gc-semantic-state-role-proposed-or-rejected-56dd9cc319026bae"
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+arm_tag = 0x0001
+source_arm_name = "ProposedOrRejected"
+stable_name = "proposed_or_rejected"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:gc-semantic-state-role-quarantined-58e4adc8f7e57cdc"
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+arm_tag = 0x0002
+source_arm_name = "Quarantined"
+stable_name = "quarantined"
+payload_kind = "inline-record"
+payload_sha256 = "af247f729f138801bbcea0c58203e810afacc72a81b763debcdef680561716cb"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:gc-semantic-state-role-physical-completed-pending-cut-1ac53fb434c80aad"
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+arm_tag = 0x0003
+source_arm_name = "PhysicalCompletedPendingCut"
+stable_name = "physical_completed_pending_cut"
+payload_kind = "inline-record"
+payload_sha256 = "48f4f488d01a31617569edaabb8cf681de937ba28e5e43f3e3d85510152fc982"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:gc-semantic-state-role-cancelled-before-physical-start-43e4cb408afc52ea"
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+arm_tag = 0x0004
+source_arm_name = "CancelledBeforePhysicalStart"
+stable_name = "cancelled_before_physical_start"
+payload_kind = "inline-record"
+payload_sha256 = "48f4f488d01a31617569edaabb8cf681de937ba28e5e43f3e3d85510152fc982"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:gc-semantic-state-role-retired-08268cbedafd9df2"
+union_name = "GcSemanticState<Role>"
+containing_schema = "GcSemanticState<Role>"
+union_path = "GcSemanticState<Role>"
+arm_tag = 0x0005
+source_arm_name = "Retired"
+stable_name = "retired"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:mandatory-inventory-role-local-10cee250b3d8c292"
+union_name = "MandatoryInventoryRole"
+containing_schema = "MandatoryInventory"
+union_path = "MandatoryInventory.role"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:mandatory-inventory-role-meta-b7a8c3ebf1c0dae3"
+union_name = "MandatoryInventoryRole"
+containing_schema = "MandatoryInventory"
+union_path = "MandatoryInventory.role"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:mandatory-inventory-role-shard-9c33b820a94be31a"
+union_name = "MandatoryInventoryRole"
+containing_schema = "MandatoryInventory"
+union_path = "MandatoryInventory.role"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
@@ -67736,6 +67964,134 @@ row_id = "a08:target:union-arm-global-authorization-decision-record-operation-au
 target_row_id = "a08:union-arm:global-authorization-decision-record-operation-audit-admission-not-required-d9267d7f30c4ba9e"
 slice_id = "a08"
 source_key = "arm|GlobalAuthorizationDecisionRecord|GlobalAuthorizationDecisionRecord.operation_audit_admission|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-gc-decision-record-decision-f2eb86b26bf4ede9"
+target_row_id = "a14:union:gc-decision-record-decision-f2eb86b26bf4ede9"
+slice_id = "a14"
+source_key = "union|GcDecisionRecord|GcDecisionRecord.decision"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-gc-decision-record-decision-rejected-f2527ef00013bfd6"
+target_row_id = "a14:union-arm:gc-decision-record-decision-rejected-f2527ef00013bfd6"
+slice_id = "a14"
+source_key = "arm|GcDecisionRecord|GcDecisionRecord.decision|Rejected"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-gc-decision-record-decision-accepted-5e2166083d33266b"
+target_row_id = "a14:union-arm:gc-decision-record-decision-accepted-5e2166083d33266b"
+slice_id = "a14"
+source_key = "arm|GcDecisionRecord|GcDecisionRecord.decision|Accepted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-gc-physical-disposition-import-spec-role-0ccd5bdd72b1b2ba"
+target_row_id = "a14:union:gc-physical-disposition-import-spec-role-0ccd5bdd72b1b2ba"
+slice_id = "a14"
+source_key = "union|GcPhysicalDispositionImportSpec<Role>|GcPhysicalDispositionImportSpec<Role>"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-gc-physical-disposition-import-spec-role-completed-890c8e17cb830895"
+target_row_id = "a14:union-arm:gc-physical-disposition-import-spec-role-completed-890c8e17cb830895"
+slice_id = "a14"
+source_key = "arm|GcPhysicalDispositionImportSpec<Role>|GcPhysicalDispositionImportSpec<Role>|Completed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-gc-physical-disposition-import-spec-role-cancelled-9bad7360fcbd9ef8"
+target_row_id = "a14:union-arm:gc-physical-disposition-import-spec-role-cancelled-9bad7360fcbd9ef8"
+slice_id = "a14"
+source_key = "arm|GcPhysicalDispositionImportSpec<Role>|GcPhysicalDispositionImportSpec<Role>|Cancelled"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-gc-semantic-state-role-ee302f0f4ddf7648"
+target_row_id = "a14:union:gc-semantic-state-role-ee302f0f4ddf7648"
+slice_id = "a14"
+source_key = "union|GcSemanticState<Role>|GcSemanticState<Role>"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-gc-semantic-state-role-proposed-or-rejected-56dd9cc319026bae"
+target_row_id = "a14:union-arm:gc-semantic-state-role-proposed-or-rejected-56dd9cc319026bae"
+slice_id = "a14"
+source_key = "arm|GcSemanticState<Role>|GcSemanticState<Role>|ProposedOrRejected"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-gc-semantic-state-role-quarantined-58e4adc8f7e57cdc"
+target_row_id = "a14:union-arm:gc-semantic-state-role-quarantined-58e4adc8f7e57cdc"
+slice_id = "a14"
+source_key = "arm|GcSemanticState<Role>|GcSemanticState<Role>|Quarantined"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-gc-semantic-state-role-physical-completed-pending-cut-1ac53fb434c80aad"
+target_row_id = "a14:union-arm:gc-semantic-state-role-physical-completed-pending-cut-1ac53fb434c80aad"
+slice_id = "a14"
+source_key = "arm|GcSemanticState<Role>|GcSemanticState<Role>|PhysicalCompletedPendingCut"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-gc-semantic-state-role-cancelled-before-physical-start-43e4cb408afc52ea"
+target_row_id = "a14:union-arm:gc-semantic-state-role-cancelled-before-physical-start-43e4cb408afc52ea"
+slice_id = "a14"
+source_key = "arm|GcSemanticState<Role>|GcSemanticState<Role>|CancelledBeforePhysicalStart"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-gc-semantic-state-role-retired-08268cbedafd9df2"
+target_row_id = "a14:union-arm:gc-semantic-state-role-retired-08268cbedafd9df2"
+slice_id = "a14"
+source_key = "arm|GcSemanticState<Role>|GcSemanticState<Role>|Retired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-mandatory-inventory-role-265cf33f3496616a"
+target_row_id = "a14:union:mandatory-inventory-role-265cf33f3496616a"
+slice_id = "a14"
+source_key = "union|MandatoryInventory|MandatoryInventory.role"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-mandatory-inventory-role-local-10cee250b3d8c292"
+target_row_id = "a14:union-arm:mandatory-inventory-role-local-10cee250b3d8c292"
+slice_id = "a14"
+source_key = "arm|MandatoryInventory|MandatoryInventory.role|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-mandatory-inventory-role-meta-b7a8c3ebf1c0dae3"
+target_row_id = "a14:union-arm:mandatory-inventory-role-meta-b7a8c3ebf1c0dae3"
+slice_id = "a14"
+source_key = "arm|MandatoryInventory|MandatoryInventory.role|Meta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-mandatory-inventory-role-shard-9c33b820a94be31a"
+target_row_id = "a14:union-arm:mandatory-inventory-role-shard-9c33b820a94be31a"
+slice_id = "a14"
+source_key = "arm|MandatoryInventory|MandatoryInventory.role|Shard"
 target_kind = "union-arm"
 definition_status = "declared"
 

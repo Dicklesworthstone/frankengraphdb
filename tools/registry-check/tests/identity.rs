@@ -4530,6 +4530,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
                 | "RestoreLeaseOperationTerminalRecordRef<Role>"
                 | "RestoreRetentionAnchor<Role>"
+                | "GcDecisionRecordDecision"
+                | "GcPhysicalDispositionImportSpec<Role>"
+                | "GcSemanticState<Role>"
+                | "MandatoryInventoryRole"
                 | "GlobalAuthorizationDecisionRecordOperationAuditAdmission"
                 | "AuditTerminalAttemptRecordState"
                 | "AuditTerminalFreezeRecordDomainRecordGroupRole"
@@ -4766,7 +4770,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 291,
+        pre_erratum.ordinary_unions.len() + 295,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
