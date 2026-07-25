@@ -558,10 +558,8 @@ fn pack_validated_by_index<ValueAt>(
 where
     ValueAt: Fn(usize) -> u64,
 {
-    if width == 0 {
-        return Ok(());
-    }
-
+    // Width zero still needs this second pass: zero is its only legal value,
+    // and an interior-mutable accessor may have changed since preflight.
     let exclusive_limit = (width != MAX_BIT_WIDTH).then(|| 1_u64 << width);
     let mut bit_cursor = 0_usize;
     for index in 0..count {
@@ -588,10 +586,8 @@ fn pack_for_validated_by_index<ValueAt>(
 where
     ValueAt: Fn(usize) -> u64,
 {
-    if width == 0 {
-        return Ok(());
-    }
-
+    // Width zero still needs this second pass: only `base` is representable,
+    // and an interior-mutable accessor may have changed since preflight.
     let exclusive_limit = (width != MAX_BIT_WIDTH).then(|| 1_u64 << width);
     let mut bit_cursor = 0_usize;
     for index in 0..count {
@@ -1020,6 +1016,25 @@ mod tests {
             })
         );
 
+        let values = [0_u64, 0];
+        let calls = Cell::new(0_usize);
+        assert_eq!(
+            encode_by_index(values.len(), 0, |index| {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call == values.len() {
+                    1
+                } else {
+                    values[index]
+                }
+            }),
+            Err(BitpackError::ValueOutOfRange {
+                index: 0,
+                value: 1,
+                width: 0,
+            })
+        );
+
         let values = [10_u64, 11];
         let calls = Cell::new(0_usize);
         assert_eq!(
@@ -1036,6 +1051,43 @@ mod tests {
                 index: 0,
                 value: 8,
                 width: 3,
+            })
+        );
+
+        let values = [10_u64, 10];
+        let calls = Cell::new(0_usize);
+        assert_eq!(
+            encode_for_by_index(values.len(), 10, 0, |index| {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call == values.len() {
+                    11
+                } else {
+                    values[index]
+                }
+            }),
+            Err(BitpackError::ValueOutOfRange {
+                index: 0,
+                value: 1,
+                width: 0,
+            })
+        );
+
+        let calls = Cell::new(0_usize);
+        assert_eq!(
+            encode_for_by_index(values.len(), 10, 0, |index| {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call == values.len() {
+                    9
+                } else {
+                    values[index]
+                }
+            }),
+            Err(BitpackError::ValueBelowBase {
+                index: 0,
+                value: 9,
+                base: 10,
             })
         );
     }
