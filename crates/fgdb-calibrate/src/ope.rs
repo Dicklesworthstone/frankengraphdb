@@ -2048,10 +2048,47 @@ mod tests {
             let evidence = ledger.evidence()?;
             assert!(evidence.complete());
             assert_eq!(evidence.selection(), OpeSelection::Candidate);
-            assert!(
-                evidence.candidate_estimate().numerator()
-                    > evidence.fallback_estimate().numerator(),
-                "{estimator:?} put the extreme-outcome candidate at or below its fallback"
+            assert_eq!(
+                evidence.selection_reason(),
+                OpeSelectionReason::CandidateEstimatedBetter
+            );
+            assert!(evidence.zero_support_exclusions().is_empty());
+
+            // Exact, not merely ordered. These are ratios of exact fixed-point
+            // integers, so "it did not overflow and it ranked correctly" would
+            // leave the actual arithmetic unproved at the one magnitude the
+            // envelope is declared against. Each of the four observations
+            // contributes PROBABILITY_SCALE * MAX_ABS_OUTCOME_UNITS to the
+            // candidate and its negation to the fallback. All three estimators
+            // agree because the direct model predicts the selected action's
+            // logged outcome exactly, so every importance-weighted residual is
+            // zero and the two estimator families coincide on this fixture.
+            let magnitude = 4 * i128::from(PROBABILITY_SCALE) * i128::from(MAX_ABS_OUTCOME_UNITS);
+            assert_eq!(
+                evidence.candidate_estimate().numerator(),
+                magnitude,
+                "{estimator:?} candidate estimate at the declared outcome bound"
+            );
+            assert_eq!(
+                evidence.fallback_estimate().numerator(),
+                -magnitude,
+                "{estimator:?} fallback estimate at the declared outcome bound"
+            );
+            assert_eq!(
+                evidence.candidate_estimate().denominator(),
+                4 * u128::from(PROBABILITY_SCALE) * u128::try_from(OUTCOME_SCALE)?
+            );
+
+            // The advantage numerator is the widest intermediate the envelope
+            // guards: `validate_arithmetic_envelope` is the only place that
+            // compares a derived quantity against `i128::MAX`, and that
+            // quantity is this one. Driving it at the declared bound is what
+            // makes this a test of the envelope rather than of the estimators.
+            assert_eq!(
+                evidence.advantage_estimate().numerator(),
+                magnitude
+                    .checked_mul(2)
+                    .expect("advantage at the declared bound must stay representable")
             );
         }
         Ok(())
