@@ -171,7 +171,10 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
     '"targets":550' \
+    '"completion_layer_schemas":4' \
+    '"annotations":0' \
     '"semantic_bindings":0' \
+    '"expansion_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \
     '"appendix_structural_symbols":314' \
@@ -192,7 +195,10 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"source_dispositions":848' \
     '"top_level_candidates":1229' \
     '"targets":550' \
+    '"completion_layer_schemas":4' \
+    '"annotations":0' \
     '"semantic_bindings":0' \
+    '"expansion_bindings":0' \
     '"evidence_rows":0' \
     '"reference_only_symbols":343' \
     '"violations":0' \
@@ -1427,20 +1433,46 @@ expect_appendix_violation \
 log "phase 3l: unknown catalog keys are structural load failures"
 stage_appendix neg-appendix-unknown-key
 awk '
-  !changed && $0 == "schema_version = 4" {
+  !changed && $0 == "schema_version = 5" {
     print
     print "unknown_catalog_root = true"
     changed = 1
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "expected current Appendix catalog schema_version = 5" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-unknown-key/registries/appendix_a_catalog.toml"
 expect_appendix_structural_error \
   neg-appendix-unknown-key catalog_unknown_key catalog
 
-log "phase 3m: malformed projection schemas are structural load failures"
+log "phase 3m: completion-layer schema contract drift is rejected"
+stage_appendix neg-appendix-completion-schema
+awk '
+  !changed && $0 == "pin_policy = \"compiled-count-sha256-readable-row-contract\"" {
+    print "pin_policy = \"catalog-self-authorized\""
+    changed = 1
+    next
+  }
+  { print }
+  END {
+    if (!changed) {
+      print "expected frozen completion-layer pin_policy" > "/dev/stderr"
+      exit 42
+    }
+  }
+' "$ROOT/registries/appendix_a_catalog.toml" \
+  > "$WORK/neg-appendix-completion-schema/registries/appendix_a_catalog.toml"
+expect_appendix_violation \
+  neg-appendix-completion-schema catalog_completion_layer_schema_drift \
+  catalog_row
+
+log "phase 3n: malformed projection schemas are structural load failures"
 stage_appendix neg-appendix-projection-schema
 awk '
   !changed && $0 == "[[logical_kind]]" {
@@ -1457,7 +1489,7 @@ expect_appendix_structural_error \
   neg-appendix-projection-schema catalog_projection_schema logical_object_kinds
 
 # --- Verdict -----------------------------------------------------------------
-log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-reference-union-name-collision,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second,appendix-regenerate-first,appendix-regenerate-second,appendix-regenerate-third}.jsonl"
+log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-reference-union-name-collision,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-completion-schema,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second,appendix-regenerate-first,appendix-regenerate-second,appendix-regenerate-third}.jsonl"
 log "result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 log "G0 identity e2e: ALL GREEN"

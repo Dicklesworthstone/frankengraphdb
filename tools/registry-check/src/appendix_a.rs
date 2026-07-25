@@ -19,9 +19,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub const CATALOG_SCHEMA_VERSION: i64 = 4;
+pub const CATALOG_SCHEMA_VERSION: i64 = 5;
 pub const CATALOG_NAME: &str = "appendix_a_catalog";
-pub const CATALOG_EPOCH: i64 = 4;
+pub const CATALOG_EPOCH: i64 = 5;
 pub const ROW_ID_GRAMMAR_VERSION: i64 = 3;
 pub const DIAGNOSTIC_VERSION: i64 = 1;
 pub const CANONICAL_ORDER: &str = "source-key,projection-registry,assigned-code,containing-schema,union-path,field-tag,arm-tag,row-id";
@@ -56,6 +56,10 @@ pub const EXPECTED_EXPANSION_BINDING_SHA256: &str =
 pub const EXPECTED_EVIDENCE_BINDING_COUNT: usize = 0;
 pub const EXPECTED_EVIDENCE_BINDING_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+pub const COMPLETION_LAYER_SCHEMA_VERSION: i64 = 1;
+pub const EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT: usize = 4;
+pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
+    "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 389;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
     "78c2adede17da5eea90ffb344591c7292e7d093c8ef07175c906e7595219639d";
@@ -159,6 +163,30 @@ struct SemanticBindingContractPin {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct AnnotationContractPin {
+    row_id: &'static str,
+    target_row_id: &'static str,
+    target_source_key: &'static str,
+    exact_type: &'static str,
+    cardinality: &'static str,
+    layout: &'static str,
+    role: &'static str,
+    posture: &'static str,
+    authority: &'static str,
+    locality: &'static str,
+    generic_expansions: &'static [&'static str],
+    role_expansions: &'static [&'static str],
+    reference_semantics: &'static str,
+    target_schema_ids: &'static [&'static str],
+    construction_order: &'static str,
+    retention_and_cut_rule: &'static str,
+    digest_recipe: &'static str,
+    redaction_class: &'static str,
+    resource_bounds: &'static str,
+    compatibility: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct EvidenceBindingContractPin {
     row_id: &'static str,
     target_row_id: &'static str,
@@ -171,6 +199,19 @@ struct EvidenceBindingContractPin {
     scenario_ids: &'static [&'static str],
     event_ids: &'static [&'static str],
     gate_ids: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompletionLayerSchemaContractPin {
+    layer: &'static str,
+    schema_version: i64,
+    field_contracts: &'static [&'static str],
+    target_binding: &'static str,
+    target_cardinality: &'static str,
+    epoch_domain: &'static str,
+    projection_policy: &'static str,
+    authoring_policy: &'static str,
+    pin_policy: &'static str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -196,10 +237,113 @@ struct AmbiguityAdjudicationContractPin {
     rationale: &'static str,
 }
 
+const ANNOTATION_FIELD_CONTRACTS: [&str; 19] = [
+    "row_id:string:required",
+    "target_row_id:string:required",
+    "exact_type:string:required",
+    "cardinality:string:required",
+    "layout:string:required",
+    "role:string:required",
+    "posture:string:required",
+    "authority:string:required",
+    "locality:string:required",
+    "generic_expansions:string-array:required",
+    "role_expansions:string-array:required",
+    "reference_semantics:string:required",
+    "target_schema_ids:string-array:required",
+    "construction_order:string:required",
+    "retention_and_cut_rule:string:required",
+    "digest_recipe:string:required",
+    "redaction_class:string:required",
+    "resource_bounds:string:required",
+    "compatibility:string:required",
+];
+
+const SEMANTIC_BINDING_FIELD_CONTRACTS: [&str; 6] = [
+    "row_id:string:required",
+    "target_row_id:string:required",
+    "owner_bead_id:string:required",
+    "owner_crate:string:required",
+    "owner_status:string:required",
+    "consumer_crates:string-array:required",
+];
+
+const EXPANSION_BINDING_FIELD_CONTRACTS: [&str; 7] = [
+    "row_id:string:required",
+    "target_row_id:string:required",
+    "parameter_ordinal:integer:required",
+    "formal:string:required",
+    "formal_class:string:required",
+    "values:string-array:required",
+    "rationale:string:required",
+];
+
+const EVIDENCE_FIELD_CONTRACTS: [&str; 10] = [
+    "row_id:string:required",
+    "target_row_id:string:required",
+    "evidence_id:string:required",
+    "phase:string:required",
+    "status:string:required",
+    "owner_bead_id:string:required",
+    "checker_ids:string-array:required",
+    "scenario_ids:string-array:required",
+    "event_ids:string-array:required",
+    "gate_ids:string-array:required",
+];
+
+const COMPLETION_LAYER_SCHEMA_CONTRACT: [CompletionLayerSchemaContractPin; 4] = [
+    CompletionLayerSchemaContractPin {
+        layer: "annotation",
+        schema_version: COMPLETION_LAYER_SCHEMA_VERSION,
+        field_contracts: &ANNOTATION_FIELD_CONTRACTS,
+        target_binding: "target_row_id->target.target_row_id",
+        target_cardinality: "zero-or-one-per-target;exactly-one-approved-when-complete",
+        epoch_domain: "catalog-epoch-on-shape-change;content-pins-on-row-change",
+        projection_policy: "catalog-only;appendix-regenerate-does-not-project",
+        authoring_policy: "reviewed-source-assisted;policy-fields-owner-authored",
+        pin_policy: "compiled-count-sha256-readable-row-contract",
+    },
+    CompletionLayerSchemaContractPin {
+        layer: "semantic_binding",
+        schema_version: COMPLETION_LAYER_SCHEMA_VERSION,
+        field_contracts: &SEMANTIC_BINDING_FIELD_CONTRACTS,
+        target_binding: "target_row_id->target.target_row_id",
+        target_cardinality: "zero-or-one-per-target;exactly-one-approved-when-complete",
+        epoch_domain: "catalog-epoch-on-shape-change;content-pins-on-row-change",
+        projection_policy: "catalog-only;appendix-regenerate-does-not-project",
+        authoring_policy: "reviewed-owner-authored",
+        pin_policy: "compiled-count-sha256-readable-row-contract",
+    },
+    CompletionLayerSchemaContractPin {
+        layer: "expansion_binding",
+        schema_version: COMPLETION_LAYER_SCHEMA_VERSION,
+        field_contracts: &EXPANSION_BINDING_FIELD_CONTRACTS,
+        target_binding: "target_row_id->target.target_row_id",
+        target_cardinality: "zero-or-one-per-target-parameter-ordinal;exact-source-dimensions",
+        epoch_domain: "catalog-epoch-on-shape-change;content-pins-on-row-change",
+        projection_policy: "catalog-only;appendix-regenerate-does-not-project",
+        authoring_policy: "reviewed-source-dimension-assisted;rationale-owner-authored",
+        pin_policy: "compiled-count-sha256-readable-row-contract",
+    },
+    CompletionLayerSchemaContractPin {
+        layer: "evidence",
+        schema_version: COMPLETION_LAYER_SCHEMA_VERSION,
+        field_contracts: &EVIDENCE_FIELD_CONTRACTS,
+        target_binding: "target_row_id->target.target_row_id",
+        target_cardinality: "zero-or-one-per-target-evidence-id;complete-needs-static-live-g0-and-runtime",
+        epoch_domain: "catalog-epoch-on-shape-change;content-pins-on-row-change",
+        projection_policy: "catalog-only;appendix-regenerate-does-not-project",
+        authoring_policy: "reviewed-owner-authored",
+        pin_policy: "compiled-count-sha256-readable-row-contract",
+    },
+];
+
 // These independent, readable pins are deliberately empty while all A01-A21
 // slices are declared. A slice may add completion metadata only by adding the
-// exact reciprocal target/source/owner/evidence contract here in reviewed
-// code; changing the opaque transcript digest alone is never authorization.
+// exact reciprocal target/source/schema/owner/evidence contract here in
+// reviewed code; changing the opaque transcript digest alone is never
+// authorization.
+const ANNOTATION_CONTRACT: [AnnotationContractPin; 0] = [];
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
@@ -4374,13 +4518,14 @@ pub const PROJECTION_FILES: [(&str, &str); 6] = [
     ("durable_fields", "durable_fields.toml"),
 ];
 
-const ROOT_KEYS: [&str; 27] = [
+const ROOT_KEYS: [&str; 28] = [
     "schema_version",
     "catalog",
     "source_manifest",
     "reference_manifest",
     "target_manifest",
     "maintenance_proof",
+    "completion_layer",
     "slice",
     "projection_epoch",
     "reservation",
@@ -4474,6 +4619,17 @@ const MAINTENANCE_PROOF_KEYS: [&str; 9] = [
     "event_ids",
     "gate_ids",
     "evidence_status",
+];
+const COMPLETION_LAYER_KEYS: [&str; 9] = [
+    "layer",
+    "schema_version",
+    "field_contracts",
+    "target_binding",
+    "target_cardinality",
+    "epoch_domain",
+    "projection_policy",
+    "authoring_policy",
+    "pin_policy",
 ];
 const PROJECTION_EPOCH_KEYS: [&str; 2] = ["registry", "registry_epoch"];
 const CATALOG_ROW_KEYS: [&str; 2] = ["slice_id", "row_id"];
@@ -4585,6 +4741,7 @@ pub struct Catalog {
     pub reference_manifest: ReferenceManifest,
     pub target_manifest: TargetManifest,
     pub maintenance_proof: MaintenanceProof,
+    pub completion_layers: Vec<CompletionLayerSchema>,
     pub slices: Vec<Slice>,
     pub projection_epochs: BTreeMap<String, i64>,
     pub identity: IdentityRegistries,
@@ -4611,6 +4768,19 @@ pub struct MaintenanceProof {
     pub event_ids: Vec<String>,
     pub gate_ids: Vec<String>,
     pub evidence_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionLayerSchema {
+    pub layer: String,
+    pub schema_version: i64,
+    pub field_contracts: Vec<String>,
+    pub target_binding: String,
+    pub target_cardinality: String,
+    pub epoch_domain: String,
+    pub projection_policy: String,
+    pub authoring_policy: String,
+    pub pin_policy: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5157,6 +5327,7 @@ fn parse_catalog_structural(text: &str) -> Result<Catalog, Vec<Violation>> {
         );
         parse_maintenance_proof(table, &mut violations)
     });
+    let completion_layers = parse_completion_layers(&root, &mut violations);
 
     let slice_tables = read_table_array(&root, "slice", "catalog", &mut violations);
     let mut slices = Vec::new();
@@ -5240,6 +5411,13 @@ fn parse_catalog_structural(text: &str) -> Result<Catalog, Vec<Violation>> {
             "maintenance proof was not constructed",
         )]);
     };
+    let Some(completion_layers) = completion_layers else {
+        return Err(vec![Violation::new(
+            "catalog_schema",
+            "completion_layer",
+            "completion layer schemas were not constructed",
+        )]);
+    };
     let Some(projection_epochs) = projection_epochs else {
         return Err(vec![Violation::new(
             "catalog_schema",
@@ -5296,6 +5474,7 @@ fn parse_catalog_structural(text: &str) -> Result<Catalog, Vec<Violation>> {
         reference_manifest,
         target_manifest,
         maintenance_proof,
+        completion_layers,
         slices,
         projection_epochs,
         identity,
@@ -6157,6 +6336,23 @@ pub fn evidence_binding_contract_sha256(rows: &[EvidenceBinding]) -> String {
     sha256_hex(transcript.as_bytes())
 }
 
+pub fn completion_layer_schema_sha256(rows: &[CompletionLayerSchema]) -> String {
+    let mut transcript = String::new();
+    for row in rows {
+        append_contract_field(&mut transcript, &row.layer);
+        append_contract_field(&mut transcript, &row.schema_version.to_string());
+        append_contract_array(&mut transcript, &row.field_contracts);
+        append_contract_field(&mut transcript, &row.target_binding);
+        append_contract_field(&mut transcript, &row.target_cardinality);
+        append_contract_field(&mut transcript, &row.epoch_domain);
+        append_contract_field(&mut transcript, &row.projection_policy);
+        append_contract_field(&mut transcript, &row.authoring_policy);
+        append_contract_field(&mut transcript, &row.pin_policy);
+        transcript.push('\n');
+    }
+    sha256_hex(transcript.as_bytes())
+}
+
 pub fn ambiguity_adjudication_contract_sha256(rows: &[AmbiguityAdjudication]) -> String {
     let mut ordered: Vec<_> = rows.iter().collect();
     ordered.sort_by(|left, right| left.row_id.cmp(&right.row_id));
@@ -6245,6 +6441,7 @@ pub fn validate_catalog(catalog: &Catalog) -> Vec<Violation> {
     validate_source_manifest_pin(&catalog.source_manifest, &mut out);
     validate_reference_manifest(catalog, &mut out);
     validate_target_manifest(catalog, &mut out);
+    validate_completion_layer_schema_contract(catalog, &mut out);
 
     if catalog.slices.len() != SLICE_PINS.len() {
         out.push(Violation::new(
@@ -8509,6 +8706,54 @@ fn parse_maintenance_proof(
     }
 }
 
+fn parse_completion_layers(
+    root: &Table,
+    violations: &mut Vec<Violation>,
+) -> Option<Vec<CompletionLayerSchema>> {
+    let tables = read_table_array(root, "completion_layer", "catalog", violations)?;
+    let mut rows = Vec::new();
+    for (index, table) in tables.iter().enumerate() {
+        let context = format!("completion_layer[{index}]");
+        exact_keys(table, &COMPLETION_LAYER_KEYS, &context, violations);
+        let values = (
+            read_string(table, "layer", &context, violations),
+            read_int(table, "schema_version", &context, violations),
+            read_string_array(table, "field_contracts", &context, violations),
+            read_string(table, "target_binding", &context, violations),
+            read_string(table, "target_cardinality", &context, violations),
+            read_string(table, "epoch_domain", &context, violations),
+            read_string(table, "projection_policy", &context, violations),
+            read_string(table, "authoring_policy", &context, violations),
+            read_string(table, "pin_policy", &context, violations),
+        );
+        if let (
+            Some(layer),
+            Some(schema_version),
+            Some(field_contracts),
+            Some(target_binding),
+            Some(target_cardinality),
+            Some(epoch_domain),
+            Some(projection_policy),
+            Some(authoring_policy),
+            Some(pin_policy),
+        ) = values
+        {
+            rows.push(CompletionLayerSchema {
+                layer,
+                schema_version,
+                field_contracts,
+                target_binding,
+                target_cardinality,
+                epoch_domain,
+                projection_policy,
+                authoring_policy,
+                pin_policy,
+            });
+        }
+    }
+    Some(rows)
+}
+
 fn parse_reservations(root: &Table, violations: &mut Vec<Violation>) -> Option<Vec<Reservation>> {
     let tables = read_table_array(root, "reservation", "catalog", violations)?;
     let mut rows = Vec::new();
@@ -9193,6 +9438,106 @@ fn validate_target_manifest(catalog: &Catalog, out: &mut Vec<Violation>) {
     }
 }
 
+fn validate_completion_layer_schema_contract(catalog: &Catalog, out: &mut Vec<Violation>) {
+    let actual_sha256 = completion_layer_schema_sha256(&catalog.completion_layers);
+    if catalog.completion_layers.len() != EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT
+        || actual_sha256 != EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256
+    {
+        out.push(Violation::new(
+            "catalog_completion_layer_schema_drift",
+            "completion_layer",
+            format!(
+                "completion layer schema must contain {EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT} rows with sha256 {EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256}; found {} rows with sha256 {actual_sha256}",
+                catalog.completion_layers.len()
+            ),
+        ));
+    }
+    if COMPLETION_LAYER_SCHEMA_CONTRACT.len() != EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT {
+        out.push(Violation::new(
+            "catalog_completion_layer_schema_pin_inconsistent",
+            "completion_layer",
+            "readable completion layer schema pins and released count must be updated together",
+        ));
+    }
+    let readable_matches = catalog.completion_layers.len()
+        == COMPLETION_LAYER_SCHEMA_CONTRACT.len()
+        && catalog
+            .completion_layers
+            .iter()
+            .zip(&COMPLETION_LAYER_SCHEMA_CONTRACT)
+            .all(|(row, pin)| completion_layer_schema_matches(row, pin));
+    if !readable_matches {
+        out.push(Violation::new(
+            "catalog_completion_layer_schema_mismatch",
+            "completion_layer",
+            "completion layer rows must byte-match the readable field, binding, cardinality, epoch, projection, authoring, and pin contracts in canonical layer order",
+        ));
+    }
+    for (layer, field_contracts, parser_keys) in [
+        (
+            "annotation",
+            ANNOTATION_FIELD_CONTRACTS.as_slice(),
+            ANNOTATION_KEYS.as_slice(),
+        ),
+        (
+            "semantic_binding",
+            SEMANTIC_BINDING_FIELD_CONTRACTS.as_slice(),
+            SEMANTIC_BINDING_KEYS.as_slice(),
+        ),
+        (
+            "expansion_binding",
+            EXPANSION_BINDING_FIELD_CONTRACTS.as_slice(),
+            EXPANSION_BINDING_KEYS.as_slice(),
+        ),
+        (
+            "evidence",
+            EVIDENCE_FIELD_CONTRACTS.as_slice(),
+            EVIDENCE_KEYS.as_slice(),
+        ),
+    ] {
+        if !completion_field_contracts_match_parser(field_contracts, parser_keys) {
+            out.push(Violation::new(
+                "catalog_completion_layer_schema_implementation_drift",
+                layer,
+                "readable required field contracts no longer match the strict parser key set and supported scalar/array type vocabulary",
+            ));
+        }
+    }
+}
+
+fn completion_field_contracts_match_parser(field_contracts: &[&str], parser_keys: &[&str]) -> bool {
+    field_contracts.len() == parser_keys.len()
+        && field_contracts
+            .iter()
+            .zip(parser_keys)
+            .all(|(contract, key)| {
+                let mut parts = contract.split(':');
+                parts.next() == Some(*key)
+                    && matches!(parts.next(), Some("string" | "integer" | "string-array"))
+                    && parts.next() == Some("required")
+                    && parts.next().is_none()
+            })
+}
+
+fn completion_layer_schema_matches(
+    row: &CompletionLayerSchema,
+    pin: &CompletionLayerSchemaContractPin,
+) -> bool {
+    row.layer == pin.layer
+        && row.schema_version == pin.schema_version
+        && row
+            .field_contracts
+            .iter()
+            .map(String::as_str)
+            .eq(pin.field_contracts.iter().copied())
+        && row.target_binding == pin.target_binding
+        && row.target_cardinality == pin.target_cardinality
+        && row.epoch_domain == pin.epoch_domain
+        && row.projection_policy == pin.projection_policy
+        && row.authoring_policy == pin.authoring_policy
+        && row.pin_policy == pin.pin_policy
+}
+
 fn validate_binding_contract_pins(catalog: &Catalog, out: &mut Vec<Violation>) {
     let annotation_sha256 = annotation_contract_sha256(&catalog.annotations);
     if catalog.annotations.len() != EXPECTED_ANNOTATION_COUNT
@@ -9261,9 +9606,74 @@ fn validate_binding_contract_pins(catalog: &Catalog, out: &mut Vec<Violation>) {
             ),
         ));
     }
+    validate_readable_annotation_contract(catalog, out);
     validate_readable_binding_contract(catalog, out);
     validate_readable_expansion_contract(catalog, out);
     validate_readable_ambiguity_contract(catalog, out);
+}
+
+fn validate_readable_annotation_contract(catalog: &Catalog, out: &mut Vec<Violation>) {
+    validate_readable_annotation_contract_with(
+        catalog,
+        &ANNOTATION_CONTRACT,
+        EXPECTED_ANNOTATION_COUNT,
+        out,
+    );
+}
+
+fn validate_readable_annotation_contract_with(
+    catalog: &Catalog,
+    contract: &[AnnotationContractPin],
+    expected_count: usize,
+    out: &mut Vec<Violation>,
+) {
+    if contract.len() != expected_count {
+        out.push(Violation::new(
+            "catalog_annotation_contract_pin_inconsistent",
+            "annotation",
+            "readable annotation pins and released transcript count must be updated together",
+        ));
+    }
+    let pins: BTreeMap<&str, &AnnotationContractPin> =
+        contract.iter().map(|pin| (pin.row_id, pin)).collect();
+    if pins.len() != contract.len() {
+        out.push(Violation::new(
+            "catalog_annotation_contract_ambiguous",
+            "annotation",
+            "readable annotation contract contains duplicate row IDs",
+        ));
+    }
+    for row in &catalog.annotations {
+        match pins.get(row.row_id.as_str()).copied() {
+            Some(pin) if annotation_contract_matches_with(contract, catalog, row) => {
+                debug_assert_eq!(pin.row_id, row.row_id);
+            }
+            Some(_) => out.push(Violation::new(
+                "catalog_annotation_contract_mismatch",
+                &row.row_id,
+                "annotation does not byte-match its readable target/source/schema contract",
+            )),
+            None => out.push(Violation::new(
+                "catalog_annotation_contract_unapproved",
+                &row.row_id,
+                "annotation has no independent readable per-target contract",
+            )),
+        }
+    }
+    let rows: BTreeSet<&str> = catalog
+        .annotations
+        .iter()
+        .map(|row| row.row_id.as_str())
+        .collect();
+    for pin in contract {
+        if !rows.contains(pin.row_id) {
+            out.push(Violation::new(
+                "catalog_annotation_contract_missing",
+                pin.row_id,
+                "readable annotation contract has no reciprocal catalog row",
+            ));
+        }
+    }
 }
 
 fn validate_readable_binding_contract(catalog: &Catalog, out: &mut Vec<Violation>) {
@@ -9448,6 +9858,52 @@ fn semantic_binding_contract_matches_with(
             .iter()
             .map(String::as_str)
             .eq(pin.consumer_crates.iter().copied())
+}
+
+fn annotation_contract_matches_with(
+    contract: &[AnnotationContractPin],
+    catalog: &Catalog,
+    row: &Annotation,
+) -> bool {
+    let Some(pin) = contract.iter().find(|pin| pin.row_id == row.row_id) else {
+        return false;
+    };
+    let source_key = catalog
+        .targets
+        .iter()
+        .find(|target| target.target_row_id == row.target_row_id)
+        .map(|target| target.source_key.as_str());
+    row.target_row_id == pin.target_row_id
+        && source_key == Some(pin.target_source_key)
+        && row.exact_type == pin.exact_type
+        && row.cardinality == pin.cardinality
+        && row.layout == pin.layout
+        && row.role == pin.role
+        && row.posture == pin.posture
+        && row.authority == pin.authority
+        && row.locality == pin.locality
+        && row
+            .generic_expansions
+            .iter()
+            .map(String::as_str)
+            .eq(pin.generic_expansions.iter().copied())
+        && row
+            .role_expansions
+            .iter()
+            .map(String::as_str)
+            .eq(pin.role_expansions.iter().copied())
+        && row.reference_semantics == pin.reference_semantics
+        && row
+            .target_schema_ids
+            .iter()
+            .map(String::as_str)
+            .eq(pin.target_schema_ids.iter().copied())
+        && row.construction_order == pin.construction_order
+        && row.retention_and_cut_rule == pin.retention_and_cut_rule
+        && row.digest_recipe == pin.digest_recipe
+        && row.redaction_class == pin.redaction_class
+        && row.resource_bounds == pin.resource_bounds
+        && row.compatibility == pin.compatibility
 }
 
 fn expansion_binding_contract_matches_with(
@@ -9666,6 +10122,23 @@ fn evidence_binding_contract_matches_with(
             .iter()
             .map(String::as_str)
             .eq(pin.gate_ids.iter().copied())
+}
+
+fn approved_annotation_counts(catalog: &Catalog) -> BTreeMap<String, usize> {
+    approved_annotation_counts_with(catalog, &ANNOTATION_CONTRACT)
+}
+
+fn approved_annotation_counts_with(
+    catalog: &Catalog,
+    contract: &[AnnotationContractPin],
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for row in &catalog.annotations {
+        if annotation_contract_matches_with(contract, catalog, row) {
+            *counts.entry(row.target_row_id.clone()).or_default() += 1;
+        }
+    }
+    counts
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -10502,12 +10975,14 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
         }
     }
 
+    let approved_annotation_counts = approved_annotation_counts(catalog);
     let ApprovedBindingCounts {
         semantic: binding_counts,
         static_live: static_live_counts,
         runtime: runtime_counts,
     } = approved_binding_counts(catalog);
     validate_runtime_live_owner_coupling(catalog, out);
+    let mut semantic_targets = BTreeSet::new();
     for row in &catalog.semantic_bindings {
         validate_metadata_row_id(&row.row_id, "semantic-binding", out);
         insert_owned_row_id(&mut all_row_ids, &row.row_id, out);
@@ -10519,6 +10994,13 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
             out,
         );
         validate_semantic_binding(row, &slice_map, out);
+        if !semantic_targets.insert(row.target_row_id.as_str()) {
+            out.push(Violation::new(
+                "catalog_semantic_binding_duplicate",
+                &row.row_id,
+                "target has more than one semantic binding",
+            ));
+        }
     }
     validate_expansion_binding_rows(
         catalog,
@@ -10646,7 +11128,7 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
                     "complete target requires a source-reconciled top-level, field, union, or arm contract; reference-only and projection fallback targets remain declared",
                 ));
             }
-            let annotation_count = annotation_counts
+            let annotation_count = approved_annotation_counts
                 .get(row.target_row_id.as_str())
                 .copied()
                 .unwrap_or_default();
@@ -13280,6 +13762,58 @@ stable_name = "Ready"
         catalog
     }
 
+    fn catalog_with_annotation() -> Catalog {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        catalog.annotations.push(Annotation {
+            row_id: "a01:annotation:bootstrap-frame-root-slot".to_owned(),
+            target_row_id: TARGET_ROW_ID.to_owned(),
+            exact_type: "RootSlot".to_owned(),
+            cardinality: "one".to_owned(),
+            layout: "fixed".to_owned(),
+            role: "Local".to_owned(),
+            posture: "bootstrap".to_owned(),
+            authority: "root".to_owned(),
+            locality: "local".to_owned(),
+            generic_expansions: Vec::new(),
+            role_expansions: Vec::new(),
+            reference_semantics: "embedded".to_owned(),
+            target_schema_ids: Vec::new(),
+            construction_order: "bootstrap-root-slot".to_owned(),
+            retention_and_cut_rule: "fixed-location".to_owned(),
+            digest_recipe: "slot-checksum".to_owned(),
+            redaction_class: "public-commitment".to_owned(),
+            resource_bounds: "fixed-4096-bytes".to_owned(),
+            compatibility: "v1".to_owned(),
+        });
+        catalog
+    }
+
+    const fn annotation_pin() -> AnnotationContractPin {
+        AnnotationContractPin {
+            row_id: "a01:annotation:bootstrap-frame-root-slot",
+            target_row_id: TARGET_ROW_ID,
+            target_source_key: TARGET_SOURCE_KEY,
+            exact_type: "RootSlot",
+            cardinality: "one",
+            layout: "fixed",
+            role: "Local",
+            posture: "bootstrap",
+            authority: "root",
+            locality: "local",
+            generic_expansions: &[],
+            role_expansions: &[],
+            reference_semantics: "embedded",
+            target_schema_ids: &[],
+            construction_order: "bootstrap-root-slot",
+            retention_and_cut_rule: "fixed-location",
+            digest_recipe: "slot-checksum",
+            redaction_class: "public-commitment",
+            resource_bounds: "fixed-4096-bytes",
+            compatibility: "v1",
+        }
+    }
+
     const fn semantic_pin() -> SemanticBindingContractPin {
         SemanticBindingContractPin {
             row_id: "a01:semantic-binding:bootstrap-frame-root-slot",
@@ -14380,6 +14914,80 @@ stable_name = "Ready"
                 .iter()
                 .any(|violation| violation.code == "slice_census_pin_mismatch"),
             "nonfinal ambiguity state incorrectly counted as resolved"
+        );
+    }
+
+    #[test]
+    fn readable_annotation_contract_exercises_nonempty_reciprocal_paths() {
+        let catalog = catalog_with_annotation();
+        let contract = [annotation_pin()];
+        let mut violations = Vec::new();
+        validate_readable_annotation_contract_with(
+            &catalog,
+            &contract,
+            contract.len(),
+            &mut violations,
+        );
+        assert!(
+            violations.is_empty(),
+            "exact readable annotation failed: {violations:?}"
+        );
+        assert_eq!(
+            approved_annotation_counts_with(&catalog, &contract).get(TARGET_ROW_ID),
+            Some(&1)
+        );
+        assert!(
+            approved_annotation_counts_with(&catalog, &[]).is_empty(),
+            "unapproved annotations must not satisfy complete-slice counts"
+        );
+    }
+
+    #[test]
+    fn readable_annotation_contract_rejects_mismatch_missing_duplicate_and_count_drift() {
+        let mut catalog = catalog_with_annotation();
+        let contract = [annotation_pin()];
+
+        catalog.annotations[0].posture = "durable".to_owned();
+        let mut violations = Vec::new();
+        validate_readable_annotation_contract_with(
+            &catalog,
+            &contract,
+            contract.len(),
+            &mut violations,
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|violation| { violation.code == "catalog_annotation_contract_mismatch" })
+        );
+
+        catalog.annotations.clear();
+        let duplicate = [annotation_pin(), annotation_pin()];
+        let mut violations = Vec::new();
+        validate_readable_annotation_contract_with(
+            &catalog,
+            &duplicate,
+            duplicate.len(),
+            &mut violations,
+        );
+        for expected in [
+            "catalog_annotation_contract_ambiguous",
+            "catalog_annotation_contract_missing",
+        ] {
+            assert!(
+                violations
+                    .iter()
+                    .any(|violation| violation.code == expected),
+                "missing annotation reciprocal branch {expected}: {violations:?}"
+            );
+        }
+
+        let mut violations = Vec::new();
+        validate_readable_annotation_contract_with(&catalog, &contract, 0, &mut violations);
+        assert!(
+            violations.iter().any(|violation| {
+                violation.code == "catalog_annotation_contract_pin_inconsistent"
+            })
         );
     }
 

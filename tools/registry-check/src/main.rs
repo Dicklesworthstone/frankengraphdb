@@ -408,8 +408,17 @@ fn emit_appendix_catalog(
             ),
             ("targets", n(catalog.targets.len() as i64)),
             (
+                "completion_layer_schemas",
+                n(catalog.completion_layers.len() as i64),
+            ),
+            ("annotations", n(catalog.annotations.len() as i64)),
+            (
                 "semantic_bindings",
                 n(catalog.semantic_bindings.len() as i64),
+            ),
+            (
+                "expansion_bindings",
+                n(catalog.expansion_bindings.len() as i64),
             ),
             ("evidence_rows", n(catalog.evidence.len() as i64)),
             (
@@ -489,8 +498,17 @@ fn run_appendix(root: &Path) -> Result<usize, String> {
             ),
             ("targets", n(catalog.targets.len() as i64)),
             (
+                "completion_layer_schemas",
+                n(catalog.completion_layers.len() as i64),
+            ),
+            ("annotations", n(catalog.annotations.len() as i64)),
+            (
                 "semantic_bindings",
                 n(catalog.semantic_bindings.len() as i64),
+            ),
+            (
+                "expansion_bindings",
+                n(catalog.expansion_bindings.len() as i64),
             ),
             ("evidence_rows", n(catalog.evidence.len() as i64)),
             (

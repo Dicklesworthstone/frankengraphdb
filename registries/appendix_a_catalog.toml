@@ -3,18 +3,19 @@
 # =============================================================================
 # Bead: fgdb-appendix-a-catalog-scaffold-gvvf
 #
-# Schema v4 adds source-confirmed top-level ordinary-union cross-index rows
-# backed by exact wire parents/variants, preserving the five disjoint identity
-# classes and the schema-v3 source, ambiguity, expansion, and owner contracts.
-# Every slice is deliberately declared: later A01-A21 work must supply exact
-# annotations, real implementation ownership, and static/runtime evidence.
+# Schema v5 freezes the four catalog-only completion-layer row shapes, target
+# binding cardinalities, authoring boundaries, and independent content-pin
+# mechanics before any slice authors those rows. No completion layer projects
+# into durable_fields or another generated registry. Every slice remains
+# deliberately declared: later A01-A21 work must supply exact annotations,
+# real implementation ownership, and static/runtime evidence.
 # =============================================================================
 
-schema_version = 4
+schema_version = 5
 
 [catalog]
 name = "appendix_a_catalog"
-catalog_epoch = 4
+catalog_epoch = 5
 row_id_grammar_version = 3
 canonical_order = "source-key,projection-registry,assigned-code,containing-schema,union-path,field-tag,arm-tag,row-id"
 diagnostic_version = 1
@@ -52,6 +53,50 @@ scenario_ids = ["g0_identity_e2e"]
 event_ids = ["appendix_closure_checked", "appendix_projection_checked", "appendix_projection_regenerated", "appendix_regeneration_completed", "appendix_source_manifest"]
 gate_ids = ["G0"]
 evidence_status = "live"
+
+[[completion_layer]]
+layer = "annotation"
+schema_version = 1
+field_contracts = ["row_id:string:required", "target_row_id:string:required", "exact_type:string:required", "cardinality:string:required", "layout:string:required", "role:string:required", "posture:string:required", "authority:string:required", "locality:string:required", "generic_expansions:string-array:required", "role_expansions:string-array:required", "reference_semantics:string:required", "target_schema_ids:string-array:required", "construction_order:string:required", "retention_and_cut_rule:string:required", "digest_recipe:string:required", "redaction_class:string:required", "resource_bounds:string:required", "compatibility:string:required"]
+target_binding = "target_row_id->target.target_row_id"
+target_cardinality = "zero-or-one-per-target;exactly-one-approved-when-complete"
+epoch_domain = "catalog-epoch-on-shape-change;content-pins-on-row-change"
+projection_policy = "catalog-only;appendix-regenerate-does-not-project"
+authoring_policy = "reviewed-source-assisted;policy-fields-owner-authored"
+pin_policy = "compiled-count-sha256-readable-row-contract"
+
+[[completion_layer]]
+layer = "semantic_binding"
+schema_version = 1
+field_contracts = ["row_id:string:required", "target_row_id:string:required", "owner_bead_id:string:required", "owner_crate:string:required", "owner_status:string:required", "consumer_crates:string-array:required"]
+target_binding = "target_row_id->target.target_row_id"
+target_cardinality = "zero-or-one-per-target;exactly-one-approved-when-complete"
+epoch_domain = "catalog-epoch-on-shape-change;content-pins-on-row-change"
+projection_policy = "catalog-only;appendix-regenerate-does-not-project"
+authoring_policy = "reviewed-owner-authored"
+pin_policy = "compiled-count-sha256-readable-row-contract"
+
+[[completion_layer]]
+layer = "expansion_binding"
+schema_version = 1
+field_contracts = ["row_id:string:required", "target_row_id:string:required", "parameter_ordinal:integer:required", "formal:string:required", "formal_class:string:required", "values:string-array:required", "rationale:string:required"]
+target_binding = "target_row_id->target.target_row_id"
+target_cardinality = "zero-or-one-per-target-parameter-ordinal;exact-source-dimensions"
+epoch_domain = "catalog-epoch-on-shape-change;content-pins-on-row-change"
+projection_policy = "catalog-only;appendix-regenerate-does-not-project"
+authoring_policy = "reviewed-source-dimension-assisted;rationale-owner-authored"
+pin_policy = "compiled-count-sha256-readable-row-contract"
+
+[[completion_layer]]
+layer = "evidence"
+schema_version = 1
+field_contracts = ["row_id:string:required", "target_row_id:string:required", "evidence_id:string:required", "phase:string:required", "status:string:required", "owner_bead_id:string:required", "checker_ids:string-array:required", "scenario_ids:string-array:required", "event_ids:string-array:required", "gate_ids:string-array:required"]
+target_binding = "target_row_id->target.target_row_id"
+target_cardinality = "zero-or-one-per-target-evidence-id;complete-needs-static-live-g0-and-runtime"
+epoch_domain = "catalog-epoch-on-shape-change;content-pins-on-row-change"
+projection_policy = "catalog-only;appendix-regenerate-does-not-project"
+authoring_policy = "reviewed-owner-authored"
+pin_policy = "compiled-count-sha256-readable-row-contract"
 
 [[slice]]
 ordinal = 1

@@ -368,8 +368,8 @@ fn appendix_a_catalog_parse_is_closed_and_versioned() {
         (
             "unknown root",
             source.replacen(
-                "schema_version = 4",
-                "schema_version = 4\nunknown_root_key = true",
+                "schema_version = 5",
+                "schema_version = 5\nunknown_root_key = true",
                 1,
             ),
             "catalog_unknown_key",
@@ -417,13 +417,13 @@ fn appendix_a_catalog_parse_is_closed_and_versioned() {
         ),
         (
             "stale schema version",
-            source.replacen("schema_version = 4", "schema_version = 3", 1),
+            source.replacen("schema_version = 5", "schema_version = 4", 1),
             "catalog_pin_mismatch",
             "schema_version",
         ),
         (
             "future schema version",
-            source.replacen("schema_version = 4", "schema_version = 5", 1),
+            source.replacen("schema_version = 5", "schema_version = 6", 1),
             "catalog_pin_mismatch",
             "schema_version",
         ),
@@ -624,6 +624,205 @@ unknown_metadata_key = true
 }
 
 #[test]
+fn appendix_a_completion_layer_schemas_are_readable_closed_and_versioned() {
+    let source = real_appendix_catalog_text();
+    let baseline = real_appendix_catalog();
+    assert_eq!(baseline.completion_layers.len(), 4);
+    assert_eq!(
+        appendix_a::completion_layer_schema_sha256(&baseline.completion_layers),
+        appendix_a::EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256
+    );
+
+    let unknown = source.replacen(
+        "[[completion_layer]]",
+        "[[completion_layer]]\nunknown_completion_key = true",
+        1,
+    );
+    let violations = appendix_a::parse_catalog(&unknown)
+        .expect_err("unknown completion-layer key must fail closed");
+    assert!(has_violation(
+        &violations,
+        "catalog_unknown_key",
+        "unknown_completion_key"
+    ));
+
+    let wrong_type = source.replacen(
+        "layer = \"annotation\"\nschema_version = 1",
+        "layer = \"annotation\"\nschema_version = \"1\"",
+        1,
+    );
+    let violations =
+        appendix_a::parse_catalog(&wrong_type).expect_err("wrong schema_version type must fail");
+    assert!(has_violation(
+        &violations,
+        "catalog_schema",
+        "schema_version"
+    ));
+
+    let missing = source.replacen(
+        "authoring_policy = \"reviewed-source-assisted;policy-fields-owner-authored\"\n",
+        "",
+        1,
+    );
+    let violations =
+        appendix_a::parse_catalog(&missing).expect_err("required authoring policy must fail");
+    assert!(has_violation(
+        &violations,
+        "catalog_schema",
+        "authoring_policy"
+    ));
+
+    let reordered = swap_first_two_table_blocks(&source, "[[completion_layer]]");
+    let violations =
+        appendix_a::parse_catalog(&reordered).expect_err("completion layers have canonical order");
+    assert!(
+        violations.iter().any(|violation| {
+            matches!(
+                violation.code.as_str(),
+                "catalog_completion_layer_schema_drift"
+                    | "catalog_completion_layer_schema_mismatch"
+            )
+        }),
+        "reordered completion layers escaped the readable/hash pins: {violations:?}"
+    );
+}
+
+#[test]
+fn appendix_a_empty_completion_row_schemas_still_reject_wrong_field_types() {
+    let source = real_appendix_catalog_text();
+    let baseline = real_appendix_catalog();
+    let fixtures = [
+        (
+            "annotation",
+            "annotation",
+            r#"
+[[annotation]]
+row_id = "a01:annotation:bootstrap-frame-root-slot"
+target_row_id = "a01:bootstrap-frame:root-slot"
+exact_type = "RootSlot"
+cardinality = "one"
+layout = "fixed"
+role = "Local"
+posture = "bootstrap"
+authority = "root"
+locality = "local"
+generic_expansions = []
+role_expansions = []
+reference_semantics = "embedded"
+target_schema_ids = []
+construction_order = "bootstrap-root-slot"
+retention_and_cut_rule = "fixed-location"
+digest_recipe = "slot-checksum"
+redaction_class = "public-commitment"
+resource_bounds = "fixed-4096-bytes"
+compatibility = "v1"
+"#,
+        ),
+        (
+            "semantic binding",
+            "semantic_binding",
+            r#"
+[[semantic_binding]]
+row_id = "a01:semantic-binding:bootstrap-frame-root-slot"
+target_row_id = "a01:bootstrap-frame:root-slot"
+owner_bead_id = "fgdb-w10-fixture"
+owner_crate = "fgdb-fixture"
+owner_status = "planned"
+consumer_crates = ["fgdb"]
+"#,
+        ),
+        (
+            "expansion binding",
+            "expansion_binding",
+            r#"
+[[expansion_binding]]
+row_id = "a01:expansion-binding:bootstrap-frame-root-slot-parameter-1-role"
+target_row_id = "a01:bootstrap-frame:root-slot"
+parameter_ordinal = 1
+formal = "Role"
+formal_class = "role"
+values = ["Local"]
+rationale = "fixture"
+"#,
+        ),
+        (
+            "evidence",
+            "evidence",
+            r#"
+[[evidence]]
+row_id = "a01:evidence:bootstrap-frame-root-slot-static-contract"
+target_row_id = "a01:bootstrap-frame:root-slot"
+evidence_id = "static-contract"
+phase = "static"
+status = "live"
+owner_bead_id = "fgdb-w10-fixture"
+checker_ids = ["appendix_a_catalog_closure"]
+scenario_ids = ["g0_identity_e2e"]
+event_ids = ["appendix_closure_checked"]
+gate_ids = ["G0"]
+"#,
+        ),
+    ];
+    for (name, layer, fixture) in fixtures {
+        let mut shaped = source.clone();
+        shaped.push_str(fixture);
+        let violations =
+            appendix_a::parse_catalog(&shaped).expect_err("unreleased fixture row must fail pins");
+        assert!(
+            !violations
+                .iter()
+                .any(|violation| violation.code == "catalog_schema"),
+            "{name} fixture does not satisfy its frozen structural shape: {violations:?}"
+        );
+
+        let schema = baseline
+            .completion_layers
+            .iter()
+            .find(|row| row.layer == layer)
+            .expect("fixture completion schema");
+        for contract in &schema.field_contracts {
+            let mut parts = contract.split(':');
+            let field = parts.next().expect("field contract name");
+            let field_type = parts.next().expect("field contract type");
+            assert_eq!(parts.next(), Some("required"));
+            assert_eq!(parts.next(), None);
+            let prefix = format!("{field} = ");
+            let assignment = fixture
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .expect("fixture carries every required field");
+            assert!(
+                matches!(field_type, "string" | "integer" | "string-array"),
+                "unsupported frozen field type {field_type:?}"
+            );
+            let wrong_assignment = if field_type == "string" {
+                format!("{field} = 1")
+            } else {
+                format!("{field} = \"wrong-type\"")
+            };
+
+            let mut malformed = source.clone();
+            malformed.push_str(&fixture.replacen(assignment, &wrong_assignment, 1));
+            let violations = appendix_a::parse_catalog(&malformed)
+                .expect_err("wrong completion-row field type must fail structurally");
+            assert!(
+                has_violation(&violations, "catalog_schema", field),
+                "{name}.{field} accepted the wrong field type: {violations:?}"
+            );
+
+            let mut missing = source.clone();
+            missing.push_str(&fixture.replacen(assignment, "", 1));
+            let violations = appendix_a::parse_catalog(&missing)
+                .expect_err("missing required completion-row field must fail structurally");
+            assert!(
+                has_violation(&violations, "catalog_schema", field),
+                "{name}.{field} was not required: {violations:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn appendix_a_catalog_projection_targets_are_exact_and_reservations_are_nonsemantic() {
     let baseline = real_appendix_catalog();
     let baseline_violations = appendix_a::appendix_a_catalog_closure(&baseline);
@@ -748,6 +947,18 @@ fn appendix_a_catalog_maintenance_and_semantic_binding_contracts_are_distinct() 
             .any(|violation| violation.code == "catalog_semantic_owner_invalid")
     );
 
+    let mut duplicate_semantic = baseline.clone();
+    duplicate_semantic.semantic_bindings.push(valid.clone());
+    let mut duplicate = valid.clone();
+    duplicate.row_id.push_str("-duplicate");
+    duplicate_semantic.semantic_bindings.push(duplicate);
+    let violations = appendix_a::validate_catalog(&duplicate_semantic);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| { violation.code == "catalog_semantic_binding_duplicate" })
+    );
+
     let mut unsorted_consumers = baseline;
     let mut unsorted = valid;
     unsorted.consumer_crates = vec!["z".to_owned(), "a".to_owned()];
@@ -791,6 +1002,12 @@ fn appendix_a_annotations_reject_placeholders_and_unknown_schema_ids() {
             .iter()
             .any(|violation| violation.code == "catalog_annotation_contract_drift"),
         "an unpinned annotation self-authorized: {violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.code == "catalog_annotation_contract_unapproved"),
+        "an annotation without an independent readable pin self-authorized: {violations:?}"
     );
     for unexpected in [
         "catalog_annotation_placeholder",
@@ -1036,6 +1253,7 @@ fn appendix_a_annotations_reject_placeholders_and_unknown_schema_ids() {
 #[test]
 fn appendix_a_field_annotations_match_source_type_and_cardinality() {
     let mut catalog = real_appendix_catalog();
+    let generated_before = appendix_a::generated_projections(&catalog);
     let annotation = appendix_a::Annotation {
         row_id: "a01:annotation:field-root-slot-cluster-incarnation".to_owned(),
         target_row_id: "a01:field:root-slot-cluster-incarnation".to_owned(),
@@ -1058,6 +1276,48 @@ fn appendix_a_field_annotations_match_source_type_and_cardinality() {
         compatibility: "v1".to_owned(),
     };
     catalog.annotations.push(annotation.clone());
+    let mut all_completion_metadata = catalog.clone();
+    all_completion_metadata
+        .semantic_bindings
+        .push(appendix_a::SemanticBinding {
+            row_id: "a01:semantic-binding:field-root-slot-cluster-incarnation".to_owned(),
+            target_row_id: annotation.target_row_id.clone(),
+            owner_bead_id: "fgdb-w10-fixture".to_owned(),
+            owner_crate: "fgdb-formats".to_owned(),
+            owner_status: "planned".to_owned(),
+            consumer_crates: vec!["fgdb".to_owned()],
+        });
+    all_completion_metadata
+        .expansion_bindings
+        .push(appendix_a::ExpansionBinding {
+            row_id: "a01:expansion-binding:field-root-slot-cluster-incarnation-parameter-1-role"
+                .to_owned(),
+            target_row_id: annotation.target_row_id.clone(),
+            parameter_ordinal: 1,
+            formal: "Role".to_owned(),
+            formal_class: "role".to_owned(),
+            values: vec!["Local".to_owned()],
+            rationale: "projection non-effect fixture".to_owned(),
+        });
+    all_completion_metadata
+        .evidence
+        .push(appendix_a::EvidenceBinding {
+            row_id: "a01:evidence:field-root-slot-cluster-incarnation-static-contract".to_owned(),
+            target_row_id: annotation.target_row_id.clone(),
+            evidence_id: "static-contract".to_owned(),
+            phase: "static".to_owned(),
+            status: "live".to_owned(),
+            owner_bead_id: "fgdb-verification-fixture".to_owned(),
+            checker_ids: vec!["appendix_a_catalog_closure".to_owned()],
+            scenario_ids: vec!["g0_identity_e2e".to_owned()],
+            event_ids: vec!["appendix_closure_checked".to_owned()],
+            gate_ids: vec!["G0".to_owned()],
+        });
+    assert_eq!(
+        appendix_a::generated_projections(&all_completion_metadata),
+        generated_before,
+        "catalog-only completion metadata must not participate in a generated registry epoch"
+    );
     let source = real_plan_source();
     let violations = appendix_a::appendix_a_catalog_source(&catalog, &source);
     assert!(
@@ -1066,6 +1326,24 @@ fn appendix_a_field_annotations_match_source_type_and_cardinality() {
             .any(|violation| violation.code == "source_annotation_contract_mismatch"),
         "source-exact field annotation was rejected: {violations:?}"
     );
+    // Positive control above licenses the source measurement. Its
+    // interpretation is deliberately narrower: the census determines type
+    // and cardinality, but cannot choose policy. Both policy-distinct rows
+    // satisfy the identical source facts and therefore require reviewed,
+    // independently pinned authoring rather than a census generator.
+    let mut policy_distinct = catalog.clone();
+    policy_distinct.annotations[0].posture = "durable".to_owned();
+    policy_distinct.annotations[0].authority = "local-authority".to_owned();
+    policy_distinct.annotations[0].digest_recipe = "canonical-u64".to_owned();
+    policy_distinct.annotations[0].redaction_class = "private-metadata".to_owned();
+    let violations = appendix_a::appendix_a_catalog_source(&policy_distinct, &source);
+    assert!(
+        !violations
+            .iter()
+            .any(|violation| violation.code == "source_annotation_contract_mismatch"),
+        "source facts unexpectedly chose policy fields: {violations:?}"
+    );
+    assert_ne!(policy_distinct.annotations[0], catalog.annotations[0]);
 
     catalog.annotations[0].exact_type = "u32".to_owned();
     catalog.annotations[0].cardinality = "optional".to_owned();
