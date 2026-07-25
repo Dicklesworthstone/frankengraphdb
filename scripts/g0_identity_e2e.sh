@@ -19,6 +19,23 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Read one scalar from the catalog's [target_manifest] block. Block-scoped so a
+# same-named key in another table -- e.g. the reservation partition's own
+# target_count -- can never be picked up by accident.
+catalog_manifest_value() {
+  awk -v key="$1" '
+    /^\[target_manifest\]/ { inblock = 1; next }
+    /^\[/ { inblock = 0 }
+    inblock && $1 == key { gsub(/"/, "", $3); print $3; found = 1; exit }
+    END {
+      if (!found) {
+        print "target_manifest key " key " not found in the catalog" > "/dev/stderr"
+        exit 42
+      }
+    }
+  ' "$ROOT/registries/appendix_a_catalog.toml"
+}
 WORK="${G0_E2E_WORKDIR:-$(mktemp -d)}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 BIN="$TARGET_DIR/debug/registry-check"
@@ -137,11 +154,14 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
 else
   die "Appendix A reference-manifest event is missing or drifted"
 fi
+EXPECT_TARGET_COUNT="$(catalog_manifest_value target_count)"
+EXPECT_FALLBACK_COUNT="$(catalog_manifest_value projection_fallback_count)"
+EXPECT_TARGET_ASSIGNMENT_SHA="$(catalog_manifest_value target_source_assignment_sha256)"
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
-    '"target_count":551' \
-    '"projection_fallback_count":84' \
-    '"target_source_assignment_sha256":"8cb69670ffe3eb5e6fddb1016e19c718e59695255a25126099e346b94ad51f41"' \
+    '"target_count":'"$EXPECT_TARGET_COUNT" \
+    '"projection_fallback_count":'"$EXPECT_FALLBACK_COUNT" \
+    '"target_source_assignment_sha256":"'"$EXPECT_TARGET_ASSIGNMENT_SHA"'"' \
     '"outcome":"pass"'; then
   ok "Appendix A target/source assignments are release-pinned"
 else
@@ -639,14 +659,21 @@ fi
 
 log "phase 2h: registry epoch drift without a reviewed assignment change"
 stage_except neg-registry-epoch logical_object_kinds.toml
-awk '
-  !changed && $0 == "registry_epoch = 10" {
-    print "registry_epoch = 11"
+LOGICAL_EPOCH="$(awk '/^registry_epoch = /{gsub(/[^0-9]/,"",$3); print $3; exit}' \
+  "$ROOT/registries/logical_object_kinds.toml")"
+awk -v cur="registry_epoch = $LOGICAL_EPOCH" -v nxt="registry_epoch = $((LOGICAL_EPOCH + 1))" '
+  !changed && $0 == cur {
+    print nxt
     changed = 1
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "epoch-drift fixture matched nothing: expected \"" cur "\"" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/logical_object_kinds.toml" \
   > "$WORK/neg-registry-epoch/registries/logical_object_kinds.toml"
 expect_identity_violation \
