@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 19
+registry_epoch = 20
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -1729,6 +1729,21 @@ role_predicate = "true"
 retention_and_cut_rule = "grant_id derivation input; distinguishes otherwise-identical grants on the same target (a01:1402)"
 version_status = "reserved"
 max_size_bytes = 32
+
+[[field]]
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x0009
+stable_name = "authority_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "the grant spec strongly retains the exact authority configuration its quorum rule and member set were validated against, so a later reconfiguration cannot retroactively change what the grant was authorized under (a01:1402); ConfigurationState is constructed at the catalog floor and never cites the spec back"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "RemoteRetentionReleaseAckCertificate"

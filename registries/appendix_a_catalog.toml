@@ -38,9 +38,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 548
+target_count = 549
 projection_fallback_count = 83
-target_source_assignment_sha256 = "8be4e34c7e4e34ba31bf16db8022e8fc95a4b4cef8a2ebbe3fe4bf5e60c6b6c0"
+target_source_assignment_sha256 = "93a521c352a43f04db23a8cf1501301ff9d76e3b3efa00ad4c26a84ed4511fc6"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -600,7 +600,7 @@ registry_epoch = 11
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 19
+registry_epoch = 20
 
 [[logical_kind]]
 slice_id = "a03"
@@ -4907,6 +4907,23 @@ role_predicate = "true"
 retention_and_cut_rule = "grant_id derivation input; distinguishes otherwise-identical grants on the same target (a01:1402)"
 version_status = "reserved"
 max_size_bytes = 32
+[[field]]
+slice_id = "a01"
+row_id = "a01:field:remote-retention-grant-spec-authority-configuration-ref"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x0009
+stable_name = "authority_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "the grant spec strongly retains the exact authority configuration its quorum rule and member set were validated against, so a later reconfiguration cannot retroactively change what the grant was authorized under (a01:1402); ConfigurationState is constructed at the catalog floor and never cites the spec back"
+version_status = "reserved"
+max_size_bytes = 40
+
 
 [[field]]
 slice_id = "a01"
@@ -30505,6 +30522,14 @@ row_id = "a01:target:field-remote-retention-grant-spec-grant-id"
 target_row_id = "a01:field:remote-retention-grant-spec-grant-id"
 slice_id = "a01"
 source_key = "field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.grant_id|grant_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:field-remote-retention-grant-spec-authority-configuration-ref"
+target_row_id = "a01:field:remote-retention-grant-spec-authority-configuration-ref"
+slice_id = "a01"
+source_key = "field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.authority_configuration_ref|authority_configuration_ref"
 target_kind = "field"
 definition_status = "declared"
 
