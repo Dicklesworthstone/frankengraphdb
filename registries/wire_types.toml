@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 32
+registry_epoch = 33
 
 [[type]]
 wire_type_id = 0x0001
@@ -3189,4 +3189,46 @@ kind = "record"
 status = "reserved"
 encoding_context = "canonical nonretaining WeakEpochIdentity record; exact member layout per Appendix A a13:2004"
 allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x013e
+name = "ObjectCreationBoundary"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union ObjectCreationBoundary; source-order tags preserve the durable AAD identity at Appendix A a13:2002"
+allowed_containing_schemas = ["KeyWrap"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x013f
+name = "ObjectCreationBoundary.committed_existing"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ObjectCreationBoundary"
+wire_tag = 0x0001
+encoding_context = "arm CommittedExisting of closed union ObjectCreationBoundary"
+allowed_containing_schemas = ["ObjectCreationBoundary"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0140
+name = "ObjectCreationBoundary.transaction_reserved"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ObjectCreationBoundary"
+wire_tag = 0x0002
+encoding_context = "arm TransactionReserved of closed union ObjectCreationBoundary"
+allowed_containing_schemas = ["ObjectCreationBoundary"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0141
+name = "ObjectCreationBoundary.branch_epoch_reserved"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ObjectCreationBoundary"
+wire_tag = 0x0003
+encoding_context = "arm BranchEpochReserved of closed union ObjectCreationBoundary"
+allowed_containing_schemas = ["ObjectCreationBoundary"]
 max_size_bytes = 16777216

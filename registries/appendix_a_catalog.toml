@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2176
+target_count = 2184
 projection_fallback_count = 90
-target_source_assignment_sha256 = "108a0dd937796543a1cd3eddcfc408efdafb70ed79f7413982df1406b9d24d66"
+target_source_assignment_sha256 = "2c2a07da9da87b33532a2a5a4716fd0c4bc79d5992c6aa4b76695e2202d8b423"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 32
+registry_epoch = 33
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 43
+registry_epoch = 44
 
 [[logical_kind]]
 slice_id = "a03"
@@ -9415,6 +9415,56 @@ kind = "record"
 status = "reserved"
 encoding_context = "canonical nonretaining WeakEpochIdentity record; exact member layout per Appendix A a13:2004"
 allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a13"
+row_id = "a13:wire-type:object-creation-boundary"
+wire_type_id = 0x013e
+name = "ObjectCreationBoundary"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union ObjectCreationBoundary; source-order tags preserve the durable AAD identity at Appendix A a13:2002"
+allowed_containing_schemas = ["KeyWrap"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a13"
+row_id = "a13:wire-type:object-creation-boundary-committed-existing"
+wire_type_id = 0x013f
+name = "ObjectCreationBoundary.committed_existing"
+kind = "union_variant"
+containing_union = "ObjectCreationBoundary"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm CommittedExisting of closed union ObjectCreationBoundary"
+allowed_containing_schemas = ["ObjectCreationBoundary"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a13"
+row_id = "a13:wire-type:object-creation-boundary-transaction-reserved"
+wire_type_id = 0x0140
+name = "ObjectCreationBoundary.transaction_reserved"
+kind = "union_variant"
+containing_union = "ObjectCreationBoundary"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm TransactionReserved of closed union ObjectCreationBoundary"
+allowed_containing_schemas = ["ObjectCreationBoundary"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a13"
+row_id = "a13:wire-type:object-creation-boundary-branch-epoch-reserved"
+wire_type_id = 0x0141
+name = "ObjectCreationBoundary.branch_epoch_reserved"
+kind = "union_variant"
+containing_union = "ObjectCreationBoundary"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm BranchEpochReserved of closed union ObjectCreationBoundary"
+allowed_containing_schemas = ["ObjectCreationBoundary"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -24035,6 +24085,64 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union]]
+slice_id = "a13"
+row_id = "a13:union:object-creation-boundary-c5b12d0b9f7eccea"
+union_name = "ObjectCreationBoundary"
+containing_schema = "ObjectCreationBoundary"
+union_path = "ObjectCreationBoundary"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyWrap"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:object-creation-boundary-committed-existing-f4c676dd9cebf872"
+union_name = "ObjectCreationBoundary"
+containing_schema = "ObjectCreationBoundary"
+union_path = "ObjectCreationBoundary"
+arm_tag = 0x0001
+source_arm_name = "CommittedExisting"
+stable_name = "committed_existing"
+payload_kind = "inline-record"
+payload_sha256 = "de6fc7f8a71f1d25a8c555795484a9439a1edbe139003a50355edf9081195887"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:object-creation-boundary-transaction-reserved-70f5e64e3e6cc38d"
+union_name = "ObjectCreationBoundary"
+containing_schema = "ObjectCreationBoundary"
+union_path = "ObjectCreationBoundary"
+arm_tag = 0x0002
+source_arm_name = "TransactionReserved"
+stable_name = "transaction_reserved"
+payload_kind = "inline-record"
+payload_sha256 = "bb2d7c8843ad9a86b0f4c61ed6baf2bb172ed187a33d2fcb34de12b24e7d679f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a13"
+row_id = "a13:union-arm:object-creation-boundary-branch-epoch-reserved-0347c2cdd88da235"
+union_name = "ObjectCreationBoundary"
+containing_schema = "ObjectCreationBoundary"
+union_path = "ObjectCreationBoundary"
+arm_tag = 0x0003
+source_arm_name = "BranchEpochReserved"
+stable_name = "branch_epoch_reserved"
+payload_kind = "inline-record"
+payload_sha256 = "ce0e32685eef34d92ba0a1bee0e1f217316dbce6c59013fb92faebf7a925b7ce"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union]]
 slice_id = "a04"
@@ -43926,7 +44034,7 @@ symbol = "ObjectCreationBoundary"
 generic_signature = ""
 source_key = "top|ObjectCreationBoundary"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a13:2002"]
 
 [[top_level_candidate]]
@@ -62472,6 +62580,14 @@ target_kind = "wire-type"
 definition_status = "declared"
 
 [[target]]
+row_id = "a13:target:wire-type-object-creation-boundary"
+target_row_id = "a13:wire-type:object-creation-boundary"
+slice_id = "a13"
+source_key = "top|ObjectCreationBoundary"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
 row_id = "a13:target:union-branch-epoch-boundary-reserve-spec-operation-aad7e3ce5b9d71d7"
 target_row_id = "a13:union:branch-epoch-boundary-reserve-spec-operation-aad7e3ce5b9d71d7"
 slice_id = "a13"
@@ -62733,6 +62849,62 @@ target_row_id = "a13:union-arm:key-grant-registry-entries-terminal-status-expire
 slice_id = "a13"
 source_key = "arm|KeyGrantRegistry<Role>|KeyGrantRegistry<Role>.entries.Terminal.status|Expired"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-object-creation-boundary-c5b12d0b9f7eccea"
+target_row_id = "a13:union:object-creation-boundary-c5b12d0b9f7eccea"
+slice_id = "a13"
+source_key = "union|ObjectCreationBoundary|ObjectCreationBoundary"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-object-creation-boundary-committed-existing-f4c676dd9cebf872"
+target_row_id = "a13:union-arm:object-creation-boundary-committed-existing-f4c676dd9cebf872"
+slice_id = "a13"
+source_key = "arm|ObjectCreationBoundary|ObjectCreationBoundary|CommittedExisting"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:wire-type-object-creation-boundary-committed-existing"
+target_row_id = "a13:wire-type:object-creation-boundary-committed-existing"
+slice_id = "a13"
+source_key = "arm|ObjectCreationBoundary|ObjectCreationBoundary|CommittedExisting"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-object-creation-boundary-transaction-reserved-70f5e64e3e6cc38d"
+target_row_id = "a13:union-arm:object-creation-boundary-transaction-reserved-70f5e64e3e6cc38d"
+slice_id = "a13"
+source_key = "arm|ObjectCreationBoundary|ObjectCreationBoundary|TransactionReserved"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:wire-type-object-creation-boundary-transaction-reserved"
+target_row_id = "a13:wire-type:object-creation-boundary-transaction-reserved"
+slice_id = "a13"
+source_key = "arm|ObjectCreationBoundary|ObjectCreationBoundary|TransactionReserved"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:union-arm-object-creation-boundary-branch-epoch-reserved-0347c2cdd88da235"
+target_row_id = "a13:union-arm:object-creation-boundary-branch-epoch-reserved-0347c2cdd88da235"
+slice_id = "a13"
+source_key = "arm|ObjectCreationBoundary|ObjectCreationBoundary|BranchEpochReserved"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:wire-type-object-creation-boundary-branch-epoch-reserved"
+target_row_id = "a13:wire-type:object-creation-boundary-branch-epoch-reserved"
+slice_id = "a13"
+source_key = "arm|ObjectCreationBoundary|ObjectCreationBoundary|BranchEpochReserved"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[target]]

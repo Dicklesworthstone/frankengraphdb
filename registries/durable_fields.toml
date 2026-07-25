@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 43
+registry_epoch = 44
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -5506,6 +5506,17 @@ union_path = "NoTerminalSignatureOrOrderProof.plan_disposition"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["NoTerminalSignatureOrOrderProof"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ObjectCreationBoundary"
+containing_schema = "ObjectCreationBoundary"
+union_path = "ObjectCreationBoundary"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyWrap"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -12378,6 +12389,45 @@ source_arm_name = "SemanticPlanAbandoned"
 stable_name = "semantic_plan_abandoned"
 payload_kind = "inline-record"
 payload_sha256 = "93ac1def05d257be7afe869fc1bd686fb1b2d6a6265035f0ea2a5357701db68d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ObjectCreationBoundary"
+containing_schema = "ObjectCreationBoundary"
+union_path = "ObjectCreationBoundary"
+arm_tag = 0x0001
+source_arm_name = "CommittedExisting"
+stable_name = "committed_existing"
+payload_kind = "inline-record"
+payload_sha256 = "de6fc7f8a71f1d25a8c555795484a9439a1edbe139003a50355edf9081195887"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ObjectCreationBoundary"
+containing_schema = "ObjectCreationBoundary"
+union_path = "ObjectCreationBoundary"
+arm_tag = 0x0002
+source_arm_name = "TransactionReserved"
+stable_name = "transaction_reserved"
+payload_kind = "inline-record"
+payload_sha256 = "bb2d7c8843ad9a86b0f4c61ed6baf2bb172ed187a33d2fcb34de12b24e7d679f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ObjectCreationBoundary"
+containing_schema = "ObjectCreationBoundary"
+union_path = "ObjectCreationBoundary"
+arm_tag = 0x0003
+source_arm_name = "BranchEpochReserved"
+stable_name = "branch_epoch_reserved"
+payload_kind = "inline-record"
+payload_sha256 = "ce0e32685eef34d92ba0a1bee0e1f217316dbce6c59013fb92faebf7a925b7ce"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

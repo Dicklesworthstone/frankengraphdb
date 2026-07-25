@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 43
+registry_epoch = 44
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 43);
+    assert_eq!(epoch, 44);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3127,6 +3127,139 @@ fn idr_weak_epoch_identity_reserved_wire_record_is_exact() {
 }
 
 #[test]
+fn idr_object_creation_boundary_is_source_ordered_and_wire_backed() {
+    let identity = real_identity();
+    let parent = identity
+        .wire
+        .iter()
+        .find(|wire| wire.name == "ObjectCreationBoundary")
+        .expect("ObjectCreationBoundary wire parent exists");
+    assert_eq!(parent.wire_type_id, 0x013e);
+    assert_eq!(parent.kind, "union", "a wire record cannot back this union");
+    assert_eq!(parent.status, "reserved");
+    assert_eq!(parent.containing_union, None);
+    assert_eq!(parent.wire_tag, None);
+    assert_eq!(
+        parent.allowed_containing_schemas,
+        vec!["KeyWrap".to_owned()]
+    );
+
+    let variants = identity
+        .wire
+        .iter()
+        .filter(|wire| wire.containing_union.as_deref() == Some("ObjectCreationBoundary"))
+        .map(|wire| (wire.name.as_str(), wire.wire_type_id, wire.wire_tag))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        variants,
+        vec![
+            (
+                "ObjectCreationBoundary.committed_existing",
+                0x013f,
+                Some(0x0001),
+            ),
+            (
+                "ObjectCreationBoundary.transaction_reserved",
+                0x0140,
+                Some(0x0002),
+            ),
+            (
+                "ObjectCreationBoundary.branch_epoch_reserved",
+                0x0141,
+                Some(0x0003),
+            ),
+        ],
+        "wire variants must preserve source order, not alphabetical census order"
+    );
+    assert!(
+        identity
+            .wire
+            .iter()
+            .filter(|wire| wire.containing_union.as_deref() == Some("ObjectCreationBoundary"))
+            .all(|wire| {
+                wire.allowed_containing_schemas == vec!["ObjectCreationBoundary".to_owned()]
+            }),
+        "every wire variant must be scoped to its exact union"
+    );
+
+    let union = identity
+        .ordinary_unions
+        .iter()
+        .find(|union| union.union_name == "ObjectCreationBoundary")
+        .expect("ObjectCreationBoundary ordinary union exists");
+    assert_eq!(union.containing_schema, union.union_name);
+    assert_eq!(union.union_path, union.union_name);
+    assert_eq!(union.field_tag, None);
+    assert_eq!(union.allowed_containing_schemas, vec!["KeyWrap".to_owned()]);
+    let arms = union
+        .arms
+        .iter()
+        .map(|arm| {
+            (
+                arm.source_arm_name.as_str(),
+                arm.arm_tag,
+                arm.stable_name.as_str(),
+                arm.payload_sha256.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        arms,
+        vec![
+            (
+                "CommittedExisting",
+                0x0001,
+                "committed_existing",
+                Some("de6fc7f8a71f1d25a8c555795484a9439a1edbe139003a50355edf9081195887"),
+            ),
+            (
+                "TransactionReserved",
+                0x0002,
+                "transaction_reserved",
+                Some("bb2d7c8843ad9a86b0f4c61ed6baf2bb172ed187a33d2fcb34de12b24e7d679f"),
+            ),
+            (
+                "BranchEpochReserved",
+                0x0003,
+                "branch_epoch_reserved",
+                Some("ce0e32685eef34d92ba0a1bee0e1f217316dbce6c59013fb92faebf7a925b7ce"),
+            ),
+        ],
+        "the plan spells CommittedExisting, TransactionReserved, BranchEpochReserved"
+    );
+
+    let catalog = real_appendix_catalog();
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == "top|ObjectCreationBoundary")
+        .expect("ObjectCreationBoundary source candidate exists");
+    assert_eq!(candidate.identity_class, "wire");
+    assert_eq!(
+        catalog
+            .targets
+            .iter()
+            .filter(|target| {
+                target.source_key == "top|ObjectCreationBoundary"
+                    || target
+                        .source_key
+                        .starts_with("union|ObjectCreationBoundary|")
+                    || target.source_key.starts_with("arm|ObjectCreationBoundary|")
+            })
+            .count(),
+        8,
+        "one parent, one union, three arms, and three wire variants must be targeted"
+    );
+    assert!(
+        !catalog
+            .reservations
+            .iter()
+            .any(|reservation| reservation.symbol == "ObjectCreationBoundary"),
+        "an inline non-StrongRef family must not acquire a reservation"
+    );
+}
+
+#[test]
 fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     let identity = real_identity();
     let logical = identity
@@ -4597,6 +4730,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "TopologyStateForm"
                 | "TopologyStatePartitionScheme"
                 | "TopologyStateSortedShardsRecordState"
+                | "ObjectCreationBoundary"
         )
     };
     pre_erratum
@@ -4775,7 +4909,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 295,
+        pre_erratum.ordinary_unions.len() + 296,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
