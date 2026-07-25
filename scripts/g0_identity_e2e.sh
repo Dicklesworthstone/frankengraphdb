@@ -554,7 +554,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2d planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/durable_fields.toml" \
   > "$WORK/neg-recipe/registries/durable_fields.toml"
 if "$BIN" identity --root "$WORK/neg-recipe" >"$WORK/neg-recipe.jsonl" 2>/dev/null; then
@@ -578,7 +583,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2e planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/logical_object_kinds.toml" \
   > "$WORK/neg-schema-version/registries/logical_object_kinds.toml"
 if "$BIN" identity --root "$WORK/neg-schema-version" \
@@ -607,7 +617,12 @@ awk '
     changed = 1
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2f planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/logical_object_kinds.toml" \
   > "$WORK/neg-unknown-top-level/registries/logical_object_kinds.toml"
 if "$BIN" identity --root "$WORK/neg-unknown-top-level" \
@@ -636,7 +651,12 @@ awk '
     print "unknown_row_key = true"
     changed = 1
   }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2g planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/logical_object_kinds.toml" \
   > "$WORK/neg-unknown-row/registries/logical_object_kinds.toml"
 if "$BIN" identity --root "$WORK/neg-unknown-row" \
@@ -689,7 +709,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2i planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/logical_object_kinds.toml" \
   > "$WORK/neg-released-reuse/registries/logical_object_kinds.toml"
 expect_identity_violation \
@@ -781,7 +806,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 2l planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/durable_fields.toml" \
   > "$WORK/neg-union-role/registries/durable_fields.toml"
 expect_identity_violation \
@@ -797,7 +827,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3a planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-bead/registries/appendix_a_catalog.toml"
 expect_appendix_violation neg-appendix-bead catalog_pin_mismatch a01
@@ -839,7 +874,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3b planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" \
   > "$WORK/neg-appendix-source/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 expect_appendix_violation \
@@ -1183,7 +1223,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3g planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-row-id/registries/appendix_a_catalog.toml"
 expect_appendix_violation \
@@ -1222,7 +1267,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3i planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-complete/registries/appendix_a_catalog.toml"
 expect_appendix_violation \
@@ -1236,7 +1286,12 @@ awk '
     changed = 1
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3j planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" \
   > "$WORK/neg-appendix-reference-source/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 expect_appendix_violation \
@@ -1252,7 +1307,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3j-target planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-target-assignment/registries/appendix_a_catalog.toml"
 expect_appendix_violation \
@@ -1450,7 +1510,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3k planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-maintenance/registries/appendix_a_catalog.toml"
 expect_appendix_violation \
@@ -1509,7 +1574,12 @@ awk '
     next
   }
   { print }
-  END { if (!changed) exit 42 }
+  END {
+    if (!changed) {
+      print "FIXTURE STALE: phase 3n planted nothing - the line it rewrites no longer exists in the staged input" > "/dev/stderr"
+      exit 42
+    }
+  }
 ' "$ROOT/registries/appendix_a_catalog.toml" \
   > "$WORK/neg-appendix-projection-schema/registries/appendix_a_catalog.toml"
 expect_appendix_structural_error \
