@@ -4565,6 +4565,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 )
         )
     };
+    // A14 adds GcDecisionRecord's retaining configuration-state reference. Remove it as
+    // a cohort so the historical witness still reconstructs the exact namespace
+    // predating every post-erratum field increment.
+    let post_erratum_a14_field = |schema: &str, name: &str| {
+        schema == "GcDecisionRecord" && name == "stable_configuration_ref"
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_union(&field.exact_wire_type)
             && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
@@ -4572,6 +4578,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a15_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a05_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a04_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 233,
@@ -4579,7 +4586,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 63,
+        pre_erratum.fields.len() + 64,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A04 unanimous-precedent tranche"
     );

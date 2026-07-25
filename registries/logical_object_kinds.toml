@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 40
+registry_epoch = 41
 
 [[kind]]
 object_kind = 0x0001
@@ -3364,3 +3364,21 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_retention_anchor/"
+
+[[kind]]
+object_kind = 0x0544
+name = "GcPhysicalDispositionImportSpec"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_physical_disposition_import_spec/"
+
+[[kind]]
+object_kind = 0x0545
+name = "GcSemanticState"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_semantic_state/"

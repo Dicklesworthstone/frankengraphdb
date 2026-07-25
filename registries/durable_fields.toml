@@ -502,6 +502,21 @@ version_status = "reserved"
 max_size_bytes = 65536
 
 [[field]]
+containing_schema = "GcDecisionRecord"
+field_tag = 0x0003
+stable_name = "stable_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "retaining reference to the configuration state the GC decision was computed against; every follower recomputes the candidate from it, so it stays reachable for as long as the decision does (a14)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "GenesisMetaProjectionPayload"
 field_tag = 0x0002
 stable_name = "consumer_domain"
