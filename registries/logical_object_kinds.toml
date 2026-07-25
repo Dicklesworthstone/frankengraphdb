@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 39
+registry_epoch = 40
 
 [[kind]]
 object_kind = 0x0001
@@ -3328,3 +3328,39 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_lease_state/"
+
+[[kind]]
+object_kind = 0x0540
+name = "CanonicalCatalogRestoreTargetTerminalDisposition"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_catalog_restore_target_terminal_disposition/"
+
+[[kind]]
+object_kind = 0x0541
+name = "RestoreAbandonAuthorityProfileProjection"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandon_authority_profile_projection/"
+
+[[kind]]
+object_kind = 0x0542
+name = "RestoreLeaseOperationTerminalRecordRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_record_ref/"
+
+[[kind]]
+object_kind = 0x0543
+name = "RestoreRetentionAnchor"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_retention_anchor/"

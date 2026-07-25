@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 39
+registry_epoch = 40
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -3961,6 +3961,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+containing_schema = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+union_path = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "CanonicalConstraintDomainKey"
 containing_schema = "CanonicalConstraintDomainKey"
 union_path = "CanonicalConstraintDomainKey"
@@ -5507,6 +5518,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+containing_schema = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RestoreAbandonOperationRecordPinOwnerPlan"
 containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
 union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan"
@@ -5639,6 +5661,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RestoreLeaseOperationTerminalRecordRef<Role>"
+containing_schema = "RestoreLeaseOperationTerminalRecordRef<Role>"
+union_path = "RestoreLeaseOperationTerminalRecordRef<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreLeaseOperationTerminalRecordRef<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
 containing_schema = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
 union_path = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
@@ -5722,6 +5755,17 @@ union_path = "RestoreRegistryTerminalCommon<Role>.terminal_disposition"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RestoreRegistryTerminalCommon<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreRetentionAnchor<Role>"
+containing_schema = "RestoreRetentionAnchor<Role>"
+union_path = "RestoreRetentionAnchor<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreRetentionAnchor<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -6823,6 +6867,32 @@ source_arm_name = "Closed"
 stable_name = "closed"
 payload_kind = "inline-record"
 payload_sha256 = "1e8d9e9d296bcc02400ead75b3e8024ce03e1a24c30a42523f8d5a3ed54d02ee"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+containing_schema = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+union_path = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+arm_tag = 0x0001
+source_arm_name = "Cataloged"
+stable_name = "cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "ee1be7375132e63b9b7e82aa242105bdc8d54e0d0dcaa32c5879d3469d8e8eac"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+containing_schema = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+union_path = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+arm_tag = 0x0002
+source_arm_name = "EmbeddedNoCatalog"
+stable_name = "embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "783ded6f6696b956c09cfc4945b1dfd96de7d0c0a01341f18a1abd2fc3242d8a"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -11689,6 +11759,45 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+containing_schema = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "external_cas_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "7bb9727855f699a59a7594dbf5775fb6072105b8866558181bb9ffc1044c753f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+containing_schema = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "directory_bound_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "c25bc88bc12a9aa4a60fe4fe5bf4b5538ae1dc225cc098a32e1cbbb11f79366c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+containing_schema = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "directory_bound_embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "d87b49e20b668eb8de9c3a9791c4676dea8e7f2b09a7f78ddb8891a0955b2090"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "RestoreAbandonOperationRecordPinOwnerPlan"
 containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
 union_path = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan"
@@ -12061,6 +12170,32 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "RestoreLeaseOperationTerminalRecordRef<Role>"
+containing_schema = "RestoreLeaseOperationTerminalRecordRef<Role>"
+union_path = "RestoreLeaseOperationTerminalRecordRef<Role>"
+arm_tag = 0x0001
+source_arm_name = "Renew"
+stable_name = "renew"
+payload_kind = "inline-record"
+payload_sha256 = "e99ee5649cf594af9a2bf110458bde44e6af9c946022c934731d39432f2cdcfa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreLeaseOperationTerminalRecordRef<Role>"
+containing_schema = "RestoreLeaseOperationTerminalRecordRef<Role>"
+union_path = "RestoreLeaseOperationTerminalRecordRef<Role>"
+arm_tag = 0x0002
+source_arm_name = "Release"
+stable_name = "release"
+payload_kind = "inline-record"
+payload_sha256 = "ac1a730eee766023369b870d3a166a18adc7ce965bf5aa8e84bdafdbacce9046"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
 containing_schema = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
 union_path = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
@@ -12299,6 +12434,57 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreRetentionAnchor<Role>"
+containing_schema = "RestoreRetentionAnchor<Role>"
+union_path = "RestoreRetentionAnchor<Role>"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreRetentionAnchor<Role>"
+containing_schema = "RestoreRetentionAnchor<Role>"
+union_path = "RestoreRetentionAnchor<Role>"
+arm_tag = 0x0002
+source_arm_name = "PromotionSealPendingReopen"
+stable_name = "promotion_seal_pending_reopen"
+payload_kind = "inline-record"
+payload_sha256 = "ba4b87e66813e3549ebb50c22131668ad9ca79a8cd9d252bcac928cbcadabeb3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreRetentionAnchor<Role>"
+containing_schema = "RestoreRetentionAnchor<Role>"
+union_path = "RestoreRetentionAnchor<Role>"
+arm_tag = 0x0003
+source_arm_name = "AbandonmentPinPending"
+stable_name = "abandonment_pin_pending"
+payload_kind = "inline-record"
+payload_sha256 = "266158565a6d8d2d32a799277adfe01b9009786e460fa26cce8babf9b713a5ed"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreRetentionAnchor<Role>"
+containing_schema = "RestoreRetentionAnchor<Role>"
+union_path = "RestoreRetentionAnchor<Role>"
+arm_tag = 0x0004
+source_arm_name = "TerminalPinBasis"
+stable_name = "terminal_pin_basis"
+payload_kind = "inline-record"
+payload_sha256 = "d827318676abe5160760d64ad207dfbee120919c46abb59c8bd130d8a5ca412d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"

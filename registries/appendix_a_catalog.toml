@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1843
+target_count = 1862
 projection_fallback_count = 90
-target_source_assignment_sha256 = "47ce6d9d279b6ad2096f96cf94d4697a93d01a7250eee45fa283ff534b730d11"
+target_source_assignment_sha256 = "22058324b96a10a84b9bd7b399d4ac814b2db19d43e43d4c02fa7b93112f3690"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 39
+registry_epoch = 40
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 30
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 39
+registry_epoch = 40
 
 [[logical_kind]]
 slice_id = "a03"
@@ -4702,6 +4702,50 @@ construction_order = 24
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/typed_certified_meta_projection_payload/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:canonical-catalog-restore-target-terminal-disposition"
+object_kind = 0x0540
+name = "CanonicalCatalogRestoreTargetTerminalDisposition"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_catalog_restore_target_terminal_disposition/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-abandon-authority-profile-projection"
+object_kind = 0x0541
+name = "RestoreAbandonAuthorityProfileProjection"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_abandon_authority_profile_projection/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-lease-operation-terminal-record-ref"
+object_kind = 0x0542
+name = "RestoreLeaseOperationTerminalRecordRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_lease_operation_terminal_record_ref/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-retention-anchor"
+object_kind = 0x0543
+name = "RestoreRetentionAnchor"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_retention_anchor/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -26036,6 +26080,222 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:canonical-catalog-restore-target-terminal-disposition-role-profile-7513694efded32c5"
+union_name = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+containing_schema = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+union_path = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:canonical-catalog-restore-target-terminal-disposition-role-profile-cataloged-dd965e9d8dbfd88f"
+union_name = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+containing_schema = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+union_path = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+arm_tag = 0x0001
+source_arm_name = "Cataloged"
+stable_name = "cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "ee1be7375132e63b9b7e82aa242105bdc8d54e0d0dcaa32c5879d3469d8e8eac"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:canonical-catalog-restore-target-terminal-disposition-role-profile-embedded-no-catalog-dfb912b69124017d"
+union_name = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+containing_schema = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+union_path = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+arm_tag = 0x0002
+source_arm_name = "EmbeddedNoCatalog"
+stable_name = "embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "783ded6f6696b956c09cfc4945b1dfd96de7d0c0a01341f18a1abd2fc3242d8a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-abandon-authority-profile-projection-role-authority-owning-role-14b920a084f1cb23"
+union_name = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+containing_schema = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-abandon-authority-profile-projection-role-authority-owning-role-external-cas-cataloged-0a3ac4a322592c9c"
+union_name = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+containing_schema = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "external_cas_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "7bb9727855f699a59a7594dbf5775fb6072105b8866558181bb9ffc1044c753f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-abandon-authority-profile-projection-role-authority-owning-role-directory-bound-cataloged-681e28fc13304d68"
+union_name = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+containing_schema = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "directory_bound_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "c25bc88bc12a9aa4a60fe4fe5bf4b5538ae1dc225cc098a32e1cbbb11f79366c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-abandon-authority-profile-projection-role-authority-owning-role-directory-bound-embedded-no-catalog-8aeccac9f753b0c7"
+union_name = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+containing_schema = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+union_path = "RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "directory_bound_embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "d87b49e20b668eb8de9c3a9791c4676dea8e7f2b09a7f78ddb8891a0955b2090"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-lease-operation-terminal-record-ref-role-39730b96f5be289d"
+union_name = "RestoreLeaseOperationTerminalRecordRef<Role>"
+containing_schema = "RestoreLeaseOperationTerminalRecordRef<Role>"
+union_path = "RestoreLeaseOperationTerminalRecordRef<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreLeaseOperationTerminalRecordRef<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-lease-operation-terminal-record-ref-role-renew-c235a0629690da74"
+union_name = "RestoreLeaseOperationTerminalRecordRef<Role>"
+containing_schema = "RestoreLeaseOperationTerminalRecordRef<Role>"
+union_path = "RestoreLeaseOperationTerminalRecordRef<Role>"
+arm_tag = 0x0001
+source_arm_name = "Renew"
+stable_name = "renew"
+payload_kind = "inline-record"
+payload_sha256 = "e99ee5649cf594af9a2bf110458bde44e6af9c946022c934731d39432f2cdcfa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-lease-operation-terminal-record-ref-role-release-a4a4a4921fc18a24"
+union_name = "RestoreLeaseOperationTerminalRecordRef<Role>"
+containing_schema = "RestoreLeaseOperationTerminalRecordRef<Role>"
+union_path = "RestoreLeaseOperationTerminalRecordRef<Role>"
+arm_tag = 0x0002
+source_arm_name = "Release"
+stable_name = "release"
+payload_kind = "inline-record"
+payload_sha256 = "ac1a730eee766023369b870d3a166a18adc7ce965bf5aa8e84bdafdbacce9046"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:restore-retention-anchor-role-a592bd87f831959e"
+union_name = "RestoreRetentionAnchor<Role>"
+containing_schema = "RestoreRetentionAnchor<Role>"
+union_path = "RestoreRetentionAnchor<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreRetentionAnchor<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-retention-anchor-role-none-2dd9f1da58f42224"
+union_name = "RestoreRetentionAnchor<Role>"
+containing_schema = "RestoreRetentionAnchor<Role>"
+union_path = "RestoreRetentionAnchor<Role>"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-retention-anchor-role-promotion-seal-pending-reopen-dc4924b394b5bc46"
+union_name = "RestoreRetentionAnchor<Role>"
+containing_schema = "RestoreRetentionAnchor<Role>"
+union_path = "RestoreRetentionAnchor<Role>"
+arm_tag = 0x0002
+source_arm_name = "PromotionSealPendingReopen"
+stable_name = "promotion_seal_pending_reopen"
+payload_kind = "inline-record"
+payload_sha256 = "ba4b87e66813e3549ebb50c22131668ad9ca79a8cd9d252bcac928cbcadabeb3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-retention-anchor-role-abandonment-pin-pending-01499f59d53be864"
+union_name = "RestoreRetentionAnchor<Role>"
+containing_schema = "RestoreRetentionAnchor<Role>"
+union_path = "RestoreRetentionAnchor<Role>"
+arm_tag = 0x0003
+source_arm_name = "AbandonmentPinPending"
+stable_name = "abandonment_pin_pending"
+payload_kind = "inline-record"
+payload_sha256 = "266158565a6d8d2d32a799277adfe01b9009786e460fa26cce8babf9b713a5ed"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:restore-retention-anchor-role-terminal-pin-basis-1c2492187f07a8f4"
+union_name = "RestoreRetentionAnchor<Role>"
+containing_schema = "RestoreRetentionAnchor<Role>"
+union_path = "RestoreRetentionAnchor<Role>"
+arm_tag = 0x0004
+source_arm_name = "TerminalPinBasis"
+stable_name = "terminal_pin_basis"
+payload_kind = "inline-record"
+payload_sha256 = "d827318676abe5160760d64ad207dfbee120919c46abb59c8bd130d8a5ca412d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
 slice_id = "a10"
@@ -34920,7 +35180,7 @@ symbol = "CanonicalCatalogRestoreTargetTerminalDisposition"
 generic_signature = "<Role,Profile>"
 source_key = "top|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2429"]
 
 [[top_level_candidate]]
@@ -41630,7 +41890,7 @@ symbol = "RestoreAbandonAuthorityProfileProjection"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2443"]
 
 [[top_level_candidate]]
@@ -42050,7 +42310,7 @@ symbol = "RestoreLeaseOperationTerminalRecordRef"
 generic_signature = "<Role>"
 source_key = "top|RestoreLeaseOperationTerminalRecordRef<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2349"]
 
 [[top_level_candidate]]
@@ -42240,7 +42500,7 @@ symbol = "RestoreRetentionAnchor"
 generic_signature = "<Role>"
 source_key = "top|RestoreRetentionAnchor<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a18:2379"]
 
 [[top_level_candidate]]
@@ -60893,6 +61153,158 @@ target_row_id = "a08:logical-kind:typed-certified-meta-projection-payload"
 slice_id = "a08"
 source_key = "top|TypedCertifiedMetaProjectionPayload"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-canonical-catalog-restore-target-terminal-disposition"
+target_row_id = "a18:logical-kind:canonical-catalog-restore-target-terminal-disposition"
+slice_id = "a18"
+source_key = "top|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-abandon-authority-profile-projection"
+target_row_id = "a18:logical-kind:restore-abandon-authority-profile-projection"
+slice_id = "a18"
+source_key = "top|RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-lease-operation-terminal-record-ref"
+target_row_id = "a18:logical-kind:restore-lease-operation-terminal-record-ref"
+slice_id = "a18"
+source_key = "top|RestoreLeaseOperationTerminalRecordRef<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-retention-anchor"
+target_row_id = "a18:logical-kind:restore-retention-anchor"
+slice_id = "a18"
+source_key = "top|RestoreRetentionAnchor<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-canonical-catalog-restore-target-terminal-disposition-role-profile-7513694efded32c5"
+target_row_id = "a18:union:canonical-catalog-restore-target-terminal-disposition-role-profile-7513694efded32c5"
+slice_id = "a18"
+source_key = "union|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-canonical-catalog-restore-target-terminal-disposition-role-profile-cataloged-dd965e9d8dbfd88f"
+target_row_id = "a18:union-arm:canonical-catalog-restore-target-terminal-disposition-role-profile-cataloged-dd965e9d8dbfd88f"
+slice_id = "a18"
+source_key = "arm|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>|Cataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-canonical-catalog-restore-target-terminal-disposition-role-profile-embedded-no-catalog-dfb912b69124017d"
+target_row_id = "a18:union-arm:canonical-catalog-restore-target-terminal-disposition-role-profile-embedded-no-catalog-dfb912b69124017d"
+slice_id = "a18"
+source_key = "arm|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>|EmbeddedNoCatalog"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-abandon-authority-profile-projection-role-authority-owning-role-14b920a084f1cb23"
+target_row_id = "a18:union:restore-abandon-authority-profile-projection-role-authority-owning-role-14b920a084f1cb23"
+slice_id = "a18"
+source_key = "union|RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>|RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-abandon-authority-profile-projection-role-authority-owning-role-external-cas-cataloged-0a3ac4a322592c9c"
+target_row_id = "a18:union-arm:restore-abandon-authority-profile-projection-role-authority-owning-role-external-cas-cataloged-0a3ac4a322592c9c"
+slice_id = "a18"
+source_key = "arm|RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>|RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>|ExternalCasCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-abandon-authority-profile-projection-role-authority-owning-role-directory-bound-cataloged-681e28fc13304d68"
+target_row_id = "a18:union-arm:restore-abandon-authority-profile-projection-role-authority-owning-role-directory-bound-cataloged-681e28fc13304d68"
+slice_id = "a18"
+source_key = "arm|RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>|RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>|DirectoryBoundCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-abandon-authority-profile-projection-role-authority-owning-role-directory-bound-embedded-no-catalog-8aeccac9f753b0c7"
+target_row_id = "a18:union-arm:restore-abandon-authority-profile-projection-role-authority-owning-role-directory-bound-embedded-no-catalog-8aeccac9f753b0c7"
+slice_id = "a18"
+source_key = "arm|RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>|RestoreAbandonAuthorityProfileProjection<Role:AuthorityOwningRole>|DirectoryBoundEmbeddedNoCatalog"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-lease-operation-terminal-record-ref-role-39730b96f5be289d"
+target_row_id = "a18:union:restore-lease-operation-terminal-record-ref-role-39730b96f5be289d"
+slice_id = "a18"
+source_key = "union|RestoreLeaseOperationTerminalRecordRef<Role>|RestoreLeaseOperationTerminalRecordRef<Role>"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-lease-operation-terminal-record-ref-role-renew-c235a0629690da74"
+target_row_id = "a18:union-arm:restore-lease-operation-terminal-record-ref-role-renew-c235a0629690da74"
+slice_id = "a18"
+source_key = "arm|RestoreLeaseOperationTerminalRecordRef<Role>|RestoreLeaseOperationTerminalRecordRef<Role>|Renew"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-lease-operation-terminal-record-ref-role-release-a4a4a4921fc18a24"
+target_row_id = "a18:union-arm:restore-lease-operation-terminal-record-ref-role-release-a4a4a4921fc18a24"
+slice_id = "a18"
+source_key = "arm|RestoreLeaseOperationTerminalRecordRef<Role>|RestoreLeaseOperationTerminalRecordRef<Role>|Release"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-restore-retention-anchor-role-a592bd87f831959e"
+target_row_id = "a18:union:restore-retention-anchor-role-a592bd87f831959e"
+slice_id = "a18"
+source_key = "union|RestoreRetentionAnchor<Role>|RestoreRetentionAnchor<Role>"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-retention-anchor-role-none-2dd9f1da58f42224"
+target_row_id = "a18:union-arm:restore-retention-anchor-role-none-2dd9f1da58f42224"
+slice_id = "a18"
+source_key = "arm|RestoreRetentionAnchor<Role>|RestoreRetentionAnchor<Role>|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-retention-anchor-role-promotion-seal-pending-reopen-dc4924b394b5bc46"
+target_row_id = "a18:union-arm:restore-retention-anchor-role-promotion-seal-pending-reopen-dc4924b394b5bc46"
+slice_id = "a18"
+source_key = "arm|RestoreRetentionAnchor<Role>|RestoreRetentionAnchor<Role>|PromotionSealPendingReopen"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-retention-anchor-role-abandonment-pin-pending-01499f59d53be864"
+target_row_id = "a18:union-arm:restore-retention-anchor-role-abandonment-pin-pending-01499f59d53be864"
+slice_id = "a18"
+source_key = "arm|RestoreRetentionAnchor<Role>|RestoreRetentionAnchor<Role>|AbandonmentPinPending"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-restore-retention-anchor-role-terminal-pin-basis-1c2492187f07a8f4"
+target_row_id = "a18:union-arm:restore-retention-anchor-role-terminal-pin-basis-1c2492187f07a8f4"
+slice_id = "a18"
+source_key = "arm|RestoreRetentionAnchor<Role>|RestoreRetentionAnchor<Role>|TerminalPinBasis"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
