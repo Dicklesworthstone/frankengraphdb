@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 13
+registry_epoch = 14
 
 [[type]]
 wire_type_id = 0x0001
@@ -698,5 +698,291 @@ name = "ResultManifestRef"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: Local | Sharded"
+allowed_containing_schemas = ["ResultManifestRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x004c
+name = "DeliveryTransitionAppliedRef.inline_semantic_detachment"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DeliveryTransitionAppliedRef"
+wire_tag = 0x0001
+encoding_context = "arm InlineSemanticDetachment of closed union DeliveryTransitionAppliedRef"
+allowed_containing_schemas = ["DeliveryTransitionAppliedRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x004d
+name = "DeliveryTransitionAppliedRef.protocol_maintenance"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DeliveryTransitionAppliedRef"
+wire_tag = 0x0002
+encoding_context = "arm ProtocolMaintenance of closed union DeliveryTransitionAppliedRef"
+allowed_containing_schemas = ["DeliveryTransitionAppliedRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x004e
+name = "LocalAttemptRegistrationSpec.explicit_begin"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalAttemptRegistrationSpec"
+wire_tag = 0x0001
+encoding_context = "arm ExplicitBegin of closed union LocalAttemptRegistrationSpec"
+allowed_containing_schemas = ["LocalAttemptRegistrationSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x004f
+name = "LocalAttemptRegistrationSpec.autocommit"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalAttemptRegistrationSpec"
+wire_tag = 0x0002
+encoding_context = "arm Autocommit of closed union LocalAttemptRegistrationSpec"
+allowed_containing_schemas = ["LocalAttemptRegistrationSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0050
+name = "LocalAuditTicketOwner.operation"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalAuditTicketOwner"
+wire_tag = 0x0001
+encoding_context = "arm Operation of closed union LocalAuditTicketOwner"
+allowed_containing_schemas = ["LocalAuditTicketOwner"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0051
+name = "LocalAuditTicketOwner.statement"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalAuditTicketOwner"
+wire_tag = 0x0002
+encoding_context = "arm Statement of closed union LocalAuditTicketOwner"
+allowed_containing_schemas = ["LocalAuditTicketOwner"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0052
+name = "LocalAuditTicketOwner.control"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalAuditTicketOwner"
+wire_tag = 0x0003
+encoding_context = "arm Control of closed union LocalAuditTicketOwner"
+allowed_containing_schemas = ["LocalAuditTicketOwner"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0053
+name = "LocalOperationAuditAdmission.not_required"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalOperationAuditAdmission"
+wire_tag = 0x0001
+encoding_context = "arm NotRequired of closed union LocalOperationAuditAdmission"
+allowed_containing_schemas = ["LocalOperationAuditAdmission"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0054
+name = "LocalOperationAuditAdmission.pending_unclaimed"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalOperationAuditAdmission"
+wire_tag = 0x0002
+encoding_context = "arm PendingUnclaimed of closed union LocalOperationAuditAdmission"
+allowed_containing_schemas = ["LocalOperationAuditAdmission"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0055
+name = "LocalOperationAuditAdmission.claimed"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalOperationAuditAdmission"
+wire_tag = 0x0003
+encoding_context = "arm Claimed of closed union LocalOperationAuditAdmission"
+allowed_containing_schemas = ["LocalOperationAuditAdmission"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0056
+name = "LocalOutcomeCompactionSpec.never_registered"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalOutcomeCompactionSpec"
+wire_tag = 0x0001
+encoding_context = "arm NeverRegistered of closed union LocalOutcomeCompactionSpec"
+allowed_containing_schemas = ["LocalOutcomeCompactionSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0057
+name = "LocalOutcomeCompactionSpec.terminal_ready"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalOutcomeCompactionSpec"
+wire_tag = 0x0002
+encoding_context = "arm TerminalReady of closed union LocalOutcomeCompactionSpec"
+allowed_containing_schemas = ["LocalOutcomeCompactionSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0058
+name = "LocalResultDeliveryOwner.terminal_read"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalResultDeliveryOwner"
+wire_tag = 0x0001
+encoding_context = "arm TerminalRead of closed union LocalResultDeliveryOwner"
+allowed_containing_schemas = ["LocalResultDeliveryOwner"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0059
+name = "LocalResultDeliveryOwner.autocommit_write_terminal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalResultDeliveryOwner"
+wire_tag = 0x0002
+encoding_context = "arm AutocommitWriteTerminal of closed union LocalResultDeliveryOwner"
+allowed_containing_schemas = ["LocalResultDeliveryOwner"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x005a
+name = "LocalResultDeliveryOwner.statement"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalResultDeliveryOwner"
+wire_tag = 0x0003
+encoding_context = "arm Statement of closed union LocalResultDeliveryOwner"
+allowed_containing_schemas = ["LocalResultDeliveryOwner"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x005b
+name = "LocalResultDeliveryOwner.dp_result"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalResultDeliveryOwner"
+wire_tag = 0x0004
+encoding_context = "arm DpResult of closed union LocalResultDeliveryOwner"
+allowed_containing_schemas = ["LocalResultDeliveryOwner"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x005c
+name = "LocalResultDeliveryTransitionSpec.acknowledge"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalResultDeliveryTransitionSpec"
+wire_tag = 0x0001
+encoding_context = "arm Acknowledge of closed union LocalResultDeliveryTransitionSpec"
+allowed_containing_schemas = ["LocalResultDeliveryTransitionSpec"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x005d
+name = "LocalResultDeliveryTransitionSpec.release_unacked"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalResultDeliveryTransitionSpec"
+wire_tag = 0x0002
+encoding_context = "arm ReleaseUnacked of closed union LocalResultDeliveryTransitionSpec"
+allowed_containing_schemas = ["LocalResultDeliveryTransitionSpec"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x005e
+name = "LocalStatementPublishedOutput.no_result"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalStatementPublishedOutput"
+wire_tag = 0x0001
+encoding_context = "arm NoResult of closed union LocalStatementPublishedOutput"
+allowed_containing_schemas = ["LocalStatementPublishedOutput"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x005f
+name = "LocalStatementPublishedOutput.buffered"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocalStatementPublishedOutput"
+wire_tag = 0x0002
+encoding_context = "arm Buffered of closed union LocalStatementPublishedOutput"
+allowed_containing_schemas = ["LocalStatementPublishedOutput"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0060
+name = "ResultActivationAppliedRef.inline_semantic"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResultActivationAppliedRef"
+wire_tag = 0x0001
+encoding_context = "arm InlineSemantic of closed union ResultActivationAppliedRef"
+allowed_containing_schemas = ["ResultActivationAppliedRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0061
+name = "ResultActivationAppliedRef.protocol_activation"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResultActivationAppliedRef"
+wire_tag = 0x0002
+encoding_context = "arm ProtocolActivation of closed union ResultActivationAppliedRef"
+allowed_containing_schemas = ["ResultActivationAppliedRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0062
+name = "ResultDeliveryServiceAuthority.direct_ordinary"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResultDeliveryServiceAuthority"
+wire_tag = 0x0001
+encoding_context = "arm DirectOrdinary of closed union ResultDeliveryServiceAuthority"
+allowed_containing_schemas = ["ResultDeliveryServiceAuthority"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0063
+name = "ResultDeliveryServiceAuthority.promotion_receipt_required"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResultDeliveryServiceAuthority"
+wire_tag = 0x0002
+encoding_context = "arm PromotionReceiptRequired of closed union ResultDeliveryServiceAuthority"
+allowed_containing_schemas = ["ResultDeliveryServiceAuthority"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0064
+name = "ResultManifestRef.local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResultManifestRef"
+wire_tag = 0x0001
+encoding_context = "arm Local of closed union ResultManifestRef"
+allowed_containing_schemas = ["ResultManifestRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0065
+name = "ResultManifestRef.sharded"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResultManifestRef"
+wire_tag = 0x0002
+encoding_context = "arm Sharded of closed union ResultManifestRef"
 allowed_containing_schemas = ["ResultManifestRef"]
 max_size_bytes = 16777216
