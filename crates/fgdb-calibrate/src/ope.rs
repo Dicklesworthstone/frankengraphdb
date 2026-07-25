@@ -1987,6 +1987,77 @@ mod tests {
     }
 
     #[test]
+    fn outcome_magnitude_bound_is_inclusive_and_total() -> TestResult {
+        // MAX_ABS_OUTCOME_UNITS is the declared limit the arithmetic envelope
+        // is proved against, so where exactly it falls is load-bearing rather
+        // than decorative: the check is `unsigned_abs() > MAX`, making the
+        // limit itself representable.
+        let maximum = i64::try_from(MAX_ABS_OUTCOME_UNITS)?;
+        assert_eq!(outcome(maximum)?.scaled(), maximum);
+        assert_eq!(outcome(-maximum)?.scaled(), -maximum);
+        assert_eq!(outcome(0)?.scaled(), 0);
+
+        for rejected in [maximum + 1, -maximum - 1, i64::MAX] {
+            assert_eq!(
+                outcome(rejected),
+                Err(OpeError::OutcomeOutOfRange { scaled: rejected }),
+                "outcome {rejected} outside the declared bound must be refused"
+            );
+        }
+
+        // i64::MIN has no positive counterpart, so a plain `abs()` here would
+        // overflow rather than reject. The bound uses `unsigned_abs`, which is
+        // what makes the check total over every i64 instead of panicking on
+        // one input.
+        assert_eq!(
+            outcome(i64::MIN),
+            Err(OpeError::OutcomeOutOfRange { scaled: i64::MIN })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn outcomes_at_the_declared_bound_evaluate_inside_the_arithmetic_envelope() -> TestResult {
+        // The envelope check derives its headroom from MAX_ABS_OUTCOME_UNITS,
+        // but no test drove outcomes that actually sit at that magnitude. An
+        // envelope that admits the profile while the estimator overflows on
+        // conforming inputs would be a proof about the wrong quantity.
+        let maximum = i64::try_from(MAX_ABS_OUTCOME_UNITS)?;
+        let high = outcome(maximum)?;
+        let low = outcome(-maximum)?;
+
+        for estimator in [
+            OpeEstimator::Direct,
+            OpeEstimator::ImportanceWeighted,
+            OpeEstimator::DoublyRobust,
+        ] {
+            let mut ledger =
+                OpeLedger::try_new(identity(estimator, 100, 103)?, profile(2, 4, 2, 8)?)?;
+            for sequence in 100..=103 {
+                ledger.record(binary_decision(
+                    sequence,
+                    sequence % 2 == 0,
+                    HALF,
+                    Probability::one(),
+                    Probability::zero(),
+                    high,
+                    low,
+                )?)?;
+            }
+
+            let evidence = ledger.evidence()?;
+            assert!(evidence.complete());
+            assert_eq!(evidence.selection(), OpeSelection::Candidate);
+            assert!(
+                evidence.candidate_estimate().numerator()
+                    > evidence.fallback_estimate().numerator(),
+                "{estimator:?} put the extreme-outcome candidate at or below its fallback"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn all_three_logged_distributions_must_sum_exactly_to_one() -> TestResult {
         let short_half = Probability::try_from_numerator(HALF.numerator() - 1)?;
         let make_actions = |behavior_b, candidate_b, fallback_b| {
