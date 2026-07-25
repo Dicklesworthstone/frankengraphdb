@@ -7,6 +7,56 @@
 //! fallback, and registered terminal-action identities. The bounded log
 //! accepts a deterministic total record order and enforces strictly ordered,
 //! nonoverlapping batches independently for each monitor family.
+//!
+//! The claim-class sentences above are structural claims, so each is paired
+//! below with a doctest that must fail to compile and a companion that must
+//! compile. A `compile_fail` block on its own would also "pass" when it fails
+//! for an unrelated reason such as a typo or a renamed item; the companion is
+//! what makes the pair evidence, because the two differ only in the step the
+//! law forbids.
+//!
+//! No claim-class field exists to be changed. Reading the class is legal:
+//!
+//! ```
+//! use fgdb_calibrate::log::StatisticalLogRecord;
+//! use fgdb_claim::RegistryClaimClass;
+//! fn read(record: StatisticalLogRecord) -> RegistryClaimClass {
+//!     record.claim_class()
+//! }
+//! ```
+//!
+//! Assigning it is not, because there is no such field to assign:
+//!
+//! ```compile_fail
+//! use fgdb_calibrate::log::StatisticalLogRecord;
+//! use fgdb_claim::RegistryClaimClass;
+//! fn tamper(record: &mut StatisticalLogRecord) {
+//!     record.claim_class = RegistryClaimClass::Invariant;
+//! }
+//! ```
+//!
+//! There is likewise no conversion out of the type into a claim class. The two
+//! functions below have identical signatures and differ only in whether they
+//! reach the class through the accessor or through a conversion. The second
+//! does not compile because no `From<StatisticalLogRecord>` for
+//! `RegistryClaimClass` exists to be reached — at any class, not merely at
+//! `Invariant`:
+//!
+//! ```
+//! use fgdb_calibrate::log::StatisticalLogRecord;
+//! use fgdb_claim::RegistryClaimClass;
+//! fn via_accessor(record: StatisticalLogRecord) -> RegistryClaimClass {
+//!     record.claim_class()
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use fgdb_calibrate::log::StatisticalLogRecord;
+//! use fgdb_claim::RegistryClaimClass;
+//! fn via_conversion(record: StatisticalLogRecord) -> RegistryClaimClass {
+//!     record.into()
+//! }
+//! ```
 
 use core::{cmp::Ordering, fmt};
 
