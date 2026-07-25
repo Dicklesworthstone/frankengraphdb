@@ -1411,6 +1411,43 @@ mod tests {
             .collect()
     }
 
+    fn assert_single_level_fanout_matches(
+        tree: &AdaptiveRadixTree<u64>,
+        reference: &BTreeMap<Vec<u8>, u64>,
+        child_count: usize,
+    ) {
+        assert_eq!(tree.len(), child_count);
+        assert_eq!(owned_entries(tree), reference_entries(reference));
+        for edge in u8::MIN..=u8::MAX {
+            assert_eq!(
+                tree.get([edge]),
+                reference.get([edge].as_slice()),
+                "edge={edge} child_count={child_count}"
+            );
+        }
+
+        let expected_kind = match child_count {
+            0 => None,
+            1..=4 => Some(NodeKind::Node4),
+            5..=16 => Some(NodeKind::Node16),
+            17..=48 => Some(NodeKind::Node48),
+            49..=256 => Some(NodeKind::Node256),
+            _ => unreachable!("one-byte keys cannot exceed 256 children"),
+        };
+        assert_eq!(
+            tree.root.as_ref().map(|root| root.children.kind()),
+            expected_kind
+        );
+        assert_eq!(
+            tree.node_kind_histogram().total(),
+            usize::from(child_count >= 2)
+        );
+        if child_count >= 2 {
+            let kind = expected_kind.expect("multiple keys require a fanout node");
+            assert_eq!(tree.node_kind_histogram().count(kind), 1);
+        }
+    }
+
     #[test]
     fn empty_key_replacement_and_mutation_are_map_compatible() {
         let mut tree = AdaptiveRadixTree::new();
@@ -1514,6 +1551,36 @@ mod tests {
                 node256: 0,
             }
         );
+    }
+
+    #[test]
+    fn adversarial_edge_order_preserves_every_fanout_boundary() {
+        let insertion_order = (0_u16..=255)
+            .map(|ordinal| ((ordinal * 197 + 101) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let checkpoints = [1_usize, 4, 5, 16, 17, 48, 49, 255, 256];
+        let mut tree = AdaptiveRadixTree::new();
+        let mut reference = BTreeMap::new();
+
+        for (ordinal, &edge) in insertion_order.iter().enumerate() {
+            let value = u64::from(edge) * 17 + 5;
+            assert_eq!(tree.insert([edge], value), Ok(None));
+            reference.insert(vec![edge], value);
+            let child_count = ordinal + 1;
+            if checkpoints.contains(&child_count) {
+                assert_single_level_fanout_matches(&tree, &reference, child_count);
+            }
+        }
+
+        for removed in 0..insertion_order.len() {
+            let edge = insertion_order[(removed * 149 + 73) & 0xff];
+            assert_eq!(tree.remove([edge]), reference.remove([edge].as_slice()));
+            let child_count = 255 - removed;
+            if checkpoints.contains(&child_count) || child_count == 0 {
+                assert_single_level_fanout_matches(&tree, &reference, child_count);
+            }
+        }
+        assert!(tree.is_empty());
     }
 
     #[test]
