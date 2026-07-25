@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 851
+target_count = 853
 projection_fallback_count = 84
-target_source_assignment_sha256 = "92ebf4634c09d90445982e99488b49d46f1ba727c6f7ef0caa622cc3f1381ba1"
+target_source_assignment_sha256 = "1f41a0f800d2296dec57fe403ad4c8aa1a60faf36d4604780e9c87139e468b3b"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 17
+registry_epoch = 18
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -2339,6 +2339,28 @@ construction_order = 18
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/txn_outcome_record/"
+
+[[logical_kind]]
+slice_id = "a11"
+row_id = "a11:logical-kind:delivered-delta-payload"
+object_kind = 0x0285
+name = "DeliveredDeltaPayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delivered_delta_payload/"
+
+[[logical_kind]]
+slice_id = "a11"
+row_id = "a11:logical-kind:delivered-baseline-payload"
+object_kind = 0x04d3
+name = "DeliveredBaselinePayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delivered_baseline_payload/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -14178,7 +14200,7 @@ symbol = "DeliveredBaselinePayload"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04d3"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a11:reservation:delivered-delta-payload"
@@ -14187,7 +14209,7 @@ symbol = "DeliveredDeltaPayload"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0285"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:delivery-lease-expiry-evidence"
@@ -22595,7 +22617,7 @@ symbol = "DeliveredBaselinePayload"
 generic_signature = ""
 source_key = "top|DeliveredBaselinePayload"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a11:1932"]
 
 [[top_level_candidate]]
@@ -22605,7 +22627,7 @@ symbol = "DeliveredDeltaPayload"
 generic_signature = ""
 source_key = "top|DeliveredDeltaPayload"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a11:1932"]
 
 [[top_level_candidate]]
@@ -39438,6 +39460,22 @@ target_row_id = "a09:wire-type:escaping-allocation-cause-terminal-result-prepara
 slice_id = "a09"
 source_key = "arm|EscapingAllocationCause|EscapingAllocationCause|TerminalResultPreparation"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:logical-kind-delivered-delta-payload"
+target_row_id = "a11:logical-kind:delivered-delta-payload"
+slice_id = "a11"
+source_key = "top|DeliveredDeltaPayload"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:logical-kind-delivered-baseline-payload"
+target_row_id = "a11:logical-kind:delivered-baseline-payload"
+slice_id = "a11"
+source_key = "top|DeliveredBaselinePayload"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

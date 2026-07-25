@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 17
+registry_epoch = 18
 
 [[kind]]
 object_kind = 0x0001
@@ -331,6 +331,15 @@ construction_order = 17
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/cross_log_transparency_freshness/"
+
+[[kind]]
+object_kind = 0x0285
+name = "DeliveredDeltaPayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delivered_delta_payload/"
 
 [[kind]]
 object_kind = 0x0286
@@ -1240,6 +1249,15 @@ construction_order = 62
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/verifier_key_retirement_floor/"
+
+[[kind]]
+object_kind = 0x04d3
+name = "DeliveredBaselinePayload"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/delivered_baseline_payload/"
 
 [[kind]]
 object_kind = 0x04e0
