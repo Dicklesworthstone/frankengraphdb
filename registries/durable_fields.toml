@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 40
+registry_epoch = 41
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -387,6 +387,21 @@ role_predicate = "true"
 retention_and_cut_rule = "control-command payload (bead a10 populates the exact schema)"
 version_status = "active"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "output_payload_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeliveredDeltaPayload"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact DeliveredDeltaPayload owned by this delivery envelope; retained while the envelope is retained, and the acyclic order 30 <= 35 keeps the reference backward-only (a11:1934)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"

@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 1865
+target_count = 1866
 projection_fallback_count = 90
-target_source_assignment_sha256 = "203d72d3661de6053339e6f65b3d1e8cd44b028d261ab4cca645ee57792c940b"
+target_source_assignment_sha256 = "67d05e606b612b5c05fc567bde0b16f81f5056c198d112a2153cadb95d111ac4"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 30
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 40
+registry_epoch = 41
 
 [[logical_kind]]
 slice_id = "a03"
@@ -12982,6 +12982,23 @@ role_predicate = "true"
 retention_and_cut_rule = "inline target shard domain of the one-way Local-to-shard projection; retained with the projection and carries no reachability edge (a05:1622)"
 version_status = "reserved"
 max_size_bytes = 93
+
+[[field]]
+slice_id = "a11"
+row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-output-payload-ref"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "output_payload_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeliveredDeltaPayload"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact DeliveredDeltaPayload owned by this delivery envelope; retained while the envelope is retained, and the acyclic order 30 <= 35 keeps the reference backward-only (a11:1934)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 slice_id = "a11"
@@ -55257,6 +55274,14 @@ target_row_id = "a06:wire-type:local-prepared-root-entry-transferred"
 slice_id = "a06"
 source_key = "arm|LocalPreparedRootEntry|LocalPreparedRootEntry|Transferred"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:field-delta-delivery-envelope-role-authority-owning-role-output-payload-ref"
+target_row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-output-payload-ref"
+slice_id = "a11"
+source_key = "field|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.output_payload_ref|output_payload_ref"
+target_kind = "field"
 definition_status = "declared"
 
 [[target]]

@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 40
+registry_epoch = 41
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 40);
+    assert_eq!(epoch, 41);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3427,6 +3427,65 @@ fn idr_backup_proof_reserved_logical_shells_are_exact() {
 }
 
 #[test]
+fn idr_delta_delivery_output_payload_ref_is_exact() {
+    let identity = real_identity();
+    let owner = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "DeltaDeliveryEnvelope")
+        .expect("DeltaDeliveryEnvelope logical owner exists");
+    let target = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "DeliveredDeltaPayload")
+        .expect("DeliveredDeltaPayload logical target exists");
+    assert_eq!(owner.construction_order, 35);
+    assert_eq!(target.construction_order, 30);
+
+    let fields = identity
+        .fields
+        .iter()
+        .filter(|field| {
+            field.containing_schema == "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+                && field.stable_name == "output_payload_ref"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 1);
+    let field = fields[0];
+    assert_eq!(field.field_tag, 0x000a);
+    assert_eq!(field.exact_wire_type, "StrongRef");
+    assert_eq!(field.cardinality, "one");
+    assert_eq!(field.identity_class, "logical");
+    assert_eq!(field.reference_semantics, "strong");
+    assert_eq!(
+        field.target_schema_id.as_deref(),
+        Some("DeliveredDeltaPayload")
+    );
+    assert_eq!(field.construction_order, owner.construction_order);
+    assert_eq!(field.role_predicate, "true");
+    assert_eq!(field.version_status, "reserved");
+    assert_eq!(field.max_size_bytes, 40);
+    assert!(field.retention_and_cut_rule.contains("30 <= 35"));
+
+    let catalog = real_appendix_catalog();
+    let target_rows = catalog
+        .targets
+        .iter()
+        .filter(|row| {
+            row.target_row_id
+                == "a11:field:delta-delivery-envelope-role-authority-owning-role-output-payload-ref"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(target_rows.len(), 1);
+    assert_eq!(
+        target_rows[0].source_key,
+        "field|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.output_payload_ref|output_payload_ref"
+    );
+    assert_eq!(target_rows[0].target_kind, "field");
+    assert_eq!(target_rows[0].definition_status, "declared");
+}
+
+#[test]
 fn idr_key_reference_quarantine_reserved_logical_shell_is_exact() {
     let identity = real_identity();
     let logical = identity
@@ -4533,6 +4592,15 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "sorted_destruction_operation_plans"
             )
     };
+    // A11's first ruling-free non-union field has no union name for the
+    // historical reconstruction to match, so remove it by exact owner/member.
+    let post_erratum_a11_field = |schema: &str, name: &str| {
+        (schema, name)
+            == (
+                "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>",
+                "output_payload_ref",
+            )
+    };
     // a05's single post-erratum field row (fgdb-a05-w12-role-transition-wjj2).
     let post_erratum_a05_field = |schema: &str, name: &str| {
         matches!(
@@ -4576,6 +4644,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a16_reference_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a15_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a11_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a05_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a04_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
@@ -4586,9 +4655,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 64,
+        pre_erratum.fields.len() + 65,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A04 unanimous-precedent tranche"
+        "the historical witness must remove every post-erratum field cohort through the A11 output-reference tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
