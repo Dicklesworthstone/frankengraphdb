@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 18
+registry_epoch = 19
 
 [[type]]
 wire_type_id = 0x0001
@@ -1272,3 +1272,93 @@ wire_tag = 0x0005
 encoding_context = "unit discriminant for an identity escaping during terminal result preparation"
 allowed_containing_schemas = ["EscapingAllocationCause"]
 max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0084
+name = "Acknowledged"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["Acknowledged"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0085
+name = "ActiveDeliverable"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ActiveDeliverable"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0086
+name = "LocalBeginTerminalSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["LocalBeginTerminalSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0087
+name = "LocalConflictCompactionSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["LocalConflictCompactionSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0088
+name = "LocalConflictIndexBasis"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["LocalConflictIndexBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0089
+name = "ReleasedAwaitingActivation"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ReleasedAwaitingActivation"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x008a
+name = "ReleasedUnacked"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ReleasedUnacked"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x008b
+name = "ResultActiveCommon"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ResultActiveCommon"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x008c
+name = "ResultResumeTransitionSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ResultResumeTransitionSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x008d
+name = "ResultTerminalCommon"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ResultTerminalCommon"]
+max_size_bytes = 16777216

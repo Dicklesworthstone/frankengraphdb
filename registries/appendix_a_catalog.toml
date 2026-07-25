@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 854
+target_count = 876
 projection_fallback_count = 84
-target_source_assignment_sha256 = "4cace7a459967f911fe4603b8468653ef56ba014a7515c0d9c68a0f2c1535df9"
+target_source_assignment_sha256 = "bd17b4ecbe9cc330df90f50fbbf827f9999c49854add3983895780c0212dadc3"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 19
+registry_epoch = 20
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -641,7 +641,7 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 18
+registry_epoch = 19
 
 [[projection_epoch]]
 registry = "durable_fields"
@@ -2372,6 +2372,138 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/delivered_baseline_payload/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:admitted-txn-abort-command"
+object_kind = 0x0206
+name = "AdmittedTxnAbortCommand"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/admitted_txn_abort_command/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:distributed-derived-generation-manifest"
+object_kind = 0x028c
+name = "DistributedDerivedGenerationManifest"
+status = "reserved"
+construction_order = 45
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/distributed_derived_generation_manifest/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-audit-ticket-claim-record"
+object_kind = 0x02f6
+name = "LocalAuditTicketClaimRecord"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_audit_ticket_claim_record/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-begin-reservation-record"
+object_kind = 0x02fc
+name = "LocalBeginReservationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_begin_reservation_record/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-buffered-result-manifest"
+object_kind = 0x02ff
+name = "LocalBufferedResultManifest"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_buffered_result_manifest/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-conflict-index"
+object_kind = 0x0300
+name = "LocalConflictIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_conflict_index/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:local-result-delivery-lease"
+object_kind = 0x0321
+name = "LocalResultDeliveryLease"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_result_delivery_lease/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:result-delivery-lease-time-basis"
+object_kind = 0x040a
+name = "ResultDeliveryLeaseTimeBasis"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_lease_time_basis/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:result-delivery-policy"
+object_kind = 0x040b
+name = "ResultDeliveryPolicy"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_policy/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:result-resource-escrow"
+object_kind = 0x0410
+name = "ResultResourceEscrow"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_resource_escrow/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:distributed"
+object_kind = 0x052c
+name = "Distributed"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/distributed/"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:shard-derived-component"
+object_kind = 0x052d
+name = "ShardDerivedComponent"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_derived_component/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -4105,6 +4237,116 @@ status = "reserved"
 encoding_context = "unit discriminant for an identity escaping during terminal result preparation"
 allowed_containing_schemas = ["EscapingAllocationCause"]
 max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:acknowledged"
+wire_type_id = 0x0084
+name = "Acknowledged"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["Acknowledged"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:active-deliverable"
+wire_type_id = 0x0085
+name = "ActiveDeliverable"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ActiveDeliverable"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-begin-terminal-spec"
+wire_type_id = 0x0086
+name = "LocalBeginTerminalSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["LocalBeginTerminalSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-conflict-compaction-spec"
+wire_type_id = 0x0087
+name = "LocalConflictCompactionSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["LocalConflictCompactionSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-conflict-index-basis"
+wire_type_id = 0x0088
+name = "LocalConflictIndexBasis"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["LocalConflictIndexBasis"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:released-awaiting-activation"
+wire_type_id = 0x0089
+name = "ReleasedAwaitingActivation"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ReleasedAwaitingActivation"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:released-unacked"
+wire_type_id = 0x008a
+name = "ReleasedUnacked"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ReleasedUnacked"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:result-active-common"
+wire_type_id = 0x008b
+name = "ResultActiveCommon"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ResultActiveCommon"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:result-resume-transition-spec"
+wire_type_id = 0x008c
+name = "ResultResumeTransitionSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ResultResumeTransitionSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:result-terminal-common"
+wire_type_id = 0x008d
+name = "ResultTerminalCommon"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical Local result/conflict-plane record"
+allowed_containing_schemas = ["ResultTerminalCommon"]
+max_size_bytes = 16777216
 
 [[field]]
 slice_id = "a03"
@@ -12825,7 +13067,7 @@ symbol = "AdmittedTxnAbortCommand"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0206"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:allocation-epoch-reservation"
@@ -14319,7 +14561,7 @@ symbol = "DistributedDerivedGenerationManifest"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x028c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:distributed-serialization-certificate"
@@ -15435,7 +15677,7 @@ symbol = "LocalAuditTicketClaimRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02f6"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a14:reservation:local-audit-ticket-fence-floor"
@@ -15489,7 +15731,7 @@ symbol = "LocalBeginReservationRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02fc"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:local-begin-reservation-spec"
@@ -15516,7 +15758,7 @@ symbol = "LocalBufferedResultManifest"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02ff"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:local-conflict-index"
@@ -15525,7 +15767,7 @@ symbol = "LocalConflictIndex"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0300"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:local-conflict-overlap-floor"
@@ -15822,7 +16064,7 @@ symbol = "LocalResultDeliveryLease"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0321"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a14:reservation:local-retention-cut-floor"
@@ -18243,7 +18485,7 @@ symbol = "ResultDeliveryLeaseTimeBasis"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x040a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:result-delivery-policy"
@@ -18252,7 +18494,7 @@ symbol = "ResultDeliveryPolicy"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x040b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:result-end-send-completion-record"
@@ -18306,7 +18548,7 @@ symbol = "ResultResourceEscrow"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0410"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:result-schema"
@@ -20148,7 +20390,7 @@ symbol = "Acknowledged"
 generic_signature = ""
 source_key = "top|Acknowledged"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1514"]
 
 [[top_level_candidate]]
@@ -20188,7 +20430,7 @@ symbol = "ActiveDeliverable"
 generic_signature = ""
 source_key = "top|ActiveDeliverable"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1514"]
 
 [[top_level_candidate]]
@@ -20228,7 +20470,7 @@ symbol = "AdmittedTxnAbortCommand"
 generic_signature = ""
 source_key = "top|AdmittedTxnAbortCommand"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1538"]
 
 [[top_level_candidate]]
@@ -22818,7 +23060,7 @@ symbol = "Distributed"
 generic_signature = ""
 source_key = "top|Distributed"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1542"]
 
 [[top_level_candidate]]
@@ -22828,7 +23070,7 @@ symbol = "DistributedDerivedGenerationManifest"
 generic_signature = ""
 source_key = "top|DistributedDerivedGenerationManifest"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1542"]
 
 [[top_level_candidate]]
@@ -24838,7 +25080,7 @@ symbol = "LocalAuditTicketClaimRecord"
 generic_signature = ""
 source_key = "top|LocalAuditTicketClaimRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1470"]
 
 [[top_level_candidate]]
@@ -24948,7 +25190,7 @@ symbol = "LocalBeginReservationRecord"
 generic_signature = ""
 source_key = "top|LocalBeginReservationRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1482"]
 
 [[top_level_candidate]]
@@ -24968,7 +25210,7 @@ symbol = "LocalBeginTerminalSpec"
 generic_signature = ""
 source_key = "top|LocalBeginTerminalSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1482", "a07:1714"]
 
 [[top_level_candidate]]
@@ -24978,7 +25220,7 @@ symbol = "LocalBufferedResultManifest"
 generic_signature = ""
 source_key = "top|LocalBufferedResultManifest"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1490"]
 
 [[top_level_candidate]]
@@ -25008,7 +25250,7 @@ symbol = "LocalConflictCompactionSpec"
 generic_signature = ""
 source_key = "top|LocalConflictCompactionSpec"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1480"]
 
 [[top_level_candidate]]
@@ -25038,7 +25280,7 @@ symbol = "LocalConflictIndex"
 generic_signature = ""
 source_key = "top|LocalConflictIndex"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1478"]
 
 [[top_level_candidate]]
@@ -25048,7 +25290,7 @@ symbol = "LocalConflictIndexBasis"
 generic_signature = ""
 source_key = "top|LocalConflictIndexBasis"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1478"]
 
 [[top_level_candidate]]
@@ -25378,7 +25620,7 @@ symbol = "LocalResultDeliveryLease"
 generic_signature = ""
 source_key = "top|LocalResultDeliveryLease"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1496"]
 
 [[top_level_candidate]]
@@ -27728,7 +27970,7 @@ symbol = "ReleasedAwaitingActivation"
 generic_signature = ""
 source_key = "top|ReleasedAwaitingActivation"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1514"]
 
 [[top_level_candidate]]
@@ -27738,7 +27980,7 @@ symbol = "ReleasedUnacked"
 generic_signature = ""
 source_key = "top|ReleasedUnacked"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1514"]
 
 [[top_level_candidate]]
@@ -29548,7 +29790,7 @@ symbol = "ResultActiveCommon"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|ResultActiveCommon<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1512"]
 
 [[top_level_candidate]]
@@ -29588,7 +29830,7 @@ symbol = "ResultDeliveryLeaseTimeBasis"
 generic_signature = "<Role>"
 source_key = "top|ResultDeliveryLeaseTimeBasis<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1494"]
 
 [[top_level_candidate]]
@@ -29608,7 +29850,7 @@ symbol = "ResultDeliveryPolicy"
 generic_signature = "<Role>"
 source_key = "top|ResultDeliveryPolicy<Role>"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1492"]
 
 [[top_level_candidate]]
@@ -29738,7 +29980,7 @@ symbol = "ResultResourceEscrow"
 generic_signature = "<Role>"
 source_key = "top|ResultResourceEscrow<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1498"]
 
 [[top_level_candidate]]
@@ -29758,7 +30000,7 @@ symbol = "ResultResumeTransitionSpec"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|ResultResumeTransitionSpec<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1516"]
 
 [[top_level_candidate]]
@@ -29798,7 +30040,7 @@ symbol = "ResultTerminalCommon"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|ResultTerminalCommon<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1512"]
 
 [[top_level_candidate]]
@@ -30498,7 +30740,7 @@ symbol = "ShardDerivedComponent"
 generic_signature = ""
 source_key = "top|ShardDerivedComponent"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a03:1542"]
 
 [[top_level_candidate]]
@@ -39495,6 +39737,182 @@ target_row_id = "a11:logical-kind:delivered-baseline-payload"
 slice_id = "a11"
 source_key = "top|DeliveredBaselinePayload"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-admitted-txn-abort-command"
+target_row_id = "a03:logical-kind:admitted-txn-abort-command"
+slice_id = "a03"
+source_key = "top|AdmittedTxnAbortCommand"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-distributed-derived-generation-manifest"
+target_row_id = "a03:logical-kind:distributed-derived-generation-manifest"
+slice_id = "a03"
+source_key = "top|DistributedDerivedGenerationManifest"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-audit-ticket-claim-record"
+target_row_id = "a03:logical-kind:local-audit-ticket-claim-record"
+slice_id = "a03"
+source_key = "top|LocalAuditTicketClaimRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-begin-reservation-record"
+target_row_id = "a03:logical-kind:local-begin-reservation-record"
+slice_id = "a03"
+source_key = "top|LocalBeginReservationRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-buffered-result-manifest"
+target_row_id = "a03:logical-kind:local-buffered-result-manifest"
+slice_id = "a03"
+source_key = "top|LocalBufferedResultManifest"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-conflict-index"
+target_row_id = "a03:logical-kind:local-conflict-index"
+slice_id = "a03"
+source_key = "top|LocalConflictIndex"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-local-result-delivery-lease"
+target_row_id = "a03:logical-kind:local-result-delivery-lease"
+slice_id = "a03"
+source_key = "top|LocalResultDeliveryLease"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-result-delivery-lease-time-basis"
+target_row_id = "a03:logical-kind:result-delivery-lease-time-basis"
+slice_id = "a03"
+source_key = "top|ResultDeliveryLeaseTimeBasis<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-result-delivery-policy"
+target_row_id = "a03:logical-kind:result-delivery-policy"
+slice_id = "a03"
+source_key = "top|ResultDeliveryPolicy<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-result-resource-escrow"
+target_row_id = "a03:logical-kind:result-resource-escrow"
+slice_id = "a03"
+source_key = "top|ResultResourceEscrow<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-distributed"
+target_row_id = "a03:logical-kind:distributed"
+slice_id = "a03"
+source_key = "top|Distributed"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:logical-kind-shard-derived-component"
+target_row_id = "a03:logical-kind:shard-derived-component"
+slice_id = "a03"
+source_key = "top|ShardDerivedComponent"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-acknowledged"
+target_row_id = "a03:wire-type:acknowledged"
+slice_id = "a03"
+source_key = "top|Acknowledged"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-active-deliverable"
+target_row_id = "a03:wire-type:active-deliverable"
+slice_id = "a03"
+source_key = "top|ActiveDeliverable"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-local-begin-terminal-spec"
+target_row_id = "a03:wire-type:local-begin-terminal-spec"
+slice_id = "a03"
+source_key = "top|LocalBeginTerminalSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-local-conflict-compaction-spec"
+target_row_id = "a03:wire-type:local-conflict-compaction-spec"
+slice_id = "a03"
+source_key = "top|LocalConflictCompactionSpec"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-local-conflict-index-basis"
+target_row_id = "a03:wire-type:local-conflict-index-basis"
+slice_id = "a03"
+source_key = "top|LocalConflictIndexBasis"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-released-awaiting-activation"
+target_row_id = "a03:wire-type:released-awaiting-activation"
+slice_id = "a03"
+source_key = "top|ReleasedAwaitingActivation"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-released-unacked"
+target_row_id = "a03:wire-type:released-unacked"
+slice_id = "a03"
+source_key = "top|ReleasedUnacked"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-result-active-common"
+target_row_id = "a03:wire-type:result-active-common"
+slice_id = "a03"
+source_key = "top|ResultActiveCommon<Role:AuthorityOwningRole>"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-result-resume-transition-spec"
+target_row_id = "a03:wire-type:result-resume-transition-spec"
+slice_id = "a03"
+source_key = "top|ResultResumeTransitionSpec<Role:AuthorityOwningRole>"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:wire-type-result-terminal-common"
+target_row_id = "a03:wire-type:result-terminal-common"
+slice_id = "a03"
+source_key = "top|ResultTerminalCommon<Role:AuthorityOwningRole>"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

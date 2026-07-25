@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 19
+registry_epoch = 20
 
 [[kind]]
 object_kind = 0x0001
@@ -261,6 +261,15 @@ max_size_bytes = 1048576
 golden_corpus = "corpus/logical/backup_manifest/"
 
 [[kind]]
+object_kind = 0x0206
+name = "AdmittedTxnAbortCommand"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/admitted_txn_abort_command/"
+
+[[kind]]
 object_kind = 0x0235
 name = "AuthenticatedClientResultAckReceipt"
 status = "reserved"
@@ -369,6 +378,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/derived_generation_registry/"
 
 [[kind]]
+object_kind = 0x028c
+name = "DistributedDerivedGenerationManifest"
+status = "reserved"
+construction_order = 45
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/distributed_derived_generation_manifest/"
+
+[[kind]]
 object_kind = 0x0295
 name = "ExportLeaf"
 status = "reserved"
@@ -459,6 +477,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_attempt_registration/"
 
 [[kind]]
+object_kind = 0x02f6
+name = "LocalAuditTicketClaimRecord"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_audit_ticket_claim_record/"
+
+[[kind]]
 object_kind = 0x02fb
 name = "LocalBeginIdempotencyIndex"
 status = "reserved"
@@ -466,6 +493,15 @@ construction_order = 25
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_begin_idempotency_index/"
+
+[[kind]]
+object_kind = 0x02fc
+name = "LocalBeginReservationRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_begin_reservation_record/"
 
 [[kind]]
 object_kind = 0x02fd
@@ -477,6 +513,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_begin_reservation_spec/"
 
 [[kind]]
+object_kind = 0x02ff
+name = "LocalBufferedResultManifest"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_buffered_result_manifest/"
+
+[[kind]]
+object_kind = 0x0300
+name = "LocalConflictIndex"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_conflict_index/"
+
+[[kind]]
 object_kind = 0x0315
 name = "LocalPrepareAdmissionSpec"
 status = "reserved"
@@ -484,6 +538,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_prepare_admission_spec/"
+
+[[kind]]
+object_kind = 0x0321
+name = "LocalResultDeliveryLease"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_result_delivery_lease/"
 
 [[kind]]
 object_kind = 0x0323
@@ -900,6 +963,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/result_delivery_disposition_proof/"
 
 [[kind]]
+object_kind = 0x040a
+name = "ResultDeliveryLeaseTimeBasis"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_lease_time_basis/"
+
+[[kind]]
+object_kind = 0x040b
+name = "ResultDeliveryPolicy"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_delivery_policy/"
+
+[[kind]]
 object_kind = 0x040c
 name = "ResultEndSendCompletionRecord"
 status = "reserved"
@@ -907,6 +988,15 @@ construction_order = 26
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/result_end_send_completion_record/"
+
+[[kind]]
+object_kind = 0x0410
+name = "ResultResourceEscrow"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/result_resource_escrow/"
 
 [[kind]]
 object_kind = 0x041c
@@ -1420,3 +1510,21 @@ construction_order = 14
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/certificate_signature_share/"
+
+[[kind]]
+object_kind = 0x052c
+name = "Distributed"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/distributed/"
+
+[[kind]]
+object_kind = 0x052d
+name = "ShardDerivedComponent"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_derived_component/"
