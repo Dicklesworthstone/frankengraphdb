@@ -1,0 +1,138 @@
+//! `unsafe-ledger-check` — CI entrypoint for the unsafe-boundary ledger
+//! (bead `fgdb-w1-unsafe-ledger-icp`; plan §1 constraint 2, §18.1).
+//!
+//! Exit 0 only when the whole boundary verifies. Emits one NDJSON line per
+//! event so CI keeps a machine-readable record of what was actually examined —
+//! crates scanned, the per-crate forbid verdict, every site, every orphan row —
+//! rather than a bare green bar. A green bar that cannot say what it checked is
+//! the failure mode this bead exists to prevent.
+
+use registry_check::jsonl::{arr, b, event, n, s};
+use registry_check::unsafe_ledger;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+pub const REPLAY_COMMAND: &str = "cargo run -p registry-check --bin unsafe-ledger-check -- --root .";
+
+fn main() -> ExitCode {
+    let mut args = std::env::args().skip(1);
+    let mut root = PathBuf::from(".");
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--root" => match args.next() {
+                Some(value) => root = PathBuf::from(value),
+                None => {
+                    println!(
+                        "{}",
+                        event(&[
+                            ("event", s("run_error")),
+                            ("msg", s("--root requires a path")),
+                            ("outcome", s("error")),
+                        ])
+                    );
+                    return ExitCode::FAILURE;
+                }
+            },
+            other => {
+                println!(
+                    "{}",
+                    event(&[
+                        ("event", s("run_error")),
+                        ("msg", s(format!("unknown argument {other:?}"))),
+                        ("outcome", s("error")),
+                    ])
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let (report, violations) = unsafe_ledger::check_workspace(&root);
+
+    // The scanner's own control is reported FIRST and explicitly: every
+    // zero-site conclusion below is licensed by it, so a reader can tell
+    // whether an empty unsafe surface was proven or merely assumed.
+    let licensed = report.scanner_self_test_sites == unsafe_ledger::SCANNER_FIXTURE_SITES;
+    println!(
+        "{}",
+        event(&[
+            ("event", s("unsafe_scanner_self_test")),
+            ("sites_found", n(report.scanner_self_test_sites as i64)),
+            (
+                "sites_expected",
+                n(unsafe_ledger::SCANNER_FIXTURE_SITES as i64)
+            ),
+            ("licensed", b(licensed)),
+            ("outcome", s(if licensed { "pass" } else { "fail" })),
+        ])
+    );
+
+    for (krate, inherits) in &report.forbid_verdicts {
+        println!(
+            "{}",
+            event(&[
+                ("event", s("crate_forbid_verdict")),
+                ("crate", s(krate)),
+                ("inherits_workspace_forbid", b(*inherits)),
+            ])
+        );
+    }
+
+    println!(
+        "{}",
+        event(&[
+            ("event", s("unsafe_sites_scanned")),
+            ("count", n(report.scanned_sites.len() as i64)),
+            (
+                "sites",
+                arr(report
+                    .scanned_sites
+                    .iter()
+                    .map(|site| format!("{}:{} {}", site.path, site.line, site.symbol)))
+            ),
+        ])
+    );
+
+    println!(
+        "{}",
+        event(&[
+            ("event", s("ledger_orphan_rows")),
+            ("count", n(report.orphan_rows.len() as i64)),
+            ("rows", arr(report.orphan_rows.iter().cloned())),
+        ])
+    );
+
+    for violation in &violations {
+        println!(
+            "{}",
+            event(&[
+                ("event", s("unsafe_boundary_violation")),
+                ("code", s(&violation.code)),
+                ("subject", s(&violation.subject)),
+                ("source_anchor", s(&violation.source_anchor)),
+                ("msg", s(&violation.message)),
+                ("replay_command", s(REPLAY_COMMAND)),
+                ("outcome", s("fail")),
+            ])
+        );
+    }
+
+    let failed = !violations.is_empty();
+    println!(
+        "{}",
+        event(&[
+            ("event", s("unsafe_ledger_completed")),
+            ("crates_scanned", n(report.crates_scanned as i64)),
+            ("sites", n(report.scanned_sites.len() as i64)),
+            ("orphan_rows", n(report.orphan_rows.len() as i64)),
+            ("violations", n(violations.len() as i64)),
+            ("outcome", s(if failed { "fail" } else { "pass" })),
+        ])
+    );
+
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}

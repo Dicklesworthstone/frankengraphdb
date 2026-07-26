@@ -493,3 +493,18 @@ symbol = "g0_threat_e2e"
 kind = "script"
 artifact = "scripts/g0_threat_e2e.sh"
 status = "live"
+
+# --- W1 unsafe-boundary ledger: island roster, workspace forbid inheritance, ---
+# --- and the site<->row bijection. Owner: fgdb-w1-unsafe-ledger-icp.        ---
+
+[[checker]]
+symbol = "unsafe_boundary_ledger"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/unsafe_ledger.rs"
+status = "live"
+
+[[checker]]
+symbol = "unsafe_ledger_check"
+kind = "binary"
+artifact = "tools/registry-check/src/bin/unsafe-ledger-check.rs"
+status = "live"

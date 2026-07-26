@@ -1,0 +1,86 @@
+# =============================================================================
+# unsafe_boundary_ledger.toml — the enumerated unsafe surface (G0)
+# =============================================================================
+# Bead: fgdb-w1-unsafe-ledger-icp
+# Provenance: plan §1 constraint 2 (memory safety is structural), §8.7 (SIMD /
+# memory-level-parallelism discipline), §18.1 (the unsafe-islands row).
+#
+# WHAT THIS FILE IS. Not documentation — the enforcement surface. The workspace
+# sets `unsafe_code = "forbid"`, and Rust's `forbid` cannot be lowered by an
+# inner `allow`. That is deliberate: it means raw-pointer work cannot be
+# sprinkled through ordinary crates at all. It may exist only inside a
+# separately named `fgdb-unsafe-*` boundary crate whose root uses `deny`
+# instead, with narrowly scoped `#[allow(unsafe_code)]` sites. Every one of
+# those sites needs a row here, and CI rejects an unledgered site.
+#
+# WHY THE ROSTER IS DECLARED EVEN WHILE EMPTY. The workspace currently has zero
+# islands and zero unsafe sites. A checker that simply counted sites would
+# report "0 sites, pass" — and would report the same thing if its scanner were
+# broken or this file were deleted. So the roster below is a positive claim
+# with a `status`, and `unsafe-ledger-check` verifies BOTH directions: a
+# `present` island that is missing fails, and a `planned` island that has
+# quietly appeared fails. An island must be admitted here before it lands,
+# never after.
+#
+# Row schema:
+#   [[island]]
+#   name    = "fgdb-unsafe-*"      # crate name under crates/
+#   charter = "..."                # what may live here; bounds the island
+#   status  = "present" | "planned"
+#
+#   [[site]]
+#   row_id            = "..."      # unique, stable
+#   island            = "..."      # must name a declared island
+#   path              = "..."      # repo-relative source file
+#   symbol            = "..."      # the item the allow scopes, verbatim
+#   stated_invariant  = "..."      # the LOCAL safety invariant this site relies on
+#   evidence          = "..."      # test / proof / Miri lane that exercises it
+#   fallback          = "..."      # the scalar or safe implementation it must match
+#   no_claim_boundary = "..."      # what this site does NOT guarantee
+#
+# `stated_invariant`, `evidence`, `fallback` and `no_claim_boundary` may not be
+# empty. A site with a blank evidence field is an unaudited site wearing a
+# ledger row, so the checker rejects it rather than counting it as covered.
+# `no_claim_boundary` exists to stop evidence inflation: a Miri-clean run is
+# evidence for the paths it exercised, never a proof of the site.
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "unsafe_boundary_ledger"
+bead = "fgdb-w1-unsafe-ledger-icp"
+
+# -----------------------------------------------------------------------------
+# The roster. Per §18.1 these three are THE ONLY crate roots in the workspace
+# permitted not to use forbid(unsafe_code). All three are `planned`: none has
+# landed yet, and the checker fails if any of them appears without its status
+# being moved here first.
+# -----------------------------------------------------------------------------
+
+[[island]]
+name = "fgdb-unsafe-simd"
+charter = "SIMD and vector kernels only: codec decode inner loops, digest and cipher inner loops, hash-table control-group probes, linalg kernels, plus AMAC/memory-level-parallelism experiments. Every kernel carries a bit-identical scalar fallback (§8.7); STRICT kernels are fixed by the portable scalar profile and must agree bit-for-bit across every supported dispatch path. AMAC/prefetch policy is physical-only and may never change a result or a logical order."
+status = "planned"
+
+[[island]]
+name = "fgdb-unsafe-arena"
+charter = "Bump/region arena internals and generational-handle plumbing, consumed by safe crates strictly through safe APIs. No public raw pointers and no public unsafe fn. Region reclamation must prove bytes_reclaimed == bytes_allocated on cancellation and region close."
+status = "planned"
+
+[[island]]
+name = "fgdb-unsafe-vfs"
+charter = "Raw file and memory-mapping syscall surfaces beneath the filesystem-profile layer. Every mapping is exposed to safe callers as a bounded, lifetime-checked view; torn-write and bit-rot behaviour is the caller's contract, never assumed here."
+status = "planned"
+
+# -----------------------------------------------------------------------------
+# Sites. Empty today, and that emptiness is CHECKED rather than assumed: the
+# checker self-tests its site scanner against a fixture with a known site count
+# before it is willing to report zero, and it fails the whole run if that
+# self-test does not reproduce exactly. See tools/registry-check/src/
+# unsafe_ledger.rs (`SCANNER_FIXTURE`).
+#
+# When the first island lands, add its row here IN THE SAME COMMIT as the
+# `allow` site. `site_unledgered` fires otherwise, and `ledger_row_orphaned`
+# fires if a row outlives the code it describes.
+# -----------------------------------------------------------------------------
