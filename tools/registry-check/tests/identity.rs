@@ -5113,6 +5113,142 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("RestoreShardReadyBarrier", "reconciliation_completion_proof_ref")
         )
     };
+    // The a18 StrongRef field tranche. These rows are post-erratum additions,
+    // so exclude the exact owner/member cohort from the historical namespace.
+    let post_erratum_a18_field_tranche = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            (
+                "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>",
+                "abandon_operation_record_ref"
+            ) | (
+                "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>",
+                "pending_pin_owner_ref"
+            ) | (
+                "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>",
+                "receipt_ref"
+            ) | (
+                "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>",
+                "result_catalog_authority_head_ref"
+            ) | (
+                "GlobalRestoreParticipantPinReleaseCompletionCertificate",
+                "meta_terminal_tombstone_ref"
+            ) | (
+                "GlobalRestoreParticipantPinReleaseCompletionCertificate",
+                "post_finalize_global_state_root_ref"
+            ) | ("LocalRestoreCompletionEvidence", "cleanup_authority_ref")
+                | (
+                    "LocalRestoreTerminalTombstone",
+                    "release_operation_summary_ref"
+                )
+                | (
+                    "LocalRestoreTerminalTombstone",
+                    "source_key_access_cleanup_accumulator_ref"
+                )
+                | ("MetaRestoreCompletionEvidence", "cleanup_authority_ref")
+                | (
+                    "MetaRestoreTerminalTombstone",
+                    "release_operation_summary_ref"
+                )
+                | (
+                    "MetaRestoreTerminalTombstone",
+                    "source_key_access_cleanup_accumulator_ref"
+                )
+                | ("RecoveryTransformSourceBasis<Role>", "working_set_ref")
+                | (
+                    "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>",
+                    "pending_owner_ref"
+                )
+                | (
+                    "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>",
+                    "meta_pending_owner_ref"
+                )
+                | ("RestoreLeaseOperationTerminalHistory<Role>", "index_ref")
+                | (
+                    "RestoreLeaseOperationTerminalHistory<Role>",
+                    "accumulator_ref"
+                )
+                | ("RestoreLeaseOperationTerminalRecordRef<Role>", "record_ref")
+                | (
+                    "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>",
+                    "current_lease_authority_observation_import_ref"
+                )
+                | (
+                    "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>",
+                    "usable_evidence_ref"
+                )
+                | (
+                    "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>",
+                    "expired_evidence_ref"
+                )
+                | (
+                    "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>",
+                    "portable_expiry_attestation_ref"
+                )
+                | ("RestoreRetentionAnchor<Role>", "pending_owner_ref")
+                | ("RestoreShardAbandonAck", "abandonment_tombstone_ref")
+                | ("RestoreShardAbandonAck", "source_access_closure_ref")
+                | ("RestoreShardAbandonAck", "post_close_shard_state_root_ref")
+                | (
+                    "RestoreSourceKeyAccessCleanupProgress<Role>",
+                    "source_access_inventory_ref"
+                )
+                | (
+                    "RestoreSourceKeyAccessCleanupProgress<Role>",
+                    "lease_bound_source_access_set_ref"
+                )
+                | (
+                    "RestoreSourceKeyAccessCleanupRecord<Role>",
+                    "source_access_inventory_ref"
+                )
+                | (
+                    "RestoreSourceKeyAccessCleanupRecord<Role>",
+                    "lease_bound_source_access_set_ref"
+                )
+                | (
+                    "RestoreSourceKeyAccessCleanupRecord<Role>",
+                    "final_progress_ref"
+                )
+                | (
+                    "RestoreSourceKeyAccessCleanupRecord<Role>",
+                    "accumulator_ref"
+                )
+                | (
+                    "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>",
+                    "portable_observation_ref"
+                )
+                | (
+                    "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>",
+                    "time_observation_import_ref"
+                )
+                | (
+                    "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>",
+                    "time_validation_evidence_ref"
+                )
+                | (
+                    "RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>",
+                    "source_access_cleanup_accumulator_ref"
+                )
+                | ("RestoreTerminalPinBasis<Role>", "physical_inventory_ref")
+                | (
+                    "RestoreTerminalPinBasis<Role>",
+                    "pin_durability_receipt_ref"
+                )
+                | (
+                    "RestoreTerminalPinBasis<Role>",
+                    "retained_recovery_physical_inventory_ref"
+                )
+                | (
+                    "RestoreTerminalPinDurabilityReceipt<Role,Disposition>",
+                    "inventory_ref"
+                )
+                | (
+                    "ShardRestoreAbandonmentTombstone",
+                    "own_no_target_observation_proof_ref"
+                )
+                | ("ShardRestoreAbandonmentTombstone", "pending_pin_owner_ref")
+        )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_a21_field(&field.containing_schema)
             && !post_erratum_union(&field.exact_wire_type)
@@ -5124,6 +5260,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a04_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a19_field_tranche(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a18_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a04_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
     });
@@ -5133,9 +5270,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 166,
+        pre_erratum.fields.len() + 208,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A12 retention-cut tranche"
+        "the historical witness must remove every post-erratum field cohort through the a18 StrongRef tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

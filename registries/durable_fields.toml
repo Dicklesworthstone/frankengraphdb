@@ -215,6 +215,36 @@ bd_excluded_field_tags = [11]
 recipe_pin = "fnv1a64:2be6808e91bd9d0d"
 
 [[field]]
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "abandon_operation_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonOperationRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonOperationRecord<Role> this AuthorityOwningRestoreAbandonmentTombstone names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2437)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+field_tag = 0x001c
+stable_name = "pending_pin_owner_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonmentPinPendingOwner"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonmentPinPendingOwner<Role> this AuthorityOwningRestoreAbandonmentTombstone names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2437)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "BackupManifest"
 field_tag = 0x0001
 stable_name = "body_ref"
@@ -286,6 +316,36 @@ target_schema_id = "ClaimToAppliedUseIdentityDerivationProof"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the ClaimToAppliedUseIdentityDerivationProof<Role,Kind> this BootstrapReservationUsePublicationCertificate names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a19:2511)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+field_tag = 0x0005
+stable_name = "receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CatalogTombstoneRestoreTargetReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the CatalogTombstoneRestoreTargetReceipt<CanonicalCatalogTombstoneRestoreTargetContract<Role,Profile>> this CanonicalCatalogRestoreTargetTerminalDisposition names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2429)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+field_tag = 0x0006
+stable_name = "result_catalog_authority_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CatalogAuthorityHead"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the CatalogAuthorityHead this CanonicalCatalogRestoreTargetTerminalDisposition names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2429)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -905,6 +965,36 @@ bd_excluded_field_tags = [1]
 recipe_pin = "fnv1a64:55336bfa5c150521"
 
 [[field]]
+containing_schema = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+field_tag = 0x0007
+stable_name = "meta_terminal_tombstone_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "MetaRestoreTerminalTombstone"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the MetaRestoreTerminalTombstone this GlobalRestoreParticipantPinReleaseCompletionCertificate names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a18:2419)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+field_tag = 0x0008
+stable_name = "post_finalize_global_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStateRoot"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalStateRoot this GlobalRestoreParticipantPinReleaseCompletionCertificate names; retained while the referrer is retained, and the acyclic order 31 <= 50 keeps the reference backward-only (a18:2419)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "GlobalTxnRecord"
 field_tag = 0x0001
 stable_name = "resulting_global_state_payload_digest"
@@ -1063,6 +1153,51 @@ role_predicate = "true"
 retention_and_cut_rule = "inline new Meta authority domain of the pre-order transfer plan; retained with the plan and carries no reachability edge (a05:1606)"
 version_status = "reserved"
 max_size_bytes = 93
+
+[[field]]
+containing_schema = "LocalRestoreCompletionEvidence"
+field_tag = 0x0001
+stable_name = "cleanup_authority_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalCleanupAuthority"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalCleanupAuthority<Local> this LocalRestoreCompletionEvidence names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2399)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalRestoreTerminalTombstone"
+field_tag = 0x0002
+stable_name = "release_operation_summary_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceLeaseReleaseOperationSummary"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceLeaseReleaseOperationSummary<Local> this LocalRestoreTerminalTombstone names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalRestoreTerminalTombstone"
+field_tag = 0x0004
+stable_name = "source_key_access_cleanup_accumulator_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessCleanupAccumulator"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessCleanupAccumulator<Local> this LocalRestoreTerminalTombstone names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "LocalToShardProjection"
@@ -1299,6 +1434,51 @@ role_predicate = "role-meta"
 retention_and_cut_rule = "reserved; a05-a07 populate the exact schema"
 version_status = "reserved"
 max_size_bytes = 268435456
+
+[[field]]
+containing_schema = "MetaRestoreCompletionEvidence"
+field_tag = 0x0001
+stable_name = "cleanup_authority_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalCleanupAuthority"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalCleanupAuthority<Meta> this MetaRestoreCompletionEvidence names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a18:2399)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "MetaRestoreTerminalTombstone"
+field_tag = 0x0002
+stable_name = "release_operation_summary_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceLeaseReleaseOperationSummary"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceLeaseReleaseOperationSummary<Meta> this MetaRestoreTerminalTombstone names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "MetaRestoreTerminalTombstone"
+field_tag = 0x0004
+stable_name = "source_key_access_cleanup_accumulator_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessCleanupAccumulator"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessCleanupAccumulator<Meta> this MetaRestoreTerminalTombstone names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "OfflineMacaroonIssuerEpochFenceReceipt"
@@ -1771,6 +1951,21 @@ target_schema_id = "RecoveryIncarnationTransformPlan"
 construction_order = 20
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the RecoveryIncarnationTransformPlan<Role> this RecoveryIncarnationProjectionResult names; retained while the referrer is retained, and the acyclic order 20 <= 20 keeps the reference backward-only (a19:2459)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RecoveryTransformSourceBasis<Role>"
+field_tag = 0x0001
+stable_name = "working_set_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreCanonicalAcquisitionWorkingSet"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreCanonicalAcquisitionWorkingSet<Local> this RecoveryTransformSourceBasis names; retained while the referrer is retained, and the acyclic order 10 <= 30 keeps the reference backward-only (a18:2455)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -3803,6 +3998,36 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0019
+stable_name = "pending_owner_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonmentPinPendingOwner"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonmentPinPendingOwner<Local> this RestoreAbandonOperationRecord names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2435)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+field_tag = 0x001a
+stable_name = "meta_pending_owner_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonmentPinPendingOwner"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonmentPinPendingOwner<Meta> this RestoreAbandonOperationRecord names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2435)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
 field_tag = 0x0005
 stable_name = "prior_lease_barrier_bootstrap_import_ref"
@@ -3878,6 +4103,111 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "RestoreLeaseOperationTerminalHistory<Role>"
+field_tag = 0x0001
+stable_name = "index_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreLeaseOperationTerminalIndex"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreLeaseOperationTerminalIndex<Role> this RestoreLeaseOperationTerminalHistory names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2349)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreLeaseOperationTerminalHistory<Role>"
+field_tag = 0x0002
+stable_name = "accumulator_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreLeaseOperationTerminalAccumulator"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreLeaseOperationTerminalAccumulator<Role> this RestoreLeaseOperationTerminalHistory names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2349)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreLeaseOperationTerminalRecordRef<Role>"
+field_tag = 0x0001
+stable_name = "record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreLeaseOperationTerminalRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreLeaseOperationTerminalRecord<Role,Renew> this RestoreLeaseOperationTerminalRecordRef names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2349)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0002
+stable_name = "current_lease_authority_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceLeaseAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceLeaseAuthorityObservationImport<Role> this RestoreLeaseReleaseEligibility names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a18:2403)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "usable_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this RestoreLeaseReleaseEligibility names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a18:2403)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "expired_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this RestoreLeaseReleaseEligibility names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a18:2403)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "portable_expiry_attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableTimeExpiryAttestation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableTimeExpiryAttestation this RestoreLeaseReleaseEligibility names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a18:2403)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "RestoreReconciliationCompletionProof<Role>"
 field_tag = 0x0004
 stable_name = "reconciliation_root_ref"
@@ -3908,6 +4238,21 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "RestoreRetentionAnchor<Role>"
+field_tag = 0x0002
+stable_name = "pending_owner_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonmentPinPendingOwner"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonmentPinPendingOwner<Role> this RestoreRetentionAnchor names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2379)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "RestoreServicePromotionManifest"
 field_tag = 0x0005
 stable_name = "target_posture"
@@ -3934,6 +4279,51 @@ role_predicate = "true"
 retention_and_cut_rule = "portable inline authority profile retained and cut with the signed promotion manifest (a20:2575)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RestoreShardAbandonAck"
+field_tag = 0x0008
+stable_name = "abandonment_tombstone_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardRestoreAbandonmentTombstone"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardRestoreAbandonmentTombstone this RestoreShardAbandonAck names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2451)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreShardAbandonAck"
+field_tag = 0x000a
+stable_name = "source_access_closure_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardRestoreSourceAccessClosure"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardRestoreSourceAccessClosure this RestoreShardAbandonAck names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2451)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreShardAbandonAck"
+field_tag = 0x000c
+stable_name = "post_close_shard_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardLogicalStateRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardLogicalStateRoot this RestoreShardAbandonAck names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2451)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "RestoreShardBootstrapProjectionCertificate"
@@ -4026,6 +4416,141 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+field_tag = 0x0004
+stable_name = "source_access_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessInventory"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessInventory<Role> this RestoreSourceKeyAccessCleanupProgress names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2359)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+field_tag = 0x0005
+stable_name = "lease_bound_source_access_set_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreLeaseBoundSourceAccessSet"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreLeaseBoundSourceAccessSet<Role> this RestoreSourceKeyAccessCleanupProgress names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2359)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreSourceKeyAccessCleanupRecord<Role>"
+field_tag = 0x0004
+stable_name = "source_access_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessInventory"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessInventory<Role> this RestoreSourceKeyAccessCleanupRecord names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2361)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreSourceKeyAccessCleanupRecord<Role>"
+field_tag = 0x0005
+stable_name = "lease_bound_source_access_set_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreLeaseBoundSourceAccessSet"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreLeaseBoundSourceAccessSet<Role> this RestoreSourceKeyAccessCleanupRecord names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2361)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreSourceKeyAccessCleanupRecord<Role>"
+field_tag = 0x0006
+stable_name = "final_progress_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessCleanupProgress"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessCleanupProgress<Role> this RestoreSourceKeyAccessCleanupRecord names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2361)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreSourceKeyAccessCleanupRecord<Role>"
+field_tag = 0x000d
+stable_name = "accumulator_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessCleanupAccumulator"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessCleanupAccumulator<Role> this RestoreSourceKeyAccessCleanupRecord names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2361)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "portable_observation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableRestoreSourceLeaseAuthorityObservation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableRestoreSourceLeaseAuthorityObservation this RestoreSourceLeaseAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2401)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "time_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityObservationImport this RestoreSourceLeaseAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 23 <= 30 keeps the reference backward-only (a18:2401)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "time_validation_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this RestoreSourceLeaseAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a18:2401)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
 field_tag = 0x0005
 stable_name = "predecessor"
@@ -4096,6 +4621,81 @@ role_predicate = "true"
 retention_and_cut_rule = "closed union Genesis|Checkpointed; the lineage root this lease record is anchored at, lives/dies with the lease record (a16:2237)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "source_access_cleanup_accumulator_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessCleanupAccumulator"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessCleanupAccumulator<Role> this RestoreSourceLeaseReleaseOperationSummary names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreTerminalPinBasis<Role>"
+field_tag = 0x0005
+stable_name = "physical_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalPhysicalInventory"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalPhysicalInventory<Role,Operational> this RestoreTerminalPinBasis names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2373)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreTerminalPinBasis<Role>"
+field_tag = 0x0007
+stable_name = "pin_durability_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalPinDurabilityReceipt"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalPinDurabilityReceipt<Role,Operational> this RestoreTerminalPinBasis names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2373)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreTerminalPinBasis<Role>"
+field_tag = 0x0012
+stable_name = "retained_recovery_physical_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalPhysicalInventory"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalPhysicalInventory<Role,Abandoned> this RestoreTerminalPinBasis names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2373)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreTerminalPinDurabilityReceipt<Role,Disposition>"
+field_tag = 0x0008
+stable_name = "inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalPhysicalInventory"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalPhysicalInventory<Role,Disposition> this RestoreTerminalPinDurabilityReceipt names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2369)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "RootAuthorityTrustArtifact"
@@ -5031,6 +5631,36 @@ role_predicate = "role-shard"
 retention_and_cut_rule = "reserved; a05-a08 populate the exact schema"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ShardRestoreAbandonmentTombstone"
+field_tag = 0x000e
+stable_name = "own_no_target_observation_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreNoTargetObservationProof"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreNoTargetObservationProof<Shard> this ShardRestoreAbandonmentTombstone names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2439)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardRestoreAbandonmentTombstone"
+field_tag = 0x0011
+stable_name = "pending_pin_owner_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonmentPinPendingOwner"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonmentPinPendingOwner<Shard> this ShardRestoreAbandonmentTombstone names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2439)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ShardTimeAuthorityRetirementAck"

@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2528
+target_count = 2570
 projection_fallback_count = 106
-target_source_assignment_sha256 = "1e65244e1a95897e1a0a0d89723063c266111cd281f02817535cfb9964599bb8"
+target_source_assignment_sha256 = "37098947ac209862f7bf2180a0493900eafee0210c7336cb9039c4a6f4ff9b24"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -85414,3 +85414,1053 @@ source_locations = ["a09:1904"]
 resolution = "maps-to-source"
 resolved_source_keys = ["top|LocalFinalCertificationReserveSpec"]
 rationale = "a09:1904: the same span carries a second structural body for `top|LocalFinalCertificationReserveSpec`, whose own definition is a07:1750. a09 references the symbol and shows an installed record inside the same sentence, so the two bodies diverge for one source key. The divergence resolves to the a07 owner's definition; a09 contributes no competing structural claim."
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:authority-owning-restore-abandonment-tombstone-role-authority-owning-role-abandon-operation-record-ref"
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "abandon_operation_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonOperationRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonOperationRecord<Role> this AuthorityOwningRestoreAbandonmentTombstone names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2437)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:authority-owning-restore-abandonment-tombstone-role-authority-owning-role-pending-pin-owner-ref"
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+field_tag = 0x001c
+stable_name = "pending_pin_owner_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonmentPinPendingOwner"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonmentPinPendingOwner<Role> this AuthorityOwningRestoreAbandonmentTombstone names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2437)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:canonical-catalog-restore-target-terminal-disposition-role-profile-receipt-ref"
+containing_schema = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+field_tag = 0x0005
+stable_name = "receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CatalogTombstoneRestoreTargetReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the CatalogTombstoneRestoreTargetReceipt<CanonicalCatalogTombstoneRestoreTargetContract<Role,Profile>> this CanonicalCatalogRestoreTargetTerminalDisposition names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2429)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:canonical-catalog-restore-target-terminal-disposition-role-profile-result-catalog-authority-head-ref"
+containing_schema = "CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>"
+field_tag = 0x0006
+stable_name = "result_catalog_authority_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CatalogAuthorityHead"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the CatalogAuthorityHead this CanonicalCatalogRestoreTargetTerminalDisposition names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2429)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:global-restore-participant-pin-release-completion-certificate-meta-terminal-tombstone-ref"
+containing_schema = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+field_tag = 0x0007
+stable_name = "meta_terminal_tombstone_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "MetaRestoreTerminalTombstone"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the MetaRestoreTerminalTombstone this GlobalRestoreParticipantPinReleaseCompletionCertificate names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a18:2419)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:global-restore-participant-pin-release-completion-certificate-post-finalize-global-state-root-ref"
+containing_schema = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+field_tag = 0x0008
+stable_name = "post_finalize_global_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStateRoot"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalStateRoot this GlobalRestoreParticipantPinReleaseCompletionCertificate names; retained while the referrer is retained, and the acyclic order 31 <= 50 keeps the reference backward-only (a18:2419)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:local-restore-completion-evidence-cleanup-authority-ref"
+containing_schema = "LocalRestoreCompletionEvidence"
+field_tag = 0x0001
+stable_name = "cleanup_authority_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalCleanupAuthority"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalCleanupAuthority<Local> this LocalRestoreCompletionEvidence names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2399)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:local-restore-terminal-tombstone-release-operation-summary-ref"
+containing_schema = "LocalRestoreTerminalTombstone"
+field_tag = 0x0002
+stable_name = "release_operation_summary_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceLeaseReleaseOperationSummary"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceLeaseReleaseOperationSummary<Local> this LocalRestoreTerminalTombstone names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:local-restore-terminal-tombstone-source-key-access-cleanup-accumulator-ref"
+containing_schema = "LocalRestoreTerminalTombstone"
+field_tag = 0x0004
+stable_name = "source_key_access_cleanup_accumulator_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessCleanupAccumulator"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessCleanupAccumulator<Local> this LocalRestoreTerminalTombstone names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:meta-restore-completion-evidence-cleanup-authority-ref"
+containing_schema = "MetaRestoreCompletionEvidence"
+field_tag = 0x0001
+stable_name = "cleanup_authority_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalCleanupAuthority"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalCleanupAuthority<Meta> this MetaRestoreCompletionEvidence names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a18:2399)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:meta-restore-terminal-tombstone-release-operation-summary-ref"
+containing_schema = "MetaRestoreTerminalTombstone"
+field_tag = 0x0002
+stable_name = "release_operation_summary_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceLeaseReleaseOperationSummary"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceLeaseReleaseOperationSummary<Meta> this MetaRestoreTerminalTombstone names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:meta-restore-terminal-tombstone-source-key-access-cleanup-accumulator-ref"
+containing_schema = "MetaRestoreTerminalTombstone"
+field_tag = 0x0004
+stable_name = "source_key_access_cleanup_accumulator_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessCleanupAccumulator"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessCleanupAccumulator<Meta> this MetaRestoreTerminalTombstone names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:recovery-transform-source-basis-role-working-set-ref"
+containing_schema = "RecoveryTransformSourceBasis<Role>"
+field_tag = 0x0001
+stable_name = "working_set_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreCanonicalAcquisitionWorkingSet"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreCanonicalAcquisitionWorkingSet<Local> this RecoveryTransformSourceBasis names; retained while the referrer is retained, and the acyclic order 10 <= 30 keeps the reference backward-only (a18:2455)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-abandon-operation-record-role-authority-owning-role-pending-owner-ref"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0019
+stable_name = "pending_owner_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonmentPinPendingOwner"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonmentPinPendingOwner<Local> this RestoreAbandonOperationRecord names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2435)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-abandon-operation-record-role-authority-owning-role-meta-pending-owner-ref"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+field_tag = 0x001a
+stable_name = "meta_pending_owner_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonmentPinPendingOwner"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonmentPinPendingOwner<Meta> this RestoreAbandonOperationRecord names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2435)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-lease-operation-terminal-history-role-index-ref"
+containing_schema = "RestoreLeaseOperationTerminalHistory<Role>"
+field_tag = 0x0001
+stable_name = "index_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreLeaseOperationTerminalIndex"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreLeaseOperationTerminalIndex<Role> this RestoreLeaseOperationTerminalHistory names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2349)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-lease-operation-terminal-history-role-accumulator-ref"
+containing_schema = "RestoreLeaseOperationTerminalHistory<Role>"
+field_tag = 0x0002
+stable_name = "accumulator_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreLeaseOperationTerminalAccumulator"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreLeaseOperationTerminalAccumulator<Role> this RestoreLeaseOperationTerminalHistory names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2349)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-lease-operation-terminal-record-ref-role-record-ref"
+containing_schema = "RestoreLeaseOperationTerminalRecordRef<Role>"
+field_tag = 0x0001
+stable_name = "record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreLeaseOperationTerminalRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreLeaseOperationTerminalRecord<Role,Renew> this RestoreLeaseOperationTerminalRecordRef names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2349)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-lease-release-eligibility-role-authority-owning-role-current-lease-authority-observation-import-ref"
+containing_schema = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0002
+stable_name = "current_lease_authority_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceLeaseAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceLeaseAuthorityObservationImport<Role> this RestoreLeaseReleaseEligibility names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a18:2403)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-lease-release-eligibility-role-authority-owning-role-usable-evidence-ref"
+containing_schema = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "usable_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this RestoreLeaseReleaseEligibility names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a18:2403)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-lease-release-eligibility-role-authority-owning-role-expired-evidence-ref"
+containing_schema = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "expired_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this RestoreLeaseReleaseEligibility names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a18:2403)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-lease-release-eligibility-role-authority-owning-role-portable-expiry-attestation-ref"
+containing_schema = "RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "portable_expiry_attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableTimeExpiryAttestation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableTimeExpiryAttestation this RestoreLeaseReleaseEligibility names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a18:2403)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-retention-anchor-role-pending-owner-ref"
+containing_schema = "RestoreRetentionAnchor<Role>"
+field_tag = 0x0002
+stable_name = "pending_owner_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonmentPinPendingOwner"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonmentPinPendingOwner<Role> this RestoreRetentionAnchor names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2379)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-shard-abandon-ack-abandonment-tombstone-ref"
+containing_schema = "RestoreShardAbandonAck"
+field_tag = 0x0008
+stable_name = "abandonment_tombstone_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardRestoreAbandonmentTombstone"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardRestoreAbandonmentTombstone this RestoreShardAbandonAck names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2451)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-shard-abandon-ack-source-access-closure-ref"
+containing_schema = "RestoreShardAbandonAck"
+field_tag = 0x000a
+stable_name = "source_access_closure_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardRestoreSourceAccessClosure"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardRestoreSourceAccessClosure this RestoreShardAbandonAck names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2451)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-shard-abandon-ack-post-close-shard-state-root-ref"
+containing_schema = "RestoreShardAbandonAck"
+field_tag = 0x000c
+stable_name = "post_close_shard_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardLogicalStateRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardLogicalStateRoot this RestoreShardAbandonAck names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2451)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-key-access-cleanup-progress-role-source-access-inventory-ref"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+field_tag = 0x0004
+stable_name = "source_access_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessInventory"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessInventory<Role> this RestoreSourceKeyAccessCleanupProgress names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2359)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-key-access-cleanup-progress-role-lease-bound-source-access-set-ref"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+field_tag = 0x0005
+stable_name = "lease_bound_source_access_set_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreLeaseBoundSourceAccessSet"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreLeaseBoundSourceAccessSet<Role> this RestoreSourceKeyAccessCleanupProgress names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2359)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-key-access-cleanup-record-role-source-access-inventory-ref"
+containing_schema = "RestoreSourceKeyAccessCleanupRecord<Role>"
+field_tag = 0x0004
+stable_name = "source_access_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessInventory"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessInventory<Role> this RestoreSourceKeyAccessCleanupRecord names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2361)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-key-access-cleanup-record-role-lease-bound-source-access-set-ref"
+containing_schema = "RestoreSourceKeyAccessCleanupRecord<Role>"
+field_tag = 0x0005
+stable_name = "lease_bound_source_access_set_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreLeaseBoundSourceAccessSet"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreLeaseBoundSourceAccessSet<Role> this RestoreSourceKeyAccessCleanupRecord names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2361)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-key-access-cleanup-record-role-final-progress-ref"
+containing_schema = "RestoreSourceKeyAccessCleanupRecord<Role>"
+field_tag = 0x0006
+stable_name = "final_progress_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessCleanupProgress"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessCleanupProgress<Role> this RestoreSourceKeyAccessCleanupRecord names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2361)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-key-access-cleanup-record-role-accumulator-ref"
+containing_schema = "RestoreSourceKeyAccessCleanupRecord<Role>"
+field_tag = 0x000d
+stable_name = "accumulator_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessCleanupAccumulator"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessCleanupAccumulator<Role> this RestoreSourceKeyAccessCleanupRecord names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2361)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-lease-authority-observation-import-role-authority-owning-role-portable-observation-ref"
+containing_schema = "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "portable_observation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableRestoreSourceLeaseAuthorityObservation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableRestoreSourceLeaseAuthorityObservation this RestoreSourceLeaseAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2401)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-lease-authority-observation-import-role-authority-owning-role-time-observation-import-ref"
+containing_schema = "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "time_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityObservationImport this RestoreSourceLeaseAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 23 <= 30 keeps the reference backward-only (a18:2401)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-lease-authority-observation-import-role-authority-owning-role-time-validation-evidence-ref"
+containing_schema = "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "time_validation_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this RestoreSourceLeaseAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a18:2401)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-lease-release-operation-summary-role-authority-owning-role-source-access-cleanup-accumulator-ref"
+containing_schema = "RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "source_access_cleanup_accumulator_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceKeyAccessCleanupAccumulator"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceKeyAccessCleanupAccumulator<Role> this RestoreSourceLeaseReleaseOperationSummary names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-terminal-pin-basis-role-physical-inventory-ref"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+field_tag = 0x0005
+stable_name = "physical_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalPhysicalInventory"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalPhysicalInventory<Role,Operational> this RestoreTerminalPinBasis names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2373)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-terminal-pin-basis-role-pin-durability-receipt-ref"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+field_tag = 0x0007
+stable_name = "pin_durability_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalPinDurabilityReceipt"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalPinDurabilityReceipt<Role,Operational> this RestoreTerminalPinBasis names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2373)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-terminal-pin-basis-role-retained-recovery-physical-inventory-ref"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+field_tag = 0x0012
+stable_name = "retained_recovery_physical_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalPhysicalInventory"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalPhysicalInventory<Role,Abandoned> this RestoreTerminalPinBasis names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a18:2373)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-terminal-pin-durability-receipt-role-disposition-inventory-ref"
+containing_schema = "RestoreTerminalPinDurabilityReceipt<Role,Disposition>"
+field_tag = 0x0008
+stable_name = "inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalPhysicalInventory"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreTerminalPhysicalInventory<Role,Disposition> this RestoreTerminalPinDurabilityReceipt names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2369)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:shard-restore-abandonment-tombstone-own-no-target-observation-proof-ref"
+containing_schema = "ShardRestoreAbandonmentTombstone"
+field_tag = 0x000e
+stable_name = "own_no_target_observation_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreNoTargetObservationProof"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreNoTargetObservationProof<Shard> this ShardRestoreAbandonmentTombstone names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2439)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:shard-restore-abandonment-tombstone-pending-pin-owner-ref"
+containing_schema = "ShardRestoreAbandonmentTombstone"
+field_tag = 0x0011
+stable_name = "pending_pin_owner_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreAbandonmentPinPendingOwner"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreAbandonmentPinPendingOwner<Shard> this ShardRestoreAbandonmentTombstone names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2439)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[target]]
+row_id = "a18:target:field-authority-owning-restore-abandonment-tombstone-role-authority-owning-role-abandon-operation-record-ref"
+target_row_id = "a18:field:authority-owning-restore-abandonment-tombstone-role-authority-owning-role-abandon-operation-record-ref"
+slice_id = "a18"
+source_key = "field|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.abandon_operation_record_ref|abandon_operation_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-authority-owning-restore-abandonment-tombstone-role-authority-owning-role-pending-pin-owner-ref"
+target_row_id = "a18:field:authority-owning-restore-abandonment-tombstone-role-authority-owning-role-pending-pin-owner-ref"
+slice_id = "a18"
+source_key = "field|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.pending_pin_owner_ref|pending_pin_owner_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-canonical-catalog-restore-target-terminal-disposition-role-profile-receipt-ref"
+target_row_id = "a18:field:canonical-catalog-restore-target-terminal-disposition-role-profile-receipt-ref"
+slice_id = "a18"
+source_key = "field|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>.Cataloged.receipt_ref|receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-canonical-catalog-restore-target-terminal-disposition-role-profile-result-catalog-authority-head-ref"
+target_row_id = "a18:field:canonical-catalog-restore-target-terminal-disposition-role-profile-result-catalog-authority-head-ref"
+slice_id = "a18"
+source_key = "field|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>|CanonicalCatalogRestoreTargetTerminalDisposition<Role,Profile>.Cataloged.result_catalog_authority_head_ref|result_catalog_authority_head_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-global-restore-participant-pin-release-completion-certificate-meta-terminal-tombstone-ref"
+target_row_id = "a18:field:global-restore-participant-pin-release-completion-certificate-meta-terminal-tombstone-ref"
+slice_id = "a18"
+source_key = "field|GlobalRestoreParticipantPinReleaseCompletionCertificate|GlobalRestoreParticipantPinReleaseCompletionCertificate.meta_terminal_tombstone_ref|meta_terminal_tombstone_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-global-restore-participant-pin-release-completion-certificate-post-finalize-global-state-root-ref"
+target_row_id = "a18:field:global-restore-participant-pin-release-completion-certificate-post-finalize-global-state-root-ref"
+slice_id = "a18"
+source_key = "field|GlobalRestoreParticipantPinReleaseCompletionCertificate|GlobalRestoreParticipantPinReleaseCompletionCertificate.post_finalize_global_state_root_ref|post_finalize_global_state_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-local-restore-completion-evidence-cleanup-authority-ref"
+target_row_id = "a18:field:local-restore-completion-evidence-cleanup-authority-ref"
+slice_id = "a18"
+source_key = "field|LocalRestoreCompletionEvidence|LocalRestoreCompletionEvidence.Operational.cleanup_authority_ref|cleanup_authority_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-local-restore-terminal-tombstone-release-operation-summary-ref"
+target_row_id = "a18:field:local-restore-terminal-tombstone-release-operation-summary-ref"
+slice_id = "a18"
+source_key = "field|LocalRestoreTerminalTombstone|LocalRestoreTerminalTombstone.release_operation_summary_ref|release_operation_summary_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-local-restore-terminal-tombstone-source-key-access-cleanup-accumulator-ref"
+target_row_id = "a18:field:local-restore-terminal-tombstone-source-key-access-cleanup-accumulator-ref"
+slice_id = "a18"
+source_key = "field|LocalRestoreTerminalTombstone|LocalRestoreTerminalTombstone.source_key_access_cleanup_accumulator_ref|source_key_access_cleanup_accumulator_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-meta-restore-completion-evidence-cleanup-authority-ref"
+target_row_id = "a18:field:meta-restore-completion-evidence-cleanup-authority-ref"
+slice_id = "a18"
+source_key = "field|MetaRestoreCompletionEvidence|MetaRestoreCompletionEvidence.Operational.cleanup_authority_ref|cleanup_authority_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-meta-restore-terminal-tombstone-release-operation-summary-ref"
+target_row_id = "a18:field:meta-restore-terminal-tombstone-release-operation-summary-ref"
+slice_id = "a18"
+source_key = "field|MetaRestoreTerminalTombstone|MetaRestoreTerminalTombstone.release_operation_summary_ref|release_operation_summary_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-meta-restore-terminal-tombstone-source-key-access-cleanup-accumulator-ref"
+target_row_id = "a18:field:meta-restore-terminal-tombstone-source-key-access-cleanup-accumulator-ref"
+slice_id = "a18"
+source_key = "field|MetaRestoreTerminalTombstone|MetaRestoreTerminalTombstone.source_key_access_cleanup_accumulator_ref|source_key_access_cleanup_accumulator_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-recovery-transform-source-basis-role-working-set-ref"
+target_row_id = "a18:field:recovery-transform-source-basis-role-working-set-ref"
+slice_id = "a18"
+source_key = "field|RecoveryTransformSourceBasis<Role>|RecoveryTransformSourceBasis<Role>.Local.working_set_ref|working_set_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-abandon-operation-record-role-authority-owning-role-pending-owner-ref"
+target_row_id = "a18:field:restore-abandon-operation-record-role-authority-owning-role-pending-owner-ref"
+slice_id = "a18"
+source_key = "field|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan.Local.pending_owner_ref|pending_owner_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-abandon-operation-record-role-authority-owning-role-meta-pending-owner-ref"
+target_row_id = "a18:field:restore-abandon-operation-record-role-authority-owning-role-meta-pending-owner-ref"
+slice_id = "a18"
+source_key = "field|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.pin_owner_plan.Meta.meta_pending_owner_ref|meta_pending_owner_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-lease-operation-terminal-history-role-index-ref"
+target_row_id = "a18:field:restore-lease-operation-terminal-history-role-index-ref"
+slice_id = "a18"
+source_key = "field|RestoreLeaseOperationTerminalHistory<Role>|RestoreLeaseOperationTerminalHistory<Role>.Detailed.index_ref|index_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-lease-operation-terminal-history-role-accumulator-ref"
+target_row_id = "a18:field:restore-lease-operation-terminal-history-role-accumulator-ref"
+slice_id = "a18"
+source_key = "field|RestoreLeaseOperationTerminalHistory<Role>|RestoreLeaseOperationTerminalHistory<Role>.Compacted.accumulator_ref|accumulator_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-lease-operation-terminal-record-ref-role-record-ref"
+target_row_id = "a18:field:restore-lease-operation-terminal-record-ref-role-record-ref"
+slice_id = "a18"
+source_key = "field|RestoreLeaseOperationTerminalRecordRef<Role>|RestoreLeaseOperationTerminalRecordRef<Role>.Renew.record_ref|record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-lease-release-eligibility-role-authority-owning-role-current-lease-authority-observation-import-ref"
+target_row_id = "a18:field:restore-lease-release-eligibility-role-authority-owning-role-current-lease-authority-observation-import-ref"
+slice_id = "a18"
+source_key = "field|RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>|RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>.Live.current_lease_authority_observation_import_ref|current_lease_authority_observation_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-lease-release-eligibility-role-authority-owning-role-usable-evidence-ref"
+target_row_id = "a18:field:restore-lease-release-eligibility-role-authority-owning-role-usable-evidence-ref"
+slice_id = "a18"
+source_key = "field|RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>|RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>.Live.usable_evidence_ref|usable_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-lease-release-eligibility-role-authority-owning-role-expired-evidence-ref"
+target_row_id = "a18:field:restore-lease-release-eligibility-role-authority-owning-role-expired-evidence-ref"
+slice_id = "a18"
+source_key = "field|RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>|RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>.Expired.expired_evidence_ref|expired_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-lease-release-eligibility-role-authority-owning-role-portable-expiry-attestation-ref"
+target_row_id = "a18:field:restore-lease-release-eligibility-role-authority-owning-role-portable-expiry-attestation-ref"
+slice_id = "a18"
+source_key = "field|RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>|RestoreLeaseReleaseEligibility<Role:AuthorityOwningRole>.Expired.portable_expiry_attestation_ref|portable_expiry_attestation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-retention-anchor-role-pending-owner-ref"
+target_row_id = "a18:field:restore-retention-anchor-role-pending-owner-ref"
+slice_id = "a18"
+source_key = "field|RestoreRetentionAnchor<Role>|RestoreRetentionAnchor<Role>.AbandonmentPinPending.pending_owner_ref|pending_owner_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-shard-abandon-ack-abandonment-tombstone-ref"
+target_row_id = "a18:field:restore-shard-abandon-ack-abandonment-tombstone-ref"
+slice_id = "a18"
+source_key = "field|RestoreShardAbandonAck|RestoreShardAbandonAck.abandonment_tombstone_ref|abandonment_tombstone_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-shard-abandon-ack-source-access-closure-ref"
+target_row_id = "a18:field:restore-shard-abandon-ack-source-access-closure-ref"
+slice_id = "a18"
+source_key = "field|RestoreShardAbandonAck|RestoreShardAbandonAck.source_access_closure_ref|source_access_closure_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-shard-abandon-ack-post-close-shard-state-root-ref"
+target_row_id = "a18:field:restore-shard-abandon-ack-post-close-shard-state-root-ref"
+slice_id = "a18"
+source_key = "field|RestoreShardAbandonAck|RestoreShardAbandonAck.post_close_shard_state_root_ref|post_close_shard_state_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-key-access-cleanup-progress-role-source-access-inventory-ref"
+target_row_id = "a18:field:restore-source-key-access-cleanup-progress-role-source-access-inventory-ref"
+slice_id = "a18"
+source_key = "field|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.source_access_inventory_ref|source_access_inventory_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-key-access-cleanup-progress-role-lease-bound-source-access-set-ref"
+target_row_id = "a18:field:restore-source-key-access-cleanup-progress-role-lease-bound-source-access-set-ref"
+slice_id = "a18"
+source_key = "field|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.lease_bound_source_access_set_ref|lease_bound_source_access_set_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-key-access-cleanup-record-role-source-access-inventory-ref"
+target_row_id = "a18:field:restore-source-key-access-cleanup-record-role-source-access-inventory-ref"
+slice_id = "a18"
+source_key = "field|RestoreSourceKeyAccessCleanupRecord<Role>|RestoreSourceKeyAccessCleanupRecord<Role>.source_access_inventory_ref|source_access_inventory_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-key-access-cleanup-record-role-lease-bound-source-access-set-ref"
+target_row_id = "a18:field:restore-source-key-access-cleanup-record-role-lease-bound-source-access-set-ref"
+slice_id = "a18"
+source_key = "field|RestoreSourceKeyAccessCleanupRecord<Role>|RestoreSourceKeyAccessCleanupRecord<Role>.lease_bound_source_access_set_ref|lease_bound_source_access_set_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-key-access-cleanup-record-role-final-progress-ref"
+target_row_id = "a18:field:restore-source-key-access-cleanup-record-role-final-progress-ref"
+slice_id = "a18"
+source_key = "field|RestoreSourceKeyAccessCleanupRecord<Role>|RestoreSourceKeyAccessCleanupRecord<Role>.final_progress_ref|final_progress_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-key-access-cleanup-record-role-accumulator-ref"
+target_row_id = "a18:field:restore-source-key-access-cleanup-record-role-accumulator-ref"
+slice_id = "a18"
+source_key = "field|RestoreSourceKeyAccessCleanupRecord<Role>|RestoreSourceKeyAccessCleanupRecord<Role>.accumulator_ref|accumulator_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-lease-authority-observation-import-role-authority-owning-role-portable-observation-ref"
+target_row_id = "a18:field:restore-source-lease-authority-observation-import-role-authority-owning-role-portable-observation-ref"
+slice_id = "a18"
+source_key = "field|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>.portable_observation_ref|portable_observation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-lease-authority-observation-import-role-authority-owning-role-time-observation-import-ref"
+target_row_id = "a18:field:restore-source-lease-authority-observation-import-role-authority-owning-role-time-observation-import-ref"
+slice_id = "a18"
+source_key = "field|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>.time_observation_import_ref|time_observation_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-lease-authority-observation-import-role-authority-owning-role-time-validation-evidence-ref"
+target_row_id = "a18:field:restore-source-lease-authority-observation-import-role-authority-owning-role-time-validation-evidence-ref"
+slice_id = "a18"
+source_key = "field|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>.time_validation_evidence_ref|time_validation_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-lease-release-operation-summary-role-authority-owning-role-source-access-cleanup-accumulator-ref"
+target_row_id = "a18:field:restore-source-lease-release-operation-summary-role-authority-owning-role-source-access-cleanup-accumulator-ref"
+slice_id = "a18"
+source_key = "field|RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>|RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>.source_access_cleanup_accumulator_ref|source_access_cleanup_accumulator_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-terminal-pin-basis-role-physical-inventory-ref"
+target_row_id = "a18:field:restore-terminal-pin-basis-role-physical-inventory-ref"
+slice_id = "a18"
+source_key = "field|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>.Operational.physical_inventory_ref|physical_inventory_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-terminal-pin-basis-role-pin-durability-receipt-ref"
+target_row_id = "a18:field:restore-terminal-pin-basis-role-pin-durability-receipt-ref"
+slice_id = "a18"
+source_key = "field|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>.Operational.pin_durability_receipt_ref|pin_durability_receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-terminal-pin-basis-role-retained-recovery-physical-inventory-ref"
+target_row_id = "a18:field:restore-terminal-pin-basis-role-retained-recovery-physical-inventory-ref"
+slice_id = "a18"
+source_key = "field|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>.Abandoned.retained_recovery_physical_inventory_ref|retained_recovery_physical_inventory_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-terminal-pin-durability-receipt-role-disposition-inventory-ref"
+target_row_id = "a18:field:restore-terminal-pin-durability-receipt-role-disposition-inventory-ref"
+slice_id = "a18"
+source_key = "field|RestoreTerminalPinDurabilityReceipt<Role,Disposition>|RestoreTerminalPinDurabilityReceipt<Role,Disposition>.inventory_ref|inventory_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-shard-restore-abandonment-tombstone-own-no-target-observation-proof-ref"
+target_row_id = "a18:field:shard-restore-abandonment-tombstone-own-no-target-observation-proof-ref"
+slice_id = "a18"
+source_key = "field|ShardRestoreAbandonmentTombstone|ShardRestoreAbandonmentTombstone.own_no_target_observation_proof_ref|own_no_target_observation_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-shard-restore-abandonment-tombstone-pending-pin-owner-ref"
+target_row_id = "a18:field:shard-restore-abandonment-tombstone-pending-pin-owner-ref"
+slice_id = "a18"
+source_key = "field|ShardRestoreAbandonmentTombstone|ShardRestoreAbandonmentTombstone.pending_pin_owner_ref|pending_pin_owner_ref"
+target_kind = "field"
+definition_status = "declared"
