@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2739
+target_count = 2747
 projection_fallback_count = 108
-target_source_assignment_sha256 = "f75c6dd416775413b746b02daf94949b5a0a0535dfc6da9bec28cd605e67a0cd"
+target_source_assignment_sha256 = "211d31f4f337b65886bbd8834e1f20a80731ae2de8ab2116d69150e7e4ba5f2b"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -5923,6 +5923,17 @@ construction_order = 15
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/resource_ledger_transition/"
+
+[[logical_kind]]
+slice_id = "a10"
+row_id = "a10:logical-kind:sequence-neutral-spec"
+object_kind = 0x0432
+name = "SequenceNeutralSpec"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sequence_neutral_spec/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -42193,7 +42204,7 @@ symbol = "SequenceNeutralSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0432"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:service-visibility-epoch-reservation"
@@ -53735,7 +53746,7 @@ symbol = "SequenceNeutralSpec"
 generic_signature = "<Tag>"
 source_key = "top|SequenceNeutralSpec<Tag>"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a10:1914"]
 
 [[top_level_candidate]]
@@ -90346,6 +90357,124 @@ max_size_bytes = 32
 digest_class = "transcript"
 transcript_recipe = "domain-separated root transcript over the canonically-ordered TxnAllocationSlotKey -> EscapingAllocationBinding leaf set together with generation, attempt_identity, through_statement_seq and sorted_spent_commitments, excluding exactly root_digest (a09:1900)"
 
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:committed-effect-capsule-authority-bound-header"
+containing_schema = "CommittedEffectCapsule"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the prebuilt capsule; retained and cut with the capsule, byte-matched against the one complete Local binding it repeats, and creates no reachability edge (a10:1910)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:committed-effect-capsule-authorization-decision-ref"
+containing_schema = "CommittedEffectCapsule"
+field_tag = 0x0010
+stable_name = "authorization_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuthorizationDecisionRecord"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Local authorization decision that admitted this commit; retained while the capsule is retained, with the target constructed no later than its owner (a10:1910)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:committed-effect-capsule-authorization-decision-digest"
+containing_schema = "CommittedEffectCapsule"
+field_tag = 0x0011
+stable_name = "authorization_decision_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+target_schema_id = "AuthorizationDecisionRecord"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "repeated weak-identity digest that cross-checks the typed authorization_decision_ref (a10:1910 'Repeated digests cross-check typed refs'); comparison-only and never a reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:control-command-authority-bound-header"
+containing_schema = "ControlCommand"
+field_tag = 0x0002
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the control order unit; retained and cut with the command, byte-matched against the one complete Local binding, and creates no reachability edge (a10:1912)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:control-command-typed-payload-ref"
+containing_schema = "ControlCommand"
+field_tag = 0x0005
+stable_name = "typed_payload_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SequenceNeutralSpec"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the canonically encoded sequence-neutral spec wrapper that carries the one terminal audit gate; the spec is constructed before the command that orders it and is retained while the command is retained (a10:1912,1914)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:control-command-authorization-decision-ref"
+containing_schema = "ControlCommand"
+field_tag = 0x000a
+stable_name = "authorization_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuthorizationDecisionRecord"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Local authorization decision the command must byte-match; retained while the command is retained, with the target constructed no later than its owner (a10:1912)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:prepared-commit-record-configuration-ref"
+containing_schema = "PreparedCommitRecord"
+field_tag = 0x000a
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact configuration whose OID enters the recomputed ownership ID and every receipt transcript; every successor repeats the same configuration, so the edge is retained for the life of the prepared entry (a10:1922)"
+version_status = "reserved"
+max_size_bytes = 40
+
 [[target]]
 row_id = "a09:target:field-identity-continuity-record-database-security-namespace-id"
 target_row_id = "a09:field:identity-continuity-record-database-security-namespace-id"
@@ -90559,6 +90688,70 @@ row_id = "a09:target:field-txn-allocation-binding-root-root-digest"
 target_row_id = "a09:field:txn-allocation-binding-root-root-digest"
 slice_id = "a09"
 source_key = "field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.root_digest|root_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:logical-kind-sequence-neutral-spec"
+target_row_id = "a10:logical-kind:sequence-neutral-spec"
+slice_id = "a10"
+source_key = "top|SequenceNeutralSpec<Tag>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-committed-effect-capsule-authority-bound-header"
+target_row_id = "a10:field:committed-effect-capsule-authority-bound-header"
+slice_id = "a10"
+source_key = "field|CommittedEffectCapsule|CommittedEffectCapsule.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-committed-effect-capsule-authorization-decision-ref"
+target_row_id = "a10:field:committed-effect-capsule-authorization-decision-ref"
+slice_id = "a10"
+source_key = "field|CommittedEffectCapsule|CommittedEffectCapsule.authorization_decision_ref|authorization_decision_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-committed-effect-capsule-authorization-decision-digest"
+target_row_id = "a10:field:committed-effect-capsule-authorization-decision-digest"
+slice_id = "a10"
+source_key = "field|CommittedEffectCapsule|CommittedEffectCapsule.authorization_decision_digest|authorization_decision_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-control-command-authority-bound-header"
+target_row_id = "a10:field:control-command-authority-bound-header"
+slice_id = "a10"
+source_key = "field|ControlCommand|ControlCommand.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-control-command-typed-payload-ref"
+target_row_id = "a10:field:control-command-typed-payload-ref"
+slice_id = "a10"
+source_key = "field|ControlCommand|ControlCommand.typed_payload_ref|typed_payload_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-control-command-authorization-decision-ref"
+target_row_id = "a10:field:control-command-authorization-decision-ref"
+slice_id = "a10"
+source_key = "field|ControlCommand|ControlCommand.authorization_decision_ref|authorization_decision_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-prepared-commit-record-configuration-ref"
+target_row_id = "a10:field:prepared-commit-record-configuration-ref"
+slice_id = "a10"
+source_key = "field|PreparedCommitRecord|PreparedCommitRecord.configuration_ref|configuration_ref"
 target_kind = "field"
 definition_status = "declared"
 

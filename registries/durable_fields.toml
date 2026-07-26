@@ -625,6 +625,51 @@ version_status = "active"
 max_size_bytes = 4096
 
 [[field]]
+containing_schema = "CommittedEffectCapsule"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the prebuilt capsule; retained and cut with the capsule, byte-matched against the one complete Local binding it repeats, and creates no reachability edge (a10:1910)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "CommittedEffectCapsule"
+field_tag = 0x0010
+stable_name = "authorization_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuthorizationDecisionRecord"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Local authorization decision that admitted this commit; retained while the capsule is retained, with the target constructed no later than its owner (a10:1910)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "CommittedEffectCapsule"
+field_tag = 0x0011
+stable_name = "authorization_decision_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+target_schema_id = "AuthorizationDecisionRecord"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "repeated weak-identity digest that cross-checks the typed authorization_decision_ref (a10:1910 'Repeated digests cross-check typed refs'); comparison-only and never a reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
 containing_schema = "ConstraintStateRoot"
 field_tag = 0x0004
 stable_name = "coordinate"
@@ -696,6 +741,50 @@ role_predicate = "true"
 retention_and_cut_rule = "control-command payload (bead a10 populates the exact schema)"
 version_status = "active"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ControlCommand"
+field_tag = 0x0002
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the control order unit; retained and cut with the command, byte-matched against the one complete Local binding, and creates no reachability edge (a10:1912)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "ControlCommand"
+field_tag = 0x0005
+stable_name = "typed_payload_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SequenceNeutralSpec"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the canonically encoded sequence-neutral spec wrapper that carries the one terminal audit gate; the spec is constructed before the command that orders it and is retained while the command is retained (a10:1912,1914)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ControlCommand"
+field_tag = 0x000a
+stable_name = "authorization_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuthorizationDecisionRecord"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Local authorization decision the command must byte-match; retained while the command is retained, with the target constructed no later than its owner (a10:1912)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "DeliveredBaselinePayload"
@@ -3029,6 +3118,21 @@ retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-o
 version_status = "active"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "PreparedCommitRecord"
+field_tag = 0x000a
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact configuration whose OID enters the recomputed ownership ID and every receipt transcript; every successor repeats the same configuration, so the edge is retained for the life of the prepared entry (a10:1922)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"

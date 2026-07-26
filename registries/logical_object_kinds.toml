@@ -3024,6 +3024,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/sealed_pre_bootstrap_dispatch_journal_import/"
 
 [[kind]]
+object_kind = 0x0432
+name = "SequenceNeutralSpec"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sequence_neutral_spec/"
+
+[[kind]]
 object_kind = 0x0433
 name = "ServiceVisibilityEpochReservation"
 status = "reserved"

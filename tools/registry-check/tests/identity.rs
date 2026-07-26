@@ -5327,6 +5327,21 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 )
         )
     };
+    // a10 adds the seven field rows the source and the landed tree already
+    // determine. Remove them as one cohort so the historical witness keeps
+    // reconstructing the namespace that predates post-erratum increments.
+    let post_erratum_a10_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("CommittedEffectCapsule", "authority_bound_header")
+                | ("CommittedEffectCapsule", "authorization_decision_ref")
+                | ("CommittedEffectCapsule", "authorization_decision_digest")
+                | ("ControlCommand", "authority_bound_header")
+                | ("ControlCommand", "typed_payload_ref")
+                | ("ControlCommand", "authorization_decision_ref")
+                | ("PreparedCommitRecord", "configuration_ref")
+        )
+    };
     // a21 landed DurableCapabilityValidationEvidence's field table after the
     // erratum, so those rows are not part of the pre-erratum namespace.
     let post_erratum_a21_field = |schema: &str| schema == "DurableCapabilityValidationEvidence";
@@ -5721,6 +5736,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             )
             && !post_erratum_a04_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a10_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_j00a_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_inline_field(
                 &field.containing_schema,
@@ -5739,7 +5755,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 341,
+        pre_erratum.fields.len() + 348,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the a09 storage-identity tranche"
     );
