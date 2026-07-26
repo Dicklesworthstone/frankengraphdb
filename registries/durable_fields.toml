@@ -260,6 +260,36 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "BootstrapReservationUsePublicationCertificate<Role,Kind>"
+field_tag = 0x0004
+stable_name = "reservation_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,Kind> this BootstrapReservationUsePublicationCertificate names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2511)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BootstrapReservationUsePublicationCertificate<Role,Kind>"
+field_tag = 0x0005
+stable_name = "claim_to_applied_use_derivation_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ClaimToAppliedUseIdentityDerivationProof"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ClaimToAppliedUseIdentityDerivationProof<Role,Kind> this BootstrapReservationUsePublicationCertificate names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a19:2511)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "CertificateAttemptPlan"
 field_tag = 0x0005
 stable_name = "configuration_ref"
@@ -490,6 +520,36 @@ role_predicate = "true"
 retention_and_cut_rule = "closed union Atomic|Coalesced; the delta's committed source provenance, retained with the envelope so coalescing stays provable and W12 emits only Meta-published Global sources (a11:1934)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>"
+field_tag = 0x000e
+stable_name = "new_database_identity_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,NewDatabaseIdentity> this DirectoryBoundCreationEvidence names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2531)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>"
+field_tag = 0x000f
+stable_name = "allocation_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,AllocationEpoch> this DirectoryBoundCreationEvidence names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2531)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "DurableCapabilityValidationEvidence"
@@ -1283,6 +1343,36 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>"
+field_tag = 0x0004
+stable_name = "claimed_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this PreBootstrapReservationClaimCanonicalImportRecord names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2527)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>"
+field_tag = 0x0005
+stable_name = "claim_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationClaimReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationClaimReceipt this PreBootstrapReservationClaimCanonicalImportRecord names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2527)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "PreparedCommitRecord"
 field_tag = 0x0001
 stable_name = "exact_realizations"
@@ -1295,6 +1385,96 @@ role_predicate = "true"
 retention_and_cut_rule = "object_or_subobject_id realization inventory: names packed members without new schema surface; nonretaining locators — prepared OWNERSHIP retention is the obligation, not this edge (FG-INV-16)"
 version_status = "active"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "portable_barrier_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LeasesRevokedOrExpiredThrough"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the LeasesRevokedOrExpiredThrough this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "continuity_ancestry_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableRestoreContinuityAncestryProof"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableRestoreContinuityAncestryProof this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x000d
+stable_name = "fence_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseIssuerFenceReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseIssuerFenceReceipt this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x0011
+stable_name = "cohort_window_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseCohortWindow"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseCohortWindow this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 17 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x0013
+stable_name = "prebootstrap_portable_expiry_attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapPortableTimeExpiryAttestation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapPortableTimeExpiryAttestation this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x0019
+stable_name = "revocation_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseCohortRevocationReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseCohortRevocationReceipt this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ProvisionalRetentionCutSet"
@@ -1490,6 +1670,81 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "RecoveryAllocationEpochAuthority<Role>"
+field_tag = 0x0001
+stable_name = "allocation_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Local,AllocationEpoch> this RecoveryAllocationEpochAuthority names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a19:2559)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RecoveryBridgeAuthority<Role>"
+field_tag = 0x0001
+stable_name = "direct_creation_authority_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreDirectCreationAuthorityRecord"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreDirectCreationAuthorityRecord<Local> this RecoveryBridgeAuthority names; retained while the referrer is retained, and the acyclic order 50 <= 51 keeps the reference backward-only (a19:2555)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RecoveryBridgeAuthority<Role>"
+field_tag = 0x0002
+stable_name = "source_acquisition_bundle_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceAcquisitionBundle"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceAcquisitionBundle<Local> this RecoveryBridgeAuthority names; retained while the referrer is retained, and the acyclic order 46 <= 51 keeps the reference backward-only (a19:2555)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RecoveryBridgeAuthority<Role>"
+field_tag = 0x0003
+stable_name = "latest_source_lease_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceLeaseRecord"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceLeaseRecord<Local> this RecoveryBridgeAuthority names; retained while the referrer is retained, and the acyclic order 45 <= 51 keeps the reference backward-only (a19:2555)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RecoveryBridgeAuthority<Role>"
+field_tag = 0x0009
+stable_name = "source_lease_projection_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardRestoreSourceLeaseProjection"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardRestoreSourceLeaseProjection this RecoveryBridgeAuthority names; retained while the referrer is retained, and the acyclic order 50 <= 51 keeps the reference backward-only (a19:2555)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "RecoveryBridgeSpec"
 field_tag = 0x0001
 stable_name = "source_manifest_identity"
@@ -1503,6 +1758,21 @@ retention_and_cut_rule = "weak identity of the source manifest; never retains it
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "RecoveryIncarnationProjectionResult<Role>"
+field_tag = 0x0001
+stable_name = "plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryIncarnationTransformPlan"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RecoveryIncarnationTransformPlan<Role> this RecoveryIncarnationProjectionResult names; retained while the referrer is retained, and the acyclic order 20 <= 20 keeps the reference backward-only (a19:2459)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "RemoteAuthorityConfigurationEvidence"
@@ -3188,6 +3458,456 @@ version_status = "reserved"
 max_size_bytes = 8
 
 [[field]]
+containing_schema = "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "current_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this ReservationAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2493)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "portable_observation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableReservationAuthorityObservation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableReservationAuthorityObservation this ReservationAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2493)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "time_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityObservationImport this ReservationAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 23 <= 30 keeps the reference backward-only (a19:2493)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "time_validation_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this ReservationAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a19:2493)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationBurnEligibility<Role>"
+field_tag = 0x0001
+stable_name = "expired_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this ReservationBurnEligibility names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationBurnEligibility<Role>"
+field_tag = 0x0002
+stable_name = "portable_expiry_attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableTimeExpiryAttestation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableTimeExpiryAttestation this ReservationBurnEligibility names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationBurnSource<Role:AuthorityOwningRole>"
+field_tag = 0x0002
+stable_name = "current_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityObservationImport<Role> this ReservationBurnSource names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationClaimOperationRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "reserved_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this ReservationClaimOperationRecord names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a19:2501)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationClaimOperationRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "reserved_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityObservationImport"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityObservationImport<Role> this ReservationClaimOperationRecord names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2501)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationConsumeAuthorizationBasis<Role,Kind>"
+field_tag = 0x0004
+stable_name = "claim_to_applied_use_derivation_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ClaimToAppliedUseIdentityDerivationProof"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ClaimToAppliedUseIdentityDerivationProof<Role,ServiceVisibilityEpoch> this ReservationConsumeAuthorizationBasis names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2517)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "current_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityObservationImport<Role> this ReservationDispositionEligibility names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0002
+stable_name = "usable_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this ReservationDispositionEligibility names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "current_claimed_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityObservationImport<Role> this ReservationDispositionEligibility names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "expired_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this ReservationDispositionEligibility names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "portable_expiry_attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableTimeExpiryAttestation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableTimeExpiryAttestation this ReservationDispositionEligibility names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "current_reserved_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "operation_terminal_history_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationOperationTerminalHistory"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationOperationTerminalHistory<Role> this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "operation_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationClaimOperationRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationClaimOperationRecord<Role> this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "claimed_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "claim_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationClaimReceipt"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationClaimReceipt this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x002d
+stable_name = "consumption_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationConsumptionReceipt"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationConsumptionReceipt this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0034
+stable_name = "burn_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationBurnReceipt"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationBurnReceipt this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x003b
+stable_name = "authenticated_winning_successor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "prior_lease_barrier_bootstrap_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseBarrierBootstrapImport"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseBarrierBootstrapImport<Role> this RestoreDirectCreationAuthorityRecord names; retained while the referrer is retained, and the acyclic order 30 <= 50 keeps the reference backward-only (a19:2533)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "new_database_and_security_namespace_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,NewDatabaseIdentity> this RestoreDirectCreationAuthorityRecord names; retained while the referrer is retained, and the acyclic order 30 <= 50 keeps the reference backward-only (a19:2533)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0008
+stable_name = "creation_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DirectoryBoundCreationEvidence"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the DirectoryBoundCreationEvidence<Role> this RestoreDirectCreationAuthorityRecord names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a19:2533)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "audit_clone_boundary_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditCloneBoundary"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditCloneBoundary this RestoreDirectCreationAuthorityRecord names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a19:2533)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "allocation_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,AllocationEpoch> this RestoreDirectCreationAuthorityRecord names; retained while the referrer is retained, and the acyclic order 30 <= 50 keeps the reference backward-only (a19:2533)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreReconciliationCompletionProof<Role>"
+field_tag = 0x0004
+stable_name = "reconciliation_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreReconciliationRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreReconciliationRoot<Role> this RestoreReconciliationCompletionProof names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2547)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreReconciliationStatus<Role>"
+field_tag = 0x0002
+stable_name = "proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreReconciliationCompletionProof"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreReconciliationCompletionProof<Role> this RestoreReconciliationStatus names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a19:2547)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "RestoreServicePromotionManifest"
 field_tag = 0x0005
 stable_name = "target_posture"
@@ -3214,6 +3934,96 @@ role_predicate = "true"
 retention_and_cut_rule = "portable inline authority profile retained and cut with the signed promotion manifest (a20:2575)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RestoreShardBootstrapProjectionCertificate"
+field_tag = 0x0001
+stable_name = "projection_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreShardBootstrapProjection"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreShardBootstrapProjection this RestoreShardBootstrapProjectionCertificate names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2541)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreShardReadyBarrier"
+field_tag = 0x0008
+stable_name = "local_projection_result_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryIncarnationProjectionResult"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RecoveryIncarnationProjectionResult<Shard> this RestoreShardReadyBarrier names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a19:2565)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreShardReadyBarrier"
+field_tag = 0x0009
+stable_name = "state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardLogicalStateRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardLogicalStateRoot this RestoreShardReadyBarrier names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2565)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreShardReadyBarrier"
+field_tag = 0x000a
+stable_name = "ready_closure_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreReadyClosureInventory"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreReadyClosureInventory<Shard> this RestoreShardReadyBarrier names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a19:2565)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreShardReadyBarrier"
+field_tag = 0x000b
+stable_name = "active_meta_projection_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ActiveMetaProjectionRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ActiveMetaProjectionRoot this RestoreShardReadyBarrier names; retained while the referrer is retained, and the acyclic order 35 <= 40 keeps the reference backward-only (a19:2565)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreShardReadyBarrier"
+field_tag = 0x000c
+stable_name = "reconciliation_completion_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreReconciliationCompletionProof"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreReconciliationCompletionProof<Shard> this RestoreShardReadyBarrier names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2565)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"

@@ -5051,6 +5051,68 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     // a21 landed DurableCapabilityValidationEvidence's field table after the
     // erratum, so those rows are not part of the pre-erratum namespace.
     let post_erratum_a21_field = |schema: &str| schema == "DurableCapabilityValidationEvidence";
+    // The a19 StrongRef field tranche. Every row is a post-erratum
+    // addition, so the historical witness must reconstruct the namespace
+    // that predates it.
+    let post_erratum_a19_field_tranche = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("BootstrapReservationUsePublicationCertificate<Role,Kind>", "reservation_claim_import_ref")
+                | ("BootstrapReservationUsePublicationCertificate<Role,Kind>", "claim_to_applied_use_derivation_proof_ref")
+                | ("DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>", "new_database_identity_claim_import_ref")
+                | ("DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>", "allocation_claim_import_ref")
+                | ("PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>", "claimed_head_ref")
+                | ("PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>", "claim_receipt_ref")
+                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "portable_barrier_ref")
+                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "continuity_ancestry_proof_ref")
+                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "fence_receipt_ref")
+                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "cohort_window_ref")
+                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "prebootstrap_portable_expiry_attestation_ref")
+                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "revocation_receipt_ref")
+                | ("RecoveryAllocationEpochAuthority<Role>", "allocation_claim_import_ref")
+                | ("RecoveryBridgeAuthority<Role>", "direct_creation_authority_ref")
+                | ("RecoveryBridgeAuthority<Role>", "source_acquisition_bundle_ref")
+                | ("RecoveryBridgeAuthority<Role>", "latest_source_lease_record_ref")
+                | ("RecoveryBridgeAuthority<Role>", "source_lease_projection_ref")
+                | ("RecoveryIncarnationProjectionResult<Role>", "plan_ref")
+                | ("ReservationAuthorityObservationImport<Role:AuthorityOwningRole>", "current_head_ref")
+                | ("ReservationAuthorityObservationImport<Role:AuthorityOwningRole>", "portable_observation_ref")
+                | ("ReservationAuthorityObservationImport<Role:AuthorityOwningRole>", "time_observation_import_ref")
+                | ("ReservationAuthorityObservationImport<Role:AuthorityOwningRole>", "time_validation_evidence_ref")
+                | ("ReservationBurnEligibility<Role>", "expired_evidence_ref")
+                | ("ReservationBurnEligibility<Role>", "portable_expiry_attestation_ref")
+                | ("ReservationBurnSource<Role:AuthorityOwningRole>", "current_observation_import_ref")
+                | ("ReservationClaimOperationRecord<Role:AuthorityOwningRole>", "reserved_head_ref")
+                | ("ReservationClaimOperationRecord<Role:AuthorityOwningRole>", "reserved_observation_import_ref")
+                | ("ReservationConsumeAuthorizationBasis<Role,Kind>", "claim_to_applied_use_derivation_proof_ref")
+                | ("ReservationDispositionEligibility<Role:AuthorityOwningRole>", "current_observation_import_ref")
+                | ("ReservationDispositionEligibility<Role:AuthorityOwningRole>", "usable_evidence_ref")
+                | ("ReservationDispositionEligibility<Role:AuthorityOwningRole>", "current_claimed_observation_import_ref")
+                | ("ReservationDispositionEligibility<Role:AuthorityOwningRole>", "expired_evidence_ref")
+                | ("ReservationDispositionEligibility<Role:AuthorityOwningRole>", "portable_expiry_attestation_ref")
+                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "current_reserved_head_ref")
+                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "operation_terminal_history_ref")
+                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "operation_record_ref")
+                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "claimed_head_ref")
+                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "claim_receipt_ref")
+                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "consumption_receipt_ref")
+                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "burn_receipt_ref")
+                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "authenticated_winning_successor_ref")
+                | ("RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>", "prior_lease_barrier_bootstrap_import_ref")
+                | ("RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>", "new_database_and_security_namespace_claim_import_ref")
+                | ("RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>", "creation_evidence_ref")
+                | ("RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>", "audit_clone_boundary_ref")
+                | ("RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>", "allocation_claim_import_ref")
+                | ("RestoreReconciliationCompletionProof<Role>", "reconciliation_root_ref")
+                | ("RestoreReconciliationStatus<Role>", "proof_ref")
+                | ("RestoreShardBootstrapProjectionCertificate", "projection_ref")
+                | ("RestoreShardReadyBarrier", "local_projection_result_ref")
+                | ("RestoreShardReadyBarrier", "state_root_ref")
+                | ("RestoreShardReadyBarrier", "ready_closure_inventory_ref")
+                | ("RestoreShardReadyBarrier", "active_meta_projection_root_ref")
+                | ("RestoreShardReadyBarrier", "reconciliation_completion_proof_ref")
+        )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_a21_field(&field.containing_schema)
             && !post_erratum_union(&field.exact_wire_type)
@@ -5061,6 +5123,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a05_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a04_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a19_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a04_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
     });
@@ -5070,7 +5133,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 112,
+        pre_erratum.fields.len() + 166,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A12 retention-cut tranche"
     );

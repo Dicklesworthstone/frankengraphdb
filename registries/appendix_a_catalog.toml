@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2469
+target_count = 2523
 projection_fallback_count = 105
-target_source_assignment_sha256 = "d0e06fc91abcb5c130d8705468609466952d16aab901894b84093dcb7a0f6e2d"
+target_source_assignment_sha256 = "f557159461b8b21f977b282d482cf3ca80286f29854450584295a52558d91340"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -15914,6 +15914,924 @@ role_predicate = "true"
 retention_and_cut_rule = "portable inline authority profile retained and cut with the signed promotion manifest (a20:2575)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:bootstrap-reservation-use-publication-certificate-role-kind-reservation-claim-import-ref"
+containing_schema = "BootstrapReservationUsePublicationCertificate<Role,Kind>"
+field_tag = 0x0004
+stable_name = "reservation_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,Kind> this BootstrapReservationUsePublicationCertificate names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2511)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:bootstrap-reservation-use-publication-certificate-role-kind-claim-to-applied-use-derivation-proof-ref"
+containing_schema = "BootstrapReservationUsePublicationCertificate<Role,Kind>"
+field_tag = 0x0005
+stable_name = "claim_to_applied_use_derivation_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ClaimToAppliedUseIdentityDerivationProof"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ClaimToAppliedUseIdentityDerivationProof<Role,Kind> this BootstrapReservationUsePublicationCertificate names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a19:2511)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:directory-bound-creation-evidence-role-authority-owning-role-new-database-identity-claim-import-ref"
+containing_schema = "DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>"
+field_tag = 0x000e
+stable_name = "new_database_identity_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,NewDatabaseIdentity> this DirectoryBoundCreationEvidence names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2531)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:directory-bound-creation-evidence-role-authority-owning-role-allocation-claim-import-ref"
+containing_schema = "DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>"
+field_tag = 0x000f
+stable_name = "allocation_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,AllocationEpoch> this DirectoryBoundCreationEvidence names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2531)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:pre-bootstrap-reservation-claim-canonical-import-record-role-authority-owning-role-kind-claimed-head-ref"
+containing_schema = "PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>"
+field_tag = 0x0004
+stable_name = "claimed_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this PreBootstrapReservationClaimCanonicalImportRecord names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2527)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:pre-bootstrap-reservation-claim-canonical-import-record-role-authority-owning-role-kind-claim-receipt-ref"
+containing_schema = "PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>"
+field_tag = 0x0005
+stable_name = "claim_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationClaimReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationClaimReceipt this PreBootstrapReservationClaimCanonicalImportRecord names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2527)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-portable-barrier-ref"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "portable_barrier_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LeasesRevokedOrExpiredThrough"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the LeasesRevokedOrExpiredThrough this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-continuity-ancestry-proof-ref"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "continuity_ancestry_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableRestoreContinuityAncestryProof"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableRestoreContinuityAncestryProof this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-fence-receipt-ref"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x000d
+stable_name = "fence_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseIssuerFenceReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseIssuerFenceReceipt this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-cohort-window-ref"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x0011
+stable_name = "cohort_window_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseCohortWindow"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseCohortWindow this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 17 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-prebootstrap-portable-expiry-attestation-ref"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x0013
+stable_name = "prebootstrap_portable_expiry_attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapPortableTimeExpiryAttestation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapPortableTimeExpiryAttestation this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-revocation-receipt-ref"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x0019
+stable_name = "revocation_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseCohortRevocationReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseCohortRevocationReceipt this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:recovery-allocation-epoch-authority-role-allocation-claim-import-ref"
+containing_schema = "RecoveryAllocationEpochAuthority<Role>"
+field_tag = 0x0001
+stable_name = "allocation_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Local,AllocationEpoch> this RecoveryAllocationEpochAuthority names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a19:2559)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:recovery-bridge-authority-role-direct-creation-authority-ref"
+containing_schema = "RecoveryBridgeAuthority<Role>"
+field_tag = 0x0001
+stable_name = "direct_creation_authority_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreDirectCreationAuthorityRecord"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreDirectCreationAuthorityRecord<Local> this RecoveryBridgeAuthority names; retained while the referrer is retained, and the acyclic order 50 <= 51 keeps the reference backward-only (a19:2555)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:recovery-bridge-authority-role-source-acquisition-bundle-ref"
+containing_schema = "RecoveryBridgeAuthority<Role>"
+field_tag = 0x0002
+stable_name = "source_acquisition_bundle_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceAcquisitionBundle"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceAcquisitionBundle<Local> this RecoveryBridgeAuthority names; retained while the referrer is retained, and the acyclic order 46 <= 51 keeps the reference backward-only (a19:2555)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:recovery-bridge-authority-role-latest-source-lease-record-ref"
+containing_schema = "RecoveryBridgeAuthority<Role>"
+field_tag = 0x0003
+stable_name = "latest_source_lease_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceLeaseRecord"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreSourceLeaseRecord<Local> this RecoveryBridgeAuthority names; retained while the referrer is retained, and the acyclic order 45 <= 51 keeps the reference backward-only (a19:2555)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:recovery-bridge-authority-role-source-lease-projection-ref"
+containing_schema = "RecoveryBridgeAuthority<Role>"
+field_tag = 0x0009
+stable_name = "source_lease_projection_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardRestoreSourceLeaseProjection"
+construction_order = 51
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardRestoreSourceLeaseProjection this RecoveryBridgeAuthority names; retained while the referrer is retained, and the acyclic order 50 <= 51 keeps the reference backward-only (a19:2555)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:recovery-incarnation-projection-result-role-plan-ref"
+containing_schema = "RecoveryIncarnationProjectionResult<Role>"
+field_tag = 0x0001
+stable_name = "plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryIncarnationTransformPlan"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RecoveryIncarnationTransformPlan<Role> this RecoveryIncarnationProjectionResult names; retained while the referrer is retained, and the acyclic order 20 <= 20 keeps the reference backward-only (a19:2459)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-authority-observation-import-role-authority-owning-role-current-head-ref"
+containing_schema = "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "current_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this ReservationAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2493)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-authority-observation-import-role-authority-owning-role-portable-observation-ref"
+containing_schema = "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "portable_observation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableReservationAuthorityObservation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableReservationAuthorityObservation this ReservationAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2493)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-authority-observation-import-role-authority-owning-role-time-observation-import-ref"
+containing_schema = "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "time_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeAuthorityObservationImport this ReservationAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 23 <= 30 keeps the reference backward-only (a19:2493)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-authority-observation-import-role-authority-owning-role-time-validation-evidence-ref"
+containing_schema = "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "time_validation_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this ReservationAuthorityObservationImport names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a19:2493)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-burn-eligibility-role-expired-evidence-ref"
+containing_schema = "ReservationBurnEligibility<Role>"
+field_tag = 0x0001
+stable_name = "expired_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this ReservationBurnEligibility names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-burn-eligibility-role-portable-expiry-attestation-ref"
+containing_schema = "ReservationBurnEligibility<Role>"
+field_tag = 0x0002
+stable_name = "portable_expiry_attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableTimeExpiryAttestation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableTimeExpiryAttestation this ReservationBurnEligibility names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-burn-source-role-authority-owning-role-current-observation-import-ref"
+containing_schema = "ReservationBurnSource<Role:AuthorityOwningRole>"
+field_tag = 0x0002
+stable_name = "current_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityObservationImport<Role> this ReservationBurnSource names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-claim-operation-record-role-authority-owning-role-reserved-head-ref"
+containing_schema = "ReservationClaimOperationRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "reserved_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this ReservationClaimOperationRecord names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a19:2501)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-claim-operation-record-role-authority-owning-role-reserved-observation-import-ref"
+containing_schema = "ReservationClaimOperationRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "reserved_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityObservationImport"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityObservationImport<Role> this ReservationClaimOperationRecord names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2501)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-consume-authorization-basis-role-kind-claim-to-applied-use-derivation-proof-ref"
+containing_schema = "ReservationConsumeAuthorizationBasis<Role,Kind>"
+field_tag = 0x0004
+stable_name = "claim_to_applied_use_derivation_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ClaimToAppliedUseIdentityDerivationProof"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ClaimToAppliedUseIdentityDerivationProof<Role,ServiceVisibilityEpoch> this ReservationConsumeAuthorizationBasis names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2517)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-disposition-eligibility-role-authority-owning-role-current-observation-import-ref"
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "current_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityObservationImport<Role> this ReservationDispositionEligibility names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-disposition-eligibility-role-authority-owning-role-usable-evidence-ref"
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0002
+stable_name = "usable_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this ReservationDispositionEligibility names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-disposition-eligibility-role-authority-owning-role-current-claimed-observation-import-ref"
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "current_claimed_observation_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityObservationImport"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityObservationImport<Role> this ReservationDispositionEligibility names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-disposition-eligibility-role-authority-owning-role-expired-evidence-ref"
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "expired_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this ReservationDispositionEligibility names; retained while the referrer is retained, and the acyclic order 25 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-disposition-eligibility-role-authority-owning-role-portable-expiry-attestation-ref"
+containing_schema = "ReservationDispositionEligibility<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "portable_expiry_attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableTimeExpiryAttestation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PortableTimeExpiryAttestation this ReservationDispositionEligibility names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a19:2513)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-use-record-role-authority-owning-role-current-reserved-head-ref"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "current_reserved_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-use-record-role-authority-owning-role-operation-terminal-history-ref"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "operation_terminal_history_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationOperationTerminalHistory"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationOperationTerminalHistory<Role> this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-use-record-role-authority-owning-role-operation-record-ref"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "operation_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationClaimOperationRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationClaimOperationRecord<Role> this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-use-record-role-authority-owning-role-claimed-head-ref"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "claimed_head_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-use-record-role-authority-owning-role-claim-receipt-ref"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "claim_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationClaimReceipt"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationClaimReceipt this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-use-record-role-authority-owning-role-consumption-receipt-ref"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x002d
+stable_name = "consumption_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationConsumptionReceipt"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationConsumptionReceipt this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-use-record-role-authority-owning-role-burn-receipt-ref"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0034
+stable_name = "burn_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationBurnReceipt"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationBurnReceipt this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:reservation-use-record-role-authority-owning-role-authenticated-winning-successor-ref"
+containing_schema = "ReservationUseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x003b
+stable_name = "authenticated_winning_successor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReservationAuthorityHead"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-direct-creation-authority-record-role-authority-owning-role-prior-lease-barrier-bootstrap-import-ref"
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "prior_lease_barrier_bootstrap_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseBarrierBootstrapImport"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseBarrierBootstrapImport<Role> this RestoreDirectCreationAuthorityRecord names; retained while the referrer is retained, and the acyclic order 30 <= 50 keeps the reference backward-only (a19:2533)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-direct-creation-authority-record-role-authority-owning-role-new-database-and-security-namespace-claim-import-ref"
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "new_database_and_security_namespace_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,NewDatabaseIdentity> this RestoreDirectCreationAuthorityRecord names; retained while the referrer is retained, and the acyclic order 30 <= 50 keeps the reference backward-only (a19:2533)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-direct-creation-authority-record-role-authority-owning-role-creation-evidence-ref"
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0008
+stable_name = "creation_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DirectoryBoundCreationEvidence"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the DirectoryBoundCreationEvidence<Role> this RestoreDirectCreationAuthorityRecord names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a19:2533)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-direct-creation-authority-record-role-authority-owning-role-audit-clone-boundary-ref"
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "audit_clone_boundary_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditCloneBoundary"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditCloneBoundary this RestoreDirectCreationAuthorityRecord names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a19:2533)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-direct-creation-authority-record-role-authority-owning-role-allocation-claim-import-ref"
+containing_schema = "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "allocation_claim_import_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapReservationClaimCanonicalImportRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,AllocationEpoch> this RestoreDirectCreationAuthorityRecord names; retained while the referrer is retained, and the acyclic order 30 <= 50 keeps the reference backward-only (a19:2533)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-reconciliation-completion-proof-role-reconciliation-root-ref"
+containing_schema = "RestoreReconciliationCompletionProof<Role>"
+field_tag = 0x0004
+stable_name = "reconciliation_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreReconciliationRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreReconciliationRoot<Role> this RestoreReconciliationCompletionProof names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2547)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-reconciliation-status-role-proof-ref"
+containing_schema = "RestoreReconciliationStatus<Role>"
+field_tag = 0x0002
+stable_name = "proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreReconciliationCompletionProof"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreReconciliationCompletionProof<Role> this RestoreReconciliationStatus names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a19:2547)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-shard-bootstrap-projection-certificate-projection-ref"
+containing_schema = "RestoreShardBootstrapProjectionCertificate"
+field_tag = 0x0001
+stable_name = "projection_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreShardBootstrapProjection"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreShardBootstrapProjection this RestoreShardBootstrapProjectionCertificate names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2541)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-shard-ready-barrier-local-projection-result-ref"
+containing_schema = "RestoreShardReadyBarrier"
+field_tag = 0x0008
+stable_name = "local_projection_result_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryIncarnationProjectionResult"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RecoveryIncarnationProjectionResult<Shard> this RestoreShardReadyBarrier names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a19:2565)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-shard-ready-barrier-state-root-ref"
+containing_schema = "RestoreShardReadyBarrier"
+field_tag = 0x0009
+stable_name = "state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardLogicalStateRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardLogicalStateRoot this RestoreShardReadyBarrier names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2565)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-shard-ready-barrier-ready-closure-inventory-ref"
+containing_schema = "RestoreShardReadyBarrier"
+field_tag = 0x000a
+stable_name = "ready_closure_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreReadyClosureInventory"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreReadyClosureInventory<Shard> this RestoreShardReadyBarrier names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a19:2565)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-shard-ready-barrier-active-meta-projection-root-ref"
+containing_schema = "RestoreShardReadyBarrier"
+field_tag = 0x000b
+stable_name = "active_meta_projection_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ActiveMetaProjectionRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ActiveMetaProjectionRoot this RestoreShardReadyBarrier names; retained while the referrer is retained, and the acyclic order 35 <= 40 keeps the reference backward-only (a19:2565)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:restore-shard-ready-barrier-reconciliation-completion-proof-ref"
+containing_schema = "RestoreShardReadyBarrier"
+field_tag = 0x000c
+stable_name = "reconciliation_completion_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreReconciliationCompletionProof"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RestoreReconciliationCompletionProof<Shard> this RestoreShardReadyBarrier names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2565)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[union]]
 slice_id = "a01"
@@ -74513,6 +75431,438 @@ target_row_id = "a21:logical-kind:witness-policy"
 slice_id = "a21"
 source_key = "top|WitnessPolicy"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-bootstrap-reservation-use-publication-certificate-role-kind-reservation-claim-import-ref"
+target_row_id = "a19:field:bootstrap-reservation-use-publication-certificate-role-kind-reservation-claim-import-ref"
+slice_id = "a19"
+source_key = "field|BootstrapReservationUsePublicationCertificate<Role,Kind>|BootstrapReservationUsePublicationCertificate<Role,Kind>.reservation_claim_import_ref|reservation_claim_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-bootstrap-reservation-use-publication-certificate-role-kind-claim-to-applied-use-derivation-proof-ref"
+target_row_id = "a19:field:bootstrap-reservation-use-publication-certificate-role-kind-claim-to-applied-use-derivation-proof-ref"
+slice_id = "a19"
+source_key = "field|BootstrapReservationUsePublicationCertificate<Role,Kind>|BootstrapReservationUsePublicationCertificate<Role,Kind>.claim_to_applied_use_derivation_proof_ref|claim_to_applied_use_derivation_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-directory-bound-creation-evidence-role-authority-owning-role-new-database-identity-claim-import-ref"
+target_row_id = "a19:field:directory-bound-creation-evidence-role-authority-owning-role-new-database-identity-claim-import-ref"
+slice_id = "a19"
+source_key = "field|DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>|DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>.new_database_identity_claim_import_ref|new_database_identity_claim_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-directory-bound-creation-evidence-role-authority-owning-role-allocation-claim-import-ref"
+target_row_id = "a19:field:directory-bound-creation-evidence-role-authority-owning-role-allocation-claim-import-ref"
+slice_id = "a19"
+source_key = "field|DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>|DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>.allocation_claim_import_ref|allocation_claim_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-pre-bootstrap-reservation-claim-canonical-import-record-role-authority-owning-role-kind-claimed-head-ref"
+target_row_id = "a19:field:pre-bootstrap-reservation-claim-canonical-import-record-role-authority-owning-role-kind-claimed-head-ref"
+slice_id = "a19"
+source_key = "field|PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>|PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>.claimed_head_ref|claimed_head_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-pre-bootstrap-reservation-claim-canonical-import-record-role-authority-owning-role-kind-claim-receipt-ref"
+target_row_id = "a19:field:pre-bootstrap-reservation-claim-canonical-import-record-role-authority-owning-role-kind-claim-receipt-ref"
+slice_id = "a19"
+source_key = "field|PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>|PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>.claim_receipt_ref|claim_receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-portable-barrier-ref"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-portable-barrier-ref"
+slice_id = "a19"
+source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.portable_barrier_ref|portable_barrier_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-continuity-ancestry-proof-ref"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-continuity-ancestry-proof-ref"
+slice_id = "a19"
+source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.continuity_ancestry_proof_ref|continuity_ancestry_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-fence-receipt-ref"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-fence-receipt-ref"
+slice_id = "a19"
+source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.sorted_issuer_fence_imports.record.fence_receipt_ref|fence_receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-cohort-window-ref"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-cohort-window-ref"
+slice_id = "a19"
+source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.sorted_expired_cohort_imports.record.cohort_window_ref|cohort_window_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-prebootstrap-portable-expiry-attestation-ref"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-prebootstrap-portable-expiry-attestation-ref"
+slice_id = "a19"
+source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.sorted_expired_cohort_imports.record.prebootstrap_portable_expiry_attestation_ref|prebootstrap_portable_expiry_attestation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-revocation-receipt-ref"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-revocation-receipt-ref"
+slice_id = "a19"
+source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.sorted_revoked_cohort_imports.record.revocation_receipt_ref|revocation_receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-recovery-allocation-epoch-authority-role-allocation-claim-import-ref"
+target_row_id = "a19:field:recovery-allocation-epoch-authority-role-allocation-claim-import-ref"
+slice_id = "a19"
+source_key = "field|RecoveryAllocationEpochAuthority<Role>|RecoveryAllocationEpochAuthority<Role>.Local.allocation_claim_import_ref|allocation_claim_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-recovery-bridge-authority-role-direct-creation-authority-ref"
+target_row_id = "a19:field:recovery-bridge-authority-role-direct-creation-authority-ref"
+slice_id = "a19"
+source_key = "field|RecoveryBridgeAuthority<Role>|RecoveryBridgeAuthority<Role>.Local.direct_creation_authority_ref|direct_creation_authority_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-recovery-bridge-authority-role-source-acquisition-bundle-ref"
+target_row_id = "a19:field:recovery-bridge-authority-role-source-acquisition-bundle-ref"
+slice_id = "a19"
+source_key = "field|RecoveryBridgeAuthority<Role>|RecoveryBridgeAuthority<Role>.Local.source_acquisition_bundle_ref|source_acquisition_bundle_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-recovery-bridge-authority-role-latest-source-lease-record-ref"
+target_row_id = "a19:field:recovery-bridge-authority-role-latest-source-lease-record-ref"
+slice_id = "a19"
+source_key = "field|RecoveryBridgeAuthority<Role>|RecoveryBridgeAuthority<Role>.Local.latest_source_lease_record_ref|latest_source_lease_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-recovery-bridge-authority-role-source-lease-projection-ref"
+target_row_id = "a19:field:recovery-bridge-authority-role-source-lease-projection-ref"
+slice_id = "a19"
+source_key = "field|RecoveryBridgeAuthority<Role>|RecoveryBridgeAuthority<Role>.Shard.source_lease_projection_ref|source_lease_projection_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-recovery-incarnation-projection-result-role-plan-ref"
+target_row_id = "a19:field:recovery-incarnation-projection-result-role-plan-ref"
+slice_id = "a19"
+source_key = "field|RecoveryIncarnationProjectionResult<Role>|RecoveryIncarnationProjectionResult<Role>.plan_ref|plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-authority-observation-import-role-authority-owning-role-current-head-ref"
+target_row_id = "a19:field:reservation-authority-observation-import-role-authority-owning-role-current-head-ref"
+slice_id = "a19"
+source_key = "field|ReservationAuthorityObservationImport<Role:AuthorityOwningRole>|ReservationAuthorityObservationImport<Role:AuthorityOwningRole>.current_head_ref|current_head_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-authority-observation-import-role-authority-owning-role-portable-observation-ref"
+target_row_id = "a19:field:reservation-authority-observation-import-role-authority-owning-role-portable-observation-ref"
+slice_id = "a19"
+source_key = "field|ReservationAuthorityObservationImport<Role:AuthorityOwningRole>|ReservationAuthorityObservationImport<Role:AuthorityOwningRole>.portable_observation_ref|portable_observation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-authority-observation-import-role-authority-owning-role-time-observation-import-ref"
+target_row_id = "a19:field:reservation-authority-observation-import-role-authority-owning-role-time-observation-import-ref"
+slice_id = "a19"
+source_key = "field|ReservationAuthorityObservationImport<Role:AuthorityOwningRole>|ReservationAuthorityObservationImport<Role:AuthorityOwningRole>.time_observation_import_ref|time_observation_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-authority-observation-import-role-authority-owning-role-time-validation-evidence-ref"
+target_row_id = "a19:field:reservation-authority-observation-import-role-authority-owning-role-time-validation-evidence-ref"
+slice_id = "a19"
+source_key = "field|ReservationAuthorityObservationImport<Role:AuthorityOwningRole>|ReservationAuthorityObservationImport<Role:AuthorityOwningRole>.time_validation_evidence_ref|time_validation_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-burn-eligibility-role-expired-evidence-ref"
+target_row_id = "a19:field:reservation-burn-eligibility-role-expired-evidence-ref"
+slice_id = "a19"
+source_key = "field|ReservationBurnEligibility<Role>|ReservationBurnEligibility<Role>.ExpiredUnused.expired_evidence_ref|expired_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-burn-eligibility-role-portable-expiry-attestation-ref"
+target_row_id = "a19:field:reservation-burn-eligibility-role-portable-expiry-attestation-ref"
+slice_id = "a19"
+source_key = "field|ReservationBurnEligibility<Role>|ReservationBurnEligibility<Role>.ExpiredUnused.portable_expiry_attestation_ref|portable_expiry_attestation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-burn-source-role-authority-owning-role-current-observation-import-ref"
+target_row_id = "a19:field:reservation-burn-source-role-authority-owning-role-current-observation-import-ref"
+slice_id = "a19"
+source_key = "field|ReservationBurnSource<Role:AuthorityOwningRole>|ReservationBurnSource<Role:AuthorityOwningRole>.UnclaimedReserved.current_observation_import_ref|current_observation_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-claim-operation-record-role-authority-owning-role-reserved-head-ref"
+target_row_id = "a19:field:reservation-claim-operation-record-role-authority-owning-role-reserved-head-ref"
+slice_id = "a19"
+source_key = "field|ReservationClaimOperationRecord<Role:AuthorityOwningRole>|ReservationClaimOperationRecord<Role:AuthorityOwningRole>.reserved_head_ref|reserved_head_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-claim-operation-record-role-authority-owning-role-reserved-observation-import-ref"
+target_row_id = "a19:field:reservation-claim-operation-record-role-authority-owning-role-reserved-observation-import-ref"
+slice_id = "a19"
+source_key = "field|ReservationClaimOperationRecord<Role:AuthorityOwningRole>|ReservationClaimOperationRecord<Role:AuthorityOwningRole>.reserved_observation_import_ref|reserved_observation_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-consume-authorization-basis-role-kind-claim-to-applied-use-derivation-proof-ref"
+target_row_id = "a19:field:reservation-consume-authorization-basis-role-kind-claim-to-applied-use-derivation-proof-ref"
+slice_id = "a19"
+source_key = "field|ReservationConsumeAuthorizationBasis<Role,Kind>|ReservationConsumeAuthorizationBasis<Role,Kind>.RoleTransitionServiceVisibility.claim_to_applied_use_derivation_proof_ref|claim_to_applied_use_derivation_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-disposition-eligibility-role-authority-owning-role-current-observation-import-ref"
+target_row_id = "a19:field:reservation-disposition-eligibility-role-authority-owning-role-current-observation-import-ref"
+slice_id = "a19"
+source_key = "field|ReservationDispositionEligibility<Role:AuthorityOwningRole>|ReservationDispositionEligibility<Role:AuthorityOwningRole>.Live.current_observation_import_ref|current_observation_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-disposition-eligibility-role-authority-owning-role-usable-evidence-ref"
+target_row_id = "a19:field:reservation-disposition-eligibility-role-authority-owning-role-usable-evidence-ref"
+slice_id = "a19"
+source_key = "field|ReservationDispositionEligibility<Role:AuthorityOwningRole>|ReservationDispositionEligibility<Role:AuthorityOwningRole>.Live.usable_evidence_ref|usable_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-disposition-eligibility-role-authority-owning-role-current-claimed-observation-import-ref"
+target_row_id = "a19:field:reservation-disposition-eligibility-role-authority-owning-role-current-claimed-observation-import-ref"
+slice_id = "a19"
+source_key = "field|ReservationDispositionEligibility<Role:AuthorityOwningRole>|ReservationDispositionEligibility<Role:AuthorityOwningRole>.ExpiredFixedClaim.current_claimed_observation_import_ref|current_claimed_observation_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-disposition-eligibility-role-authority-owning-role-expired-evidence-ref"
+target_row_id = "a19:field:reservation-disposition-eligibility-role-authority-owning-role-expired-evidence-ref"
+slice_id = "a19"
+source_key = "field|ReservationDispositionEligibility<Role:AuthorityOwningRole>|ReservationDispositionEligibility<Role:AuthorityOwningRole>.ExpiredFixedClaim.expired_evidence_ref|expired_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-disposition-eligibility-role-authority-owning-role-portable-expiry-attestation-ref"
+target_row_id = "a19:field:reservation-disposition-eligibility-role-authority-owning-role-portable-expiry-attestation-ref"
+slice_id = "a19"
+source_key = "field|ReservationDispositionEligibility<Role:AuthorityOwningRole>|ReservationDispositionEligibility<Role:AuthorityOwningRole>.ExpiredFixedClaim.portable_expiry_attestation_ref|portable_expiry_attestation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-use-record-role-authority-owning-role-current-reserved-head-ref"
+target_row_id = "a19:field:reservation-use-record-role-authority-owning-role-current-reserved-head-ref"
+slice_id = "a19"
+source_key = "field|ReservationUseRecord<Role:AuthorityOwningRole>|ReservationUseRecord<Role:AuthorityOwningRole>.ReservedAvailable.current_reserved_head_ref|current_reserved_head_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-use-record-role-authority-owning-role-operation-terminal-history-ref"
+target_row_id = "a19:field:reservation-use-record-role-authority-owning-role-operation-terminal-history-ref"
+slice_id = "a19"
+source_key = "field|ReservationUseRecord<Role:AuthorityOwningRole>|ReservationUseRecord<Role:AuthorityOwningRole>.ReservedAvailable.operation_terminal_history_ref|operation_terminal_history_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-use-record-role-authority-owning-role-operation-record-ref"
+target_row_id = "a19:field:reservation-use-record-role-authority-owning-role-operation-record-ref"
+slice_id = "a19"
+source_key = "field|ReservationUseRecord<Role:AuthorityOwningRole>|ReservationUseRecord<Role:AuthorityOwningRole>.ClaimAuthorizedUndispatched.operation_record_ref|operation_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-use-record-role-authority-owning-role-claimed-head-ref"
+target_row_id = "a19:field:reservation-use-record-role-authority-owning-role-claimed-head-ref"
+slice_id = "a19"
+source_key = "field|ReservationUseRecord<Role:AuthorityOwningRole>|ReservationUseRecord<Role:AuthorityOwningRole>.ClaimedAvailable.claimed_head_ref|claimed_head_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-use-record-role-authority-owning-role-claim-receipt-ref"
+target_row_id = "a19:field:reservation-use-record-role-authority-owning-role-claim-receipt-ref"
+slice_id = "a19"
+source_key = "field|ReservationUseRecord<Role:AuthorityOwningRole>|ReservationUseRecord<Role:AuthorityOwningRole>.ClaimedAvailable.claim_receipt_ref|claim_receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-use-record-role-authority-owning-role-consumption-receipt-ref"
+target_row_id = "a19:field:reservation-use-record-role-authority-owning-role-consumption-receipt-ref"
+slice_id = "a19"
+source_key = "field|ReservationUseRecord<Role:AuthorityOwningRole>|ReservationUseRecord<Role:AuthorityOwningRole>.Consumed.consumption_receipt_ref|consumption_receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-use-record-role-authority-owning-role-burn-receipt-ref"
+target_row_id = "a19:field:reservation-use-record-role-authority-owning-role-burn-receipt-ref"
+slice_id = "a19"
+source_key = "field|ReservationUseRecord<Role:AuthorityOwningRole>|ReservationUseRecord<Role:AuthorityOwningRole>.BurnedBeforeUse.burn_receipt_ref|burn_receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-reservation-use-record-role-authority-owning-role-authenticated-winning-successor-ref"
+target_row_id = "a19:field:reservation-use-record-role-authority-owning-role-authenticated-winning-successor-ref"
+slice_id = "a19"
+source_key = "field|ReservationUseRecord<Role:AuthorityOwningRole>|ReservationUseRecord<Role:AuthorityOwningRole>.ReservationConflictQuarantined.authenticated_winning_successor_ref|authenticated_winning_successor_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-direct-creation-authority-record-role-authority-owning-role-prior-lease-barrier-bootstrap-import-ref"
+target_row_id = "a19:field:restore-direct-creation-authority-record-role-authority-owning-role-prior-lease-barrier-bootstrap-import-ref"
+slice_id = "a19"
+source_key = "field|RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>|RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>.mode.RecoverSameIdentity.prior_lease_barrier_bootstrap_import_ref|prior_lease_barrier_bootstrap_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-direct-creation-authority-record-role-authority-owning-role-new-database-and-security-namespace-claim-import-ref"
+target_row_id = "a19:field:restore-direct-creation-authority-record-role-authority-owning-role-new-database-and-security-namespace-claim-import-ref"
+slice_id = "a19"
+source_key = "field|RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>|RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>.mode.CloneNewIdentity.new_database_and_security_namespace_claim_import_ref|new_database_and_security_namespace_claim_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-direct-creation-authority-record-role-authority-owning-role-creation-evidence-ref"
+target_row_id = "a19:field:restore-direct-creation-authority-record-role-authority-owning-role-creation-evidence-ref"
+slice_id = "a19"
+source_key = "field|RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>|RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>.mode.CloneNewIdentity.creation_authority.DirectoryBound.creation_evidence_ref|creation_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-direct-creation-authority-record-role-authority-owning-role-audit-clone-boundary-ref"
+target_row_id = "a19:field:restore-direct-creation-authority-record-role-authority-owning-role-audit-clone-boundary-ref"
+slice_id = "a19"
+source_key = "field|RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>|RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>.mode.CloneNewIdentity.audit_clone_boundary_ref|audit_clone_boundary_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-direct-creation-authority-record-role-authority-owning-role-allocation-claim-import-ref"
+target_row_id = "a19:field:restore-direct-creation-authority-record-role-authority-owning-role-allocation-claim-import-ref"
+slice_id = "a19"
+source_key = "field|RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>|RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>.allocation_claim_import_ref|allocation_claim_import_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-reconciliation-completion-proof-role-reconciliation-root-ref"
+target_row_id = "a19:field:restore-reconciliation-completion-proof-role-reconciliation-root-ref"
+slice_id = "a19"
+source_key = "field|RestoreReconciliationCompletionProof<Role>|RestoreReconciliationCompletionProof<Role>.reconciliation_root_ref|reconciliation_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-reconciliation-status-role-proof-ref"
+target_row_id = "a19:field:restore-reconciliation-status-role-proof-ref"
+slice_id = "a19"
+source_key = "field|RestoreReconciliationStatus<Role>|RestoreReconciliationStatus<Role>.Complete.proof_ref|proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-shard-bootstrap-projection-certificate-projection-ref"
+target_row_id = "a19:field:restore-shard-bootstrap-projection-certificate-projection-ref"
+slice_id = "a19"
+source_key = "field|RestoreShardBootstrapProjectionCertificate|RestoreShardBootstrapProjectionCertificate.projection_ref|projection_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-shard-ready-barrier-local-projection-result-ref"
+target_row_id = "a19:field:restore-shard-ready-barrier-local-projection-result-ref"
+slice_id = "a19"
+source_key = "field|RestoreShardReadyBarrier|RestoreShardReadyBarrier.local_projection_result_ref|local_projection_result_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-shard-ready-barrier-state-root-ref"
+target_row_id = "a19:field:restore-shard-ready-barrier-state-root-ref"
+slice_id = "a19"
+source_key = "field|RestoreShardReadyBarrier|RestoreShardReadyBarrier.state_root_ref|state_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-shard-ready-barrier-ready-closure-inventory-ref"
+target_row_id = "a19:field:restore-shard-ready-barrier-ready-closure-inventory-ref"
+slice_id = "a19"
+source_key = "field|RestoreShardReadyBarrier|RestoreShardReadyBarrier.ready_closure_inventory_ref|ready_closure_inventory_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-shard-ready-barrier-active-meta-projection-root-ref"
+target_row_id = "a19:field:restore-shard-ready-barrier-active-meta-projection-root-ref"
+slice_id = "a19"
+source_key = "field|RestoreShardReadyBarrier|RestoreShardReadyBarrier.active_meta_projection_root_ref|active_meta_projection_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-restore-shard-ready-barrier-reconciliation-completion-proof-ref"
+target_row_id = "a19:field:restore-shard-ready-barrier-reconciliation-completion-proof-ref"
+slice_id = "a19"
+source_key = "field|RestoreShardReadyBarrier|RestoreShardReadyBarrier.reconciliation_completion_proof_ref|reconciliation_completion_proof_ref"
+target_kind = "field"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
