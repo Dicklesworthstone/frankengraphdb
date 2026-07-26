@@ -7009,6 +7009,16 @@ fn idr_j00a_predecessors_are_nonretaining_and_current_generations_stay_owned() {
 fn idr_a16_authority_bound_headers_are_source_ordered_inline_values() {
     let identity = real_identity();
     let catalog = real_appendix_catalog();
+    // The subject of this test is that `authority_bound_header` is an INLINE value
+    // (no reference semantics, no target schema, source-ordered tag); the order is
+    // row data carried alongside, and a field row's order must equal its containing
+    // kind's. Two witnesses move under fgdb-oicl:
+    //   RestoreSourceLeaseRecord           45 -> 30. Four referrers cap it at 30
+    //     (RecoveryBridgeSourceLeaseBasis, RestoreLeaseState,
+    //      RestoreLeaseReleaseEligibility, RestoreSourceLeaseAuthorityObservationImport)
+    //     against a floor of 27, so 45 sat 15 above its own ceiling.
+    //   TimeAuthorityEpochTransitionRecord 60 -> 30, inside the a16 time-authority
+    //     component that collapses to 30.
     let expected = [
         ("ProtectedErrorReplayTimeBasis<Role>", 0x0009, 17),
         (
@@ -7019,12 +7029,12 @@ fn idr_a16_authority_bound_headers_are_source_ordered_inline_values() {
         (
             "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>",
             0x0001,
-            45,
+            30,
         ),
         (
             "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
             0x0003,
-            60,
+            30,
         ),
     ];
     for (schema, tag, construction_order) in expected {
@@ -7061,12 +7071,20 @@ fn idr_a16_authority_bound_headers_are_source_ordered_inline_values() {
 fn idr_a16_generic_strong_targets_use_registered_family_symbols() {
     let identity = real_identity();
     let catalog = real_appendix_catalog();
+    // The fourth column is the CONTAINING kind's construction_order, which a field
+    // row must equal by law (`field_construction_order_mismatch`). fgdb-oicl
+    // collapsed the a16 time-authority component to 30 -- TimeAuthorityRegistry's
+    // own window was empty in both directions at [65..23], and 30 is the
+    // minimum-churn consistent value for the component -- so every witness whose
+    // CONTAINING kind is in that component moves to 30. Entries whose containing
+    // kind did not move (ShardTimeBoundSubjectRetirementProof@36,
+    // TimeBoundSubjectRetirementProof@61) are deliberately untouched.
     let expected = [
         (
             "ShardTimeBoundSubjectInventoryCertificate",
             "inventory_ref",
             0x0008,
-            35,
+            30,
             "TimeBoundSubjectInventory",
         ),
         (
@@ -7080,28 +7098,28 @@ fn idr_a16_generic_strong_targets_use_registered_family_symbols() {
             "TimeAuthorityDrainHold<Role:AuthorityOwningRole>",
             "inventory_closure_ref",
             0x0004,
-            55,
+            30,
             "RoleTimeBoundSubjectInventoryClosure",
         ),
         (
             "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
             "subject_inventory_closure_ref",
             0x000c,
-            60,
+            30,
             "RoleTimeBoundSubjectInventoryClosure",
         ),
         (
             "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
             "drain_hold_ref",
             0x000d,
-            60,
+            30,
             "TimeAuthorityDrainHold",
         ),
         (
             "TimeBoundSubjectInventoryProof<Role>",
             "inventory_ref",
             0x0001,
-            34,
+            30,
             "TimeBoundSubjectInventory",
         ),
         (
@@ -7181,11 +7199,15 @@ fn idr_a16_logical_union_consumers_have_exact_self_rooted_closures() {
             50,
         ),
         (
+            // 60 -> 30 (fgdb-oicl): the consumer TimeAuthorityEpochTransitionRecord
+            // is inside the a16 time-authority component that collapses to 30, and
+            // a field row's order must equal its containing kind's. The other two
+            // consumers did not move and keep their witnesses.
             "RoleTimeAuthorityDrainFloorSet<Role>",
             "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
             "drain_floor_set",
             0x000f,
-            60,
+            30,
         ),
     ];
     for (union_name, consumer, stable_name, field_tag, construction_order) in expected {
@@ -8561,10 +8583,31 @@ fn idr_restore_source_acquisition_bundle_closes_the_bidirectional_order_interval
             "{predecessor} must precede the bundle that strongly retains it"
         );
     }
-    assert_eq!(
-        bundle.construction_order,
-        logical("RestoreSourceLeaseRecord").construction_order + 1,
-        "the latest outbound strong-reference target fixes the bundle at order 46"
+    // The tight `RestoreSourceLeaseRecord + 1` witness was retired by fgdb-oicl.
+    // It held only while the lease record sat at 45, and 45 was itself out of
+    // window: four referrers (RecoveryBridgeSourceLeaseBasis, RestoreLeaseState,
+    // RestoreLeaseReleaseEligibility, RestoreSourceLeaseAuthorityObservationImport)
+    // cap it at 30 against a floor of 27, so the equality encoded the defect rather
+    // than a contract. The bundle deliberately does NOT move with it: 46 still
+    // satisfies every outbound edge, and the repair moves the minimum set of
+    // symbols. What survives is the law this test is named for -- the bundle is
+    // bounded below by every target its own body retains.
+    let latest_outbound = [
+        "RestoreSourceAcquisitionPlanImportRecord",
+        "RestoreCanonicalAcquisitionWorkingSet",
+        "RestoreSourceAcquisitionSourceGate",
+        "PortableRestoreArchiveAcquisitionReceipt",
+        "RestoreSourceLeaseRecord",
+    ]
+    .into_iter()
+    .map(|name| logical(name).construction_order)
+    .max()
+    .expect("the bundle retains at least one ordered target");
+    assert!(
+        latest_outbound <= bundle.construction_order,
+        "the latest outbound strong-reference target ({latest_outbound}) must not \
+         follow the bundle that retains it ({})",
+        bundle.construction_order
     );
 
     let bridge_authority = logical("RecoveryBridgeAuthority");
