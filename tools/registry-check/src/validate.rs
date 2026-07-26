@@ -21,9 +21,16 @@
 //!   proof_lane_system_unreadable
 //!                            — a "checked" lane names a formal system no reader
 //!                              here adjudicates (completeness guard)
-//!   proof_lane_self_test_failed / checker_liveness_self_test_failed
+//!   clause_promoted_without_live_checker
+//!                            — a clause is enforced while an entrypoint is not a
+//!                              live checker (promotion law)
+//!   clause_negative_test_is_its_own_checker
+//!                            — an enforced clause's negative test IS its checker
+//!   checker_liveness_self_test_failed
 //!                            — the liveness readers failed a known answer, so no
-//!                              clean verdict below them is licensed (control)
+//!                              clean verdict anywhere below is licensed (control;
+//!                              emitted ONCE for the whole run, since one reader
+//!                              serves all three registries that ask it)
 //!   twenty_id_violation      — the twenty-ID spine set is wrong
 //!   hash_mismatch            — twenty-ID table hash pin does not match
 //!   bad_field                — enum/shape violation on a row field
@@ -58,6 +65,34 @@ impl Violation {
             msg: msg.into(),
         }
     }
+}
+
+/// The closed clause-status vocabulary, and — for each status — whether a
+/// clause in it is ENFORCED.
+///
+/// One list, two consumers, on purpose
+/// (`fgdb-clause-promotion-to-live-is-unguarded-nllh`). The status vocabulary
+/// was previously spelled inline in a `matches!`, and the promotion law that
+/// followed would have been a second `== "live"` beside it. Two spellings of one
+/// vocabulary is how a status added later arrives enforced by nothing: the
+/// schema check would reject it (or be widened to accept it) while the law that
+/// gives `live` its meaning silently skips it. Adding a status here forces the
+/// author to answer the only question that matters about it.
+///
+/// `dormant` is not enforced by design: `invariants.toml`'s header says "an
+/// unimplemented or dormant clause forces its feature off and cannot count as
+/// covered", so it is a stub that has been switched off rather than a promotion.
+pub const CLAUSE_STATUS_ENFORCED: &[(&str, bool)] =
+    &[("live", true), ("stub", false), ("dormant", false)];
+
+/// Is `status` a registered clause status, and does it enforce?
+///
+/// `None` means the status is not in the vocabulary at all.
+pub fn clause_status_is_enforced(status: &str) -> Option<bool> {
+    CLAUSE_STATUS_ENFORCED
+        .iter()
+        .find(|(name, _)| *name == status)
+        .map(|(_, enforced)| *enforced)
 }
 
 /// The canonical claim classes and ranks (must match constitution.toml).
@@ -213,8 +248,10 @@ pub fn check_justification(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_clause(
     r: &Registries,
+    prover: &crate::liveness::Prover<'_>,
     clause: &Clause,
     invariant_id: &str,
     clause_keys: &BTreeSet<String>,
@@ -258,12 +295,25 @@ fn validate_clause(
             ),
         ));
     }
-    if !matches!(clause.status.as_str(), "live" | "stub" | "dormant") {
+    // The clause status vocabulary, read from the ONE list that also decides
+    // whether the promotion law below applies. See [`CLAUSE_STATUS_ENFORCED`]:
+    // two copies of this vocabulary is how a new status would arrive enforced
+    // by nothing.
+    let enforced = clause_status_is_enforced(&clause.status);
+    if enforced.is_none() {
         out.push(Violation::new(
             "bad_field",
             reg,
             id,
-            format!("status {:?} not in {{live, stub, dormant}}", clause.status),
+            format!(
+                "status {:?} not in {{{}}}",
+                clause.status,
+                CLAUSE_STATUS_ENFORCED
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         ));
     }
     if !matches!(clause.first_gate.as_str(), "G0" | "G1" | "G2" | "G3" | "G4") {
@@ -305,6 +355,95 @@ fn validate_clause(
                 reg,
                 id,
                 format!("{field} {symbol:?} does not resolve in checker_index.toml"),
+            ));
+        }
+    }
+    // THE PROMOTION LAW (`fgdb-clause-promotion-to-live-is-unguarded-nllh`).
+    //
+    // `invariants.toml`'s own header states it: "Workstream beads flip status
+    // stub -> live in the same change that LANDS THE CHECKER, never before."
+    // AGENTS.md rests every G1-G4 exit gate on it: "no subsystem ships against
+    // an unenforced invariant ... cannot pass while any invariant it depends on
+    // lacks a live checker in invariants.toml."
+    //
+    // Nothing implemented it. Measured before this was written: promoting a
+    // shipped clause to `live`, changing nothing else, produced ZERO violations
+    // — its checker stayed a `status = "stub"` row pointing at a crate that does
+    // not exist. So did the degenerate case, a live clause whose
+    // `negative_test_entrypoint` IS its `checker_entrypoint`. The whole law for
+    // both fields was "the string resolves to a row".
+    //
+    // What `live` means for a CHECKER row is `crate::liveness`'s question, and
+    // it is answered there rather than a third time here: this is the same
+    // delegation `assess_lane` makes for proof lanes
+    // (`fgdb-proof-lane-checked-is-only-file-existence-0f1l`), which is the same
+    // reader `validate_checker_index` uses (`...-tl0o`). Three faces of one
+    // fact, one reader.
+    //
+    // The negative test is held to the SAME bar as the checker and not a weaker
+    // one, because its entire purpose is to prove the checker can go red — a
+    // negative test that cannot itself fail proves nothing, which is exactly the
+    // shape of every defect in this family.
+    if enforced == Some(true) {
+        for (field, symbol) in [
+            ("checker_entrypoint", &clause.checker_entrypoint),
+            ("negative_test_entrypoint", &clause.negative_test_entrypoint),
+        ] {
+            // An unresolved symbol is already reported above; reporting it twice
+            // would say the row is two different kinds of broken.
+            let Some(row) = r.checker_index.iter().find(|c| &c.symbol == symbol) else {
+                continue;
+            };
+            if row.status != "live" {
+                out.push(Violation::new(
+                    "clause_promoted_without_live_checker",
+                    reg,
+                    id,
+                    format!(
+                        "clause status is {:?} but {field} {symbol:?} is a checker_index row \
+                         with status {:?}; a clause is enforced only in the change that lands \
+                         its checker",
+                        clause.status, row.status
+                    ),
+                ));
+                continue;
+            }
+            let defects = prover.assess(row);
+            if !defects.is_empty() {
+                out.push(Violation::new(
+                    "clause_promoted_without_live_checker",
+                    reg,
+                    id,
+                    format!(
+                        "clause status is {:?} but {field} {symbol:?} claims \
+                         `status = \"live\"` without being live: {}",
+                        clause.status,
+                        defects
+                            .iter()
+                            .map(|defect| defect.detail.clone())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                ));
+            }
+        }
+        // The degenerate case. A clause may legitimately put its checker and its
+        // negative test in the same ARTIFACT — all twenty shipped clauses do,
+        // and `claims.rs` holds both `claims_hash_twenty_id_pin` and
+        // `claims_neg_waiver_present` — so requiring distinct artifacts would
+        // reject the shipped shape. Distinct SYMBOLS is the real rule: one
+        // symbol cannot be both the proof and the proof that the proof can fail.
+        if clause.checker_entrypoint == clause.negative_test_entrypoint {
+            out.push(Violation::new(
+                "clause_negative_test_is_its_own_checker",
+                reg,
+                id,
+                format!(
+                    "clause status is {:?} and its negative_test_entrypoint is its \
+                     checker_entrypoint ({:?}); a checker cannot be the evidence that it can \
+                     go red",
+                    clause.status, clause.checker_entrypoint
+                ),
             ));
         }
     }
@@ -377,7 +516,11 @@ fn validate_clause(
     );
 }
 
-fn validate_invariants(r: &Registries, out: &mut Vec<Violation>) {
+fn validate_invariants(
+    r: &Registries,
+    prover: &crate::liveness::Prover<'_>,
+    out: &mut Vec<Violation>,
+) {
     let reg = "invariants";
     // Carrier discipline.
     let expected_allowed = ["invariant", "proof", "bounded_model"];
@@ -466,6 +609,7 @@ fn validate_invariants(r: &Registries, out: &mut Vec<Violation>) {
             }
             validate_clause(
                 r,
+                prover,
                 clause,
                 &inv.id,
                 &clause_keys,
@@ -683,24 +827,12 @@ fn validate_slo(r: &Registries, out: &mut Vec<Violation>) {
 /// Same shape as [`validate_checker_index`]: the self-test is consulted FIRST,
 /// because a reader that has stopped reading returns "no defects" for every row,
 /// which is byte-identical to what a healthy registry returns.
-fn validate_proof_lanes(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
+fn validate_proof_lanes(
+    r: &Registries,
+    prover: &crate::liveness::Prover<'_>,
+    out: &mut Vec<Violation>,
+) {
     let reg = "proof_lanes";
-    let self_test = crate::liveness::self_test();
-    if !self_test.licensed() {
-        out.push(Violation::new(
-            "proof_lane_self_test_failed",
-            reg,
-            "<self-test>",
-            format!(
-                "the liveness readers got {} of {} known answers wrong ({}); refusing to \
-                 report any lane checked",
-                self_test.failures.len(),
-                self_test.cases,
-                self_test.failures.join(", ")
-            ),
-        ));
-    }
-    let prover = crate::liveness::Prover::new(root);
     let mut seen = BTreeSet::new();
     for lane in &r.proof_lanes {
         if !seen.insert(lane.id.clone()) {
@@ -761,24 +893,12 @@ fn validate_proof_lanes(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
 /// * a live row that is not actually live is reported per row, with the code
 ///   naming which of the three claims — registered, invoked, capable of failing
 ///   — it failed.
-fn validate_checker_index(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
+fn validate_checker_index(
+    r: &Registries,
+    prover: &crate::liveness::Prover<'_>,
+    out: &mut Vec<Violation>,
+) {
     let reg = "checker_index";
-    let self_test = crate::liveness::self_test();
-    if !self_test.licensed() {
-        out.push(Violation::new(
-            "checker_liveness_self_test_failed",
-            reg,
-            "<self-test>",
-            format!(
-                "the liveness readers got {} of {} known answers wrong ({}); refusing to \
-                 report any row live",
-                self_test.failures.len(),
-                self_test.cases,
-                self_test.failures.join(", ")
-            ),
-        ));
-    }
-    let prover = crate::liveness::Prover::new(root);
     let mut seen = BTreeSet::new();
     for c in &r.checker_index {
         if !seen.insert(c.symbol.clone()) {
@@ -1277,12 +1397,40 @@ pub fn validate_manifest_atoms(r: &Registries, manifest: &Manifest) -> Vec<Viola
 /// Run every check. `root` is the repository root (artifact resolution).
 pub fn validate_all(r: &Registries, root: &Path) -> Vec<Violation> {
     let mut out = Vec::new();
+    // ONE prover for the whole sweep. Three registries now ask `liveness` the
+    // same question — is this checker row live — and the prover exists to cache
+    // the module-map read that answers it. Three provers would be three caches
+    // of one fact, which is this bug family in its performance costume; it is
+    // also why the licence below is consulted once rather than per registry.
+    let prover = crate::liveness::Prover::new(root);
+    // THE CONTROL, first, for the whole run. The liveness readers are
+    // source-text readers, the layer where all four of this repository's "looks
+    // exactly like a pass" tooling bugs lived. If they have stopped reading they
+    // report "no defects" for every row, which is byte-identical to what a
+    // healthy tree reports — so no clean verdict below is licensed until they
+    // have answered a known question correctly.
+    let self_test = crate::liveness::self_test();
+    if !self_test.licensed() {
+        out.push(Violation::new(
+            "checker_liveness_self_test_failed",
+            "checker_index",
+            "<self-test>",
+            format!(
+                "the liveness readers got {} of {} known answers wrong ({}); refusing to \
+                 report any checker row live, any proof lane checked, or any clause \
+                 legally promoted",
+                self_test.failures.len(),
+                self_test.cases,
+                self_test.failures.join(", ")
+            ),
+        ));
+    }
     validate_constitution(r, &mut out);
-    validate_invariants(r, &mut out);
+    validate_invariants(r, &prover, &mut out);
     validate_evidence(r, &mut out);
     validate_slo(r, &mut out);
-    validate_proof_lanes(r, root, &mut out);
-    validate_checker_index(r, root, &mut out);
+    validate_proof_lanes(r, &prover, &mut out);
+    validate_checker_index(r, &prover, &mut out);
     validate_script_closure(r, root, &mut out);
     validate_active_logical_kind_arms(root, &mut out);
     validate_capability_atoms(r, &mut out);

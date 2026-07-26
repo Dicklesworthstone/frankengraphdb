@@ -578,3 +578,318 @@ fn claims_closure_absent_capability_is_attributed() {
     };
     assert!(closure::compute(&r, &empty).ok());
 }
+
+// ---------------------------------------------------------------------------
+// The promotion law (`fgdb-clause-promotion-to-live-is-unguarded-nllh`).
+// ---------------------------------------------------------------------------
+//
+// `invariants.toml`'s own header states it: "Workstream beads flip status
+// stub -> live in the same change that LANDS THE CHECKER, never before."
+// AGENTS.md rests every G1-G4 exit gate on it. Nothing implemented it.
+//
+// MEASURED BEFORE THE LAW WAS WRITTEN, against the shipped registries:
+//   - all 20 clauses are `stub`, and all 40 entrypoints resolve to
+//     `checker_index` rows that are themselves `stub`, pointing into crates that
+//     do not exist;
+//   - promoting one clause to `live` and changing NOTHING else produced ZERO
+//     violations;
+//   - so did the degenerate case, a live clause whose `negative_test_entrypoint`
+//     IS its `checker_entrypoint`.
+// The whole law for both fields was "the string resolves to a row", which is why
+// [`legacy_entrypoint_resolves`] below is kept verbatim: every mutant is
+// asserted to satisfy it, so each test states that the old law could not tell
+// the cases apart.
+//
+// One measurement corrected the bead that filed this. It proposed requiring the
+// checker's and the negative test's ARTIFACTS to be distinct. All twenty shipped
+// clauses share an artifact between the two (0 share a symbol), and `claims.rs`
+// itself holds both `claims_hash_twenty_id_pin` and `claims_neg_waiver_present`,
+// so that rule would reject the shipped shape and the house style with it.
+// Distinct SYMBOLS is the real rule.
+//
+// WHAT THE PIN IS WORTH, MEASURED (2026-07-26), on depth-matched scratch copies:
+//
+//   * Deleting the promotion law turns FIVE tests red, all of them here:
+//     claims_promotion_law_is_vacuous_today_and_this_is_what_licenses_it,
+//     claims_neg_clause_promoted_without_live_checker,
+//     claims_promotion_delegates_to_the_liveness_reader,
+//     claims_neg_negative_test_is_its_own_checker, and
+//     claims_clause_status_vocabulary_has_one_reader. 14 of 19 stay green here;
+//     metamorphic 43/43 and spine 8/8 stay fully green, which is the reading
+//     that matters — the reds are the missing law, not a broken harness.
+//
+//   * Splitting the single status vocabulary back into two spellings (a
+//     `matches!` for the schema and an inline `== "live"` for the law) turns
+//     ZERO tests red. That is stated rather than hidden: with exactly the three
+//     statuses the old inline spelling already had, both implementations agree
+//     on every input, so no test CAN distinguish them today.
+//     claims_clause_status_vocabulary_has_one_reader is a prospective guard —
+//     it iterates `CLAUSE_STATUS_ENFORCED` instead of restating it, so it fires
+//     the moment a fourth status is added and the second spelling does not
+//     follow, which is exactly when the fail-open would otherwise ship. A guard
+//     that cannot fire on today's input is worth having and is NOT worth
+//     reporting as though it had been witnessed firing; see
+//     fgdb-validator-laws-never-witnessed-firing-xnxy.
+
+/// The pre-fix promotion predicate, verbatim: the symbol resolves to a row.
+/// Status was not consulted, and neither was anything about the row.
+fn legacy_entrypoint_resolves(r: &Registries, symbol: &str) -> bool {
+    r.checker_index.iter().any(|row| row.symbol == symbol)
+}
+
+/// Promote the first clause to `status`, optionally repointing its entrypoints.
+/// Returns the mutated registries and the clause key.
+fn promote_first_clause(
+    status: &str,
+    checker: Option<&str>,
+    negative_test: Option<&str>,
+) -> (Registries, String) {
+    let mut r = real_registries();
+    let mut key = String::new();
+    'outer: for invariant in r.invariants.invariants.iter_mut() {
+        for clause in invariant.clauses.iter_mut() {
+            clause.status = status.to_string();
+            if let Some(symbol) = checker {
+                clause.checker_entrypoint = symbol.to_string();
+            }
+            if let Some(symbol) = negative_test {
+                clause.negative_test_entrypoint = symbol.to_string();
+            }
+            key = clause.key.clone();
+            break 'outer;
+        }
+    }
+    (r, key)
+}
+
+/// THE VACUITY CONTROL, and it fires.
+///
+/// Zero of the twenty shipped clauses is `live`, so a sweep asserting "every
+/// live clause has a live checker" is quantified over the empty set — it would
+/// pass just as loudly with the law deleted. A zero result is not a result
+/// without a control, so this test MAKES one: it promotes a real shipped clause
+/// exactly as a workstream bead would at G1 and requires the law to produce a
+/// real defect from real registry data.
+///
+/// Written to survive G1: when clauses start promoting, the shipped-cohort half
+/// takes over and neither the count nor the emptiness of the live cohort is
+/// pinned.
+#[test]
+fn claims_promotion_law_is_vacuous_today_and_this_is_what_licenses_it() {
+    let r = real_registries();
+    let clauses: Vec<_> = r
+        .invariants
+        .invariants
+        .iter()
+        .flat_map(|invariant| invariant.clauses.iter())
+        .collect();
+    assert!(
+        !clauses.is_empty(),
+        "control: the clause roster came back empty, so every verdict about it is \
+         quantified over nothing"
+    );
+
+    // Half one: whatever IS shipped enforced must have a live checker. Vacuous
+    // today by construction; the licence for that zero is half two.
+    assert!(
+        !codes(&r).contains(&"clause_promoted_without_live_checker".to_string()),
+        "the shipped tree must satisfy the law its own registry header states"
+    );
+
+    // Half two: the licence. If this comes back clean the law is not merely
+    // unexercised, it is dead, and half one proved nothing.
+    let (promoted, key) = promote_first_clause("live", None, None);
+    let observed = codes(&promoted);
+    assert!(
+        observed.contains(&"clause_promoted_without_live_checker".to_string()),
+        "control: promoting shipped clause {key} to \"live\" produced no promotion \
+         defect at all, so the law cannot tell an enforced invariant from an \
+         unenforced one; got {observed:?}"
+    );
+}
+
+/// A clause may not be enforced by a checker that is not itself live.
+#[test]
+fn claims_neg_clause_promoted_without_live_checker() {
+    let (promoted, key) = promote_first_clause("live", None, None);
+    // The witness: the pre-fix law accepted this, because both symbols resolve.
+    let clause = promoted
+        .invariants
+        .invariants
+        .iter()
+        .flat_map(|invariant| invariant.clauses.iter())
+        .find(|clause| clause.key == key)
+        .expect("promoted clause");
+    for symbol in [&clause.checker_entrypoint, &clause.negative_test_entrypoint] {
+        assert!(
+            legacy_entrypoint_resolves(&promoted, symbol),
+            "witness: the pre-fix law must accept {symbol:?}, or this relation proves \
+             nothing about the fix"
+        );
+    }
+    let observed = codes(&promoted);
+    assert!(
+        observed.contains(&"clause_promoted_without_live_checker".to_string()),
+        "{observed:?}"
+    );
+
+    // BOTH fields are held to the bar, not just the checker. The negative test's
+    // whole purpose is to prove the checker can go red; one that is itself a
+    // stub proves nothing, and a law that checked only `checker_entrypoint`
+    // would pass this.
+    let (checker_only, _) = promote_first_clause("live", Some("claims_hash_twenty_id_pin"), None);
+    assert!(
+        codes(&checker_only).contains(&"clause_promoted_without_live_checker".to_string()),
+        "a live checker with a stub negative test is not a promoted clause: {:?}",
+        codes(&checker_only)
+    );
+
+    // THE OTHER DIRECTION, which is the one a too-strict law fails: two real
+    // live rows, in the SAME artifact (`claims.rs` holds both), is the legal
+    // shape and must not fire.
+    let (legal, _) = promote_first_clause(
+        "live",
+        Some("claims_hash_twenty_id_pin"),
+        Some("claims_neg_waiver_present"),
+    );
+    let legal_codes = codes(&legal);
+    assert!(
+        !legal_codes.contains(&"clause_promoted_without_live_checker".to_string()),
+        "a clause whose two entrypoints are distinct LIVE rows is legal even when they \
+         share an artifact — all twenty shipped clauses share one: {legal_codes:?}"
+    );
+    assert!(
+        !legal_codes.contains(&"clause_negative_test_is_its_own_checker".to_string()),
+        "{legal_codes:?}"
+    );
+}
+
+/// THE DELEGATION. The law does not re-derive what a live checker is; it asks
+/// `liveness`, and the verdict carries that reader's own words.
+///
+/// `claims_hash_twenty_id_pin` is a genuinely live row. Repointing it at a file
+/// that exists but that `cargo test --workspace` never compiles leaves
+/// `status = "live"` and a present artifact — everything short of the full
+/// liveness read still says yes. A parallel implementation of "is this checker
+/// live" would pass every other test in this file and fail this one.
+#[test]
+fn claims_promotion_delegates_to_the_liveness_reader() {
+    let (mut mutated, _) = promote_first_clause(
+        "live",
+        Some("claims_hash_twenty_id_pin"),
+        Some("claims_neg_waiver_present"),
+    );
+    assert!(
+        !codes(&mutated).contains(&"clause_promoted_without_live_checker".to_string()),
+        "control: this shape must be legal before the mutation below means anything"
+    );
+    for row in mutated.checker_index.iter_mut() {
+        if row.symbol == "claims_hash_twenty_id_pin" {
+            // Still `status = "live"`, still a file that exists.
+            row.artifact = "README.md".to_string();
+        }
+    }
+    let violations = validate::validate_all(&mutated, &repo_root());
+    let promotion: Vec<&validate::Violation> = violations
+        .iter()
+        .filter(|v| v.code == "clause_promoted_without_live_checker")
+        .collect();
+    assert!(
+        !promotion.is_empty(),
+        "a clause enforced by a row no gate compiles is not promoted: {:?}",
+        violations.iter().map(|v| &v.code).collect::<Vec<_>>()
+    );
+    assert!(
+        promotion.iter().any(|v| v
+            .msg
+            .contains("is not an integration test target of a workspace member")),
+        "the clause verdict must CARRY the liveness reader's own finding — a second \
+         implementation of \"is this checker live\" would pass every other assertion \
+         here. Got: {:?}",
+        promotion.iter().map(|v| &v.msg).collect::<Vec<_>>()
+    );
+}
+
+/// A checker cannot be the evidence that it can go red.
+#[test]
+fn claims_neg_negative_test_is_its_own_checker() {
+    let (same, _) = promote_first_clause(
+        "live",
+        Some("claims_hash_twenty_id_pin"),
+        Some("claims_hash_twenty_id_pin"),
+    );
+    assert!(
+        legacy_entrypoint_resolves(&same, "claims_hash_twenty_id_pin"),
+        "witness: the pre-fix law accepted this — the symbol resolves, twice"
+    );
+    assert!(
+        codes(&same).contains(&"clause_negative_test_is_its_own_checker".to_string()),
+        "{:?}",
+        codes(&same)
+    );
+
+    // Not enforced, not the law's business: a stub clause may still be drafting.
+    let (stubbed, _) = promote_first_clause(
+        "stub",
+        Some("claims_hash_twenty_id_pin"),
+        Some("claims_hash_twenty_id_pin"),
+    );
+    assert!(
+        !codes(&stubbed).contains(&"clause_negative_test_is_its_own_checker".to_string()),
+        "the promotion law applies to enforced clauses only: {:?}",
+        codes(&stubbed)
+    );
+}
+
+/// THE COMPLETENESS GUARD. One vocabulary, one enforcement answer.
+///
+/// The status vocabulary used to be spelled inline in a `matches!`, and the
+/// promotion law would have been a second `== "live"` beside it. Two spellings
+/// of one vocabulary is how a status added later arrives enforced by nothing —
+/// the schema check accepts it and the law that gives `live` its meaning
+/// silently skips it, which is this whole bug family. This test pins that the
+/// schema check and the promotion law read the SAME list.
+#[test]
+fn claims_clause_status_vocabulary_has_one_reader() {
+    assert!(
+        !validate::CLAUSE_STATUS_ENFORCED.is_empty(),
+        "control: an empty vocabulary makes every assertion below vacuous"
+    );
+    assert!(
+        validate::CLAUSE_STATUS_ENFORCED
+            .iter()
+            .any(|(_, enforced)| *enforced),
+        "control: no status enforces, so the promotion law can never run"
+    );
+
+    for (status, enforced) in validate::CLAUSE_STATUS_ENFORCED {
+        // Every status the law knows about is a status the schema accepts.
+        let (r, key) = promote_first_clause(
+            status,
+            Some("claims_hash_twenty_id_pin"),
+            Some("claims_hash_twenty_id_pin"),
+        );
+        let observed = codes(&r);
+        assert!(
+            !observed.contains(&"bad_field".to_string()),
+            "status {status:?} is in the enforcement table but the schema check rejects \
+             it as a bad field: {observed:?}"
+        );
+        // And the enforcement answer is the one the law acts on.
+        assert_eq!(
+            observed.contains(&"clause_negative_test_is_its_own_checker".to_string()),
+            *enforced,
+            "clause {key} at status {status:?}: the enforcement table says {enforced}, \
+             the promotion law behaved otherwise; got {observed:?}"
+        );
+    }
+
+    // A status outside the vocabulary is rejected, never silently sorted into
+    // one side or the other.
+    let (unknown, _) = promote_first_clause("enforced", None, None);
+    let observed = codes(&unknown);
+    assert!(
+        observed.contains(&"bad_field".to_string()),
+        "an unregistered clause status must be reported: {observed:?}"
+    );
+}

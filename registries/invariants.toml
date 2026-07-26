@@ -49,6 +49,36 @@
 # cannot count as covered"). Workstream beads flip status stub -> live in the
 # same change that lands the checker, never before.
 #
+# THE PROMOTION LAW IS NOW ENFORCED
+# (fgdb-clause-promotion-to-live-is-unguarded-nllh).
+# The sentence above was prose and no code. Measured: promoting a clause here to
+# `live` and changing nothing else produced ZERO violations — its checker stayed
+# a `status = "stub"` row pointing into a crate that does not exist. So did the
+# degenerate case, a clause whose negative_test_entrypoint IS its
+# checker_entrypoint. The entire law for both fields was "the string resolves to
+# a row", and 18 of the 20 clauses below carry first_gate = "G1", so at G1
+# roughly eighteen invariants promote in one window with nothing but reviewer
+# attention between "enforced" and "a row exists".
+#
+# An ENFORCED clause (see `CLAUSE_STATUS_ENFORCED` in validate.rs — one list
+# decides both the accepted vocabulary and which statuses enforce) now requires:
+#
+#   * `checker_entrypoint` resolves to a checker_index row that is
+#     `status = "live"` AND live in the full sense `liveness.rs` defines
+#     (registered + invoked + capable of failing). That question is DELEGATED to
+#     the same reader that answers it for checker_index.toml and
+#     proof_lanes.toml, not answered a third time;
+#   * `negative_test_entrypoint` meets the SAME bar, not a weaker one. Its whole
+#     purpose is to prove the checker can go red, so a negative test that cannot
+#     itself fail proves nothing;
+#   * the two are DISTINCT SYMBOLS. They may share an ARTIFACT — all twenty
+#     clauses below do, and tests/claims.rs holds both a checker and a negative
+#     test — but one symbol cannot be both the proof and the proof that the
+#     proof can fail.
+#
+# `dormant` does not enforce, by the same header sentence that defines it: a
+# dormant clause forces its feature off and cannot count as covered.
+#
 # CI (tools/registry-check) verifies: the twenty-ID set and table hash, the
 # clause dependency DAG (acyclic, registered targets only), checker/negative-
 # test symbol existence, waiver = "forbidden" on every clause, proof-lane

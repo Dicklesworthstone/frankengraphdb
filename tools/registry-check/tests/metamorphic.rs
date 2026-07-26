@@ -114,6 +114,17 @@
 //! verbatim, so the tests state in one place that the old reader could not tell
 //! the cases apart and the new one must.
 //!
+//! The THIRD face of the same fact is
+//! `fgdb-clause-promotion-to-live-is-unguarded-nllh`: not "is this checker
+//! live" or "is this proof lane checked" but **may this clause be promoted**.
+//! Its relations are deliberately NOT duplicated here — they live in
+//! `tests/claims.rs`, which owns clause laws and whose whole design is real-
+//! registry content plus targeted in-memory mutation, which is what a promotion
+//! mutant is. The delegation pin is `claims_promotion_delegates_to_the_liveness_reader`,
+//! and it is the same assertion in the same spirit as relation 12's: the clause
+//! verdict must CARRY `liveness`'s own words about the checker row, so a second
+//! implementation of "is this checker live" fails it and nothing else.
+//!
 //! Relation 12 is relation 11 ONE ARTIFACT OVER, found thirty minutes later:
 //! `proof_lanes.toml`'s `status = "checked"` was the same `Path::is_file()`,
 //! against the strongest claim class in the system. It is in this file rather
