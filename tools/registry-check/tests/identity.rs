@@ -5249,6 +5249,25 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("ShardRestoreAbandonmentTombstone", "pending_pin_owner_ref")
         )
     };
+    // The l6xd owner ruling makes these ten embedded AuthorityBoundHeader
+    // fields inline. They landed after the erratum and are not part of the
+    // historical namespace.
+    let post_erratum_a18_inline_authority_headers = |schema: &str, name: &str| {
+        name == "authority_bound_header"
+            && matches!(
+                schema,
+                "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+                    | "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+                    | "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
+                    | "RestoreSourceAccessRevocationOperationRecord<Role:AuthorityOwningRole,Kind>"
+                    | "RestoreSourceKeyAccessCleanupAccumulator<Role>"
+                    | "RestoreSourceKeyAccessCleanupProgress<Role>"
+                    | "RestoreSourceKeyAccessCleanupRecord<Role>"
+                    | "RestoreSourceKeyAccessInventory<Role:AuthorityOwningRole>"
+                    | "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
+                    | "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+            )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_a21_field(&field.containing_schema)
             && !post_erratum_union(&field.exact_wire_type)
@@ -5261,6 +5280,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a19_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a18_field_tranche(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a18_inline_authority_headers(
+                &field.containing_schema,
+                &field.stable_name,
+            )
             && !post_erratum_a04_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
     });
@@ -5270,9 +5293,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 208,
+        pre_erratum.fields.len() + 218,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the a18 StrongRef tranche"
+        "the historical witness must remove every post-erratum field cohort through the a18 inline AuthorityBoundHeader tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

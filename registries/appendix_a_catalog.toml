@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2570
+target_count = 2580
 projection_fallback_count = 106
-target_source_assignment_sha256 = "37098947ac209862f7bf2180a0493900eafee0210c7336cb9039c4a6f4ff9b24"
+target_source_assignment_sha256 = "e0befcdd041ece0eb68de50368af529951098a94d82fea54c6b1f41486bab631"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -86462,5 +86462,245 @@ row_id = "a18:target:field-shard-restore-abandonment-tombstone-pending-pin-owner
 target_row_id = "a18:field:shard-restore-abandonment-tombstone-pending-pin-owner-ref"
 slice_id = "a18"
 source_key = "field|ShardRestoreAbandonmentTombstone|ShardRestoreAbandonmentTombstone.pending_pin_owner_ref|pending_pin_owner_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:authority-owning-restore-abandonment-tombstone-role-authority-owning-role-authority-bound-header"
+containing_schema = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in AuthorityOwningRestoreAbandonmentTombstone; retained with the owning record through its declared status/replay floor and creates no reachability edge (a18:2437)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-abandon-operation-record-role-authority-owning-role-authority-bound-header"
+containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreAbandonOperationRecord; retained with the owning record through its declared status/replay floor and creates no reachability edge (a18:2435)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-lease-operation-terminal-record-role-authority-owning-role-kind-restore-lease-operation-kind-authority-bound-header"
+containing_schema = "RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreLeaseOperationTerminalRecord; retained with the owning record through its declared status/replay floor and creates no reachability edge (a18:2349)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-access-revocation-operation-record-role-authority-owning-role-kind-authority-bound-header"
+containing_schema = "RestoreSourceAccessRevocationOperationRecord<Role:AuthorityOwningRole,Kind>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreSourceAccessRevocationOperationRecord; retained with the owning record through its declared status/replay floor and creates no reachability edge (a18:2359)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-key-access-cleanup-accumulator-role-authority-bound-header"
+containing_schema = "RestoreSourceKeyAccessCleanupAccumulator<Role>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreSourceKeyAccessCleanupAccumulator; retained with the owning record through its declared status/replay floor and creates no reachability edge (a18:2361)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-key-access-cleanup-progress-role-authority-bound-header"
+containing_schema = "RestoreSourceKeyAccessCleanupProgress<Role>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreSourceKeyAccessCleanupProgress; retained with the owning record through its declared status/replay floor and creates no reachability edge (a18:2359)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-key-access-cleanup-record-role-authority-bound-header"
+containing_schema = "RestoreSourceKeyAccessCleanupRecord<Role>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreSourceKeyAccessCleanupRecord; retained with the owning record through its declared status/replay floor and creates no reachability edge (a18:2361)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-key-access-inventory-role-authority-owning-role-authority-bound-header"
+containing_schema = "RestoreSourceKeyAccessInventory<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreSourceKeyAccessInventory; retained with the owning record through its declared status/replay floor and creates no reachability edge (a18:2355)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-lease-authority-observation-import-role-authority-owning-role-authority-bound-header"
+containing_schema = "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreSourceLeaseAuthorityObservationImport; retained with the owning record through its declared status/replay floor and creates no reachability edge (a18:2401)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-terminal-cleanup-authority-role-authority-owning-role-authority-bound-header"
+containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreTerminalCleanupAuthority; retained with the owning record through its declared status/replay floor and creates no reachability edge (a18:2397)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[target]]
+row_id = "a18:target:field-authority-owning-restore-abandonment-tombstone-role-authority-owning-role-authority-bound-header"
+target_row_id = "a18:field:authority-owning-restore-abandonment-tombstone-role-authority-owning-role-authority-bound-header"
+slice_id = "a18"
+source_key = "field|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>|AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-abandon-operation-record-role-authority-owning-role-authority-bound-header"
+target_row_id = "a18:field:restore-abandon-operation-record-role-authority-owning-role-authority-bound-header"
+slice_id = "a18"
+source_key = "field|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>|RestoreAbandonOperationRecord<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-lease-operation-terminal-record-role-authority-owning-role-kind-restore-lease-operation-kind-authority-bound-header"
+target_row_id = "a18:field:restore-lease-operation-terminal-record-role-authority-owning-role-kind-restore-lease-operation-kind-authority-bound-header"
+slice_id = "a18"
+source_key = "field|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>|RestoreLeaseOperationTerminalRecord<Role:AuthorityOwningRole,Kind:RestoreLeaseOperationKind>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-access-revocation-operation-record-role-authority-owning-role-kind-authority-bound-header"
+target_row_id = "a18:field:restore-source-access-revocation-operation-record-role-authority-owning-role-kind-authority-bound-header"
+slice_id = "a18"
+source_key = "field|RestoreSourceAccessRevocationOperationRecord<Role:AuthorityOwningRole,Kind>|RestoreSourceAccessRevocationOperationRecord<Role:AuthorityOwningRole,Kind>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-key-access-cleanup-accumulator-role-authority-bound-header"
+target_row_id = "a18:field:restore-source-key-access-cleanup-accumulator-role-authority-bound-header"
+slice_id = "a18"
+source_key = "field|RestoreSourceKeyAccessCleanupAccumulator<Role>|RestoreSourceKeyAccessCleanupAccumulator<Role>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-key-access-cleanup-progress-role-authority-bound-header"
+target_row_id = "a18:field:restore-source-key-access-cleanup-progress-role-authority-bound-header"
+slice_id = "a18"
+source_key = "field|RestoreSourceKeyAccessCleanupProgress<Role>|RestoreSourceKeyAccessCleanupProgress<Role>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-key-access-cleanup-record-role-authority-bound-header"
+target_row_id = "a18:field:restore-source-key-access-cleanup-record-role-authority-bound-header"
+slice_id = "a18"
+source_key = "field|RestoreSourceKeyAccessCleanupRecord<Role>|RestoreSourceKeyAccessCleanupRecord<Role>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-key-access-inventory-role-authority-owning-role-authority-bound-header"
+target_row_id = "a18:field:restore-source-key-access-inventory-role-authority-owning-role-authority-bound-header"
+slice_id = "a18"
+source_key = "field|RestoreSourceKeyAccessInventory<Role:AuthorityOwningRole>|RestoreSourceKeyAccessInventory<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-lease-authority-observation-import-role-authority-owning-role-authority-bound-header"
+target_row_id = "a18:field:restore-source-lease-authority-observation-import-role-authority-owning-role-authority-bound-header"
+slice_id = "a18"
+source_key = "field|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-terminal-cleanup-authority-role-authority-owning-role-authority-bound-header"
+target_row_id = "a18:field:restore-terminal-cleanup-authority-role-authority-owning-role-authority-bound-header"
+slice_id = "a18"
+source_key = "field|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
 target_kind = "field"
 definition_status = "declared"
