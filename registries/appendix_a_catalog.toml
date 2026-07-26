@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2444
+target_count = 2469
 projection_fallback_count = 105
-target_source_assignment_sha256 = "52806629a176d48a3075aa37f297ed2b2fd403f9b95de67eb363be535711acea"
+target_source_assignment_sha256 = "d0e06fc91abcb5c130d8705468609466952d16aab901894b84093dcb7a0f6e2d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -5516,6 +5516,281 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16384
 golden_corpus = "corpus/logical/durable_capability_validator_semantics_registry/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:audit-clone-boundary"
+object_kind = 0x0215
+name = "AuditCloneBoundary"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_clone_boundary/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:audit-completeness-profile"
+object_kind = 0x0216
+name = "AuditCompletenessProfile"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_completeness_profile/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:audit-continuity-record"
+object_kind = 0x0217
+name = "AuditContinuityRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_continuity_record/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:audit-event-record"
+object_kind = 0x0218
+name = "AuditEventRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_event_record/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:audit-external-batch-cas-receipt"
+object_kind = 0x021c
+name = "AuditExternalBatchCasReceipt"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_external_batch_cas_receipt/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:audit-external-cas-receipt"
+object_kind = 0x021d
+name = "AuditExternalCasReceipt"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_external_cas_receipt/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:audit-outcome-record"
+object_kind = 0x021f
+name = "AuditOutcomeRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_outcome_record/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:audit-requirement-decision-record"
+object_kind = 0x0220
+name = "AuditRequirementDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_requirement_decision_record/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:audit-ticket"
+object_kind = 0x022e
+name = "AuditTicket"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_ticket/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:audit-ticket-resolution"
+object_kind = 0x0230
+name = "AuditTicketResolution"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_ticket_resolution/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:authorization-decision-record"
+object_kind = 0x0239
+name = "AuthorizationDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authorization_decision_record/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:durable-capability-verifier-key"
+object_kind = 0x0290
+name = "DurableCapabilityVerifierKey"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/durable_capability_verifier_key/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:lifecycle-authorization-decision-record"
+object_kind = 0x02f4
+name = "LifecycleAuthorizationDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/lifecycle_authorization_decision_record/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:mutation-permit-read-projection"
+object_kind = 0x0364
+name = "MutationPermitReadProjection"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/mutation_permit_read_projection/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:mutation-permit-record"
+object_kind = 0x0365
+name = "MutationPermitRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/mutation_permit_record/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:read-access-admission-record"
+object_kind = 0x03a5
+name = "ReadAccessAdmissionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_access_admission_record/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:read-permit-record"
+object_kind = 0x03a7
+name = "ReadPermitRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_permit_record/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:read-result-release-decision-record"
+object_kind = 0x03a8
+name = "ReadResultReleaseDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_result_release_decision_record/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:read-your-writes-capability-lineage-root"
+object_kind = 0x0500
+name = "ReadYourWritesCapabilityLineageRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_your_writes_capability_lineage_root/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:read-your-writes-capability-terminal-tombstone"
+object_kind = 0x0502
+name = "ReadYourWritesCapabilityTerminalTombstone"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_your_writes_capability_terminal_tombstone/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:replay-archive-record"
+object_kind = 0x03c3
+name = "ReplayArchiveRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/replay_archive_record/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:replay-manifest"
+object_kind = 0x03c4
+name = "ReplayManifest"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/replay_manifest/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:transparency-checkpoint"
+object_kind = 0x04ae
+name = "TransparencyCheckpoint"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_checkpoint/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:transparency-cross-log-receipt"
+object_kind = 0x04b0
+name = "TransparencyCrossLogReceipt"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_cross_log_receipt/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:witness-policy"
+object_kind = 0x04b9
+name = "WitnessPolicy"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/witness_policy/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -34614,7 +34889,7 @@ symbol = "AuditCloneBoundary"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0215"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:audit-completeness-profile"
@@ -34623,7 +34898,7 @@ symbol = "AuditCompletenessProfile"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0216"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:audit-completeness-transition-operation-record"
@@ -34650,7 +34925,7 @@ symbol = "AuditContinuityRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0217"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:audit-event-record"
@@ -34659,7 +34934,7 @@ symbol = "AuditEventRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0218"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:audit-event-signature-share"
@@ -34695,7 +34970,7 @@ symbol = "AuditExternalBatchCasReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x021c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:audit-external-cas-receipt"
@@ -34704,7 +34979,7 @@ symbol = "AuditExternalCasReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x021d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:audit-external-resolution-batch"
@@ -34722,7 +34997,7 @@ symbol = "AuditOutcomeRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x021f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:audit-receipt-status-authorization-record"
@@ -34740,7 +35015,7 @@ symbol = "AuditRequirementDecisionRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0220"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:audit-resolution-signature-share"
@@ -34866,7 +35141,7 @@ symbol = "AuditTicket"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x022e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:audit-ticket-claim-record"
@@ -34884,7 +35159,7 @@ symbol = "AuditTicketResolution"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0230"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:audit-visibility-advance-spec"
@@ -35001,7 +35276,7 @@ symbol = "AuthorizationDecisionRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0239"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:authorized-visible-count-index"
@@ -36018,7 +36293,7 @@ symbol = "DurableCapabilityVerifierKey"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0290"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:effect-directory-root"
@@ -37026,7 +37301,7 @@ symbol = "LifecycleAuthorizationDecisionRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02f4"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:local-attempt-registration"
@@ -38088,7 +38363,7 @@ symbol = "MutationPermitReadProjection"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0364"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:mutation-permit-record"
@@ -38097,7 +38372,7 @@ symbol = "MutationPermitRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0365"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:never-registered-evidence"
@@ -38871,7 +39146,7 @@ symbol = "ReadAccessAdmissionRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03a5"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:read-participant-routing-certificate"
@@ -38889,7 +39164,7 @@ symbol = "ReadPermitRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03a7"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:read-result-release-decision-record"
@@ -38898,7 +39173,7 @@ symbol = "ReadResultReleaseDecisionRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03a8"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:read-your-writes-capability-lineage-root"
@@ -38907,7 +39182,7 @@ symbol = "ReadYourWritesCapabilityLineageRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0500"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:read-your-writes-capability-replay-record"
@@ -38925,7 +39200,7 @@ symbol = "ReadYourWritesCapabilityTerminalTombstone"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0502"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:read-your-writes-issuance-bundle"
@@ -39204,7 +39479,7 @@ symbol = "ReplayArchiveRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03c3"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:replay-manifest"
@@ -39213,7 +39488,7 @@ symbol = "ReplayManifest"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03c4"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:replay-retention-record"
@@ -41499,7 +41774,7 @@ symbol = "TransparencyCheckpoint"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04ae"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:transparency-checkpoint-freshness-basis"
@@ -41517,7 +41792,7 @@ symbol = "TransparencyCrossLogReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04b0"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a09:reservation:txn-allocation-binding-root"
@@ -41652,7 +41927,7 @@ symbol = "WitnessPolicy"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04b9"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:workspace-overlay-release-record"
@@ -42217,7 +42492,7 @@ symbol = "AuditCloneBoundary"
 generic_signature = ""
 source_key = "top|AuditCloneBoundary"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2715"]
 
 [[top_level_candidate]]
@@ -42227,7 +42502,7 @@ symbol = "AuditCompletenessProfile"
 generic_signature = ""
 source_key = "top|AuditCompletenessProfile"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2619"]
 
 [[top_level_candidate]]
@@ -42237,7 +42512,7 @@ symbol = "AuditContinuityRecord"
 generic_signature = ""
 source_key = "top|AuditContinuityRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2711"]
 
 [[top_level_candidate]]
@@ -42257,7 +42532,7 @@ symbol = "AuditEventRecord"
 generic_signature = ""
 source_key = "top|AuditEventRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2705"]
 
 [[top_level_candidate]]
@@ -42287,7 +42562,7 @@ symbol = "AuditExternalBatchCasReceipt"
 generic_signature = ""
 source_key = "top|AuditExternalBatchCasReceipt"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2711"]
 
 [[top_level_candidate]]
@@ -42297,7 +42572,7 @@ symbol = "AuditExternalCasReceipt"
 generic_signature = ""
 source_key = "top|AuditExternalCasReceipt"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2711"]
 
 [[top_level_candidate]]
@@ -42317,7 +42592,7 @@ symbol = "AuditOutcomeRecord"
 generic_signature = ""
 source_key = "top|AuditOutcomeRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2709"]
 
 [[top_level_candidate]]
@@ -42347,7 +42622,7 @@ symbol = "AuditRequirementDecisionRecord"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|AuditRequirementDecisionRecord<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2619"]
 
 [[top_level_candidate]]
@@ -42507,7 +42782,7 @@ symbol = "AuditTicket"
 generic_signature = ""
 source_key = "top|AuditTicket"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2705"]
 
 [[top_level_candidate]]
@@ -42557,7 +42832,7 @@ symbol = "AuditTicketResolution"
 generic_signature = ""
 source_key = "top|AuditTicketResolution"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2707"]
 
 [[top_level_candidate]]
@@ -42707,7 +42982,7 @@ symbol = "AuthorizationDecisionRecord"
 generic_signature = "<Role>"
 source_key = "top|AuthorizationDecisionRecord<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2621"]
 
 [[top_level_candidate]]
@@ -44597,7 +44872,7 @@ symbol = "DurableCapabilityVerifierKey"
 generic_signature = ""
 source_key = "top|DurableCapabilityVerifierKey"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2699"]
 
 [[top_level_candidate]]
@@ -46377,7 +46652,7 @@ symbol = "LifecycleAuthorizationDecisionRecord"
 generic_signature = "<Role>"
 source_key = "top|LifecycleAuthorizationDecisionRecord<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2697"]
 
 [[top_level_candidate]]
@@ -47567,7 +47842,7 @@ symbol = "MutationPermitReadProjection"
 generic_signature = "<Role>"
 source_key = "top|MutationPermitReadProjection<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2617"]
 
 [[top_level_candidate]]
@@ -47577,7 +47852,7 @@ symbol = "MutationPermitRecord"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|MutationPermitRecord<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2615"]
 
 [[top_level_candidate]]
@@ -49047,7 +49322,7 @@ symbol = "ReadAccessAdmissionRecord"
 generic_signature = "<Role>"
 source_key = "top|ReadAccessAdmissionRecord<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2625"]
 
 [[top_level_candidate]]
@@ -49097,7 +49372,7 @@ symbol = "ReadPermitRecord"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|ReadPermitRecord<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2615"]
 
 [[top_level_candidate]]
@@ -49127,7 +49402,7 @@ symbol = "ReadResultReleaseDecisionRecord"
 generic_signature = "<Role>"
 source_key = "top|ReadResultReleaseDecisionRecord<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2627"]
 
 [[top_level_candidate]]
@@ -49157,7 +49432,7 @@ symbol = "ReadYourWritesCapabilityLineageRoot"
 generic_signature = "<Role>"
 source_key = "top|ReadYourWritesCapabilityLineageRoot<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2635"]
 
 [[top_level_candidate]]
@@ -49177,7 +49452,7 @@ symbol = "ReadYourWritesCapabilityTerminalTombstone"
 generic_signature = "<Role>"
 source_key = "top|ReadYourWritesCapabilityTerminalTombstone<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2635"]
 
 [[top_level_candidate]]
@@ -49607,7 +49882,7 @@ symbol = "ReplayArchiveRecord"
 generic_signature = ""
 source_key = "top|ReplayArchiveRecord"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2613"]
 
 [[top_level_candidate]]
@@ -49657,7 +49932,7 @@ symbol = "ReplayManifest"
 generic_signature = ""
 source_key = "top|ReplayManifest"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2611"]
 
 [[top_level_candidate]]
@@ -53637,7 +53912,7 @@ symbol = "TransparencyCheckpoint"
 generic_signature = ""
 source_key = "top|TransparencyCheckpoint"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2721"]
 
 [[top_level_candidate]]
@@ -53667,7 +53942,7 @@ symbol = "TransparencyCrossLogReceipt"
 generic_signature = ""
 source_key = "top|TransparencyCrossLogReceipt"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2719"]
 
 [[top_level_candidate]]
@@ -53967,7 +54242,7 @@ symbol = "WitnessPolicy"
 generic_signature = ""
 source_key = "top|WitnessPolicy"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2717"]
 
 [[top_level_candidate]]
@@ -74038,6 +74313,206 @@ target_row_id = "a20:field:restore-service-promotion-manifest-authority-profile"
 slice_id = "a20"
 source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.authority_profile|authority_profile"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-audit-clone-boundary"
+target_row_id = "a21:logical-kind:audit-clone-boundary"
+slice_id = "a21"
+source_key = "top|AuditCloneBoundary"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-audit-completeness-profile"
+target_row_id = "a21:logical-kind:audit-completeness-profile"
+slice_id = "a21"
+source_key = "top|AuditCompletenessProfile"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-audit-continuity-record"
+target_row_id = "a21:logical-kind:audit-continuity-record"
+slice_id = "a21"
+source_key = "top|AuditContinuityRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-audit-event-record"
+target_row_id = "a21:logical-kind:audit-event-record"
+slice_id = "a21"
+source_key = "top|AuditEventRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-audit-external-batch-cas-receipt"
+target_row_id = "a21:logical-kind:audit-external-batch-cas-receipt"
+slice_id = "a21"
+source_key = "top|AuditExternalBatchCasReceipt"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-audit-external-cas-receipt"
+target_row_id = "a21:logical-kind:audit-external-cas-receipt"
+slice_id = "a21"
+source_key = "top|AuditExternalCasReceipt"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-audit-outcome-record"
+target_row_id = "a21:logical-kind:audit-outcome-record"
+slice_id = "a21"
+source_key = "top|AuditOutcomeRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-audit-requirement-decision-record"
+target_row_id = "a21:logical-kind:audit-requirement-decision-record"
+slice_id = "a21"
+source_key = "top|AuditRequirementDecisionRecord<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-audit-ticket"
+target_row_id = "a21:logical-kind:audit-ticket"
+slice_id = "a21"
+source_key = "top|AuditTicket"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-audit-ticket-resolution"
+target_row_id = "a21:logical-kind:audit-ticket-resolution"
+slice_id = "a21"
+source_key = "top|AuditTicketResolution"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-authorization-decision-record"
+target_row_id = "a21:logical-kind:authorization-decision-record"
+slice_id = "a21"
+source_key = "top|AuthorizationDecisionRecord<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-durable-capability-verifier-key"
+target_row_id = "a21:logical-kind:durable-capability-verifier-key"
+slice_id = "a21"
+source_key = "top|DurableCapabilityVerifierKey"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-lifecycle-authorization-decision-record"
+target_row_id = "a21:logical-kind:lifecycle-authorization-decision-record"
+slice_id = "a21"
+source_key = "top|LifecycleAuthorizationDecisionRecord<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-mutation-permit-read-projection"
+target_row_id = "a21:logical-kind:mutation-permit-read-projection"
+slice_id = "a21"
+source_key = "top|MutationPermitReadProjection<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-mutation-permit-record"
+target_row_id = "a21:logical-kind:mutation-permit-record"
+slice_id = "a21"
+source_key = "top|MutationPermitRecord<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-read-access-admission-record"
+target_row_id = "a21:logical-kind:read-access-admission-record"
+slice_id = "a21"
+source_key = "top|ReadAccessAdmissionRecord<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-read-permit-record"
+target_row_id = "a21:logical-kind:read-permit-record"
+slice_id = "a21"
+source_key = "top|ReadPermitRecord<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-read-result-release-decision-record"
+target_row_id = "a21:logical-kind:read-result-release-decision-record"
+slice_id = "a21"
+source_key = "top|ReadResultReleaseDecisionRecord<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-read-your-writes-capability-lineage-root"
+target_row_id = "a21:logical-kind:read-your-writes-capability-lineage-root"
+slice_id = "a21"
+source_key = "top|ReadYourWritesCapabilityLineageRoot<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-read-your-writes-capability-terminal-tombstone"
+target_row_id = "a21:logical-kind:read-your-writes-capability-terminal-tombstone"
+slice_id = "a21"
+source_key = "top|ReadYourWritesCapabilityTerminalTombstone<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-replay-archive-record"
+target_row_id = "a21:logical-kind:replay-archive-record"
+slice_id = "a21"
+source_key = "top|ReplayArchiveRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-replay-manifest"
+target_row_id = "a21:logical-kind:replay-manifest"
+slice_id = "a21"
+source_key = "top|ReplayManifest"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-transparency-checkpoint"
+target_row_id = "a21:logical-kind:transparency-checkpoint"
+slice_id = "a21"
+source_key = "top|TransparencyCheckpoint"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-transparency-cross-log-receipt"
+target_row_id = "a21:logical-kind:transparency-cross-log-receipt"
+slice_id = "a21"
+source_key = "top|TransparencyCrossLogReceipt"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-witness-policy"
+target_row_id = "a21:logical-kind:witness-policy"
+slice_id = "a21"
+source_key = "top|WitnessPolicy"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

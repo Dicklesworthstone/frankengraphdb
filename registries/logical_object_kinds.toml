@@ -333,6 +333,42 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/attempt_compaction_attestation/"
 
 [[kind]]
+object_kind = 0x0215
+name = "AuditCloneBoundary"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_clone_boundary/"
+
+[[kind]]
+object_kind = 0x0216
+name = "AuditCompletenessProfile"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_completeness_profile/"
+
+[[kind]]
+object_kind = 0x0217
+name = "AuditContinuityRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_continuity_record/"
+
+[[kind]]
+object_kind = 0x0218
+name = "AuditEventRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_event_record/"
+
+[[kind]]
 object_kind = 0x021a
 name = "AuditEventSignerLock"
 status = "reserved"
@@ -349,6 +385,42 @@ construction_order = 6
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/audit_event_signing_attempt_plan/"
+
+[[kind]]
+object_kind = 0x021c
+name = "AuditExternalBatchCasReceipt"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_external_batch_cas_receipt/"
+
+[[kind]]
+object_kind = 0x021d
+name = "AuditExternalCasReceipt"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_external_cas_receipt/"
+
+[[kind]]
+object_kind = 0x021f
+name = "AuditOutcomeRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_outcome_record/"
+
+[[kind]]
+object_kind = 0x0220
+name = "AuditRequirementDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_requirement_decision_record/"
 
 [[kind]]
 object_kind = 0x0222
@@ -387,6 +459,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/audit_terminal_freeze_record/"
 
 [[kind]]
+object_kind = 0x022e
+name = "AuditTicket"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_ticket/"
+
+[[kind]]
 object_kind = 0x022f
 name = "AuditTicketClaimRecord"
 status = "reserved"
@@ -394,6 +475,15 @@ construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/audit_ticket_claim_record/"
+
+[[kind]]
+object_kind = 0x0230
+name = "AuditTicketResolution"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_ticket_resolution/"
 
 [[kind]]
 object_kind = 0x0235
@@ -421,6 +511,15 @@ construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/authority_owning_restore_abandonment_tombstone/"
+
+[[kind]]
+object_kind = 0x0239
+name = "AuthorizationDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authorization_decision_record/"
 
 [[kind]]
 object_kind = 0x023d
@@ -754,6 +853,15 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16384
 golden_corpus = "corpus/logical/durable_capability_validation_evidence/"
+
+[[kind]]
+object_kind = 0x0290
+name = "DurableCapabilityVerifierKey"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/durable_capability_verifier_key/"
 
 [[kind]]
 object_kind = 0x0295
@@ -1260,6 +1368,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/legacy_retention_authority_transfer_record/"
 
 [[kind]]
+object_kind = 0x02f4
+name = "LifecycleAuthorizationDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/lifecycle_authorization_decision_record/"
+
+[[kind]]
 object_kind = 0x02f5
 name = "LocalAttemptRegistration"
 status = "reserved"
@@ -1546,6 +1663,24 @@ construction_order = 40
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/meta_restore_terminal_tombstone/"
+
+[[kind]]
+object_kind = 0x0364
+name = "MutationPermitReadProjection"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/mutation_permit_read_projection/"
+
+[[kind]]
+object_kind = 0x0365
+name = "MutationPermitRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/mutation_permit_record/"
 
 [[kind]]
 object_kind = 0x0366
@@ -1872,6 +2007,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/raft_state_root/"
 
 [[kind]]
+object_kind = 0x03a5
+name = "ReadAccessAdmissionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_access_admission_record/"
+
+[[kind]]
 object_kind = 0x03a6
 name = "ReadParticipantRoutingCertificate"
 status = "reserved"
@@ -1879,6 +2023,24 @@ construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/read_participant_routing_certificate/"
+
+[[kind]]
+object_kind = 0x03a7
+name = "ReadPermitRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_permit_record/"
+
+[[kind]]
+object_kind = 0x03a8
+name = "ReadResultReleaseDecisionRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_result_release_decision_record/"
 
 [[kind]]
 object_kind = 0x03ab
@@ -2077,6 +2239,24 @@ construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/remote_trust_compaction_precondition/"
+
+[[kind]]
+object_kind = 0x03c3
+name = "ReplayArchiveRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/replay_archive_record/"
+
+[[kind]]
+object_kind = 0x03c4
+name = "ReplayManifest"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/replay_manifest/"
 
 [[kind]]
 object_kind = 0x03c6
@@ -3366,6 +3546,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/topology_transition_record/"
 
 [[kind]]
+object_kind = 0x04ae
+name = "TransparencyCheckpoint"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_checkpoint/"
+
+[[kind]]
 object_kind = 0x04af
 name = "TransparencyCheckpointFreshnessBasis"
 status = "reserved"
@@ -3373,6 +3562,15 @@ construction_order = 17
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/transparency_checkpoint_freshness_basis/"
+
+[[kind]]
+object_kind = 0x04b0
+name = "TransparencyCrossLogReceipt"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_cross_log_receipt/"
 
 [[kind]]
 object_kind = 0x04b1
@@ -3418,6 +3616,15 @@ construction_order = 62
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/verifier_key_retirement_floor/"
+
+[[kind]]
+object_kind = 0x04b9
+name = "WitnessPolicy"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/witness_policy/"
 
 [[kind]]
 object_kind = 0x04bd
@@ -3490,6 +3697,24 @@ construction_order = 17
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/protected_error_replay_time_basis/"
+
+[[kind]]
+object_kind = 0x0500
+name = "ReadYourWritesCapabilityLineageRoot"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_your_writes_capability_lineage_root/"
+
+[[kind]]
+object_kind = 0x0502
+name = "ReadYourWritesCapabilityTerminalTombstone"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_your_writes_capability_terminal_tombstone/"
 
 [[kind]]
 object_kind = 0x051e
