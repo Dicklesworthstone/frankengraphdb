@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2593
-projection_fallback_count = 106
-target_source_assignment_sha256 = "092081ad88bc2dfb9f9b79f6f1368fdfb4236533d9c48934f6c13263678f7bdf"
+target_count = 2597
+projection_fallback_count = 108
+target_source_assignment_sha256 = "42f1b039cad8667cf9266f94f7aeb9f98171c968cb756931a9c271e596557486"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 52
+registry_epoch = 53
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -2108,6 +2108,50 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/pre_bootstrap_dispatch_terminal_accumulator/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:canonical-local-refinement-commit-receipt-copy"
+object_kind = 0x025a
+name = "CanonicalLocalRefinementCommitReceiptCopy"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/canonical_local_refinement_commit_receipt_copy/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:compacted-pre-bootstrap-evidence"
+object_kind = 0x0276
+name = "CompactedPreBootstrapEvidence"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/compacted_pre_bootstrap_evidence/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:pre-bootstrap-journal-canonicalization-import-record"
+object_kind = 0x0396
+name = "PreBootstrapJournalCanonicalizationImportRecord"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/pre_bootstrap_journal_canonicalization_import_record/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:restore-journal-key-disposition"
+object_kind = 0x03d9
+name = "RestoreJournalKeyDisposition"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_journal_key_disposition/"
 
 [[logical_kind]]
 slice_id = "a03"
@@ -36782,7 +36826,7 @@ symbol = "CanonicalLocalRefinementCommitReceiptCopy"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x025a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a17:reservation:canonical-pre-bootstrap-evidence-reencryption-owner"
@@ -37061,7 +37105,7 @@ symbol = "CompactedPreBootstrapEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0276"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a14:reservation:config-payload-floor"
@@ -39995,7 +40039,7 @@ symbol = "PreBootstrapJournalCanonicalizationImportRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0396"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:pre-bootstrap-portable-time-expiry-attestation"
@@ -40823,7 +40867,7 @@ symbol = "RestoreJournalKeyDisposition"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03d9"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-lease-bound-source-access-set"
@@ -45318,7 +45362,7 @@ symbol = "CompactedPreBootstrapEvidence"
 generic_signature = "<Role>"
 source_key = "top|CompactedPreBootstrapEvidence<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2301"]
 
 [[top_level_candidate]]
@@ -49768,7 +49812,7 @@ symbol = "PreBootstrapJournalCanonicalizationImportRecord"
 generic_signature = "<Role>"
 source_key = "top|PreBootstrapJournalCanonicalizationImportRecord<Role>"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2307"]
 
 [[top_level_candidate]]
@@ -56678,6 +56722,38 @@ row_id = "a17:target:logical-kind-pre-bootstrap-dispatch-terminal-accumulator"
 target_row_id = "a17:logical-kind:pre-bootstrap-dispatch-terminal-accumulator"
 slice_id = "a17"
 source_key = "projection|logical_object_kinds|PreBootstrapDispatchTerminalAccumulator"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-canonical-local-refinement-commit-receipt-copy"
+target_row_id = "a17:logical-kind:canonical-local-refinement-commit-receipt-copy"
+slice_id = "a17"
+source_key = "projection|logical_object_kinds|CanonicalLocalRefinementCommitReceiptCopy"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-compacted-pre-bootstrap-evidence"
+target_row_id = "a17:logical-kind:compacted-pre-bootstrap-evidence"
+slice_id = "a17"
+source_key = "top|CompactedPreBootstrapEvidence<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-pre-bootstrap-journal-canonicalization-import-record"
+target_row_id = "a17:logical-kind:pre-bootstrap-journal-canonicalization-import-record"
+slice_id = "a17"
+source_key = "top|PreBootstrapJournalCanonicalizationImportRecord<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-restore-journal-key-disposition"
+target_row_id = "a17:logical-kind:restore-journal-key-disposition"
+slice_id = "a17"
+source_key = "projection|logical_object_kinds|RestoreJournalKeyDisposition"
 target_kind = "logical-kind"
 definition_status = "declared"
 

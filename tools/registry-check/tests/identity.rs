@@ -7507,6 +7507,328 @@ fn idr_pre_bootstrap_dispatch_terminal_accumulator_uses_the_accumulator_stratum(
 }
 
 #[test]
+fn idr_compacted_pre_bootstrap_evidence_follows_its_terminal_accumulator() {
+    let identity = real_identity();
+    let logical = |name: &str| {
+        identity
+            .logical
+            .iter()
+            .find(|logical| logical.name == name)
+            .expect("named logical row exists")
+    };
+    let compacted = logical("CompactedPreBootstrapEvidence");
+    assert_eq!(compacted.object_kind, 0x0276);
+    assert_eq!(compacted.status, "reserved");
+    assert_eq!(compacted.construction_order, 20);
+    assert_eq!(compacted.role_predicate, "true");
+    assert_eq!(compacted.max_size_bytes, 16_777_216);
+    assert_eq!(
+        compacted.golden_corpus,
+        "corpus/logical/compacted_pre_bootstrap_evidence/"
+    );
+    assert_eq!(
+        compacted.construction_order,
+        logical("PreBootstrapDispatchTerminalAccumulator").construction_order,
+        "the explicit StrongRef fixes the source-derived floor at the established order-20 accumulator stratum"
+    );
+
+    let plan = String::from_utf8(real_plan_source()).expect("the normative plan is UTF-8");
+    assert!(
+        plan.contains(
+            "terminal_accumulator_ref:StrongRef<PreBootstrapDispatchTerminalAccumulator<Role>>"
+        ),
+        "the construction-order edge must remain source-visible"
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|row| row.symbol == "CompactedPreBootstrapEvidence")
+        .expect("compacted evidence permanent reservation exists");
+    assert_eq!(
+        reservation.row_id,
+        "a17:reservation:compacted-pre-bootstrap-evidence"
+    );
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x0276");
+    assert_eq!(reservation.disposition, "existing");
+
+    let source_key = "top|CompactedPreBootstrapEvidence<Role>";
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|row| row.source_key == source_key)
+        .expect("compacted evidence confirmed source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|row| row.source_key == source_key)
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "the source candidate maps exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a17:target:logical-kind-compacted-pre-bootstrap-evidence"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a17:logical-kind:compacted-pre-bootstrap-evidence"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+    assert_eq!(targets[0].definition_status, "declared");
+
+    assert!(
+        !identity.fields.iter().any(|field| {
+            field.containing_schema == "CompactedPreBootstrapEvidence"
+                || field
+                    .containing_schema
+                    .starts_with("CompactedPreBootstrapEvidence<")
+        }),
+        "the logical shell must not preempt the shorthand field census"
+    );
+    assert!(
+        !identity.ordinary_unions.iter().any(|union| {
+            union.containing_schema == "CompactedPreBootstrapEvidence"
+                || union
+                    .containing_schema
+                    .starts_with("CompactedPreBootstrapEvidence<")
+        }),
+        "the record-shaped evidence must not manufacture a union"
+    );
+}
+
+#[test]
+fn idr_a17_remaining_journal_shells_exhaust_reserved_identity_codes() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let cases = [
+        (
+            "CanonicalLocalRefinementCommitReceiptCopy",
+            0x025a,
+            6,
+            "a17:reservation:canonical-local-refinement-commit-receipt-copy",
+            "a17:logical-kind:canonical-local-refinement-commit-receipt-copy",
+            "a17:target:logical-kind-canonical-local-refinement-commit-receipt-copy",
+            "projection|logical_object_kinds|CanonicalLocalRefinementCommitReceiptCopy",
+            "reference-only",
+            None,
+            "corpus/logical/canonical_local_refinement_commit_receipt_copy/",
+        ),
+        (
+            "PreBootstrapJournalCanonicalizationImportRecord",
+            0x0396,
+            20,
+            "a17:reservation:pre-bootstrap-journal-canonicalization-import-record",
+            "a17:logical-kind:pre-bootstrap-journal-canonicalization-import-record",
+            "a17:target:logical-kind-pre-bootstrap-journal-canonicalization-import-record",
+            "top|PreBootstrapJournalCanonicalizationImportRecord<Role>",
+            "appendix-ambiguous-structure",
+            Some("ambiguous"),
+            "corpus/logical/pre_bootstrap_journal_canonicalization_import_record/",
+        ),
+        (
+            "RestoreJournalKeyDisposition",
+            0x03d9,
+            20,
+            "a17:reservation:restore-journal-key-disposition",
+            "a17:logical-kind:restore-journal-key-disposition",
+            "a17:target:logical-kind-restore-journal-key-disposition",
+            "projection|logical_object_kinds|RestoreJournalKeyDisposition",
+            "reference-only",
+            None,
+            "corpus/logical/restore_journal_key_disposition/",
+        ),
+    ];
+
+    for (
+        name,
+        object_kind,
+        construction_order,
+        reservation_row_id,
+        logical_row_id,
+        target_row_id,
+        source_key,
+        source_disposition,
+        candidate_source_kind,
+        corpus,
+    ) in cases
+    {
+        let logical = identity
+            .logical
+            .iter()
+            .find(|row| row.name == name)
+            .expect("remaining a17 logical shell exists");
+        assert_eq!(logical.object_kind, object_kind);
+        assert_eq!(logical.status, "reserved");
+        assert_eq!(logical.construction_order, construction_order);
+        assert_eq!(logical.role_predicate, "true");
+        assert_eq!(logical.max_size_bytes, 16_777_216);
+        assert_eq!(logical.golden_corpus, corpus);
+        assert!(
+            !identity.wire.iter().any(|row| row.name == name),
+            "an existing logical reservation must not mint a second wire identity"
+        );
+
+        let reservation = catalog
+            .reservations
+            .iter()
+            .find(|row| row.symbol == name)
+            .expect("permanent a17 reservation exists");
+        assert_eq!(reservation.row_id, reservation_row_id);
+        assert_eq!(reservation.row_kind, "logical-kind");
+        assert_eq!(reservation.identity_class, "logical");
+        assert_eq!(reservation.disposition, "existing");
+
+        let disposition = catalog
+            .source_symbol_dispositions
+            .iter()
+            .find(|row| row.symbol == name)
+            .expect("source disposition exists");
+        assert_eq!(disposition.disposition, source_disposition);
+
+        match candidate_source_kind {
+            Some(source_kind) => {
+                let candidate = catalog
+                    .top_level_candidates
+                    .iter()
+                    .find(|row| row.source_key == source_key)
+                    .expect("structural source candidate exists");
+                assert_eq!(candidate.source_kind, source_kind);
+                assert_eq!(candidate.identity_class, "logical");
+            }
+            None => assert!(
+                !catalog
+                    .top_level_candidates
+                    .iter()
+                    .any(|row| row.symbol == name),
+                "reference-only source must use the declared projection fallback"
+            ),
+        }
+
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{name} maps exactly once");
+        assert_eq!(targets[0].row_id, target_row_id);
+        assert_eq!(targets[0].target_row_id, logical_row_id);
+        assert_eq!(targets[0].target_kind, "logical-kind");
+        assert_eq!(targets[0].definition_status, "declared");
+
+        assert!(
+            !identity.fields.iter().any(|field| {
+                field.containing_schema == name
+                    || field.containing_schema.starts_with(&format!("{name}<"))
+            }),
+            "a shell must not invent fields absent from the shorthand census"
+        );
+        assert!(
+            !identity.ordinary_unions.iter().any(|union| {
+                union.containing_schema == name
+                    || union.containing_schema.starts_with(&format!("{name}<"))
+            }),
+            "a shell must not invent ordinary-union rows absent from the census"
+        );
+    }
+
+    let logical = |name: &str| {
+        identity
+            .logical
+            .iter()
+            .find(|row| row.name == name)
+            .expect("source-order precedent exists")
+    };
+    assert_eq!(
+        logical("CanonicalLocalRefinementCommitReceiptCopy").construction_order,
+        logical("CanonicalRestorePlanAvailabilityCopy").construction_order,
+        "the reference-free authenticated receipt copy belongs to the order-6 canonical leaf-copy stratum"
+    );
+    for name in [
+        "PreBootstrapJournalCanonicalizationImportRecord",
+        "RestoreJournalKeyDisposition",
+    ] {
+        assert_eq!(
+            logical(name).construction_order,
+            logical("PreBootstrapDispatchTerminalAccumulator").construction_order,
+            "{name} retains the already-built order-20 terminal accumulator/evidence stratum"
+        );
+    }
+
+    let plan = String::from_utf8(real_plan_source()).expect("the normative plan is UTF-8");
+    assert!(plan.contains(
+        "`CanonicalLocalRefinementCommitReceiptCopy<Role>` verifies the original journal MAC during import"
+    ));
+    assert!(plan.contains(
+        "Apply creates `PreBootstrapJournalCanonicalizationImportRecord<Role> {authority_bound_header,restore_id,journal_id,certificate_bytes_and_digest,terminal_head_bytes_digest_and_cas_version,predecessor_active_head_digest_and_cas_version,sealed_import_ref,terminal_accumulator_ref"
+    ));
+    assert!(plan.contains(
+        "Canonical restore uses exact `RestoreJournalKeyDisposition<Role>` with two noninterchangeable states"
+    ));
+
+    let still_reserved = catalog
+        .reservations
+        .iter()
+        .filter(|row| row.slice_id == "a17" && row.disposition == "reserved")
+        .map(|row| row.symbol.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        still_reserved.is_empty(),
+        "the closeout must exhaust a17's permanent identity reservations: {still_reserved:?}"
+    );
+}
+
+#[test]
+fn idr_a17_outer_artifact_rows_remain_prebootstrap_only() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let cases = [
+        ("PortableRestorePlanArtifact", 0x0001, 16_777_216),
+        ("RestoreStatusReceiptArtifact", 0x0002, 1_048_576),
+        ("AvailabilityCertificateArtifact", 0x0003, 1_048_576),
+    ];
+
+    for (name, artifact_kind, max_size_bytes) in cases {
+        let row = identity
+            .prebootstrap
+            .iter()
+            .find(|row| row.name == name)
+            .expect("outer artifact has a prebootstrap identity row");
+        assert_eq!(row.artifact_kind, artifact_kind);
+        assert_eq!(row.status, "reserved");
+        assert_eq!(row.max_size_bytes, max_size_bytes);
+        assert!(
+            !identity.logical.iter().any(|other| other.name == name)
+                && !identity.physical.iter().any(|other| other.name == name)
+                && !identity.bootstrap.iter().any(|other| other.name == name)
+                && !identity.wire.iter().any(|other| other.name == name),
+            "an outer artifact must inhabit only the prebootstrap class"
+        );
+        assert!(
+            !catalog
+                .top_level_candidates
+                .iter()
+                .any(|candidate| candidate.symbol == name),
+            "outer artifact identity comes from its prebootstrap projection, not a fabricated source candidate"
+        );
+
+        let source_key = format!("projection|prebootstrap_artifact_kinds|{name}");
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|target| target.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{name} maps exactly once");
+        assert_eq!(targets[0].target_kind, "prebootstrap-kind");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+}
+
+#[test]
 fn idr_restore_canonical_acquisition_working_set_reserves_pre_freeze_stratum() {
     let identity = real_identity();
     let logical = identity
