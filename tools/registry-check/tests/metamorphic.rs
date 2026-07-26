@@ -181,7 +181,17 @@ const FIXTURE_LEDGER: &str = "schema_version = 1\n\n\
 /// fixture path: `scope` so tests running in parallel cannot share a directory,
 /// `tag` so each variant's tree is rebuilt identically on every run.
 fn verdict(scope: &str, tag: &str, manifest: &str, members: &[Member]) -> Verdict {
-    let root = std::env::temp_dir().join(format!("fgdb-metamorphic-{scope}-{tag}"));
+    // The pid is not decoration. Several agents run this suite at once on this
+    // machine, and the `remove_dir_all` below opens a fixture by DESTROYING it;
+    // without process scoping, two concurrent runs delete each other's trees
+    // mid-test. Measured before the pid was added: racing two copies of this
+    // binary failed 6-11 of the 36 tests, a different set every round, while a
+    // single run passed every time. The damage lands on the OTHER process, so
+    // it reads as a verdict drift in whatever that agent had just changed.
+    let root = std::env::temp_dir().join(format!(
+        "fgdb-metamorphic-{}-{scope}-{tag}",
+        std::process::id()
+    ));
     // Rebuild from clean: a leftover member directory from an earlier run would
     // silently change what a glob roster resolves to.
     if root.is_dir() {
@@ -593,7 +603,11 @@ fn an_unledgered_site_is_found_under_every_roster_spelling() {
 /// Materialize a one-crate workspace whose `src/lib.rs` is `source`, and report
 /// what `topology::scan_workspace` concluded about that crate.
 fn topology_flags(tag: &str, root_attr: &str, source: &str) -> (bool, bool, bool) {
-    let root = std::env::temp_dir().join(format!("fgdb-metamorphic-topo-{tag}"));
+    // Process-scoped for the reason given on the fixture root above.
+    let root = std::env::temp_dir().join(format!(
+        "fgdb-metamorphic-topo-{}-{tag}",
+        std::process::id()
+    ));
     if root.is_dir() {
         fs::remove_dir_all(&root).expect("clear fixture root");
     }
@@ -1045,7 +1059,11 @@ fn refs_source(body: &str) -> String {
 /// across every variant, so what the relations below compare is exactly the
 /// transformation applied to `refs.rs` or to the kind registry.
 fn arm_binding_codes(tag: &str, refs_src: &str, registry: &str) -> BTreeSet<String> {
-    let root = std::env::temp_dir().join(format!("fgdb-metamorphic-arms-{tag}"));
+    // Process-scoped for the reason given on the fixture root above.
+    let root = std::env::temp_dir().join(format!(
+        "fgdb-metamorphic-arms-{}-{tag}",
+        std::process::id()
+    ));
     if root.is_dir() {
         fs::remove_dir_all(&root).expect("clear fixture root");
     }
@@ -1290,7 +1308,11 @@ fn repo_root() -> std::path::PathBuf {
 /// is exactly the transformation applied to the invariant spine.
 fn registries_with(tag: &str, patch: impl Fn(&str) -> String) -> registry_check::model::Registries {
     let src = repo_root().join("registries");
-    let dir = std::env::temp_dir().join(format!("fgdb-metamorphic-atoms-{tag}"));
+    // Process-scoped for the reason given on the fixture root above.
+    let dir = std::env::temp_dir().join(format!(
+        "fgdb-metamorphic-atoms-{}-{tag}",
+        std::process::id()
+    ));
     if dir.is_dir() {
         fs::remove_dir_all(&dir).expect("clear fixture registries");
     }
@@ -1541,7 +1563,11 @@ fn liveness_codes(
 /// Every artifact below EXISTS, which is the point: the pre-fix predicate says
 /// yes to all of them.
 fn liveness_fixture(tag: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!("fgdb-metamorphic-liveness-{tag}"));
+    // Process-scoped for the reason given on the fixture root above.
+    let root = std::env::temp_dir().join(format!(
+        "fgdb-metamorphic-liveness-{}-{tag}",
+        std::process::id()
+    ));
     if root.is_dir() {
         fs::remove_dir_all(&root).expect("clear liveness fixture");
     }

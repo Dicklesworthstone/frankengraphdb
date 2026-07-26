@@ -94,6 +94,35 @@ status = "present"
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
+# The safe-facing API, which the rows below do NOT cover. Landed by fgdb-n7mb.
+#
+# Every row here says where unsafe code is WRITTEN. None of them says where it
+# is REACHABLE FROM, and those are different claims: a `pub unsafe fn`, or a
+# `*const`/`*mut` in a public signature, adds no `allow` site at all. The ledger
+# stays complete, the site<->row bijection stays satisfied, every gate above
+# stays green — and the island stops being one, because the whole point of an
+# island is that safe crates consume it through safe APIs. The arena charter
+# three entries up has asserted "No public raw pointers and no public unsafe fn"
+# since it was written; until fgdb-n7mb nothing could fail on it.
+#
+# `public_api` in tools/registry-check/src/unsafe_ledger.rs is that checker, and
+# it runs over the crates rostered above: `island_public_unsafe_fn` and
+# `island_public_raw_pointer` on a violation, `island_public_api_unparsed` when
+# a `pub` token in live code is one the reader did not consume as a visibility
+# (a `macro_rules!` body, or any item shape it does not know), and
+# `island_api_unscannable` for a rostered island with no readable source. Its
+# zero is licensed the same way the site count above is: `safe_facing_fixture`
+# is reproduced exactly — findings AND accounted-for tokens — before any island
+# result is trusted.
+#
+# Run against the real tree rather than reasoned about: appending
+# `pub unsafe fn` to control_group.rs fails with `island_public_unsafe_fn`,
+# appending a `pub fn` taking a `*mut u8` fails with
+# `island_public_raw_pointer`, and removing them returns the tree to zero.
+# Today: three islands, six files, 104 public items, no findings.
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 # fgdb-unsafe-simd — landed by fgdb-w1-unsafe-islands-eqrq.
 #
 # Two sites, deliberately of different kinds. The first must be BIT-IDENTICAL to
