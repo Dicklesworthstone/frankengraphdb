@@ -514,3 +514,113 @@ fn an_unledgered_site_is_found_under_every_roster_spelling() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Relation 6 — one reader per fact: the topology scanner and the ledger
+//             scanner must agree on every attribute form
+// ---------------------------------------------------------------------------
+
+/// Materialize a one-crate workspace whose `src/lib.rs` is `source`, and report
+/// what `topology::scan_workspace` concluded about that crate.
+fn topology_flags(tag: &str, root_attr: &str, source: &str) -> (bool, bool, bool) {
+    let root = std::env::temp_dir().join(format!("fgdb-metamorphic-topo-{tag}"));
+    if root.is_dir() {
+        fs::remove_dir_all(&root).expect("clear fixture root");
+    }
+    let dir = root.join("crates/fgdb-probe");
+    fs::create_dir_all(dir.join("src")).expect("member src dir");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"3\"\nmembers = [\n    \"crates/fgdb-probe\",\n]\n\n\
+         [workspace.lints.rust]\nunsafe_code = \"forbid\"\n",
+    )
+    .expect("workspace manifest");
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"fgdb-probe\"\nedition = \"2024\"\n\n[lints]\nworkspace = true\n",
+    )
+    .expect("member manifest");
+    fs::write(dir.join("src/lib.rs"), format!("{root_attr}{source}")).expect("member source");
+
+    let scan = registry_check::topology::scan_workspace(&root).expect("workspace scans");
+    let crate_scan = scan.by_dir("crates/fgdb-probe").expect("crate scanned");
+    (
+        crate_scan.relaxes_unsafe,
+        crate_scan.root_forbids_unsafe,
+        crate_scan.root_denies_unsafe,
+    )
+}
+
+/// Every form in this table either relaxes `unsafe_code` or merely mentions it.
+/// The topology scanner must classify each one the same way the ledger scanner
+/// does — they are two consumers of a single fact, and the substring reader this
+/// replaced disagreed on five of these ten.
+#[test]
+fn topology_and_ledger_agree_on_every_attribute_form() {
+    let hash = '#';
+    let cases: Vec<(&str, String, bool)> = vec![
+        (
+            "plain_allow",
+            format!("{hash}[allow(unsafe_code)]\npub unsafe fn f() {{}}\n"),
+            true,
+        ),
+        // missed by the substring reader: the closing paren is not adjacent
+        (
+            "multi_arg_allow",
+            format!("{hash}[allow(unsafe_code, dead_code)]\npub unsafe fn f() {{}}\n"),
+            true,
+        ),
+        (
+            "spaced_allow",
+            format!("{hash}[allow( unsafe_code )]\npub unsafe fn f() {{}}\n"),
+            true,
+        ),
+        // missed entirely: `warn` was not in the substring vocabulary
+        (
+            "warn",
+            format!("{hash}[warn(unsafe_code)]\npub unsafe fn f() {{}}\n"),
+            true,
+        ),
+        (
+            "expect",
+            format!("{hash}[expect(unsafe_code)]\npub unsafe fn f() {{}}\n"),
+            true,
+        ),
+        (
+            "cfg_attr_allow",
+            format!("{hash}[cfg_attr(unix, allow(unsafe_code))]\npub unsafe fn f() {{}}\n"),
+            true,
+        ),
+        // INVENTED by the substring reader: a doc string is not an attribute
+        (
+            "doc_string_decoy",
+            format!("{hash}[doc = \"never write allow(unsafe_code) here\"]\npub fn f() {{}}\n"),
+            false,
+        ),
+        // INVENTED by the substring reader: this crate's own sources do this
+        (
+            "comment_decoy",
+            "// never write allow(unsafe_code) here\npub fn f() {}\n".to_owned(),
+            false,
+        ),
+        (
+            "cfg_attr_forbid",
+            format!("{hash}[cfg_attr(unix, forbid(unsafe_code))]\npub fn f() {{}}\n"),
+            false,
+        ),
+        ("nothing", "pub fn f() {}\n".to_owned(), false),
+    ];
+    for (tag, source, relaxes) in cases {
+        let ledger_says = !registry_check::unsafe_ledger::scan_sites("<probe>", &source).is_empty();
+        let (topology_says, _, _) = topology_flags(tag, "", &source);
+        assert_eq!(
+            ledger_says, relaxes,
+            "`{tag}`: the ledger scanner is the reference reader and must be right first"
+        );
+        assert_eq!(
+            topology_says, ledger_says,
+            "`{tag}`: two readers of one fact disagreed — topology said {topology_says}, \
+             the ledger scanner said {ledger_says}"
+        );
+    }
+}

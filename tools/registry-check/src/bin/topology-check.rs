@@ -8,20 +8,15 @@
 //! and a difference is a violation: a generated artifact nobody regenerates is
 //! a hand-edited artifact wearing a banner.
 
-#[allow(dead_code)]
-#[path = "../hash.rs"]
-mod hash;
-#[allow(dead_code)]
-#[path = "../jsonl.rs"]
-mod jsonl;
-#[allow(dead_code)]
-#[path = "../toml.rs"]
-mod toml;
-#[allow(dead_code)]
-#[path = "../topology.rs"]
-mod topology;
-
-use jsonl::{arr, b, event, n, s};
+// Linked against the library rather than re-including its modules by `#[path]`,
+// as `unsafe-ledger-check` already does. The `#[path]` form compiled a private
+// second copy of `topology.rs`, which meant `topology` could not reference any
+// module outside its own hand-listed set — and the checker it most needed to
+// reach was `unsafe_ledger`, whose structural attribute scanner is the one
+// reader for "does this source relax unsafe_code". That reachability limit is
+// what kept a duplicate substring reader alive in `topology.rs`.
+use registry_check::jsonl::{arr, b, event, n, s};
+use registry_check::topology;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use topology::{

@@ -1228,7 +1228,23 @@ pub fn scan_workspace(root: &Path) -> Result<WorkspaceScan, String> {
             for path in sources {
                 let source = fs::read_to_string(&path)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
-                if source.contains("allow(unsafe_code)") || source.contains("expect(unsafe_code)") {
+                // One reader for one fact. This was
+                // `source.contains("allow(unsafe_code)")`, a second and weaker
+                // reader of the question `unsafe_ledger::scan_sites` already
+                // answered structurally, and the two disagreed on 5 of 10
+                // attribute forms — every disagreement resolved against the
+                // substring. It MISSED `allow(unsafe_code, clippy::x)` and
+                // `allow( unsafe_code )` (the closing paren is not adjacent) and
+                // `warn(unsafe_code)` (not in its vocabulary at all), and it
+                // INVENTED a relaxation for `#[doc = "allow(unsafe_code)"]` and
+                // for any comment quoting the rule — which this very crate's
+                // sources do, so the substring already reported `registry-check`
+                // as relaxing unsafe while the structural reader found zero
+                // sites in it. That went unnoticed only because
+                // `tools/registry-check` is a tooling member and Law 5 skips it.
+                if !crate::unsafe_ledger::scan_sites(&path.display().to_string(), &source)
+                    .is_empty()
+                {
                     scanned.relaxes_unsafe = true;
                 }
             }
