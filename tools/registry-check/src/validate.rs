@@ -780,26 +780,53 @@ fn validate_active_logical_kind_arms(root: &Path, out: &mut Vec<Violation>) {
     };
 
     // Arms: `    Variant = 0x0001 => "Name",` inside the invocation block.
+    //
+    // The block boundaries and the arm parse are both read out of MASKED source
+    // -- comments and literal contents blanked, every other byte left in place,
+    // so the masked line and the raw line are byte-aligned and an offset in one
+    // names the same column of the other. Only the arm's NAME is taken from the
+    // raw line, bounded by where the masked line says the code ends.
+    //
+    // Reading raw text here was wrong in both directions at once. A commented-
+    // out arm parsed as a live one, so the bijection this function exists to
+    // enforce -- active registry row <-> real Rust arm -- was satisfied by text
+    // the compiler ignores, which is precisely the failure it was written to
+    // catch, reached from the other side. And a trailing comment on a live arm
+    // put the comment's own text inside that arm's name, reporting
+    // `active_logical_kind_name_mismatch` against a row that was correct: a
+    // wrong diagnosis wearing the right verdict.
+    //
+    // `unsafe_ledger::mask_source` is the one reader for "which bytes of this
+    // Rust source are live code". A second comment-stripper here is how a fixed
+    // reader stays fixed while its twin rots.
+    let masked = crate::unsafe_ledger::mask_source(&refs_src);
     let mut arms: BTreeMap<u32, String> = BTreeMap::new();
-    let mut inside = false;
+    let mut depth = 0usize;
     let mut found_macro = false;
-    for line in refs_src.lines() {
+    for (line, raw) in masked.text().lines().zip(refs_src.lines()) {
         let trimmed = line.trim();
-        if !inside {
+        if depth == 0 {
             if trimmed.starts_with("active_logical_object_kinds!") && trimmed.ends_with('{') {
-                inside = true;
+                depth = 1;
                 found_macro = true;
             }
             continue;
         }
-        if trimmed == "}" {
-            inside = false;
+        // Brace DEPTH, not a bare `}`: the block used to end at the first line
+        // that was exactly `}`, so any nested block inside the invocation closed
+        // the arm set early and every arm below it read as missing.
+        let opens = line.bytes().filter(|b| *b == b'{').count();
+        let closes = line.bytes().filter(|b| *b == b'}').count();
+        let after = (depth + opens).saturating_sub(closes);
+        if after == 0 {
+            depth = 0;
             continue;
         }
-        let Some((lhs, rhs)) = trimmed.split_once("=>") else {
+        depth = after;
+        let Some(arrow) = line.find("=>") else {
             continue;
         };
-        let Some((_variant, code_text)) = lhs.split_once('=') else {
+        let Some((_variant, code_text)) = line[..arrow].split_once('=') else {
             continue;
         };
         let code_text = code_text.trim().trim_end_matches(',').trim();
@@ -809,7 +836,12 @@ fn validate_active_logical_kind_arms(root: &Path, out: &mut Vec<Violation>) {
         let Ok(code) = u32::from_str_radix(hex, 16) else {
             continue;
         };
-        let name = rhs
+        // Everything from the arrow to the last live byte of the line. A
+        // trailing comment is blank in the masked line, so `trim_end` drops it
+        // without ever letting it reach the name.
+        let name = raw
+            .get(arrow + 2..line.trim_end().len())
+            .unwrap_or_default()
             .trim()
             .trim_end_matches(',')
             .trim()
@@ -834,37 +866,69 @@ fn validate_active_logical_kind_arms(root: &Path, out: &mut Vec<Violation>) {
         return;
     }
 
-    // Active rows out of the registry.
-    let mut active: BTreeMap<u32, String> = BTreeMap::new();
-    let (mut code, mut name, mut status) = (None, None, None);
-    let flush = |code: &mut Option<u32>,
-                 name: &mut Option<String>,
-                 status: &mut Option<String>,
-                 active: &mut BTreeMap<u32, String>| {
-        if let (Some(c), Some(n), Some(s)) = (*code, name.clone(), status.clone())
-            && s == "active"
-        {
-            active.insert(c, n);
+    // Active rows out of the registry, read as DATA through the one TOML parser
+    // this crate has.
+    //
+    // The line scan this replaced matched `object_kind = 0x`, `name = ` and
+    // `status = ` as literal prefixes of a trimmed line, which is the same
+    // substring-for-structure defect as the arm scanner above, one file over,
+    // and it failed in the direction that manufactures work: `name='Beta'` in
+    // TOML literal quotes, or `name="Beta"` with no spaces around the `=`, made
+    // the row unreadable, so it dropped silently out of the active set and its
+    // perfectly good Rust arm was reported as `arm_without_active_logical_kind`.
+    // A trailing comment on `status` dropped EVERY row and the run reported
+    // `active_logical_kind_none_parsed`. Every one of those is valid TOML that
+    // `appendix_a` -- which generates this very file -- reads without trouble.
+    let table = match crate::toml::parse(&toml_src) {
+        Ok(t) => t,
+        Err(e) => {
+            out.push(Violation::new(
+                "active_logical_kind_registry_unparseable",
+                reg,
+                "logical_object_kinds.toml",
+                format!("cannot parse the registry, so the arm binding was NOT checked: {e}"),
+            ));
+            return;
         }
-        *code = None;
-        *name = None;
-        *status = None;
     };
-    for line in toml_src.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[[kind]]" {
-            flush(&mut code, &mut name, &mut status, &mut active);
-            continue;
+    let rows = match crate::toml::get_table_array(&table, "kind", "logical_object_kinds.toml") {
+        Ok(rows) => rows,
+        Err(e) => {
+            out.push(Violation::new(
+                "active_logical_kind_registry_unparseable",
+                reg,
+                "logical_object_kinds.toml",
+                format!("cannot read the [[kind]] rows, so the arm binding was NOT checked: {e}"),
+            ));
+            return;
         }
-        if let Some(v) = trimmed.strip_prefix("object_kind = 0x") {
-            code = u32::from_str_radix(v.trim(), 16).ok();
-        } else if let Some(v) = trimmed.strip_prefix("name = ") {
-            name = Some(v.trim().trim_matches('"').to_owned());
-        } else if let Some(v) = trimmed.strip_prefix("status = ") {
-            status = Some(v.trim().trim_matches('"').to_owned());
+    };
+    let mut active: BTreeMap<u32, String> = BTreeMap::new();
+    for (i, row) in rows.iter().enumerate() {
+        let ctx = format!("logical_object_kinds.toml.kind[{i}]");
+        // A row this checker cannot read is a violation, never a silent drop:
+        // dropping it is exactly how a live arm came to look orphaned.
+        let (code, name, status) = match (
+            crate::toml::get_int(row, "object_kind", &ctx),
+            crate::toml::get_str(row, "name", &ctx),
+            crate::toml::get_str(row, "status", &ctx),
+        ) {
+            (Ok(code), Ok(name), Ok(status)) => (code, name, status),
+            _ => {
+                out.push(Violation::new(
+                    "active_logical_kind_row_unreadable",
+                    reg,
+                    &ctx,
+                    "a [[kind]] row is missing object_kind, name or status; its arm binding \
+                     cannot be checked and the row is not assumed inactive",
+                ));
+                continue;
+            }
+        };
+        if status == "active" {
+            active.insert(code as u32, name);
         }
     }
-    flush(&mut code, &mut name, &mut status, &mut active);
 
     if active.is_empty() {
         out.push(Violation::new(

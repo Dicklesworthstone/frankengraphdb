@@ -50,13 +50,13 @@
 //! readers. The same relations applied to the remaining readers in this crate
 //! are currently RED and are filed rather than encoded here, so that this suite
 //! stays a gate rather than a known-failing list:
-//! `fgdb-regcheck-commented-arm-counts-live-ctv8`,
 //! `fgdb-regcheck-closure-vacuous-no-control-hp0f`,
 //! `fgdb-regcheck-claimslint-allowlist-dead-excludes-5qcg`. As each is fixed,
 //! its relation belongs here. Already landed and pinned below:
 //! `fgdb-regcheck-two-readers-unsafe-relax-6amm` (relation 6),
 //! `fgdb-regcheck-root-forbid-line-equality-fhnr` (relation 7),
-//! `fgdb-regcheck-scansites-line-anchored-ds45` (relation 8).
+//! `fgdb-regcheck-scansites-line-anchored-ds45` (relation 8),
+//! `fgdb-regcheck-commented-arm-counts-live-ctv8` (relation 9).
 
 use registry_check::unsafe_ledger::{self, LEDGER_PATH};
 use std::collections::BTreeSet;
@@ -958,6 +958,242 @@ fn a_root_policy_the_compiler_cannot_see_is_not_a_policy() {
             !forbids,
             "`{tag}`: this crate root declares nothing to the compiler, and reporting \
              it as forbidding unsafe_code launders an undeclared crate as a declared one"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relation 9 — commenting code out is deleting it
+//              (`fgdb-regcheck-commented-arm-counts-live-ctv8`)
+// ---------------------------------------------------------------------------
+
+/// The registry both arm fixtures are checked against: two `active` kinds.
+const ARM_REGISTRY: &str = "schema_version = 1\n\n\
+     [[kind]]\n\
+     object_kind = 0x0001\n\
+     name = \"Alpha\"\n\
+     status = \"active\"\n\n\
+     [[kind]]\n\
+     object_kind = 0x0002\n\
+     name = \"Beta\"\n\
+     status = \"active\"\n";
+
+fn refs_source(body: &str) -> String {
+    format!("active_logical_object_kinds! {{\n{body}}}\n")
+}
+
+/// Materialize a root holding just the two files the active-arm binding reads,
+/// and return the codes that binding produced.
+///
+/// The registries themselves come from the real repository — the same way
+/// `spine.rs` and `claims.rs` drive `validate_all` — and are held CONSTANT
+/// across every variant, so what the relations below compare is exactly the
+/// transformation applied to `refs.rs` or to the kind registry.
+fn arm_binding_codes(tag: &str, refs_src: &str, registry: &str) -> BTreeSet<String> {
+    let root = std::env::temp_dir().join(format!("fgdb-metamorphic-arms-{tag}"));
+    if root.is_dir() {
+        fs::remove_dir_all(&root).expect("clear fixture root");
+    }
+    fs::create_dir_all(root.join("crates/fgdb-types/src")).expect("fgdb-types src dir");
+    fs::create_dir_all(root.join("registries")).expect("registries dir");
+    fs::write(root.join("crates/fgdb-types/src/refs.rs"), refs_src).expect("refs.rs");
+    fs::write(root.join("registries/logical_object_kinds.toml"), registry).expect("kind registry");
+
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("repo root");
+    let registries =
+        registry_check::model::load_registries(&repo.join("registries")).expect("registries load");
+    registry_check::validate::validate_all(&registries, &root)
+        .into_iter()
+        .map(|v| v.code)
+        .filter(|code| code.contains("logical_kind") || code.contains("arm_without"))
+        .collect()
+}
+
+const BOTH_ARMS: &str = "    Alpha = 0x0001 => \"Alpha\",\n    Beta = 0x0002 => \"Beta\",\n";
+const ALPHA_ONLY: &str = "    Alpha = 0x0001 => \"Alpha\",\n";
+
+/// THE relation. Commenting an arm out is semantically identical to deleting it
+/// — the compiler sees neither — so the two must produce the same verdict.
+///
+/// They did not: a commented-out arm parsed as a live one, because the scanner
+/// split any line containing `=>` out of raw source with no comment handling.
+/// The bijection this binding exists to enforce is what makes the `fgdb-types`
+/// const-assert meaningful, and it was satisfiable by text the compiler ignores.
+/// A kind deactivated in Rust by commenting, with its registry row left
+/// `active`, passed every registry gate while the workspace could not build —
+/// which is the exact failure (84418b2, `main` broken for hours with every gate
+/// green) that this checker was written to catch, reached from the other side.
+#[test]
+fn commenting_out_an_arm_is_the_same_as_deleting_it() {
+    let deleted = arm_binding_codes("deleted", &refs_source(ALPHA_ONLY), ARM_REGISTRY);
+    let present = arm_binding_codes("present", &refs_source(BOTH_ARMS), ARM_REGISTRY);
+
+    // The control that makes the comparison mean something: deleting an arm
+    // must be visible in the first place.
+    assert!(
+        deleted.contains("active_logical_kind_without_arm"),
+        "control: an active row whose arm is deleted must be reported: {deleted:?}"
+    );
+    assert!(
+        present.is_empty(),
+        "control: with both arms present the binding is clean: {present:?}"
+    );
+
+    for (tag, body) in [
+        (
+            "line_comment",
+            format!("{ALPHA_ONLY}    // Beta = 0x0002 => \"Beta\",\n"),
+        ),
+        (
+            "block_comment",
+            format!("{ALPHA_ONLY}    /*\n    Beta = 0x0002 => \"Beta\",\n    */\n"),
+        ),
+        (
+            "trailing_comment_on_a_live_arm",
+            "    Alpha = 0x0001 => \"Alpha\", // Beta = 0x0002 => \"Beta\",\n".to_owned(),
+        ),
+    ] {
+        let commented = arm_binding_codes(tag, &refs_source(&body), ARM_REGISTRY);
+        assert_eq!(
+            commented, deleted,
+            "`{tag}`: this arm is commented out, so the compiler does not see it and \
+             neither may the checker. Commented must equal DELETED, not PRESENT.\n  \
+             deleted:   {deleted:?}\n  commented: {commented:?}"
+        );
+    }
+}
+
+/// The other half of the trailing-comment case: a comment must not corrupt the
+/// arm it trails. Splitting the raw line on the first `=>` put the comment's own
+/// text inside Alpha's name and reported `active_logical_kind_name_mismatch`
+/// against a registry row that was correct — a wrong diagnosis wearing the right
+/// verdict, which costs a reader more than a missed one.
+#[test]
+fn a_trailing_comment_does_not_rename_the_arm_it_follows() {
+    let codes = arm_binding_codes(
+        "trailing_rename",
+        &refs_source("    Alpha = 0x0001 => \"Alpha\", // Beta = 0x0002 => \"Beta\",\n"),
+        ARM_REGISTRY,
+    );
+    assert!(
+        !codes.contains("active_logical_kind_name_mismatch"),
+        "Alpha's arm is spelled exactly as its registry row; only the comment after \
+         it mentions Beta: {codes:?}"
+    );
+}
+
+/// The block must end where the invocation ends, not at the first line that
+/// happens to be `}`. A nested block inside the invocation truncated the arm
+/// set, so every arm below it was reported missing — a fail-closed direction,
+/// but one that manufactures work against correct code.
+#[test]
+fn a_nested_block_does_not_truncate_the_arm_set() {
+    let codes = arm_binding_codes(
+        "nested_block",
+        &refs_source(&format!(
+            "{ALPHA_ONLY}    cfg! {{\n    }}\n    Beta = 0x0002 => \"Beta\",\n"
+        )),
+        ARM_REGISTRY,
+    );
+    assert!(
+        codes.is_empty(),
+        "both arms are present; a nested block between them ends nothing: {codes:?}"
+    );
+}
+
+/// The registry half of the same defect. These spellings all declare exactly the
+/// two active kinds the base declares, and every one of them was read WRONG by
+/// the line scan that matched `name = ` and `status = ` as literal prefixes —
+/// failing in the direction that manufactures work, by dropping a row out of the
+/// active set so its perfectly good Rust arm was reported orphaned.
+#[test]
+fn respelling_the_kind_registry_does_not_change_the_arm_verdict() {
+    let base = arm_binding_codes("reg_base", &refs_source(BOTH_ARMS), ARM_REGISTRY);
+    assert!(
+        base.is_empty(),
+        "control: the base registry and both arms agree: {base:?}"
+    );
+    for (tag, registry) in [
+        // read as an unreadable row -> `arm_without_active_logical_kind`
+        (
+            "literal_quotes",
+            ARM_REGISTRY.replace("name = \"Beta\"", "name = 'Beta'"),
+        ),
+        // read as an unreadable row -> `arm_without_active_logical_kind`
+        (
+            "no_spaces_around_equals",
+            ARM_REGISTRY.replace("name = \"Beta\"", "name=\"Beta\""),
+        ),
+        // dropped EVERY row -> `active_logical_kind_none_parsed`
+        (
+            "trailing_comment_on_status",
+            ARM_REGISTRY.replace("status = \"active\"\n", "status = \"active\"  # pinned\n"),
+        ),
+        (
+            "rows_reordered",
+            "schema_version = 1\n\n\
+             [[kind]]\nobject_kind = 0x0002\nname = \"Beta\"\nstatus = \"active\"\n\n\
+             [[kind]]\nobject_kind = 0x0001\nname = \"Alpha\"\nstatus = \"active\"\n"
+                .to_owned(),
+        ),
+        (
+            "keys_reordered_within_a_row",
+            "schema_version = 1\n\n\
+             [[kind]]\nname = \"Alpha\"\nstatus = \"active\"\nobject_kind = 0x0001\n\n\
+             [[kind]]\nstatus = \"active\"\nobject_kind = 0x0002\nname = \"Beta\"\n"
+                .to_owned(),
+        ),
+    ] {
+        let variant = arm_binding_codes(&format!("reg_{tag}"), &refs_source(BOTH_ARMS), &registry);
+        assert_eq!(
+            variant, base,
+            "`{tag}` declares exactly the kinds the base declares, so the arm binding \
+             must reach the same verdict.\n  base:    {base:?}\n  variant: {variant:?}"
+        );
+    }
+}
+
+/// And the difference direction for the registry: a row that really did change
+/// meaning must still be caught, or the equivalences above are satisfied by a
+/// reader that sees nothing at all.
+#[test]
+fn changing_what_the_kind_registry_means_changes_the_arm_verdict() {
+    let base = arm_binding_codes("regdiff_base", &refs_source(BOTH_ARMS), ARM_REGISTRY);
+    for (tag, registry, expected) in [
+        (
+            "row_deactivated",
+            ARM_REGISTRY.replace(
+                "name = \"Beta\"\nstatus = \"active\"",
+                "name = \"Beta\"\nstatus = \"reserved\"",
+            ),
+            "arm_without_active_logical_kind",
+        ),
+        (
+            "row_renamed",
+            ARM_REGISTRY.replace("name = \"Beta\"", "name = \"Gamma\""),
+            "active_logical_kind_name_mismatch",
+        ),
+        (
+            "row_commented_out",
+            ARM_REGISTRY.replace(
+                "[[kind]]\nobject_kind = 0x0002\nname = \"Beta\"\nstatus = \"active\"",
+                "# [[kind]]\n# object_kind = 0x0002\n# name = \"Beta\"\n# status = \"active\"",
+            ),
+            "arm_without_active_logical_kind",
+        ),
+    ] {
+        let variant = arm_binding_codes(
+            &format!("regdiff_{tag}"),
+            &refs_source(BOTH_ARMS),
+            &registry,
+        );
+        assert_ne!(variant, base, "`{tag}` changed the registry's meaning");
+        assert!(
+            variant.contains(expected),
+            "`{tag}` must be reported as {expected:?}: {variant:?}"
         );
     }
 }

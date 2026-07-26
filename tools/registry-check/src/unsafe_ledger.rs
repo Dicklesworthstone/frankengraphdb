@@ -389,12 +389,24 @@ struct Attribute {
 /// it occupied, so an offset in the masked text names the same column of the
 /// same source line, and a raw line cut at one can never be split inside a
 /// character.
-struct Masked {
+pub struct Masked {
     text: String,
     line_starts: Vec<usize>,
 }
 
 impl Masked {
+    /// The masked text.
+    ///
+    /// It has the same line count as the source and every line has the same
+    /// byte length, so `masked.text().lines().zip(source.lines())` pairs each
+    /// line with its own mask and an offset found in one names the same column
+    /// of the other. Read structure from the mask and values from the source:
+    /// that is what lets a caller keep a string literal's CONTENT (blanked in
+    /// the mask) while still refusing to read a comment.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
     /// The 1-based line containing `offset`.
     fn line_of(&self, offset: usize) -> usize {
         self.line_starts.partition_point(|start| *start <= offset)
@@ -405,7 +417,14 @@ impl Masked {
 /// across lines. Running the masker per candidate — which is what this scanner
 /// used to do — cannot see that a line is already inside a `/*` opened three
 /// lines above it, which is why commented-out attributes counted as real sites.
-fn mask_source(text: &str) -> Masked {
+///
+/// This is the ONE reader for "which bytes of this Rust source are live code".
+/// It is public because `validate`'s active-arm scanner needs the same fact
+/// about `refs.rs` that this module needs about every crate source, and the
+/// separate comment-handling it had instead counted a commented-out match arm
+/// as a live one. Two readers of one fact is how a fixed reader stays fixed
+/// while its twin rots.
+pub fn mask_source(text: &str) -> Masked {
     let mut out = String::with_capacity(text.len());
     let mut line_starts = Vec::new();
     let mut state = MaskState::Code;
