@@ -1682,7 +1682,10 @@ fn an_unrelated_orphan_bead_does_not_make_appendix_bindings_unavailable() {
                 .iter()
                 .any(|v| v.code == "catalog_repository_beads_unavailable"),
             "an unresolvable bead elsewhere must not make Appendix bindings unavailable; got {:?}",
-            violations.iter().map(|v| v.code.as_str()).collect::<Vec<_>>()
+            violations
+                .iter()
+                .map(|v| v.code.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1696,7 +1699,10 @@ fn an_unrelated_orphan_bead_does_not_make_appendix_bindings_unavailable() {
             .iter()
             .any(|v| v.code == "catalog_maintenance_owner_bead_unresolved"),
         "a named bead that resolves nowhere must still fail; got {:?}",
-        violations.iter().map(|v| v.code.as_str()).collect::<Vec<_>>()
+        violations
+            .iter()
+            .map(|v| v.code.as_str())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -5351,60 +5357,187 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     let post_erratum_a19_field_tranche = |schema: &str, name: &str| {
         matches!(
             (schema, name),
-            ("BootstrapReservationUsePublicationCertificate<Role,Kind>", "reservation_claim_import_ref")
-                | ("BootstrapReservationUsePublicationCertificate<Role,Kind>", "claim_to_applied_use_derivation_proof_ref")
-                | ("DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>", "new_database_identity_claim_import_ref")
-                | ("DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>", "allocation_claim_import_ref")
-                | ("PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>", "claimed_head_ref")
-                | ("PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>", "claim_receipt_ref")
-                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "portable_barrier_ref")
-                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "continuity_ancestry_proof_ref")
-                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "fence_receipt_ref")
-                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "cohort_window_ref")
-                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "prebootstrap_portable_expiry_attestation_ref")
-                | ("PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>", "revocation_receipt_ref")
-                | ("RecoveryAllocationEpochAuthority<Role>", "allocation_claim_import_ref")
-                | ("RecoveryBridgeAuthority<Role>", "direct_creation_authority_ref")
-                | ("RecoveryBridgeAuthority<Role>", "source_acquisition_bundle_ref")
-                | ("RecoveryBridgeAuthority<Role>", "latest_source_lease_record_ref")
-                | ("RecoveryBridgeAuthority<Role>", "source_lease_projection_ref")
-                | ("RecoveryIncarnationProjectionResult<Role>", "plan_ref")
-                | ("ReservationAuthorityObservationImport<Role:AuthorityOwningRole>", "current_head_ref")
-                | ("ReservationAuthorityObservationImport<Role:AuthorityOwningRole>", "portable_observation_ref")
-                | ("ReservationAuthorityObservationImport<Role:AuthorityOwningRole>", "time_observation_import_ref")
-                | ("ReservationAuthorityObservationImport<Role:AuthorityOwningRole>", "time_validation_evidence_ref")
+            (
+                "BootstrapReservationUsePublicationCertificate<Role,Kind>",
+                "reservation_claim_import_ref"
+            ) | (
+                "BootstrapReservationUsePublicationCertificate<Role,Kind>",
+                "claim_to_applied_use_derivation_proof_ref"
+            ) | (
+                "DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>",
+                "new_database_identity_claim_import_ref"
+            ) | (
+                "DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>",
+                "allocation_claim_import_ref"
+            ) | (
+                "PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>",
+                "claimed_head_ref"
+            ) | (
+                "PreBootstrapReservationClaimCanonicalImportRecord<Role:AuthorityOwningRole,Kind>",
+                "claim_receipt_ref"
+            ) | (
+                "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>",
+                "portable_barrier_ref"
+            ) | (
+                "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>",
+                "continuity_ancestry_proof_ref"
+            ) | (
+                "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>",
+                "fence_receipt_ref"
+            ) | (
+                "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>",
+                "cohort_window_ref"
+            ) | (
+                "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>",
+                "prebootstrap_portable_expiry_attestation_ref"
+            ) | (
+                "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>",
+                "revocation_receipt_ref"
+            ) | (
+                "RecoveryAllocationEpochAuthority<Role>",
+                "allocation_claim_import_ref"
+            ) | (
+                "RecoveryBridgeAuthority<Role>",
+                "direct_creation_authority_ref"
+            ) | (
+                "RecoveryBridgeAuthority<Role>",
+                "source_acquisition_bundle_ref"
+            ) | (
+                "RecoveryBridgeAuthority<Role>",
+                "latest_source_lease_record_ref"
+            ) | (
+                "RecoveryBridgeAuthority<Role>",
+                "source_lease_projection_ref"
+            ) | ("RecoveryIncarnationProjectionResult<Role>", "plan_ref")
+                | (
+                    "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>",
+                    "current_head_ref"
+                )
+                | (
+                    "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>",
+                    "portable_observation_ref"
+                )
+                | (
+                    "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>",
+                    "time_observation_import_ref"
+                )
+                | (
+                    "ReservationAuthorityObservationImport<Role:AuthorityOwningRole>",
+                    "time_validation_evidence_ref"
+                )
                 | ("ReservationBurnEligibility<Role>", "expired_evidence_ref")
-                | ("ReservationBurnEligibility<Role>", "portable_expiry_attestation_ref")
-                | ("ReservationBurnSource<Role:AuthorityOwningRole>", "current_observation_import_ref")
-                | ("ReservationClaimOperationRecord<Role:AuthorityOwningRole>", "reserved_head_ref")
-                | ("ReservationClaimOperationRecord<Role:AuthorityOwningRole>", "reserved_observation_import_ref")
-                | ("ReservationConsumeAuthorizationBasis<Role,Kind>", "claim_to_applied_use_derivation_proof_ref")
-                | ("ReservationDispositionEligibility<Role:AuthorityOwningRole>", "current_observation_import_ref")
-                | ("ReservationDispositionEligibility<Role:AuthorityOwningRole>", "usable_evidence_ref")
-                | ("ReservationDispositionEligibility<Role:AuthorityOwningRole>", "current_claimed_observation_import_ref")
-                | ("ReservationDispositionEligibility<Role:AuthorityOwningRole>", "expired_evidence_ref")
-                | ("ReservationDispositionEligibility<Role:AuthorityOwningRole>", "portable_expiry_attestation_ref")
-                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "current_reserved_head_ref")
-                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "operation_terminal_history_ref")
-                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "operation_record_ref")
-                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "claimed_head_ref")
-                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "claim_receipt_ref")
-                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "consumption_receipt_ref")
-                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "burn_receipt_ref")
-                | ("ReservationUseRecord<Role:AuthorityOwningRole>", "authenticated_winning_successor_ref")
-                | ("RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>", "prior_lease_barrier_bootstrap_import_ref")
-                | ("RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>", "new_database_and_security_namespace_claim_import_ref")
-                | ("RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>", "creation_evidence_ref")
-                | ("RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>", "audit_clone_boundary_ref")
-                | ("RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>", "allocation_claim_import_ref")
-                | ("RestoreReconciliationCompletionProof<Role>", "reconciliation_root_ref")
+                | (
+                    "ReservationBurnEligibility<Role>",
+                    "portable_expiry_attestation_ref"
+                )
+                | (
+                    "ReservationBurnSource<Role:AuthorityOwningRole>",
+                    "current_observation_import_ref"
+                )
+                | (
+                    "ReservationClaimOperationRecord<Role:AuthorityOwningRole>",
+                    "reserved_head_ref"
+                )
+                | (
+                    "ReservationClaimOperationRecord<Role:AuthorityOwningRole>",
+                    "reserved_observation_import_ref"
+                )
+                | (
+                    "ReservationConsumeAuthorizationBasis<Role,Kind>",
+                    "claim_to_applied_use_derivation_proof_ref"
+                )
+                | (
+                    "ReservationDispositionEligibility<Role:AuthorityOwningRole>",
+                    "current_observation_import_ref"
+                )
+                | (
+                    "ReservationDispositionEligibility<Role:AuthorityOwningRole>",
+                    "usable_evidence_ref"
+                )
+                | (
+                    "ReservationDispositionEligibility<Role:AuthorityOwningRole>",
+                    "current_claimed_observation_import_ref"
+                )
+                | (
+                    "ReservationDispositionEligibility<Role:AuthorityOwningRole>",
+                    "expired_evidence_ref"
+                )
+                | (
+                    "ReservationDispositionEligibility<Role:AuthorityOwningRole>",
+                    "portable_expiry_attestation_ref"
+                )
+                | (
+                    "ReservationUseRecord<Role:AuthorityOwningRole>",
+                    "current_reserved_head_ref"
+                )
+                | (
+                    "ReservationUseRecord<Role:AuthorityOwningRole>",
+                    "operation_terminal_history_ref"
+                )
+                | (
+                    "ReservationUseRecord<Role:AuthorityOwningRole>",
+                    "operation_record_ref"
+                )
+                | (
+                    "ReservationUseRecord<Role:AuthorityOwningRole>",
+                    "claimed_head_ref"
+                )
+                | (
+                    "ReservationUseRecord<Role:AuthorityOwningRole>",
+                    "claim_receipt_ref"
+                )
+                | (
+                    "ReservationUseRecord<Role:AuthorityOwningRole>",
+                    "consumption_receipt_ref"
+                )
+                | (
+                    "ReservationUseRecord<Role:AuthorityOwningRole>",
+                    "burn_receipt_ref"
+                )
+                | (
+                    "ReservationUseRecord<Role:AuthorityOwningRole>",
+                    "authenticated_winning_successor_ref"
+                )
+                | (
+                    "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>",
+                    "prior_lease_barrier_bootstrap_import_ref"
+                )
+                | (
+                    "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>",
+                    "new_database_and_security_namespace_claim_import_ref"
+                )
+                | (
+                    "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>",
+                    "creation_evidence_ref"
+                )
+                | (
+                    "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>",
+                    "audit_clone_boundary_ref"
+                )
+                | (
+                    "RestoreDirectCreationAuthorityRecord<Role:AuthorityOwningRole>",
+                    "allocation_claim_import_ref"
+                )
+                | (
+                    "RestoreReconciliationCompletionProof<Role>",
+                    "reconciliation_root_ref"
+                )
                 | ("RestoreReconciliationStatus<Role>", "proof_ref")
-                | ("RestoreShardBootstrapProjectionCertificate", "projection_ref")
+                | (
+                    "RestoreShardBootstrapProjectionCertificate",
+                    "projection_ref"
+                )
                 | ("RestoreShardReadyBarrier", "local_projection_result_ref")
                 | ("RestoreShardReadyBarrier", "state_root_ref")
                 | ("RestoreShardReadyBarrier", "ready_closure_inventory_ref")
-                | ("RestoreShardReadyBarrier", "active_meta_projection_root_ref")
-                | ("RestoreShardReadyBarrier", "reconciliation_completion_proof_ref")
+                | (
+                    "RestoreShardReadyBarrier",
+                    "active_meta_projection_root_ref"
+                )
+                | (
+                    "RestoreShardReadyBarrier",
+                    "reconciliation_completion_proof_ref"
+                )
         )
     };
     // The a18 StrongRef field tranche. These rows are post-erratum additions,
@@ -5560,7 +5693,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "RestoreSourceKeyAccessInventory<Role:AuthorityOwningRole>"
                     | "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
                     | "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
-        )
+            )
     };
     // j00a replaces five retaining predecessor self-edges with newly catalogued
     // weak generation-adjacency digests. Remove those rows when reconstructing
@@ -5636,7 +5769,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "AuditTicketClaimRecord" => matches!(name, "ticket_ref" | "claiming_control_ref"),
         "BufferedResultManifest" => name == "canonical_schema_ref",
         "GlobalBeginIdempotencyIndex" => {
-            matches!(name, "reservation_ref" | "registration_ref" | "terminal_record_ref")
+            matches!(
+                name,
+                "reservation_ref" | "registration_ref" | "terminal_record_ref"
+            )
         }
         "GlobalBeginReservationRecord" => name == "source_spec_ref",
         "GlobalControlCommand" => matches!(
@@ -5738,14 +5874,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a10_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_j00a_field(&field.containing_schema, &field.stable_name)
-            && !post_erratum_a07_inline_field(
-                &field.containing_schema,
-                &field.stable_name,
-            )
-            && !post_erratum_a07_strong_field(
-                &field.containing_schema,
-                &field.stable_name,
-            )
+            && !post_erratum_a07_inline_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a07_strong_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_weak_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a09_field(&field.containing_schema)
     });

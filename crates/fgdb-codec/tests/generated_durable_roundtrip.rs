@@ -76,7 +76,11 @@ fn varint_round_trips_and_encodes_deterministically() {
         let (prefix_value, consumed) = varint::decode_u64_prefix(&bytes)
             .unwrap_or_else(|error| panic!("prefix decode failed for {value}: {error:?}"));
         assert_eq!(prefix_value, value);
-        assert_eq!(consumed, bytes.len(), "consumed length disagrees for {value}");
+        assert_eq!(
+            consumed,
+            bytes.len(),
+            "consumed length disagrees for {value}"
+        );
     }
 }
 
@@ -214,7 +218,11 @@ fn bitpack_round_trips_every_width_and_encodes_deterministically() {
             values.push(max - 1);
         }
         for sample in deterministic_u64s(16) {
-            values.push(if max == u64::MAX { sample } else { sample % (max + 1) });
+            values.push(if max == u64::MAX {
+                sample
+            } else {
+                sample % (max + 1)
+            });
         }
 
         let encoded = bitpack::encode(&values, width)
@@ -324,13 +332,18 @@ fn origin_birth_order_key_round_trips_and_encodes_deterministically() {
         for &intent in &scalars {
             for &merge in &scalars {
                 for &bits in &identity_bits {
-                    let vertex =
-                        identity::OriginBirthOrder::new(CommitSeq(commit), intent, merge, vid(bits));
+                    let vertex = identity::OriginBirthOrder::new(
+                        CommitSeq(commit),
+                        intent,
+                        merge,
+                        vid(bits),
+                    );
                     let key = vertex.canonical_be_key();
                     assert_eq!(key.len(), identity::ORIGIN_BIRTH_ORDER_KEY_BYTES);
 
-                    let decoded = identity::OriginBirthOrder::<VId>::try_from_canonical_be_key(&key)
-                        .expect("vertex key must decode");
+                    let decoded =
+                        identity::OriginBirthOrder::<VId>::try_from_canonical_be_key(&key)
+                            .expect("vertex key must decode");
                     assert_eq!(decoded, vertex, "vertex origin key round trip failed");
                     assert_eq!(
                         decoded.canonical_be_key(),
@@ -338,8 +351,12 @@ fn origin_birth_order_key_round_trips_and_encodes_deterministically() {
                         "vertex origin key encoding is not deterministic"
                     );
 
-                    let edge =
-                        identity::OriginBirthOrder::new(CommitSeq(commit), intent, merge, eid(bits));
+                    let edge = identity::OriginBirthOrder::new(
+                        CommitSeq(commit),
+                        intent,
+                        merge,
+                        eid(bits),
+                    );
                     let edge_key = edge.canonical_be_key();
                     let edge_decoded =
                         identity::OriginBirthOrder::<EId>::try_from_canonical_be_key(&edge_key)

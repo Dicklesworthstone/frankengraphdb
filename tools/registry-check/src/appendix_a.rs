@@ -4601,7 +4601,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.database_security_namespace_id|27c2c87b407320770f92abe612b2dbea8c1711a0f5fbb2d2464ade311812a4b7|1|8677c9c0a1d9da4b3f075d7489b931065778c6ffe638e14988861f6cf6b177f2|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdentityContinuityRecord|IdentityContinuityRecord.database_security_namespace_id|database_security_namespace_id"],
+        resolved_source_keys: &[
+            "field|IdentityContinuityRecord|IdentityContinuityRecord.database_security_namespace_id|database_security_namespace_id",
+        ],
         rationale: "a09:1892: shorthand member `database_security_namespace_id` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `id256`; the derivation is that the a01 database_security_namespace_id family is id256/32 on both landed rows (RootSlot and its bootstrap projection), and this is the same namespace identity. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4610,7 +4612,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.allocation_epoch|d541ed3794809f0ef5d752c928d72ec1bcfd0c17cea449f10920a3d71b9edd9f|1|c3f7e0f218657bdc349ef2ef87e467a77add5df82107190fca1c77e59b0cb24a|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdentityContinuityRecord|IdentityContinuityRecord.allocation_epoch|allocation_epoch"],
+        resolved_source_keys: &[
+            "field|IdentityContinuityRecord|IdentityContinuityRecord.allocation_epoch|allocation_epoch",
+        ],
         rationale: "a09:1892: shorthand member `allocation_epoch` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that the appendix `*_epoch` family is u64/8 on all seven landed rows. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4619,7 +4623,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.predecessor_digest|665396d9fd096bbae767069b80e0508b68fc19c46a0e57788888f2dc48248b24|1|19b500df548d61c71aa239ca707d6725cd4378bd7d508491c09ceb82d8092f3e|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdentityContinuityRecord|IdentityContinuityRecord.predecessor_digest|predecessor_digest"],
+        resolved_source_keys: &[
+            "field|IdentityContinuityRecord|IdentityContinuityRecord.predecessor_digest|predecessor_digest",
+        ],
         rationale: "a09:1892: shorthand member `predecessor_digest` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `WeakDigest`; the derivation is that the appendix nonretaining-predecessor family is WeakDigest/32 with reference_semantics=weak_digest, digest_class=weak_identity and NO target_schema_id on all five landed rows (a03, a06 x2, a10, a16); that shape is what keeps a continuity chain from becoming a retaining edge. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4628,7 +4634,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.external_registry_id|6bc3502124fcbdca515e4eac242aaa8e585789ebe77287c6f69a9f052dcc856d|1|9316a06ce50767d4adef5b190f94d0c837a5bb0fd5c76cc0ed125fcdc869d106|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdentityContinuityRecord|IdentityContinuityRecord.external_registry_id|external_registry_id"],
+        resolved_source_keys: &[
+            "field|IdentityContinuityRecord|IdentityContinuityRecord.external_registry_id|external_registry_id",
+        ],
         rationale: "a09:1892: shorthand member `external_registry_id` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `id256`; the derivation is that the appendix `*_id` identity family is id256/32, and this names an external registry object by identity rather than by reachability. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4637,7 +4645,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.cas_version|b9189f9e121d3d4ffb094269c468178916a894df898061f41e68d344b94c3112|1|b1a9f78ea88b9c326aab11def768ab20a0a9557dd0373ac7862e537ff61e2fe7|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdentityContinuityRecord|IdentityContinuityRecord.cas_version|cas_version"],
+        resolved_source_keys: &[
+            "field|IdentityContinuityRecord|IdentityContinuityRecord.cas_version|cas_version",
+        ],
         rationale: "a09:1892: shorthand member `cas_version` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that the sibling a01 RootSlot member `continuity_cas_version`, which the slot registers against this same continuity record, is u64/8; the two must byte-match. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4646,7 +4656,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.status|073c1634c496cdb649d1afe0a312bbb4b7e1741b271542e4a436c3b8824b1761|1|a0ff2e33d048dc5dbf1c464838eb8f6862680dd61a193291a66c3ba59f22617e|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdentityContinuityRecord|IdentityContinuityRecord.status|status"],
+        resolved_source_keys: &[
+            "field|IdentityContinuityRecord|IdentityContinuityRecord.status|status",
+        ],
         rationale: "a09:1892: shorthand member `status` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u16`; the derivation is that the source names a closed status but spells no arms, so no union may be minted without fabricating them; the appendix closed-discriminant scalar convention is u16/2, and a later arm registration remains an additive-minor change. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4655,7 +4667,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.issued_at|4d520ac53d4681a6c63ccae9c86713cd1c366506b5aa2b18fb4eb780db866fd9|1|6a184eaf4041cd4db1ee0521a2428cbd945dcc9f6735213307149b7772e3caf0|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdentityContinuityRecord|IdentityContinuityRecord.issued_at|issued_at"],
+        resolved_source_keys: &[
+            "field|IdentityContinuityRecord|IdentityContinuityRecord.issued_at|issued_at",
+        ],
         rationale: "a09:1892: shorthand member `issued_at` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that it is an opaque instant in the issuing registry's own declared domain, the slice pins no width, and u64/8 is the appendix scalar counter/instant convention. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4664,7 +4678,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.signer_set_epoch|c19a7f95576885cbbec6e343a4f083831384152b2b98871674234e0002ba8ece|1|0b673f179de73e02c2d3464be7f93694e48fb32baa2f16ee8475216b894dc698|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdentityContinuityRecord|IdentityContinuityRecord.signer_set_epoch|signer_set_epoch"],
+        resolved_source_keys: &[
+            "field|IdentityContinuityRecord|IdentityContinuityRecord.signer_set_epoch|signer_set_epoch",
+        ],
         rationale: "a09:1892: shorthand member `signer_set_epoch` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that the appendix `*_epoch` family is u64/8 on all seven landed rows. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4673,7 +4689,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.threshold_signatures|b8f26912dae26e6b378bbddcb6cd586deb9c8e0124cbe3d36241043b853706ca|1|0b6923d384e539ad614caa9ac77f82ff4d10217b1fc13aca3708f5273147ffba|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdentityContinuityRecord|IdentityContinuityRecord.threshold_signatures|threshold_signatures"],
+        resolved_source_keys: &[
+            "field|IdentityContinuityRecord|IdentityContinuityRecord.threshold_signatures|threshold_signatures",
+        ],
         rationale: "a09:1892: shorthand member `threshold_signatures` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `bytes`; the derivation is that the appendix `*_signatures` family is bytes/65536 on all six landed rows. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4682,7 +4700,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.lease_id|25200705cd3b9a83f430168138f12797f96abe50f85e871810e9dd56950249e2|1|623a488e9eb256c695b4f059ef267cf94f58472334f6673951a0658b2c4d49d7|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.lease_id|lease_id"],
+        resolved_source_keys: &[
+            "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.lease_id|lease_id",
+        ],
         rationale: "a09:1892: shorthand member `lease_id` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `id256`; the derivation is that the appendix `*_id` identity family is id256/32. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4691,7 +4711,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.graph|eef93e1d14482804277fca0172464032d1a4fdbcc338524059fa1e861454ad4d|1|4533798dfbe9a49dee89a7caa466936d73dda3469563e93e24676741b2adde6a|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.graph|graph"],
+        resolved_source_keys: &[
+            "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.graph|graph",
+        ],
         rationale: "a09:1892: shorthand member `graph` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `id256`; the derivation is that it is a graph identity and takes the appendix id256/32 identity convention. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4700,7 +4722,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.element_kind|aa088cbc779de075858de92bb259728767cb8746340b74c6f0f659846c225194|1|6364cd58f851495d3f6072444d06cab1a325c44c2758f6d982ea9e3f4c694b17|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.element_kind|element_kind"],
+        resolved_source_keys: &[
+            "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.element_kind|element_kind",
+        ],
         rationale: "a09:1892: shorthand member `element_kind` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u16`; the derivation is that it is a closed element-kind discriminant with no arms spelled in the slice, and the appendix `*_kind` scalar convention is u16/2. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4709,7 +4733,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.allocation_epoch|d541ed3794809f0ef5d752c928d72ec1bcfd0c17cea449f10920a3d71b9edd9f|1|469e63fb38a7c7d50df51b1f1bab75004b0107611bcabd3010d88b70b07a9d6d|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.allocation_epoch|allocation_epoch"],
+        resolved_source_keys: &[
+            "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.allocation_epoch|allocation_epoch",
+        ],
         rationale: "a09:1892: shorthand member `allocation_epoch` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that the appendix `*_epoch` family is u64/8 on all seven landed rows. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4718,7 +4744,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.partition|2df962d37ee229c547fb4ebef038a1eaecd0cd6f1c109746f4a9c1fa80329254|1|7c6108fea66dd7a0a06c2f0620185ca9faad96daeffec2a6a62dc2f415fb7244|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.partition|partition"],
+        resolved_source_keys: &[
+            "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.partition|partition",
+        ],
         rationale: "a09:1892: shorthand member `partition` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u32`; the derivation is that it is a partition ordinal within the graph's element-kind space, the slice makes no width claim (the 128-bit identity shape is w2-id-allocator's remit), and u32/4 is the appendix ordinal convention. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4727,7 +4755,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.half_open_range|eeb6be1e0f4c411cf21b96555377321300e43f22e511392c371bcb17d337b6bc|1|139a67ab5ae0ae008d03ef4ed71fcab6c2a2916dabd2734f222d9757ee05a3cc|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.half_open_range|half_open_range"],
+        resolved_source_keys: &[
+            "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.half_open_range|half_open_range",
+        ],
         rationale: "a09:1892: shorthand member `half_open_range` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `bytes`; the derivation is that it is a [start,end) offset pair for which the appendix registers no range wire type, so bytes/16 carries the canonical pair without minting a fabricated record, and the authenticated transcript covers it either way. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4736,7 +4766,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.time_authority_profile_oid|7d5d151447263b02b1178e7231040315f6002b33000de6b55f1779f43ef4e45c|1|0babcc1b128fed3dd610762d6f03c6dde986645590e0f1fe4c5001e20215d2fd|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.time_authority_profile_oid|time_authority_profile_oid"],
+        resolved_source_keys: &[
+            "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.time_authority_profile_oid|time_authority_profile_oid",
+        ],
         rationale: "a09:1892: shorthand member `time_authority_profile_oid` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `oid256`; the derivation is that the appendix `*_oid` family is oid256/32 with identity_class=logical and reference_semantics=weak_digest on both landed non-locator rows (a01 configuration_oid and target_configuration_oid): an authority-group object named by identity and never followed locally. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4745,7 +4777,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.issuance_not_before|da519880d46cf6df1ca5371629112c9dfab9dfe2bb692e7334ef360f70ca52ac|1|0144a9339f836b21255a552f3630d42927902ec5b16ce3e408c99bd8f78bfe63|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.issuance_not_before|issuance_not_before"],
+        resolved_source_keys: &[
+            "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.issuance_not_before|issuance_not_before",
+        ],
         rationale: "a09:1892: shorthand member `issuance_not_before` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that it is a bound in the domain named by the sibling time_authority_profile_oid, the appendix registers no profiled-time wire type, and u64/8 is the scalar instant convention. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4754,7 +4788,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.issuance_not_after|8cf89b1793eef3266d1567e68225f252efc925a66afb922cbc7aa616f5328b4a|1|6ca377a14a681a5889b8e00d787b00108f709a752800beb2449e7345acd400a2|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.issuance_not_after|issuance_not_after"],
+        resolved_source_keys: &[
+            "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.issuance_not_after|issuance_not_after",
+        ],
         rationale: "a09:1892: shorthand member `issuance_not_after` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that it is a bound in the domain named by the sibling time_authority_profile_oid, the appendix registers no profiled-time wire type, and u64/8 is the scalar instant convention. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4763,7 +4799,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.permanent_spent_commitment|01228fb28bd95f97a6b8ea907f31a525d933bb759796795370180ad6da3ea201|1|04fda4fa15c09836ebdf9c492055d1d1b44febe788d4397798a133288591a44c|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.permanent_spent_commitment|permanent_spent_commitment"],
+        resolved_source_keys: &[
+            "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.permanent_spent_commitment|permanent_spent_commitment",
+        ],
         rationale: "a09:1892: shorthand member `permanent_spent_commitment` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `digest256`; the derivation is that the appendix `*_commitment` family is digest256/32; digest_class=weak_identity matches a01 source_identity_or_transition_continuity_commitment, a comparison-only commitment that is never a reachability edge. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4772,7 +4810,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.body_digest|4a30636305daa7c44f8ca32d2d5fbd90130c1d25f94e7c863108d14ac0ae2c8e|1|8578c8f36068bce9b2b579db75d23e94712515c25d9a0b04c95ab03f5cc680fc|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.body_digest|body_digest"],
+        resolved_source_keys: &[
+            "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.body_digest|body_digest",
+        ],
         rationale: "a09:1892: shorthand member `body_digest` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `digest256`; the derivation is that the appendix body_digest family is digest256/32 with digest_class=body on nine of ten landed rows; the registered BodyDigest recipe excludes exactly this field's own tag. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4781,7 +4821,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnAllocationBindingRoot|TxnAllocationBindingRoot.generation|e661f4c935e8a5a83349afb5e347695c2e972e967b50efcd618f93b0b7b4c24b|1|413bf65f3f7168677a2366d715f0676ce18e5c4fc6dc80b2ac884060d5f928b4|shorthand field has no exact type",
         source_locations: &["a09:1900"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.generation|generation"],
+        resolved_source_keys: &[
+            "field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.generation|generation",
+        ],
         rationale: "a09:1900: shorthand member `generation` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that it is a workspace generation counter and takes the appendix u64/8 scalar counter convention. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4790,7 +4832,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnAllocationBindingRoot|TxnAllocationBindingRoot.attempt_identity|019debbed6eaf087554490210988f724f1d55f4dfb220b23b999763451f3dd75|1|dc46f014cf816414ce6eddeade40b21db2d31d4db6158377319a25da0cca28fd|shorthand field has no exact type",
         source_locations: &["a09:1900"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.attempt_identity|attempt_identity"],
+        resolved_source_keys: &[
+            "field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.attempt_identity|attempt_identity",
+        ],
         rationale: "a09:1900: shorthand member `attempt_identity` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `WeakDigest`; the derivation is that the appendix weak-identity family is WeakDigest/32 with reference_semantics=weak_digest and digest_class=weak_identity (a04 predecessor_topology_identity, a07 reservation_identity, a19 source_manifest_identity); the attempt is named, never retained. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4799,7 +4843,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnAllocationBindingRoot|TxnAllocationBindingRoot.through_statement_seq|d76561cc957c944e48f68de06c06a04367cadad5970a21a1aec710e5732ec277|1|84c53e547eb5276256badeaff5c745e1c47ba9eb7c59a2cbaf13b7ca47e181e1|shorthand field has no exact type",
         source_locations: &["a09:1900"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.through_statement_seq|through_statement_seq"],
+        resolved_source_keys: &[
+            "field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.through_statement_seq|through_statement_seq",
+        ],
         rationale: "a09:1900: shorthand member `through_statement_seq` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that the appendix `*_seq` family is u64/8 on all four landed rows. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4808,7 +4854,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnAllocationBindingRoot|TxnAllocationBindingRoot.sorted_spent_commitments|befc3a163e8404d6ebb0f347693b2df3f1f1f8df38bebe6e665a8824b56faabc|1|a5a4ca6372d9e4df081009744b80045be68b2425680d78c0ef9983725021a4e9|shorthand field has no exact type",
         source_locations: &["a09:1900"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.sorted_spent_commitments|sorted_spent_commitments"],
+        resolved_source_keys: &[
+            "field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.sorted_spent_commitments|sorted_spent_commitments",
+        ],
         rationale: "a09:1900: shorthand member `sorted_spent_commitments` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `digest256`; the derivation is that it carries the same commitment values as permanent_spent_commitment as a canonically-sorted set, so digest256/weak_identity with cardinality=many, and the appendix `many` convention caps the aggregate at 16777216. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
@@ -4817,7 +4865,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnAllocationBindingRoot|TxnAllocationBindingRoot.root_digest|c08174a56840d52bb6d7b73ddadebb835c6b18ab21f844f75c149905b0fdad76|1|de96030b1a75d7708b17640d780510379c02b0795504bea70c915c610fe53649|shorthand field has no exact type",
         source_locations: &["a09:1900"],
         resolution: "maps-to-source",
-        resolved_source_keys: &["field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.root_digest|root_digest"],
+        resolved_source_keys: &[
+            "field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.root_digest|root_digest",
+        ],
         rationale: "a09:1900: shorthand member `root_digest` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `digest256`; the derivation is that the appendix digest family is digest256/32, and the value commits the binding-root leaf mapping rather than the record's own preceding bytes, so it is digest_class=transcript with a registered recipe, matching a01 signed_transcript_digest rather than a BodyDigest. The single affected census key maps to that source form.",
     },
 ];

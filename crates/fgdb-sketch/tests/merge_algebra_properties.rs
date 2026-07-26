@@ -25,7 +25,9 @@
 //! All inputs are fixed byte strings. No clock, no entropy, no new
 //! dependencies, and boundary values are preferred over interior samples.
 
-use fgdb_sketch::count_min::{CountMinError, CountMinHashAlgorithm, CountMinProfile, CountMinSketch};
+use fgdb_sketch::count_min::{
+    CountMinError, CountMinHashAlgorithm, CountMinProfile, CountMinSketch,
+};
 use fgdb_sketch::distinct::{DistinctHashAlgorithm, DistinctProfile, DistinctSketch};
 use fgdb_sketch::zone_map::{ByteZoneMap, ZoneMapProfile};
 
@@ -61,7 +63,9 @@ fn count_min_profile() -> CountMinProfile {
 fn count_min_of(stream: &[(&[u8], u64)]) -> CountMinSketch {
     let mut sketch = CountMinSketch::try_new(count_min_profile()).expect("bounded profile");
     for &(key, weight) in stream {
-        sketch.try_observe(key, weight).expect("bounded observation");
+        sketch
+            .try_observe(key, weight)
+            .expect("bounded observation");
     }
     sketch
 }
@@ -318,13 +322,26 @@ fn zone_map_merge_is_commutative_and_bounds_contain_every_observation() {
     let values_right: Vec<&[u8]> = vec![b"\xff\xff", b"cc"];
 
     let mut forward = zone_map_of(&values_left);
-    forward.try_merge(&zone_map_of(&values_right)).expect("merge");
+    forward
+        .try_merge(&zone_map_of(&values_right))
+        .expect("merge");
     let mut backward = zone_map_of(&values_right);
-    backward.try_merge(&zone_map_of(&values_left)).expect("merge");
+    backward
+        .try_merge(&zone_map_of(&values_left))
+        .expect("merge");
 
-    assert_eq!(forward.canonical_state().minimum, backward.canonical_state().minimum);
-    assert_eq!(forward.canonical_state().maximum, backward.canonical_state().maximum);
-    assert_eq!(forward.canonical_state().count, backward.canonical_state().count);
+    assert_eq!(
+        forward.canonical_state().minimum,
+        backward.canonical_state().minimum
+    );
+    assert_eq!(
+        forward.canonical_state().maximum,
+        backward.canonical_state().maximum
+    );
+    assert_eq!(
+        forward.canonical_state().count,
+        backward.canonical_state().count
+    );
 
     // Every observed value must fall inside the merged envelope.
     for value in values_left.iter().chain(&values_right) {
@@ -342,13 +359,31 @@ fn zone_map_merging_an_empty_map_is_an_identity() {
 
     let mut left = populated.clone();
     left.try_merge(&empty).expect("merge with empty");
-    assert_eq!(left.canonical_state().count, populated.canonical_state().count);
-    assert_eq!(left.canonical_state().minimum, populated.canonical_state().minimum);
-    assert_eq!(left.canonical_state().maximum, populated.canonical_state().maximum);
+    assert_eq!(
+        left.canonical_state().count,
+        populated.canonical_state().count
+    );
+    assert_eq!(
+        left.canonical_state().minimum,
+        populated.canonical_state().minimum
+    );
+    assert_eq!(
+        left.canonical_state().maximum,
+        populated.canonical_state().maximum
+    );
 
     let mut right = empty.clone();
     right.try_merge(&populated).expect("merge into empty");
-    assert_eq!(right.canonical_state().count, populated.canonical_state().count);
-    assert_eq!(right.canonical_state().minimum, populated.canonical_state().minimum);
-    assert_eq!(right.canonical_state().maximum, populated.canonical_state().maximum);
+    assert_eq!(
+        right.canonical_state().count,
+        populated.canonical_state().count
+    );
+    assert_eq!(
+        right.canonical_state().minimum,
+        populated.canonical_state().minimum
+    );
+    assert_eq!(
+        right.canonical_state().maximum,
+        populated.canonical_state().maximum
+    );
 }
