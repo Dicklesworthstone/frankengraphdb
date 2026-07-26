@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2250
+target_count = 2251
 projection_fallback_count = 90
-target_source_assignment_sha256 = "47e162b7ad61e06ba9024da2f41c4f04746a98359cc0cf89e2f59ec599a72f68"
+target_source_assignment_sha256 = "328836dd20bd1d8c7f7ca6a54d3208a20758e0d70431a124e74f85db25ba2ba4"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -5351,6 +5351,17 @@ construction_order = 35
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_service_promotion_receipt/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:durable-capability-validation-evidence"
+object_kind = 0x028f
+name = "DurableCapabilityValidationEvidence"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/durable_capability_validation_evidence/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -33335,7 +33346,7 @@ symbol = "DurableCapabilityValidationEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x028f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:durable-capability-verifier-key"
@@ -41913,7 +41924,7 @@ symbol = "DurableCapabilityValidationEvidence"
 generic_signature = ""
 source_key = "top|DurableCapabilityValidationEvidence"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2629"]
 
 [[top_level_candidate]]
@@ -69812,6 +69823,14 @@ target_row_id = "a04:field:topology-state-meta-configuration-ref"
 slice_id = "a04"
 source_key = "field|TopologyState|TopologyState.meta_configuration_ref|meta_configuration_ref"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-durable-capability-validation-evidence"
+target_row_id = "a21:logical-kind:durable-capability-validation-evidence"
+slice_id = "a21"
+source_key = "top|DurableCapabilityValidationEvidence"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

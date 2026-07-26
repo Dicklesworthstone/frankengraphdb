@@ -738,6 +738,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/distributed_serialization_certificate/"
 
 [[kind]]
+object_kind = 0x028f
+name = "DurableCapabilityValidationEvidence"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/durable_capability_validation_evidence/"
+
+[[kind]]
 object_kind = 0x0295
 name = "ExportLeaf"
 status = "reserved"
