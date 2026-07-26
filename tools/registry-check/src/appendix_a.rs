@@ -13123,7 +13123,13 @@ fn validate_annotation_reference_shape(
     shape
 }
 
-fn registered_reference_definition_semantics(family: &str) -> Option<&'static str> {
+/// The plan's wire-tag -> reference-strength declaration (Appendix A,
+/// "Reference semantics" and the W12 history-wrapper paragraph).
+///
+/// Shared with `identity::declared_field_reference_semantics`, which applies the
+/// same declaration to `durable_fields.toml` `[[field]]` rows. ONE table: a
+/// wrapper whose strength changes here must change on both artifacts at once.
+pub(crate) fn registered_reference_definition_semantics(family: &str) -> Option<&'static str> {
     match family {
         "CertifiedRemoteStrongRef"
         | "RegisteredStrongRef"

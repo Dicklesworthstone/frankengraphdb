@@ -101,6 +101,16 @@ const REGISTRY: &[(&str, Coverage)] = &[
         "union_arm_duplicate_target",
         Coverage::Pending("reference-union fixture"),
     ),
+    // ---- wire-tag reference-strength family (fgdb-refsem-not-forced-by-wire-type-gls4) --
+    (
+        "wire_type_reference_semantics_mismatch",
+        Coverage::Witnessed,
+    ),
+    (
+        "reference_semantics_without_reference_type",
+        Coverage::Witnessed,
+    ),
+    ("unclassified_reference_wrapper", Coverage::Witnessed),
     // ---- declared exemptions, each with a reason ---------------------------------------
     (
         "registry_epoch_mismatch",
@@ -150,6 +160,13 @@ const UNREGISTERED_BASELINE: &[&str] = &[
     "disjointness_dual_class",
     "experimental_in_production",
     "external_root_outside_frame",
+    // Landed by 722ff22 (l6xd) after this baseline was frozen by 52fae53. The
+    // first was extracted and unregistered, the other two were invisible
+    // because their code argument was a variable; both halves are fixed and
+    // the three codes are now honestly on the backlog.
+    "field_construction_order_mismatch",
+    "field_identity_class_invalid",
+    "field_identity_class_not_a_field_class",
     "field_unresolved_schema",
     "field_unresolved_wire_type",
     "frame_strong_ref",
@@ -291,6 +308,94 @@ fn sat_dag_future_result() {
     );
 }
 
+/// wire_type_reference_semantics_mismatch: the wire tag declares the strength,
+/// so a `StrongRef` member may not weaken itself to a non-retaining value.
+#[test]
+fn sat_wire_type_reference_semantics_mismatch() {
+    // SATISFYING: StrongRef carrying the strength its tag declares.
+    let mut ok = base();
+    ok.logical = vec![kind("Target", 0x9001, 5), kind("Owner", 0x9002, 20)];
+    ok.fields = vec![strong_field("Owner", "r", "Target", 20)];
+    let ok_codes = codes(&ok);
+    assert!(
+        ok_codes.is_empty(),
+        "satisfying witness fired unrelated violations: {ok_codes:?}"
+    );
+    // TRIGGER: the same row weakened to "none" with its target kept -- the exact
+    // spelling that used to pass every gate while switching off dag_future_result,
+    // bare_strong_ref and every generated reachability/GC walker for the member.
+    let mut bad = base();
+    bad.logical = vec![kind("Target", 0x9001, 5), kind("Owner", 0x9002, 20)];
+    let mut weakened = strong_field("Owner", "r", "Target", 20);
+    weakened.reference_semantics = "none".to_owned();
+    weakened.identity_class = "inline".to_owned();
+    bad.fields = vec![weakened];
+    assert_eq!(
+        codes(&bad),
+        ["wire_type_reference_semantics_mismatch"],
+        "trigger must exercise exactly the wire-tag strength law"
+    );
+}
+
+/// reference_semantics_without_reference_type: the dual direction -- a plain
+/// scalar may not be promoted to a retaining edge by declaring one.
+#[test]
+fn sat_reference_semantics_without_reference_type() {
+    // SATISFYING: a plain u64 scalar declaring no reference role.
+    let mut ok = base();
+    ok.logical = vec![kind("Owner", 0x9002, 20)];
+    let mut scalar = strong_field("Owner", "n", "Target", 20);
+    scalar.exact_wire_type = "u64".to_owned();
+    scalar.identity_class = "scalar".to_owned();
+    scalar.reference_semantics = "none".to_owned();
+    scalar.target_schema_id = None;
+    ok.fields = vec![scalar.clone()];
+    let ok_codes = codes(&ok);
+    assert!(
+        ok_codes.is_empty(),
+        "satisfying witness fired unrelated violations: {ok_codes:?}"
+    );
+    // TRIGGER: the same u64 given a logical class and a resolving, earlier
+    // target, so every NEIGHBOURING guard is satisfied and only the missing
+    // wire tag remains. Without this direction a u64 becomes a retaining edge.
+    let mut bad = base();
+    bad.logical = vec![kind("Target", 0x9001, 5), kind("Owner", 0x9002, 20)];
+    let mut promoted = scalar;
+    promoted.identity_class = "logical".to_owned();
+    promoted.reference_semantics = "strong".to_owned();
+    promoted.target_schema_id = Some("Target".to_owned());
+    bad.fields = vec![promoted];
+    assert_eq!(
+        codes(&bad),
+        ["reference_semantics_without_reference_type"],
+        "trigger must exercise exactly the missing-wire-tag law"
+    );
+}
+
+/// unclassified_reference_wrapper: the completeness guard that keeps the field
+/// law from failing OPEN on a newly minted wrapper.
+#[test]
+fn sat_unclassified_reference_wrapper() {
+    // SATISFYING: the base registry's only wrapper, StrongRef, is classified.
+    let ok = base();
+    let ok_codes = codes(&ok);
+    assert!(
+        ok_codes.is_empty(),
+        "satisfying witness fired unrelated violations: {ok_codes:?}"
+    );
+    // TRIGGER: a structurally valid wrapper whose strength is declared nowhere.
+    let mut bad = base();
+    let mut minted = bad.wire[0].clone();
+    minted.wire_type_id = 0x0002;
+    minted.name = "UnclassifiedWrapperRef".to_owned();
+    bad.wire.push(minted);
+    assert_eq!(
+        codes(&bad),
+        ["unclassified_reference_wrapper"],
+        "trigger must exercise exactly the wrapper-completeness law"
+    );
+}
+
 /// The source-extracted code set and the reviewed coverage/backlog partition
 /// must remain exact. Prevents silent omission and count-preserving swaps.
 #[test]
@@ -299,14 +404,28 @@ fn identity_code_set_is_ratcheted() {
     // otherwise the assertion would be tautological.
     let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/identity.rs"));
     let mut emitted: Vec<&str> = Vec::new();
-    for (i, _) in src.match_indices("out.push(v(") {
-        if let Some(q1) = src[i..].find('"') {
-            let rest = &src[i + q1 + 1..];
-            if let Some(q2) = rest.find('"') {
-                emitted.push(&rest[..q2]);
-            }
+    // A code argument that is NOT a string literal is invisible to this
+    // extractor -- it would skip past the variable and read the next literal,
+    // which is the registry name. That is not a miss you can see: it both hides
+    // the real codes and injects a fake one. Fail loudly instead.
+    let mut nonliteral_sites: Vec<usize> = Vec::new();
+    const OPEN: &str = "out.push(v(";
+    for (i, _) in src.match_indices(OPEN) {
+        let arg = src[i + OPEN.len()..].trim_start();
+        if !arg.starts_with('"') {
+            nonliteral_sites.push(src[..i].matches('\n').count() + 1);
+            continue;
+        }
+        if let Some(end) = arg[1..].find('"') {
+            emitted.push(&arg[1..1 + end]);
         }
     }
+    assert!(
+        nonliteral_sites.is_empty(),
+        "identity.rs passes a non-literal violation code at line(s) {nonliteral_sites:?}; \
+         this extractor cannot see such a code and would silently substitute the next \
+         string literal. Spell every code as a literal at the `out.push(v(` site."
+    );
     emitted.sort_unstable();
     emitted.dedup();
     assert!(

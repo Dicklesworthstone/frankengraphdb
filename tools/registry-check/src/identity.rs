@@ -74,6 +74,51 @@ pub const BUILTIN_WIRE_TYPES: [&str; 11] = [
     "oid256",
 ];
 
+/// The `reference_semantics` a field row MUST carry, given its `exact_wire_type`.
+///
+/// LAW: **the wire tag declares the reference strength.** Appendix A: "Every
+/// ObjectId-bearing edge declares a wire tag: `StrongRef{oid}` (always
+/// followed); `StrongMarkerRef`/`StrongCommandRef` (retain the named history
+/// object); `ConditionalCoordinateRef` ...; `ConditionalMarkerRef`/
+/// `ConditionalCommandRef` (followed until an authenticated matching
+/// checkpoint/cut); `WeakMarkerIdentity` (provenance/identity only);
+/// ... or `WeakDigest{digest}` (comparison only)", and for the W12 wrappers
+/// "Strong variants retain, conditional variants stop only at a verified
+/// matching meta/shard checkpoint cut, and weak variants compare only."
+///
+/// The declaration was already enforced on Appendix A catalog ANNOTATIONS
+/// (`catalog_annotation_reference_semantics_mismatch`) and on nothing else, so a
+/// `[[field]]` row typed `StrongRef` could declare `reference_semantics =
+/// "none"`, keep its target, and pass every gate — silently switching off
+/// `dag_future_result`, `bare_strong_ref`, and every generated reachability /
+/// GC / checkpoint-vector walker for that member, then freezing behind the
+/// append-only field pin (fgdb-refsem-not-forced-by-wire-type-gls4).
+///
+/// Delegates to the one table rather than restating it. Two spelling
+/// adjustments, both forced by the same prose:
+///   * catalog `"identity"` (bare `MarkerRef`/`CommandRef`, which Appendix A
+///     calls "identities, **not reachability by themselves**") has no field
+///     spelling; a member that creates no edge carries `"none"`.
+///   * the three W12 weak-identity tags are wire tags, not catalog *definition*
+///     families, so the catalog table does not name them. "weak variants
+///     compare only" — and both landed rows carry `"none"` with an explicit
+///     "creates no reachability edge" retention rule.
+///
+/// `None` means the type declares nothing; such a row is constrained instead by
+/// `reference_semantics_without_reference_type` plus the target/union guards.
+fn declared_field_reference_semantics(exact_wire_type: &str) -> Option<&'static str> {
+    match crate::appendix_a::registered_reference_definition_semantics(exact_wire_type) {
+        Some("identity") => Some("none"),
+        Some(other) => Some(other),
+        None => match exact_wire_type {
+            "WeakGlobalCommandIdentity" | "WeakMarkerIdentity" | "WeakShardCommandIdentity" => {
+                Some("none")
+            }
+            _ => None,
+        },
+    }
+}
+
 /// Historical assignment witness before the reviewed A10 `CommandRef`
 /// namespace erratum (fgdb-a01-reference-roots-2k0q.1).
 ///
@@ -1393,6 +1438,21 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 format!("unknown kind {:?}", w.kind),
             ));
         }
+        // LAW: a reference wrapper's strength must be declared, so a newly
+        // minted wrapper cannot escape the wire-tag law by being unknown to it.
+        // Without this the field law below fails OPEN on exactly the rows it
+        // was written for: an unclassified wrapper resolves to `None` and its
+        // fields are then free to pick any semantics.
+        if w.kind == "reference_wrapper" && declared_field_reference_semantics(&w.name).is_none() {
+            out.push(v(
+                "unclassified_reference_wrapper",
+                "wire_types",
+                &w.name,
+                "a kind=\"reference_wrapper\" wire tag must declare its reference strength in \
+                 appendix_a::registered_reference_definition_semantics (Appendix A \"Reference \
+                 semantics\"); an unclassified wrapper leaves its field rows unconstrained",
+            ));
+        }
         if w.encoding_context.trim().is_empty()
             || w.allowed_containing_schemas.is_empty()
             || w.max_size_bytes <= 0
@@ -1604,22 +1664,32 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             // and a field can never contribute wire or prebootstrap identity.
             // The admitted set is unchanged - narrowing it to
             // logical|physical|inline would reject 124 landed rows.
-            let code = if matches!(f.identity_class.as_str(), "wire" | "prebootstrap") {
-                "field_identity_class_not_a_field_class"
+            let msg = format!(
+                "identity_class {:?} is not a field identity class; a field admits \
+                 scalar|inline|logical|physical|bootstrap_local (a top_level_candidate \
+                 row does take wire and prebootstrap)",
+                f.identity_class
+            );
+            // Both codes are spelled as LITERALS in the code argument. The
+            // satisfiability ratchet extracts the code set from this source
+            // text; a code passed as a variable is invisible to it, and it
+            // silently read the next literal ("durable_fields") instead --
+            // hiding both of these codes from coverage since 722ff22.
+            if matches!(f.identity_class.as_str(), "wire" | "prebootstrap") {
+                out.push(v(
+                    "field_identity_class_not_a_field_class",
+                    "durable_fields",
+                    &row_id,
+                    msg,
+                ));
             } else {
-                "field_identity_class_invalid"
-            };
-            out.push(v(
-                code,
-                "durable_fields",
-                &row_id,
-                format!(
-                    "identity_class {:?} is not a field identity class; a field admits \
-                     scalar|inline|logical|physical|bootstrap_local (a top_level_candidate \
-                     row does take wire and prebootstrap)",
-                    f.identity_class
-                ),
-            ));
+                out.push(v(
+                    "field_identity_class_invalid",
+                    "durable_fields",
+                    &row_id,
+                    msg,
+                ));
+            }
         }
         if !matches!(
             f.reference_semantics.as_str(),
@@ -1700,6 +1770,49 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                     f.exact_wire_type, f.containing_schema
                 ),
             ));
+        }
+        // LAW: reference_semantics is FORCED by exact_wire_type.
+        //
+        // Direction 1 — a type that declares a strength admits exactly that
+        // value. Direction 2 — a type that declares none may not be promoted
+        // to a retaining edge; `external_root` is excluded because it is the
+        // bootstrap slot's raw-oid external GC root (Appendix A ~1435), which
+        // `external_root_outside_frame` guards separately.
+        //
+        // The generated-reference-union spelling (target_schema_id = None, type
+        // = the union anchored to this row) is already exact via
+        // `union_field_mismatch`, so it is passed through here rather than
+        // double-reported.
+        match declared_field_reference_semantics(&f.exact_wire_type) {
+            Some(declared) if f.reference_semantics != declared => {
+                out.push(v(
+                    "wire_type_reference_semantics_mismatch",
+                    "durable_fields",
+                    &row_id,
+                    format!(
+                        "exact_wire_type {:?} declares reference_semantics {declared:?}, row \
+                         carries {:?}; the wire tag declares the strength and a member may not \
+                         weaken or strengthen it",
+                        f.exact_wire_type, f.reference_semantics
+                    ),
+                ));
+            }
+            None if matches!(f.reference_semantics.as_str(), "strong" | "conditional")
+                && !union_by_name.contains_key(f.exact_wire_type.as_str()) =>
+            {
+                out.push(v(
+                    "reference_semantics_without_reference_type",
+                    "durable_fields",
+                    &row_id,
+                    format!(
+                        "reference_semantics {:?} on exact_wire_type {:?}, which is not a \
+                         reference wrapper and not this row's generated reference union; a \
+                         retaining edge must be carried by a wire tag that declares one",
+                        f.reference_semantics, f.exact_wire_type
+                    ),
+                ));
+            }
+            _ => {}
         }
         // Construction-order consistency with the containing logical kind.
         // LAW: a field's construction_order must EQUAL its containing kind's.

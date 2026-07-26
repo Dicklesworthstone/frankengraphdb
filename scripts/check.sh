@@ -2,44 +2,72 @@
 # =============================================================================
 # check.sh — the convenience quality-gate wrapper (AGENTS.md).
 #
-# Runs, in order, stopping on the first failure:
-#   1. file-coverage closure  (every tracked file is inspected or declared)
-#   2. shell lint  (bash -n + shellcheck over every tracked shell deliverable)
-#   3. cargo fmt --check
-#   4. cargo check --all-targets
-#   5. cargo clippy --all-targets -- -D warnings
-#   6. cargo test
-#   7. registry-check all  (the G0 claims-lint / registry-validation CI job)
-#   8. scripts/g0_identity_e2e.sh  (canonical Appendix A/identity hard gate)
-#   9. scripts/g0_architecture_decisions_e2e.sh  (frozen ADR e2e + provenance)
-#  10. scripts/g0_threat_e2e.sh  (G0 threat/trust model hard gate)
-#  11. threat-check  (frozen threat model + generated document)
-#  12. architecture-check  (frozen ADR + reciprocal provenance)
-#  13. topology-check  (workspace topology + unsafe boundary ledger)
-#  14. unsafe-ledger-check  (unsafe-boundary scanner + its own self-test)
+# Runs every mandatory core check and every unique live checker artifact
+# declared by registries/checker_index.toml. Registered cargo-test artifacts
+# are covered by the workspace cargo-test invocation. Registered scripts and
+# registry-check binaries are discovered and invoked from their artifact paths.
 #
-# Steps 13-14 are load-bearing for step 1: the coverage table claims
+# topology-check and unsafe-ledger-check are load-bearing for the file-coverage
+# closure: the coverage table claims
 # topology-check as the inspector for rust-toolchain.toml,
 # registries/workspace_topology.toml, registries/unsafe_boundary_ledger.toml and
 # docs/WORKSPACE_TOPOLOGY.md. A coverage claim naming a gate this script does not
-# run would be false — which is the exact failure step 1 exists to prevent. If you
-# remove a gate below, move its files to an exemption in the same commit.
+# run would be false. The registry-derived runner makes such a removal UNRUN and
+# red; if a checker is retired, move its files to an exemption in the same
+# commit.
 #
-# STILL MISSING (fgdb-gate-coverage-checksh-omits-live-gates-u7mw, not this
-# script's bead): scripts/g0_claims_e2e.sh, scripts/g0_spine_e2e.sh,
-# scripts/g0_topology_e2e.sh and scripts/w1_cross_crate_determinism_e2e.sh are
-# registered `status = "live"` in registries/checker_index.toml and are not run
-# here. No coverage claim above depends on them.
+# Every expected gate receives exactly one PASS, RED, or UNRUN verdict. The
+# wrapper reports every verdict before exiting, and a green summary is possible
+# only when every registered live artifact was actually executed and passed.
 #
 # When CI is added, wire this script as the CI test step rather than
 # duplicating the commands.
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
+CHECKER_INDEX="$ROOT/registries/checker_index.toml"
 
-echo "==> file-coverage closure (no gate may report green over a file it never opened)"
+CORE_EXPECTED=0
+CORE_EXECUTED=0
+CORE_PASSED=0
+CORE_RED=0
+REGISTERED_EXPECTED=0
+REGISTERED_EXECUTED=0
+REGISTERED_PASSED=0
+REGISTERED_RED=0
+REGISTERED_UNRUN=0
+REGISTERED_CARGO_EXPECTED=0
+REGISTERED_CARGO_EXECUTED=0
+REGISTERED_SCRIPT_EXPECTED=0
+REGISTERED_SCRIPT_EXECUTED=0
+REGISTERED_BINARY_EXPECTED=0
+REGISTERED_BINARY_EXECUTED=0
+REGISTERED_OTHER_EXPECTED=0
+REGISTERED_SEQ=0
+LAST_GATE_RC=0
+GATE_LOG_DIR=""
+COV_TRACKED=0
+COV_INSPECTED=0
+COV_EXEMPT=0
+
+run_core_gate() {
+  local label="$1"
+  shift
+  CORE_EXPECTED=$((CORE_EXPECTED + 1))
+  CORE_EXECUTED=$((CORE_EXECUTED + 1))
+  echo "==> $label"
+  if "$@"; then
+    CORE_PASSED=$((CORE_PASSED + 1))
+    LAST_GATE_RC=0
+    echo "PASS core: $label"
+  else
+    LAST_GATE_RC=$?
+    CORE_RED=$((CORE_RED + 1))
+    echo "RED core: $label (exit $LAST_GATE_RC)" >&2
+  fi
+}
+
 # WHY this step exists: every mandated check is silent on the file types it does
 # not handle. The cargo steps are no-ops on everything that is not Rust, and `ubs`
 # is worse than silent — it exits 0 while printing "nothing was checked (this is
@@ -102,39 +130,45 @@ coverage_exempt_reason() {
       echo "" ;;
   esac
 }
-COV_TRACKED=0
-COV_INSPECTED=0
-COV_EXEMPT=0
-COV_UNCLAIMED=""
-while IFS= read -r covfile; do
-  COV_TRACKED=$((COV_TRACKED + 1))
-  if [ -n "$(coverage_of "$covfile")" ]; then
-    COV_INSPECTED=$((COV_INSPECTED + 1))
-  else
-    covreason="$(coverage_exempt_reason "$covfile")"
-    if [ -n "$covreason" ]; then
-      COV_EXEMPT=$((COV_EXEMPT + 1))
-      printf '    NOT INSPECTED  %-44s %s\n' "$covfile" "$covreason"
-    else
-      COV_UNCLAIMED="$COV_UNCLAIMED $covfile"
-    fi
-  fi
-done < <(git ls-files)
-if [ "$COV_TRACKED" -eq 0 ]; then
-  echo "ERROR: git ls-files returned nothing — this step must never be vacuously green" >&2
-  exit 1
-fi
-if [ -n "$COV_UNCLAIMED" ]; then
-  echo "ERROR: no gate in this script inspects the following tracked file(s):" >&2
-  for covfile in $COV_UNCLAIMED; do echo "    $covfile" >&2; done
-  echo "  Give it an inspector in coverage_of(), or declare it in" >&2
-  echo "  coverage_exempt_reason() with a reason saying why nothing checks it." >&2
-  echo "  Refusing to report green over a file this gate never opened." >&2
-  exit 1
-fi
-echo "    coverage: $COV_TRACKED tracked = $COV_INSPECTED inspected + $COV_EXEMPT declared-not-inspected"
+run_file_coverage() {
+  local covfile
+  local covreason
+  local -a cov_unclaimed=()
 
-echo "==> shell lint (bash -n + shellcheck) over every tracked shell deliverable"
+  COV_TRACKED=0
+  COV_INSPECTED=0
+  COV_EXEMPT=0
+  while IFS= read -r covfile; do
+    COV_TRACKED=$((COV_TRACKED + 1))
+    if [ -n "$(coverage_of "$covfile")" ]; then
+      COV_INSPECTED=$((COV_INSPECTED + 1))
+    else
+      covreason="$(coverage_exempt_reason "$covfile")"
+      if [ -n "$covreason" ]; then
+        COV_EXEMPT=$((COV_EXEMPT + 1))
+        printf '    NOT INSPECTED  %-44s %s\n' "$covfile" "$covreason"
+      else
+        cov_unclaimed+=("$covfile")
+      fi
+    fi
+  done < <(git ls-files)
+  if [ "$COV_TRACKED" -eq 0 ]; then
+    echo "ERROR: git ls-files returned nothing — this step must never be vacuously green" >&2
+    return 1
+  fi
+  if [ "${#cov_unclaimed[@]}" -ne 0 ]; then
+    echo "ERROR: no gate in this script inspects the following tracked file(s):" >&2
+    for covfile in "${cov_unclaimed[@]}"; do
+      echo "    $covfile" >&2
+    done
+    echo "  Give it an inspector in coverage_of(), or declare it in" >&2
+    echo "  coverage_exempt_reason() with a reason saying why nothing checks it." >&2
+    echo "  Refusing to report green over a file this gate never opened." >&2
+    return 1
+  fi
+  echo "    coverage: $COV_TRACKED tracked = $COV_INSPECTED inspected + $COV_EXEMPT declared-not-inspected"
+}
+
 # WHY this step exists: the mandated checks are all cargo-based, and cargo has
 # nothing to say about a .sh file. `ubs` is worse than silent on them — it exits
 # 0 while printing "no supported languages detected ... this is NOT a pass", so
@@ -149,65 +183,416 @@ echo "==> shell lint (bash -n + shellcheck) over every tracked shell deliverable
 # came back as the constant sha256("") on every tree — 64 valid hex chars that
 # passed a length check and made every before/after comparison succeed. The
 # concurrency guard was disabled with no error and no visible symptom.
-SHELL_FILES="$(git ls-files '*.sh' '*.bash')"
-if [ -z "$SHELL_FILES" ]; then
-  echo "ERROR: no shell deliverables found — this step must never be vacuously green" >&2
-  exit 1
-fi
-SHELL_N=0
-for f in $SHELL_FILES; do
-  bash -n "$f" || { echo "ERROR: bash -n failed for $f" >&2; exit 1; }
-  SHELL_N=$((SHELL_N + 1))
-done
-echo "    bash -n: $SHELL_N file(s) parsed"
-if command -v shellcheck >/dev/null 2>&1; then
+run_shell_lint() {
+  local -a shell_files=()
+  local file
+
+  mapfile -t shell_files < <(git ls-files '*.sh' '*.bash')
+  if [ "${#shell_files[@]}" -eq 0 ]; then
+    echo "ERROR: no shell deliverables found — this step must never be vacuously green" >&2
+    return 1
+  fi
+  for file in "${shell_files[@]}"; do
+    bash -n "$file" || {
+      echo "ERROR: bash -n failed for $file" >&2
+      return 1
+    }
+  done
+  echo "    bash -n: ${#shell_files[@]} file(s) parsed"
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    echo "ERROR: shellcheck is not installed; the shell deliverables were NOT checked." >&2
+    echo "  Refusing to report green on an unrun check — install shellcheck or run" >&2
+    echo "  scripts/check.sh on a host that has it." >&2
+    return 1
+  fi
   # Notes are advisory; errors and warnings are not.
-  # shellcheck disable=SC2086
-  shellcheck --severity=warning $SHELL_FILES \
-    || { echo "ERROR: shellcheck reported an error or warning" >&2; exit 1; }
-  echo "    shellcheck: clean at severity>=warning across $SHELL_N file(s)"
-else
-  echo "ERROR: shellcheck is not installed; the shell deliverables were NOT checked." >&2
-  echo "  Refusing to report green on an unrun check — install shellcheck or run" >&2
-  echo "  scripts/check.sh on a host that has it." >&2
+  shellcheck --severity=warning "${shell_files[@]}" || {
+    echo "ERROR: shellcheck reported an error or warning" >&2
+    return 1
+  }
+  echo "    shellcheck: clean at severity>=warning across ${#shell_files[@]} file(s)"
+}
+
+run_ubs() {
+  local log="$GATE_LOG_DIR/core-ubs.log"
+  local ubs_rc
+
+  ubs --only=rust --ci . 2>&1 | tee "$log"
+  ubs_rc=${PIPESTATUS[0]}
+  if [ "$ubs_rc" -ne 0 ]; then
+    return "$ubs_rc"
+  fi
+  if grep -Eiq \
+    'nothing was checked|did not run any scanner|no supported languages detected' \
+    "$log"; then
+    echo "ERROR: UBS exited zero without running a Rust scanner" >&2
+    return 1
+  fi
+}
+
+# Emit one row per unique live (kind, artifact) pair. Multiple symbols may
+# deliberately name the same executable artifact; the artifact is one gate and
+# is executed once. Checker rows use the registry's documented one-line string
+# fields. A live row missing its kind or artifact remains visible as UNRUN.
+live_gate_inventory() {
+  local registry="$1"
+
+  awk '
+    function string_value(line, value) {
+      value = line
+      sub(/^[[:space:]]*[^=]*=[[:space:]]*"/, "", value)
+      sub(/".*$/, "", value)
+      return value
+    }
+    function emit() {
+      if (in_checker && status == "live") {
+        printf "%s\t%s\n", kind, artifact
+      }
+    }
+    /^[[:space:]]*\[\[checker\]\][[:space:]]*(#.*)?$/ {
+      emit()
+      in_checker = 1
+      kind = ""
+      artifact = ""
+      status = ""
+      next
+    }
+    in_checker && /^[[:space:]]*kind[[:space:]]*=/ {
+      kind = string_value($0)
+      next
+    }
+    in_checker && /^[[:space:]]*artifact[[:space:]]*=/ {
+      artifact = string_value($0)
+      next
+    }
+    in_checker && /^[[:space:]]*status[[:space:]]*=/ {
+      status = string_value($0)
+      next
+    }
+    END { emit() }
+  ' "$registry" | LC_ALL=C sort -u
+}
+
+safe_artifact() {
+  local artifact="$1"
+
+  case "$artifact" in
+    "" | /* | .. | ../* | */.. | */../* | *$'\t'* | *$'\r'* | *$'\n'*)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+increment_registered_kind_expected() {
+  case "$1" in
+    cargo-test) REGISTERED_CARGO_EXPECTED=$((REGISTERED_CARGO_EXPECTED + 1)) ;;
+    script) REGISTERED_SCRIPT_EXPECTED=$((REGISTERED_SCRIPT_EXPECTED + 1)) ;;
+    binary) REGISTERED_BINARY_EXPECTED=$((REGISTERED_BINARY_EXPECTED + 1)) ;;
+    *) REGISTERED_OTHER_EXPECTED=$((REGISTERED_OTHER_EXPECTED + 1)) ;;
+  esac
+}
+
+increment_registered_kind_executed() {
+  case "$1" in
+    cargo-test) REGISTERED_CARGO_EXECUTED=$((REGISTERED_CARGO_EXECUTED + 1)) ;;
+    script) REGISTERED_SCRIPT_EXECUTED=$((REGISTERED_SCRIPT_EXECUTED + 1)) ;;
+    binary) REGISTERED_BINARY_EXECUTED=$((REGISTERED_BINARY_EXECUTED + 1)) ;;
+  esac
+}
+
+record_registered_result() {
+  local kind="$1"
+  local artifact="$2"
+  local outcome="$3"
+  local detail="$4"
+
+  REGISTERED_EXPECTED=$((REGISTERED_EXPECTED + 1))
+  increment_registered_kind_expected "$kind"
+  case "$outcome" in
+    pass)
+      REGISTERED_EXECUTED=$((REGISTERED_EXECUTED + 1))
+      REGISTERED_PASSED=$((REGISTERED_PASSED + 1))
+      increment_registered_kind_executed "$kind"
+      echo "PASS registered $kind $artifact — $detail"
+      ;;
+    red)
+      REGISTERED_EXECUTED=$((REGISTERED_EXECUTED + 1))
+      REGISTERED_RED=$((REGISTERED_RED + 1))
+      increment_registered_kind_executed "$kind"
+      echo "RED registered $kind $artifact — $detail" >&2
+      ;;
+    unrun)
+      REGISTERED_UNRUN=$((REGISTERED_UNRUN + 1))
+      echo "UNRUN registered $kind $artifact — $detail" >&2
+      ;;
+    *)
+      echo "internal error: unknown registered outcome $outcome" >&2
+      return 2
+      ;;
+  esac
+}
+
+run_registered_command() {
+  local kind="$1"
+  local artifact="$2"
+  shift 2
+  local log
+  local gate_rc
+
+  REGISTERED_SEQ=$((REGISTERED_SEQ + 1))
+  log="$GATE_LOG_DIR/registered-$REGISTERED_SEQ.log"
+  echo "==> registered $kind: $artifact"
+  if "$@" >"$log" 2>&1; then
+    record_registered_result "$kind" "$artifact" pass "exit 0; log $log"
+  else
+    gate_rc=$?
+    record_registered_result "$kind" "$artifact" red \
+      "exit $gate_rc; log $log"
+  fi
+}
+
+run_registered_gates() {
+  local root="$1"
+  local registry="$2"
+  local cargo_test_rc="$3"
+  local inventory
+  local row
+  local kind
+  local artifact
+  local binary_name
+  local -a gates=()
+
+  if [ ! -f "$registry" ]; then
+    record_registered_result registry "$registry" unrun \
+      "checker registry is absent"
+    return
+  fi
+  if ! inventory="$(live_gate_inventory "$registry")"; then
+    record_registered_result registry "$registry" unrun \
+      "checker registry could not be parsed"
+    return
+  fi
+  if [ -n "$inventory" ]; then
+    mapfile -t gates <<<"$inventory"
+  fi
+  if [ "${#gates[@]}" -eq 0 ]; then
+    record_registered_result registry "$registry" unrun \
+      "no live gate artifacts were discovered"
+    return
+  fi
+
+  for row in "${gates[@]}"; do
+    kind=""
+    artifact=""
+    IFS=$'\t' read -r kind artifact <<<"$row"
+    if ! safe_artifact "$artifact"; then
+      record_registered_result "${kind:-missing-kind}" \
+        "${artifact:-missing-artifact}" unrun \
+        "artifact path is missing or unsafe"
+      continue
+    fi
+    if [ ! -f "$root/$artifact" ]; then
+      record_registered_result "$kind" "$artifact" unrun \
+        "artifact does not exist"
+      continue
+    fi
+    case "$kind" in
+      cargo-test)
+        if [ "$cargo_test_rc" -eq 0 ]; then
+          record_registered_result "$kind" "$artifact" pass \
+            "covered by cargo test --workspace"
+        else
+          record_registered_result "$kind" "$artifact" red \
+            "cargo test --workspace exited $cargo_test_rc"
+        fi
+        ;;
+      script)
+        run_registered_command "$kind" "$artifact" bash "$root/$artifact"
+        ;;
+      binary)
+        case "$artifact" in
+          tools/registry-check/src/main.rs)
+            run_registered_command "$kind" "$artifact" \
+              cargo run -p registry-check --quiet -- all --root "$root"
+            ;;
+          tools/registry-check/src/appendix_a.rs)
+            run_registered_command "$kind" "$artifact" \
+              cargo run -p registry-check --quiet -- appendix --root "$root"
+            ;;
+          tools/registry-check/src/bin/*.rs)
+            binary_name="${artifact##*/}"
+            binary_name="${binary_name%.rs}"
+            run_registered_command "$kind" "$artifact" \
+              cargo run -p registry-check --quiet --bin "$binary_name" -- \
+              --root "$root"
+            ;;
+          *)
+            record_registered_result "$kind" "$artifact" unrun \
+              "no command mapping exists for this live binary artifact"
+            ;;
+        esac
+        ;;
+      *)
+        record_registered_result "$kind" "$artifact" unrun \
+          "live checker kind has no runner"
+        ;;
+    esac
+  done
+}
+
+print_registered_summary() {
+  echo
+  echo "REGISTERED LIVE GATES: $REGISTERED_EXECUTED of $REGISTERED_EXPECTED executed; $REGISTERED_PASSED passed; $REGISTERED_RED red; $REGISTERED_UNRUN unrun"
+  echo "  cargo-test artifacts: $REGISTERED_CARGO_EXECUTED/$REGISTERED_CARGO_EXPECTED executed"
+  echo "  script artifacts:     $REGISTERED_SCRIPT_EXECUTED/$REGISTERED_SCRIPT_EXPECTED executed"
+  echo "  binary artifacts:     $REGISTERED_BINARY_EXECUTED/$REGISTERED_BINARY_EXPECTED executed"
+  if [ "$REGISTERED_OTHER_EXPECTED" -ne 0 ]; then
+    echo "  unknown-kind artifacts: 0/$REGISTERED_OTHER_EXPECTED executed"
+  fi
+  if [ "$REGISTERED_RED" -ne 0 ] || [ "$REGISTERED_UNRUN" -ne 0 ] \
+    || [ "$REGISTERED_EXECUTED" -ne "$REGISTERED_EXPECTED" ]; then
+    echo "GATES RED: a registered live gate failed or was not executed" >&2
+    return 1
+  fi
+  return 0
+}
+
+reset_registered_counters() {
+  REGISTERED_EXPECTED=0
+  REGISTERED_EXECUTED=0
+  REGISTERED_PASSED=0
+  REGISTERED_RED=0
+  REGISTERED_UNRUN=0
+  REGISTERED_CARGO_EXPECTED=0
+  REGISTERED_CARGO_EXECUTED=0
+  REGISTERED_SCRIPT_EXPECTED=0
+  REGISTERED_SCRIPT_EXECUTED=0
+  REGISTERED_BINARY_EXPECTED=0
+  REGISTERED_BINARY_EXECUTED=0
+  REGISTERED_OTHER_EXPECTED=0
+  REGISTERED_SEQ=0
+}
+
+run_mutation_self_test() {
+  local work
+  local fixture_root
+  local failing_log
+  local unrun_log
+
+  work="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-check-self-test.XXXXXX")"
+  fixture_root="$work/root"
+  mkdir -p "$fixture_root/registries" "$fixture_root/scripts" \
+    "$fixture_root/tools"
+  GATE_LOG_DIR="$work/gate-logs"
+  mkdir -p "$GATE_LOG_DIR"
+
+  cat >"$fixture_root/scripts/fails.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 23
+EOF
+  cat >"$fixture_root/registries/failing.toml" <<'EOF'
+[[checker]]
+symbol = "mutation_failing_gate"
+kind = "script"
+artifact = "scripts/fails.sh"
+status = "live"
+EOF
+  failing_log="$work/failing-registration.log"
+  if (
+    reset_registered_counters
+    run_registered_gates \
+      "$fixture_root" "$fixture_root/registries/failing.toml" 0
+    print_registered_summary
+  ) >"$failing_log" 2>&1; then
+    echo "SELF-TEST RED: a registered failing gate produced a green exit" >&2
+    return 1
+  fi
+  if ! grep -Fq "RED registered script scripts/fails.sh" "$failing_log"; then
+    echo "SELF-TEST RED: failing registration was not reported RED" >&2
+    return 1
+  fi
+  if grep -Fq "ALL GATES GREEN" "$failing_log"; then
+    echo "SELF-TEST RED: failing registration printed a green verdict" >&2
+    return 1
+  fi
+
+  cat >"$fixture_root/tools/unwired.rs" <<'EOF'
+// Existing artifact with no supported binary runner mapping.
+EOF
+  cat >"$fixture_root/registries/unwired.toml" <<'EOF'
+[[checker]]
+symbol = "mutation_unwired_gate"
+kind = "binary"
+artifact = "tools/unwired.rs"
+status = "live"
+EOF
+  unrun_log="$work/unrun-registration.log"
+  if (
+    reset_registered_counters
+    run_registered_gates \
+      "$fixture_root" "$fixture_root/registries/unwired.toml" 0
+    print_registered_summary
+  ) >"$unrun_log" 2>&1; then
+    echo "SELF-TEST RED: an unwired registered gate produced a green exit" >&2
+    return 1
+  fi
+  if ! grep -Fq "UNRUN registered binary tools/unwired.rs" "$unrun_log"; then
+    echo "SELF-TEST RED: unwired registration was not reported UNRUN" >&2
+    return 1
+  fi
+  if grep -Fq "ALL GATES GREEN" "$unrun_log"; then
+    echo "SELF-TEST RED: unwired registration printed a green verdict" >&2
+    return 1
+  fi
+
+  echo "CHECK.SH MUTATION SELF-TEST PASS"
+  echo "  failing registered gate: RED"
+  echo "  registered gate without a runner: UNRUN and nonzero"
+  echo "  evidence retained at $work"
+}
+
+case "${1:-}" in
+  "")
+    ;;
+  --self-test)
+    run_mutation_self_test
+    exit $?
+    ;;
+  *)
+    echo "usage: scripts/check.sh [--self-test]" >&2
+    exit 2
+    ;;
+esac
+
+cd "$ROOT" || exit 1
+GATE_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-check-gates.XXXXXX")"
+echo "gate logs: $GATE_LOG_DIR"
+
+run_core_gate \
+  "file-coverage closure (every tracked file inspected or declared)" \
+  run_file_coverage
+run_core_gate \
+  "shell lint (bash -n + shellcheck) over tracked shell deliverables" \
+  run_shell_lint
+run_core_gate "cargo fmt --check" cargo fmt --check
+run_core_gate "cargo check --all-targets" cargo check --all-targets
+run_core_gate "cargo clippy --all-targets -- -D warnings" \
+  cargo clippy --all-targets -- -D warnings
+run_core_gate "cargo test --workspace" cargo test --workspace
+CARGO_TEST_RC="$LAST_GATE_RC"
+run_core_gate "UBS over every tracked Rust source" run_ubs
+
+run_registered_gates "$ROOT" "$CHECKER_INDEX" "$CARGO_TEST_RC"
+
+echo
+echo "CORE GATES: $CORE_EXECUTED of $CORE_EXPECTED executed; $CORE_PASSED passed; $CORE_RED red"
+REGISTERED_SUMMARY_RC=0
+print_registered_summary || REGISTERED_SUMMARY_RC=$?
+if [ "$CORE_RED" -ne 0 ] || [ "$CORE_EXECUTED" -ne "$CORE_EXPECTED" ] \
+  || [ "$REGISTERED_SUMMARY_RC" -ne 0 ]; then
+  echo "QUALITY GATE RED" >&2
   exit 1
 fi
 
-echo "==> cargo fmt --check"
-cargo fmt --check
-
-echo "==> cargo check --all-targets"
-cargo check --all-targets
-
-echo "==> cargo clippy --all-targets -- -D warnings"
-cargo clippy --all-targets -- -D warnings
-
-echo "==> cargo test"
-cargo test
-
-echo "==> registry-check all (claim registries + claims-lint + closure)"
-cargo run -p registry-check --quiet -- all --root "$ROOT" > /dev/null
-
-echo "==> G0 identity E2E (canonical Appendix A catalog + generated projections)"
-scripts/g0_identity_e2e.sh > /dev/null
-
-echo "==> G0 architecture-decisions E2E (frozen ADR + bead provenance)"
-scripts/g0_architecture_decisions_e2e.sh > /dev/null
-
-echo "==> G0 threat-model E2E (trust matrix + authority lattice + footprint)"
-scripts/g0_threat_e2e.sh > /dev/null
-
-echo "==> threat-check (frozen threat model + generated document)"
-cargo run -p registry-check --quiet --bin threat-check -- --root "$ROOT" > /dev/null
-
-echo "==> architecture-check (frozen ADR + reciprocal provenance)"
-cargo run -p registry-check --quiet --bin architecture-check -- --root "$ROOT" > /dev/null
-
-echo "==> topology-check (workspace topology + unsafe boundary ledger)"
-cargo run -p registry-check --quiet --bin topology-check -- --root "$ROOT" > /dev/null
-
-echo "==> unsafe-ledger-check (unsafe-boundary scanner + scanner self-test)"
-cargo run -p registry-check --quiet --bin unsafe-ledger-check -- --root "$ROOT" > /dev/null
-
-echo "ALL GATES GREEN — $COV_INSPECTED/$COV_TRACKED tracked files inspected, \
-$COV_EXEMPT declared-not-inspected (listed at the top of this run)"
+echo "ALL GATES GREEN — core $CORE_EXECUTED/$CORE_EXPECTED; registered live $REGISTERED_EXECUTED/$REGISTERED_EXPECTED; file coverage $COV_INSPECTED/$COV_TRACKED inspected, $COV_EXEMPT declared-not-inspected"

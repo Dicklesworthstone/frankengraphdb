@@ -4837,7 +4837,11 @@ fn idr_reference_union_rejects_registered_wire_name_collision_at_every_lifecycle
         identity.wire.push(WireType {
             wire_type_id: 0x7f00 + i64::try_from(offset).expect("fixture offset fits i64"),
             name,
-            kind: "reference_wrapper".into(),
+            // The collision law is over the wire NAME set and is indifferent to
+            // kind. `record` keeps this a single-law fixture: a fabricated
+            // `reference_wrapper` would additionally, and correctly, trip
+            // `unclassified_reference_wrapper`.
+            kind: "record".into(),
             status: lifecycle.into(),
             containing_union: None,
             wire_tag: None,
@@ -9875,5 +9879,206 @@ fn idr_restore_journal_key_destruction_summary_reserved_logical_shell_is_exact()
                     .any(|resolved| resolved.contains("|RestoreJournalKeyDestructionSummary|"))
         }),
         "shorthand ambiguities must remain open until exact field types are settled"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The wire tag declares the reference strength
+// (fgdb-refsem-not-forced-by-wire-type-gls4).
+//
+// Appendix A: "Every ObjectId-bearing edge declares a wire tag: `StrongRef{oid}`
+// (always followed) ... `WeakMarkerIdentity{marker_oid,commit_seq}`
+// (provenance/identity only) ... `WeakDigest{digest}` (comparison only)", and
+// for the W12 wrappers "Strong variants retain, conditional variants stop only
+// at a verified matching meta/shard checkpoint cut, and weak variants compare
+// only."
+//
+// That declaration was enforced on Appendix A catalog ANNOTATIONS and on
+// nothing else, so a `[[field]]` row typed `StrongRef` could declare
+// `reference_semantics = "none"`, keep its target, and pass every gate --
+// silently switching off dag_future_result, bare_strong_ref and every generated
+// reachability/GC/checkpoint-vector walker for that member, then freezing
+// behind the append-only field pin.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn idr_wire_tag_declares_reference_semantics() {
+    let base = real_identity();
+    let base_codes = codes_without_assignment_drift(&base);
+    for code in [
+        "wire_type_reference_semantics_mismatch",
+        "reference_semantics_without_reference_type",
+        "unclassified_reference_wrapper",
+    ] {
+        assert!(
+            !base_codes.contains(&code.to_string()),
+            "the landed corpus must already satisfy the wire-tag law, but {code} fires: \
+             {base_codes:?}"
+        );
+    }
+
+    // NON-VACUITY. An equivalence over an empty population proves nothing, so
+    // pin the population the law actually constrains.
+    let wrapper_names: BTreeSet<&str> = base
+        .wire
+        .iter()
+        .filter(|w| w.kind == "reference_wrapper")
+        .map(|w| w.name.as_str())
+        .collect();
+    assert!(
+        wrapper_names.len() >= 17,
+        "reference_wrapper population shrank: {}",
+        wrapper_names.len()
+    );
+    let wrapper_typed = base
+        .fields
+        .iter()
+        .filter(|f| wrapper_names.contains(f.exact_wire_type.as_str()))
+        .count();
+    assert!(
+        wrapper_typed >= 300,
+        "wrapper-typed field rows must be a real population, got {wrapper_typed}"
+    );
+
+    // The exact subject and spellings the bead measured, on the real corpus.
+    let subject = |r: &mut IdentityRegistries| -> usize {
+        r.fields
+            .iter()
+            .position(|f| {
+                f.containing_schema == "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+                    && f.stable_name == "authorization_decision_ref"
+            })
+            .expect("the landed StrongRef subject row")
+    };
+
+    // (a) weakened to "none" with its target kept -- the spelling that passed.
+    let mut kept = real_identity();
+    let i = subject(&mut kept);
+    assert_eq!(kept.fields[i].exact_wire_type, "StrongRef");
+    kept.fields[i].reference_semantics = "none".into();
+    kept.fields[i].identity_class = "inline".into();
+    assert!(
+        codes(&kept).contains(&"wire_type_reference_semantics_mismatch".to_string()),
+        "a StrongRef member may not declare reference_semantics = \"none\""
+    );
+
+    // (b) weakened AND target dropped -- the other spelling that passed.
+    let mut dropped = real_identity();
+    let i = subject(&mut dropped);
+    dropped.fields[i].reference_semantics = "none".into();
+    dropped.fields[i].identity_class = "inline".into();
+    dropped.fields[i].target_schema_id = None;
+    assert!(
+        codes(&dropped).contains(&"wire_type_reference_semantics_mismatch".to_string()),
+        "dropping the target does not excuse weakening the tag"
+    );
+
+    // (c) strengthened the other way: StrongRef may not claim to be conditional.
+    let mut stronger = real_identity();
+    let i = subject(&mut stronger);
+    stronger.fields[i].reference_semantics = "conditional".into();
+    assert!(
+        codes(&stronger).contains(&"wire_type_reference_semantics_mismatch".to_string()),
+        "the law is an equality, not a floor"
+    );
+
+    // (d) the dual direction: a plain scalar promoted to a retaining edge with
+    // every NEIGHBOURING guard satisfied (logical class, resolving earlier
+    // target), so only the missing wire tag can be what rejects it.
+    let mut promoted = real_identity();
+    let host = promoted
+        .fields
+        .iter()
+        .position(|f| {
+            f.exact_wire_type == "u64"
+                && f.reference_semantics == "none"
+                && f.target_schema_id.is_none()
+                && f.cardinality == "one"
+        })
+        .expect("a plain u64 control row");
+    let host_order = promoted.fields[host].construction_order;
+    let target = promoted
+        .logical
+        .iter()
+        .filter(|k| k.construction_order <= host_order)
+        .max_by_key(|k| k.construction_order)
+        .expect("an earlier logical kind")
+        .name
+        .clone();
+    promoted.fields[host].identity_class = "logical".into();
+    promoted.fields[host].reference_semantics = "strong".into();
+    promoted.fields[host].target_schema_id = Some(target);
+    assert!(
+        codes(&promoted).contains(&"reference_semantics_without_reference_type".to_string()),
+        "a u64 may not become a retaining edge by declaring one"
+    );
+
+    // (e) the completeness guard: a newly minted wrapper whose strength is
+    // declared nowhere must be rejected, or the law above fails OPEN on exactly
+    // the rows it was written for.
+    let mut minted = real_identity();
+    let mut wrapper = minted
+        .wire
+        .iter()
+        .find(|w| w.name == "StrongRef")
+        .expect("StrongRef is registered")
+        .clone();
+    wrapper.wire_type_id = 0x7ffe;
+    wrapper.name = "UnclassifiedWrapperRef".into();
+    minted.wire.push(wrapper);
+    assert!(
+        codes(&minted).contains(&"unclassified_reference_wrapper".to_string()),
+        "an unclassified reference_wrapper leaves its field rows unconstrained"
+    );
+}
+
+/// The two artifacts share ONE table. Every strength the Appendix A catalog can
+/// declare must have a legal field-level spelling, or a row could be required to
+/// carry a value `bad_field` rejects.
+#[test]
+fn idr_declared_reference_strengths_are_field_spellable() {
+    let base = real_identity();
+    let vocabulary = [
+        "none",
+        "strong",
+        "conditional",
+        "weak_digest",
+        "locator",
+        "external_root",
+    ];
+    // Drive it through the public verdict: for every registered wrapper, a row
+    // carrying each vocabulary value in turn must be accepted for exactly one
+    // of them -- which is the law -- and that one must be in the vocabulary.
+    let mut checked = 0;
+    for name in base
+        .wire
+        .iter()
+        .filter(|w| w.kind == "reference_wrapper")
+        .map(|w| w.name.clone())
+        .collect::<Vec<_>>()
+    {
+        let Some(idx) = base.fields.iter().position(|f| f.exact_wire_type == name) else {
+            continue;
+        };
+        let accepted: Vec<&str> = vocabulary
+            .iter()
+            .copied()
+            .filter(|sem| {
+                let mut r = base.clone();
+                r.fields[idx].reference_semantics = (*sem).into();
+                !codes_without_assignment_drift(&r)
+                    .contains(&"wire_type_reference_semantics_mismatch".to_string())
+            })
+            .collect();
+        assert_eq!(
+            accepted.len(),
+            1,
+            "wrapper {name} must admit exactly one field spelling, got {accepted:?}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 5,
+        "non-vacuity: at least the five wrappers with landed rows are checked, got {checked}"
     );
 }
