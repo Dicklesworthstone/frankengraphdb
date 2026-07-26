@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 46
+registry_epoch = 47
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 46);
+    assert_eq!(epoch, 47);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -4900,11 +4900,17 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 )
         )
     };
-    // A14 adds GcDecisionRecord's retaining configuration-state reference. Remove it as
-    // a cohort so the historical witness still reconstructs the exact namespace
+    // A14 adds GcDecisionRecord's retaining configuration-state reference and
+    // inline applied-control identity. Its two ordinary-union anchors are
+    // already removed by `post_erratum_union`. Remove the remaining A14
+    // cohort so the historical witness still reconstructs the exact namespace
     // predating every post-erratum field increment.
     let post_erratum_a14_field = |schema: &str, name: &str| {
-        schema == "GcDecisionRecord" && name == "stable_configuration_ref"
+        matches!(
+            (schema, name),
+            ("GcDecisionRecord", "stable_configuration_ref")
+                | ("GcDecisionRecord", "applied_control_ref")
+        )
     };
     pre_erratum.fields.retain(|field| {
         !post_erratum_union(&field.exact_wire_type)
@@ -4922,9 +4928,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 65,
+        pre_erratum.fields.len() + 68,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A11 output-reference tranche"
+        "the historical witness must remove every post-erratum field cohort through the A14 GC anchor tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
@@ -4977,6 +4983,93 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         codes(&missing_arm).contains(&"registry_assignment_drift".to_string()),
         "missing closed-union arm must fail the released manifest"
     );
+}
+
+#[test]
+fn idr_a14_gc_decision_and_inventory_union_anchors_are_exact() {
+    let identity = real_identity();
+    let expected_fields = [
+        (
+            "GcDecisionRecord",
+            "applied_control_ref",
+            0x0002,
+            "AppliedControlRef",
+            15,
+            49,
+        ),
+        (
+            "GcDecisionRecord",
+            "decision",
+            0x0007,
+            "GcDecisionRecordDecision",
+            15,
+            16_777_216,
+        ),
+        (
+            "MandatoryInventory",
+            "role",
+            0x0004,
+            "MandatoryInventoryRole",
+            25,
+            16_777_216,
+        ),
+    ];
+    for (schema, name, tag, wire_type, order, max_size) in expected_fields {
+        let field = identity
+            .fields
+            .iter()
+            .find(|field| field.containing_schema == schema && field.stable_name == name)
+            .unwrap_or_else(|| panic!("{schema}.{name} field exists"));
+        assert_eq!(field.field_tag, tag, "{schema}.{name} source-order tag");
+        assert_eq!(field.exact_wire_type, wire_type);
+        assert_eq!(field.cardinality, "one");
+        assert_eq!(field.identity_class, "inline");
+        assert_eq!(field.reference_semantics, "none");
+        assert_eq!(field.target_schema_id, None);
+        assert_eq!(field.construction_order, order);
+        assert_eq!(field.role_predicate, "true");
+        assert_eq!(field.version_status, "reserved");
+        assert_eq!(field.max_size_bytes, max_size);
+    }
+
+    for (union_name, schema, tag) in [
+        ("GcDecisionRecordDecision", "GcDecisionRecord", 0x0007),
+        ("MandatoryInventoryRole", "MandatoryInventory", 0x0004),
+    ] {
+        let union = identity
+            .ordinary_unions
+            .iter()
+            .find(|union| union.union_name == union_name)
+            .unwrap_or_else(|| panic!("{union_name} ordinary union exists"));
+        assert_eq!(union.containing_schema, schema);
+        assert_eq!(union.field_tag, Some(tag));
+        assert_eq!(
+            identity
+                .fields
+                .iter()
+                .filter(|field| field.exact_wire_type == union_name)
+                .count(),
+            1,
+            "{union_name} has exactly one matching field anchor"
+        );
+    }
+
+    let catalog = real_appendix_catalog();
+    for source_key in [
+        "field|GcDecisionRecord|GcDecisionRecord.applied_control_ref|applied_control_ref",
+        "field|GcDecisionRecord|GcDecisionRecord.decision|decision",
+        "field|MandatoryInventory|MandatoryInventory.role|role",
+    ] {
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|target| target.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{source_key} maps exactly once");
+        assert_eq!(targets[0].slice_id, "a14");
+        assert_eq!(targets[0].target_kind, "field");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
 }
 
 #[test]

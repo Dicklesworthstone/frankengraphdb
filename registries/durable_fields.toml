@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 46
+registry_epoch = 47
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -518,6 +518,20 @@ max_size_bytes = 65536
 
 [[field]]
 containing_schema = "GcDecisionRecord"
+field_tag = 0x0002
+stable_name = "applied_control_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline applied-control identity retained with the GC decision record; it identifies the already-applied control without creating an independent reachability edge (a14:2045)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+containing_schema = "GcDecisionRecord"
 field_tag = 0x0003
 stable_name = "stable_configuration_ref"
 exact_wire_type = "StrongRef"
@@ -530,6 +544,20 @@ role_predicate = "true"
 retention_and_cut_rule = "retaining reference to the configuration state the GC decision was computed against; every follower recomputes the candidate from it, so it stays reachable for as long as the decision does (a14)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "GcDecisionRecord"
+field_tag = 0x0007
+stable_name = "decision"
+exact_wire_type = "GcDecisionRecordDecision"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "closed Rejected or Accepted decision payload retained inline with the GC decision record; it carries no independent reachability edge (a14:2045)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "GenesisMetaProjectionPayload"
@@ -925,6 +953,20 @@ reference_semantics = "none"
 construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "closed union Live|Revoked|Expired; the issuance record's current standing, carrying the revocation or time-validation evidence that selected it, lives/dies with the issuance record (a16:2173)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "MandatoryInventory"
+field_tag = 0x0004
+stable_name = "role"
+exact_wire_type = "MandatoryInventoryRole"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "closed Local, Meta, or Shard role discriminator retained inline with the mandatory inventory; the Shard arm carries only its inline shard_id (a14:2039)"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -4446,6 +4488,7 @@ max_size_bytes = 1
 union_name = "GcDecisionRecordDecision"
 containing_schema = "GcDecisionRecord"
 union_path = "GcDecisionRecord.decision"
+field_tag = 0x0007
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["GcDecisionRecord"]
@@ -5349,6 +5392,7 @@ max_size_bytes = 16777216
 union_name = "MandatoryInventoryRole"
 containing_schema = "MandatoryInventory"
 union_path = "MandatoryInventory.role"
+field_tag = 0x0004
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["MandatoryInventory"]

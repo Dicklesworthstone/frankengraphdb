@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2222
+target_count = 2225
 projection_fallback_count = 90
-target_source_assignment_sha256 = "9468ede540cfd5f8fdb593a0b602c01790892351e2537f1c7f888e87fd6f3d53"
+target_source_assignment_sha256 = "e8ea0dc447330c7c9129482ab3dd9da7c76e1cac0f1922eb41c031b862f6f210"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 33
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 46
+registry_epoch = 47
 
 [[logical_kind]]
 slice_id = "a03"
@@ -13829,6 +13829,22 @@ max_size_bytes = 16777216
 
 [[field]]
 slice_id = "a14"
+row_id = "a14:field:gc-decision-record-applied-control-ref"
+containing_schema = "GcDecisionRecord"
+field_tag = 0x0002
+stable_name = "applied_control_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline applied-control identity retained with the GC decision record; it identifies the already-applied control without creating an independent reachability edge (a14:2045)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a14"
 row_id = "a14:field:gc-decision-record-stable-configuration-ref"
 containing_schema = "GcDecisionRecord"
 field_tag = 0x0003
@@ -13843,6 +13859,38 @@ role_predicate = "true"
 retention_and_cut_rule = "retaining reference to the configuration state the GC decision was computed against; every follower recomputes the candidate from it, so it stays reachable for as long as the decision does (a14)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+slice_id = "a14"
+row_id = "a14:field:gc-decision-record-decision"
+containing_schema = "GcDecisionRecord"
+field_tag = 0x0007
+stable_name = "decision"
+exact_wire_type = "GcDecisionRecordDecision"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "closed Rejected or Accepted decision payload retained inline with the GC decision record; it carries no independent reachability edge (a14:2045)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a14"
+row_id = "a14:field:mandatory-inventory-role"
+containing_schema = "MandatoryInventory"
+field_tag = 0x0004
+stable_name = "role"
+exact_wire_type = "MandatoryInventoryRole"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "closed Local, Meta, or Shard role discriminator retained inline with the mandatory inventory; the Shard arm carries only its inline shard_id (a14:2039)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union]]
 slice_id = "a01"
@@ -29661,6 +29709,7 @@ row_id = "a14:union:gc-decision-record-decision-f2eb86b26bf4ede9"
 union_name = "GcDecisionRecordDecision"
 containing_schema = "GcDecisionRecord"
 union_path = "GcDecisionRecord.decision"
+field_tag = 0x0007
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["GcDecisionRecord"]
@@ -29700,6 +29749,7 @@ row_id = "a14:union:mandatory-inventory-role-265cf33f3496616a"
 union_name = "MandatoryInventoryRole"
 containing_schema = "MandatoryInventory"
 union_path = "MandatoryInventory.role"
+field_tag = 0x0004
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["MandatoryInventory"]
@@ -66557,10 +66607,34 @@ target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
+row_id = "a14:target:field-gc-decision-record-applied-control-ref"
+target_row_id = "a14:field:gc-decision-record-applied-control-ref"
+slice_id = "a14"
+source_key = "field|GcDecisionRecord|GcDecisionRecord.applied_control_ref|applied_control_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
 row_id = "a14:target:field-gc-decision-record-stable-configuration-ref"
 target_row_id = "a14:field:gc-decision-record-stable-configuration-ref"
 slice_id = "a14"
 source_key = "field|GcDecisionRecord|GcDecisionRecord.stable_configuration_ref|stable_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:field-gc-decision-record-decision"
+target_row_id = "a14:field:gc-decision-record-decision"
+slice_id = "a14"
+source_key = "field|GcDecisionRecord|GcDecisionRecord.decision|decision"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:field-mandatory-inventory-role"
+target_row_id = "a14:field:mandatory-inventory-role"
+slice_id = "a14"
+source_key = "field|MandatoryInventory|MandatoryInventory.role|role"
 target_kind = "field"
 definition_status = "declared"
 
