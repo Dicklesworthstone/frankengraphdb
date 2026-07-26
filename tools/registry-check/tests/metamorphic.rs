@@ -17,6 +17,51 @@
 //! workspace read. A fix that is not pinned by a test which fails without it has
 //! a half-life. These relations are that pin.
 //!
+//! # The generalisation, which is worth more than any single fix
+//!
+//! One session produced seven bugs whose signature was "looks exactly like a
+//! pass". FOUR OF THE SEVEN WERE IN THE ENFORCEMENT TOOLING ITSELF, and every
+//! one of those four was the same mistake: **a substring, prefix, or
+//! whole-line-equality test standing in for structural parsing, inside a checker
+//! whose entire job is to be unfoolable.** Not four unrelated bugs — one bug,
+//! found four times, because each was fixed where it was noticed instead of
+//! where it came from:
+//!
+//! * `u9zp` — the workspace `unsafe_code = "forbid"` check could not fail on
+//!   this repository at all. `Cargo.toml` line 10 is a prose comment containing
+//!   the literal string, so `text.contains(…)` was satisfied no matter what the
+//!   lint table said; deleting both live lint lines left it passing. Every claim
+//!   this project makes about memory safety being structural rested on it.
+//! * `lx43` — a cosmetic requote of the member roster (TOML literal quotes)
+//!   took `crates_scanned` from 14 to ZERO, and every "0 sites, 0 orphans, pass"
+//!   below it was then quantified over nothing.
+//! * `ds45` — attribute candidacy from the trimmed line prefix: an attribute
+//!   sharing a line was invisible, and one inside a block comment was counted.
+//! * `ctv8` — the same, one file over, in the active-arm binding: a
+//!   commented-out match arm satisfied a bijection the compiler could not see.
+//!
+//! The lesson that generalises: **structure the reader, not the pattern.** A
+//! fix that widens a match leaves the class intact; a fix that parses the input
+//! as what it is (a TOML document, a masked source file, an attribute) removes
+//! it. And the direction that hides longest is not the false alarm but the
+//! silent acceptance — three of the four above were discovered only by asking
+//! "what would this checker do if it were broken?", which is exactly what an
+//! equivalence relation asks mechanically.
+//!
+//! Two habits follow, and both are cheap:
+//!
+//! 1. **One reader per fact.** Where two pieces of code answer the same
+//!    question, they will drift, and the weaker one wins by being the one that
+//!    happens to run. `unsafe_ledger::mask_source` is the single reader for
+//!    "which bytes of this Rust source are live code"; `topology` and `validate`
+//!    both consume it rather than re-deriving it. Relation 6 pins that.
+//! 2. **A zero result must be licensed.** `scanner_fixture` gives the site
+//!    scanner a known non-zero answer, `workspace_has_no_members` makes an empty
+//!    roster a violation, and `ClosureReport::licensed` proves the closure
+//!    compiler reaches something before a zero-reach run may report a pass. Any
+//!    checker that can conclude "nothing found" needs one of these, or it cannot
+//!    tell an empty input from a broken self.
+//!
 //! # The two relations
 //!
 //! Both are stated over a TRANSFORMATION of an input, never over an absolute
