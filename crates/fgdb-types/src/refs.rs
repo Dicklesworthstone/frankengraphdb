@@ -149,6 +149,13 @@ active_logical_object_kinds! {
     AuthorityBindingRecord = 0x0008 => "AuthorityBindingRecord",
     CommitCapsule = 0x000a => "CommitCapsule",
     PreparedCommitRecord = 0x000b => "PreparedCommitRecord",
+    DurableCapabilityValidationEvidence = 0x028f => "DurableCapabilityValidationEvidence",
+    DurableCapabilityHeader = 0x0550 => "DurableCapabilityHeader",
+    ExactDurableCapabilityKindBody = 0x0551 => "ExactDurableCapabilityKindBody",
+    CanonicalDurableCapabilityBytes = 0x0552 => "CanonicalDurableCapabilityBytes",
+    DurableCapabilityMacInput = 0x0553 => "DurableCapabilityMacInput",
+    DurableCapabilityValidationActionScope = 0x0554 => "DurableCapabilityValidationActionScope",
+    DurableCapabilityValidatorSemanticsRegistry = 0x0555 => "DurableCapabilityValidatorSemanticsRegistry",
 }
 
 /// Implemented by every durable logical object type that references can
