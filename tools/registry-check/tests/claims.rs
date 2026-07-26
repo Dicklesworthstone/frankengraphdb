@@ -299,6 +299,101 @@ fn claims_proof_lane_manifest_resolves() {
     );
 }
 
+/// The second law in `proof_lanes.toml`'s header, which was prose and no code:
+/// "A proof-class clause may cite a declared lane **only while its own status is
+/// `stub`**" (`fgdb-proof-lane-checked-is-only-file-existence-0f1l`).
+///
+/// A `declared` lane's artifact does not exist yet — the registry says so in the
+/// same sentence. A clause promoted off `stub` while citing one has been
+/// promoted against a proof nobody has written, and `validate` checked only that
+/// the lane id RESOLVED.
+///
+/// The control comes first and it is the load-bearing half: all ten clauses that
+/// cite a lane are `stub` today, so a test that only asserted the shipped tree is
+/// clean would pass with the rule deleted.
+#[test]
+fn claims_proof_lane_declared_requires_a_stub_clause() {
+    let real = real_registries();
+    let citing: Vec<_> = real
+        .invariants
+        .invariants
+        .iter()
+        .flat_map(|invariant| invariant.clauses.iter())
+        .filter(|clause| clause.proof_lane.is_some())
+        .collect();
+    assert!(
+        !citing.is_empty(),
+        "control: no shipped clause cites a proof lane at all, so this law is \
+         quantified over nothing"
+    );
+    assert!(
+        real.proof_lanes
+            .iter()
+            .any(|lane| lane.status == "declared"),
+        "control: no shipped lane is \"declared\", so the illegal combination cannot be \
+         formed from real rows"
+    );
+    assert!(
+        !codes(&real).contains(&"proof_lane_declared_while_clause_promoted".to_string()),
+        "the shipped tree must satisfy the law it states"
+    );
+
+    // The mutation, in both illegal directions. `dormant` is in the clause status
+    // vocabulary and is not `stub`, so it is illegal too — a rule written as
+    // `!= "live"` would pass the first mutant and miss the second.
+    for status in ["live", "dormant"] {
+        let mut promoted = real_registries();
+        let mut mutated = None;
+        'outer: for invariant in promoted.invariants.invariants.iter_mut() {
+            for clause in invariant.clauses.iter_mut() {
+                let cites_declared = clause.proof_lane.as_ref().is_some_and(|id| {
+                    real.proof_lanes
+                        .iter()
+                        .any(|lane| &lane.id == id && lane.status == "declared")
+                });
+                if cites_declared && clause.status == "stub" {
+                    clause.status = status.to_string();
+                    mutated = Some(clause.key.clone());
+                    break 'outer;
+                }
+            }
+        }
+        let key = mutated.expect("a stub clause citing a declared lane exists to mutate");
+        assert!(
+            codes(&promoted).contains(&"proof_lane_declared_while_clause_promoted".to_string()),
+            "promoting {key} to {status:?} while its lane is still \"declared\" must fail \
+             CI, got {:?}",
+            codes(&promoted)
+        );
+    }
+
+    // The other direction: promoting the LANE instead of the clause is legal, so
+    // the rule must not fire on it. A rule that rejected every non-stub clause
+    // citing any lane would pass every assertion above and block Genesis.
+    let mut both_promoted = real_registries();
+    let mut lane_id = None;
+    'outer: for invariant in both_promoted.invariants.invariants.iter_mut() {
+        for clause in invariant.clauses.iter_mut() {
+            if let Some(id) = clause.proof_lane.clone() {
+                clause.status = "live".into();
+                lane_id = Some(id);
+                break 'outer;
+            }
+        }
+    }
+    let lane_id = lane_id.expect("a clause citing a lane exists");
+    for lane in both_promoted.proof_lanes.iter_mut() {
+        if lane.id == lane_id {
+            lane.status = "checked".into();
+        }
+    }
+    assert!(
+        !codes(&both_promoted).contains(&"proof_lane_declared_while_clause_promoted".to_string()),
+        "a live clause citing a CHECKED lane is the legal combination and must not fire \
+         this rule"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Property: the class lattice admits only weaker-informs-stronger; an
 // enforce/justify edge from a weaker class to a stronger one is never

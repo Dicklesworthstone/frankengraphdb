@@ -102,7 +102,8 @@
 //! `fgdb-regcheck-scansites-line-anchored-ds45` (relation 8),
 //! `fgdb-regcheck-commented-arm-counts-live-ctv8` (relation 9),
 //! `fgdb-regcheck-closure-vacuous-no-control-hp0f` (relation 10),
-//! `fgdb-checker-index-live-is-only-file-existence-tl0o` (relation 11).
+//! `fgdb-checker-index-live-is-only-file-existence-tl0o` (relation 11),
+//! `fgdb-proof-lane-checked-is-only-file-existence-0f1l` (relation 12).
 //!
 //! Relation 11 is the same bug one level above every other entry in that list.
 //! The others are checkers that read a source file the wrong way; it is the
@@ -112,6 +113,41 @@
 //! others do not need: each mutant is asserted to satisfy the pre-fix predicate
 //! verbatim, so the tests state in one place that the old reader could not tell
 //! the cases apart and the new one must.
+//!
+//! Relation 12 is relation 11 ONE ARTIFACT OVER, found thirty minutes later:
+//! `proof_lanes.toml`'s `status = "checked"` was the same `Path::is_file()`,
+//! against the strongest claim class in the system. It is in this file rather
+//! than beside it because the fix is the habit, not the patch — the lane does
+//! not re-derive "is a gate running this", it DELEGATES to the reader relation
+//! 11 built, and one of its tests pins that by requiring the lane's verdict to
+//! carry that reader's own words. Every entry above exists because somebody
+//! wrote the second copy.
+//!
+//! # What the pin is worth, measured (2026-07-26)
+//!
+//! A fix that no test fails without has a half-life. So the reversion was run,
+//! on a depth-matched scratchpad copy, in both halves:
+//!
+//! * **Restoring the pre-fix lane body** — `assess_lane` replaced by
+//!   `root.join(artifact).is_file()`, verbatim — turns **five** tests red:
+//!   `a_lane_whose_gate_is_not_live_is_not_checked`,
+//!   `a_proof_that_admits_its_conclusion_is_not_checked`,
+//!   `a_model_that_checks_no_property_is_not_checked`,
+//!   `a_lane_of_an_unreadable_system_is_not_silently_checked`, and
+//!   `a_lane_artifact_path_is_checked_before_it_is_joined`. 38 of 43 stay green.
+//! * **Deleting the clause-side law** turns **one** test red, in the other
+//!   suite: `claims::claims_proof_lane_declared_requires_a_stub_clause`.
+//!
+//! Under BOTH reversions every control stays green —
+//! `proof_lane_base_and_readers_are_licensed`,
+//! `proof_lane_checked_arm_is_vacuous_today_and_this_is_what_licenses_it`,
+//! `liveness_base_and_readers_are_licensed`, `base_verdict_is_not_vacuous`,
+//! `every_shipped_live_row_is_provably_live`, `claims_real_registries_validate`
+//! and `claims_proof_lane_manifest_resolves`. That is the reading that matters:
+//! the reds are caused by the missing law and not by a harness that broke, and
+//! the last two are the sharpest of them — the shipped registries still validate
+//! and the pre-existing proof-lane suite still passes with the fix reverted,
+//! which is precisely why nothing caught this for as long as it stood.
 
 use registry_check::unsafe_ledger::{self, LEDGER_PATH};
 use std::collections::BTreeSet;
@@ -1624,6 +1660,74 @@ fn liveness_fixture(tag: &str) -> std::path::PathBuf {
         "#!/usr/bin/env bash\n# exit 1 would be the honest answer here\necho checked\nexit 0\n",
     )
     .expect("toothless script");
+
+    // --- proof-lane artifacts (relation 12) ------------------------------
+    //
+    // Every file below EXISTS, for the same reason as everything above it: the
+    // pre-fix proof-lane predicate was `root.join(artifact).is_file()` and says
+    // yes to all of them.
+    fs::create_dir_all(root.join("formal/lean")).expect("lean dir");
+    fs::create_dir_all(root.join("formal/tla")).expect("tla dir");
+    // Assembled from a `char` for the same reason the assertion above is: a
+    // literal admit token in a file this suite ships is a real site the moment
+    // somebody points a reader at these sources.
+    let sorry = format!("{}orry", 's');
+    fs::write(
+        root.join("formal/lean/Proved.lean"),
+        "theorem two : 1 + 1 = 2 := by decide\n",
+    )
+    .expect("proved lean");
+    fs::write(
+        root.join("formal/lean/Admitted.lean"),
+        format!("theorem two : 1 + 1 = 2 := {sorry}\n"),
+    )
+    .expect("admitted lean");
+    fs::write(
+        root.join("formal/lean/Axiomatised.lean"),
+        "axiom two : 1 + 1 = 2\n",
+    )
+    .expect("axiomatised lean");
+    // The file the bead names: it exists, it builds, it says nothing.
+    fs::write(root.join("formal/lean/Empty.lean"), "").expect("empty lean");
+    // The MASKED control: an admit token that is not an admit. A reader that
+    // widened its pattern instead of parsing its input calls this one red.
+    fs::write(
+        root.join("formal/lean/Masked.lean"),
+        format!(
+            "/- an earlier draft of this ended in {sorry}, /- even nested -/ -/\n\
+             -- and this line mentions {sorry} too\n\
+             theorem two : 1 + 1 = 2 := by decide\n"
+        ),
+    )
+    .expect("masked lean");
+
+    fs::write(
+        root.join("formal/tla/Checked.tla"),
+        "---- MODULE Checked ----\nTypeOK == TRUE\n====\n",
+    )
+    .expect("checked tla");
+    fs::write(
+        root.join("formal/tla/Checked.cfg"),
+        "SPECIFICATION Spec\nINVARIANT TypeOK\n",
+    )
+    .expect("checked cfg");
+    fs::write(
+        root.join("formal/tla/Unchecked.tla"),
+        "---- MODULE Unchecked ----\nTypeOK == TRUE\n====\n",
+    )
+    .expect("unchecked tla");
+    // A config that runs and asserts nothing — the TLA+ spelling of a `main`
+    // that can only return success.
+    fs::write(
+        root.join("formal/tla/Unchecked.cfg"),
+        "SPECIFICATION Spec\n\\* INVARIANT TypeOK\nCONSTANTS N = 3\n",
+    )
+    .expect("unchecked cfg");
+    fs::write(
+        root.join("formal/tla/NoConfig.tla"),
+        "---- MODULE NoConfig ----\nTypeOK == TRUE\n====\n",
+    )
+    .expect("configless tla");
     root
 }
 
@@ -1969,5 +2073,411 @@ fn checker_rows_survive_a_meaning_preserving_requote() {
     assert_eq!(
         base, after,
         "a cosmetic requote changed which checkers this registry declares"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Relation 12 — `status = "checked"` on a PROOF LANE must mean the same three
+//               things, and the INVOKED fact must be answered by the reader
+//               that already answers it
+//               (`fgdb-proof-lane-checked-is-only-file-existence-0f1l`)
+// ---------------------------------------------------------------------------
+//
+// Relation 11 removed `Path::is_file()` from `checker_index.toml`. The identical
+// hole was one artifact over: `registries/proof_lanes.toml`'s header defines
+// `checked` as "the artifact exists in-repo AND is CI-checked", and
+// `validate_proof_lanes` proved it with `root.join(&lane.artifact).is_file()` —
+// the pre-`tl0o` read, down to the missing path-safety guard. Nothing ran a
+// prover, so `theorem foo : False := sorry` was `checked`, and so was an empty
+// file.
+//
+// These are DIFFERENCE relations built exactly like relation 11's, with the same
+// sharpest-available witness: [`legacy_lane_is_file_predicate`] recomputes the
+// ENTIRE pre-fix predicate and every mutant below is asserted to satisfy it. So
+// each test says in one place, "the old reader called this checked and the new
+// one must not."
+//
+// The relation that matters most is [`a_lane_whose_gate_is_not_live_is_not_checked`]:
+// it does not re-derive what a running gate is, it asserts that the lane's
+// verdict CARRIES `liveness`'s own words about the gate. That is the delegation,
+// pinned. A parallel implementation would pass every other test in this block
+// and fail that one.
+
+/// The pre-fix proof-lane predicate, verbatim.
+///
+/// Note what is missing: there is no path-safety guard. That is not a
+/// simplification in the copy — `validate_proof_lanes` really did call
+/// `root.join(&lane.artifact).is_file()` on an unvalidated path, which is the
+/// same omission `tl0o` found in `validate`'s checker read and fixed only there.
+fn legacy_lane_is_file_predicate(root: &std::path::Path, artifact: &str) -> bool {
+    root.join(artifact).is_file()
+}
+
+fn lane(id: &str, system: &str, artifact: &str, status: &str) -> registry_check::model::Lane {
+    registry_check::model::Lane {
+        id: id.to_owned(),
+        lane: system.to_owned(),
+        model_scope: "scoped for the fixture: proves 1 + 1 = 2 and nothing else".to_owned(),
+        artifact: artifact.to_owned(),
+        status: status.to_owned(),
+        checked_by: Some("lane_gate".to_owned()),
+    }
+}
+
+/// The `checker_index` roster the fixture lanes bind to: one gate that is live
+/// in the full sense, one that claims live and cannot fail, one still a stub.
+fn lane_gates() -> Vec<registry_check::model::Checker> {
+    let mut stub = checker("stub_gate", "script", "scripts/gate.sh", "artifact");
+    stub.status = "stub".to_owned();
+    vec![
+        checker("lane_gate", "script", "scripts/gate.sh", "artifact"),
+        checker(
+            "toothless_gate",
+            "script",
+            "scripts/toothless.sh",
+            "artifact",
+        ),
+        stub,
+    ]
+}
+
+fn lane_defects(
+    root: &std::path::Path,
+    row: &registry_check::model::Lane,
+) -> Vec<registry_check::liveness::Defect> {
+    registry_check::liveness::assess_lane(root, row, &lane_gates())
+}
+
+fn lane_codes(root: &std::path::Path, row: &registry_check::model::Lane) -> BTreeSet<String> {
+    lane_defects(root, row)
+        .into_iter()
+        .map(|defect| defect.kind.code().to_owned())
+        .collect()
+}
+
+/// Assert that the PRE-FIX predicate accepted this lane, so the difference
+/// relation below it is a statement about the fix rather than about a mutant
+/// the old code would also have rejected.
+fn assert_legacy_accepted(root: &std::path::Path, row: &registry_check::model::Lane) {
+    assert!(
+        legacy_lane_is_file_predicate(root, &row.artifact),
+        "witness: the pre-fix predicate must accept {:?}, or this relation proves \
+         nothing about the fix",
+        row.id
+    );
+}
+
+/// The control. Two red verdicts differ in uninteresting ways, so a difference
+/// relation over an already-defective base proves nothing — and a reader that
+/// has stopped reading returns "no defects" for every lane, which is exactly
+/// what a healthy registry returns.
+#[test]
+fn proof_lane_base_and_readers_are_licensed() {
+    let control = registry_check::liveness::self_test();
+    assert!(
+        control.cases > 0,
+        "the liveness self-test ran no cases at all; a control that checks nothing \
+         licenses nothing"
+    );
+    assert!(
+        control.licensed(),
+        "the liveness readers got known answers wrong ({:?}); every verdict below is \
+         unlicensed until they are fixed",
+        control.failures
+    );
+
+    let root = liveness_fixture("lane-base");
+    for row in [
+        lane("lean-proved", "lean", "formal/lean/Proved.lean", "checked"),
+        // The masked case is a POSITIVE control: its admit tokens are all inside
+        // comments, including a nested one. A reader that widened a pattern
+        // instead of parsing its input calls this red, and this suite exists
+        // because that is the mistake this repository keeps making.
+        lane("lean-masked", "lean", "formal/lean/Masked.lean", "checked"),
+        lane(
+            "tla-checked",
+            "tlaplus",
+            "formal/tla/Checked.tla",
+            "checked",
+        ),
+        // A declared lane owes only a safe path, and this one has it.
+        lane(
+            "lean-declared",
+            "lean",
+            "formal/lean/DoesNotExistYet.lean",
+            "declared",
+        ),
+    ] {
+        assert_eq!(
+            lane_codes(&root, &row),
+            BTreeSet::new(),
+            "control: {:?} is genuinely checked and must be reported checked",
+            row.id
+        );
+    }
+}
+
+/// THE VACUITY CONTROL, and it fires.
+///
+/// Zero `.lean`, `.tla`, `.cfg` or `lakefile*` files exist in this repository
+/// and all ten shipped lanes are `declared`, so a sweep asserting "every shipped
+/// `checked` lane is really checked" is quantified over the empty set — it would
+/// pass just as loudly if every reader above had been deleted. A zero result is
+/// not a result without a control, so this test MAKES one: it takes a real
+/// shipped lane, promotes it exactly as a future author would, and requires the
+/// readers to produce a real defect from real registry data.
+///
+/// It is written to survive Genesis. When the first proof artifact lands the
+/// promoted-row branch stops firing and the shipped-cohort branch takes over,
+/// and neither the count of lanes nor the emptiness of the cohort is pinned.
+#[test]
+fn proof_lane_checked_arm_is_vacuous_today_and_this_is_what_licenses_it() {
+    let r = registry_check::model::load_registries(&repo_root().join("registries"))
+        .expect("real registries");
+    assert!(
+        !r.proof_lanes.is_empty(),
+        "control: the lane roster came back empty, so every verdict about it is \
+         quantified over nothing"
+    );
+
+    // Half one: whatever IS shipped as checked must really be checked. Vacuous
+    // today by construction; the licence for that zero is half two.
+    let mut defective = Vec::new();
+    for row in r.proof_lanes.iter().filter(|l| l.status == "checked") {
+        let codes = lane_codes(&repo_root(), row);
+        if !codes.is_empty() {
+            defective.push((row.id.clone(), codes));
+        }
+    }
+    assert!(
+        defective.is_empty(),
+        "shipped lanes claim `status = \"checked\"` without being checked: {defective:?}"
+    );
+
+    // Half two: the licence. Promote a real shipped lane the way a future author
+    // would — flip the status, leave everything else alone — and require the
+    // readers to say something. If this comes back clean, the `checked` arm is
+    // not merely unexercised, it is dead, and half one proved nothing.
+    let Some(shipped) = r.proof_lanes.first() else {
+        unreachable!("the roster is non-empty");
+    };
+    let mut promoted = shipped.clone();
+    promoted.status = "checked".to_owned();
+    let codes = lane_codes(&repo_root(), &promoted);
+    assert!(
+        !codes.is_empty(),
+        "control: promoting shipped lane {:?} to \"checked\" produced no defect at all, \
+         so the checked arm cannot tell a proof from an absent one",
+        promoted.id
+    );
+    assert!(
+        codes.contains("artifact_missing"),
+        "the promoted lane's artifact {:?} does not exist, which is the one thing even \
+         the pre-fix predicate caught; got {codes:?}",
+        promoted.artifact
+    );
+}
+
+/// INVOKED, and THE DELEGATION. The proof exists; no live gate runs it.
+///
+/// "Is CI-checked" is a checker-liveness question, so the lane must not answer
+/// it a second way. The last assertion is the pin: the lane's verdict has to
+/// carry `liveness`'s OWN words about the gate. A parallel implementation of
+/// "does a gate run this" would satisfy every other assertion here and fail that
+/// one, which is the whole point of the relation.
+#[test]
+fn a_lane_whose_gate_is_not_live_is_not_checked() {
+    let root = liveness_fixture("lane-gate");
+    let base = lane("lean-proved", "lean", "formal/lean/Proved.lean", "checked");
+    assert_legacy_accepted(&root, &base);
+    assert_eq!(lane_codes(&root, &base), BTreeSet::new());
+
+    let mut undeclared = base.clone();
+    undeclared.checked_by = None;
+    assert_legacy_accepted(&root, &undeclared);
+    assert!(
+        lane_codes(&root, &undeclared).contains("proof_lane_gate_undeclared"),
+        "a checked lane that names no gate must not be credited with one: {:?}",
+        lane_codes(&root, &undeclared)
+    );
+
+    let mut unresolved = base.clone();
+    unresolved.checked_by = Some("no_such_gate".to_owned());
+    assert_legacy_accepted(&root, &unresolved);
+    assert!(
+        lane_codes(&root, &unresolved).contains("proof_lane_gate_unresolved"),
+        "{:?}",
+        lane_codes(&root, &unresolved)
+    );
+
+    let mut stubbed = base.clone();
+    stubbed.checked_by = Some("stub_gate".to_owned());
+    assert_legacy_accepted(&root, &stubbed);
+    assert!(
+        lane_codes(&root, &stubbed).contains("proof_lane_gate_not_live"),
+        "a lane checked by a stub row is not CI-checked: {:?}",
+        lane_codes(&root, &stubbed)
+    );
+
+    // The delegation. `toothless_gate` is `status = "live"` and its artifact
+    // exists, so nothing short of the full liveness read distinguishes it from
+    // `lane_gate` — the difference is that `scripts/toothless.sh` has no nonzero
+    // exit in live code, which only `liveness::assess` knows.
+    let mut toothless = base.clone();
+    toothless.checked_by = Some("toothless_gate".to_owned());
+    assert_legacy_accepted(&root, &toothless);
+    let defects = lane_defects(&root, &toothless);
+    let codes: BTreeSet<String> = defects
+        .iter()
+        .map(|defect| defect.kind.code().to_owned())
+        .collect();
+    assert!(
+        codes.contains("proof_lane_gate_not_live"),
+        "a lane checked by a gate that cannot fail is not CI-checked: {codes:?}"
+    );
+    assert!(
+        defects
+            .iter()
+            .any(|defect| defect.detail.contains("has no nonzero exit in live code")),
+        "the lane verdict must CARRY the checker-liveness reader's own finding — a \
+         second implementation of \"does a gate run this\" would pass every other \
+         assertion here. Got: {:?}",
+        defects
+            .iter()
+            .map(|defect| defect.detail.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// CAN FAIL. The artifact exists and typechecks; it assumes its conclusion.
+#[test]
+fn a_proof_that_admits_its_conclusion_is_not_checked() {
+    let root = liveness_fixture("lane-admit");
+    let proved = lane("lean-proved", "lean", "formal/lean/Proved.lean", "checked");
+    assert_eq!(lane_codes(&root, &proved), BTreeSet::new());
+
+    for (id, artifact, expected) in [
+        (
+            "lean-admitted",
+            "formal/lean/Admitted.lean",
+            "proof_lane_admits_anything",
+        ),
+        (
+            "lean-axiomatised",
+            "formal/lean/Axiomatised.lean",
+            "proof_lane_admits_anything",
+        ),
+        (
+            "lean-empty",
+            "formal/lean/Empty.lean",
+            "proof_lane_proves_nothing",
+        ),
+    ] {
+        let row = lane(id, "lean", artifact, "checked");
+        assert_legacy_accepted(&root, &row);
+        assert!(
+            lane_codes(&root, &row).contains(expected),
+            "{id}: expected {expected}, got {:?}",
+            lane_codes(&root, &row)
+        );
+    }
+
+    // The other direction, which is the one that catches a fix that merely
+    // widened a pattern: an admit token inside a comment — including a NESTED
+    // block comment — is not an admit.
+    let masked = lane("lean-masked", "lean", "formal/lean/Masked.lean", "checked");
+    assert_eq!(
+        lane_codes(&root, &masked),
+        BTreeSet::new(),
+        "an admit token in a comment is not an admit; a reader that says otherwise is \
+         pattern-matching, not parsing"
+    );
+}
+
+/// CAN FAIL, for a model checker. TLC explores the state space and asserts
+/// nothing about it unless a config names a property.
+#[test]
+fn a_model_that_checks_no_property_is_not_checked() {
+    let root = liveness_fixture("lane-model");
+    let checked = lane(
+        "tla-checked",
+        "tlaplus",
+        "formal/tla/Checked.tla",
+        "checked",
+    );
+    assert_eq!(lane_codes(&root, &checked), BTreeSet::new());
+
+    for (id, artifact) in [
+        ("tla-unchecked", "formal/tla/Unchecked.tla"),
+        ("tla-configless", "formal/tla/NoConfig.tla"),
+    ] {
+        let row = lane(id, "tlaplus", artifact, "checked");
+        assert_legacy_accepted(&root, &row);
+        assert!(
+            lane_codes(&root, &row).contains("proof_lane_proves_nothing"),
+            "{id}: {:?}",
+            lane_codes(&root, &row)
+        );
+    }
+}
+
+/// THE COMPLETENESS GUARD. An unguarded reader fails OPEN.
+///
+/// `validate` rejects an unknown `lane` value in its schema pass, so it would be
+/// easy to leave the checkedness reader with two arms and no third. Then a row
+/// type nothing here understands would come back with no defects — reported
+/// checked because no reader looked at it, which is the failure mode of every
+/// entry in this file.
+#[test]
+fn a_lane_of_an_unreadable_system_is_not_silently_checked() {
+    let root = liveness_fixture("lane-system");
+    let mut row = lane(
+        "isabelle-what",
+        "lean",
+        "formal/lean/Proved.lean",
+        "checked",
+    );
+    assert_eq!(lane_codes(&root, &row), BTreeSet::new());
+    row.lane = "isabelle".to_owned();
+    assert_legacy_accepted(&root, &row);
+    assert!(
+        lane_codes(&root, &row).contains("proof_lane_system_unreadable"),
+        "a checked lane of a system no reader adjudicates must be reported, not passed: \
+         {:?}",
+        lane_codes(&root, &row)
+    );
+}
+
+/// REGISTERED. The path is checked before it is joined — and on EVERY lane,
+/// including a declared one.
+///
+/// `Path::join` discards the root when handed an absolute path, so an unsafe
+/// artifact passes `is_file()` the instant somebody flips the status. The lane
+/// reader never had the guard `appendix_a::safe_repository_relative` provides;
+/// `tl0o` found the same omission in the checker read and fixed it only there.
+#[test]
+fn a_lane_artifact_path_is_checked_before_it_is_joined() {
+    let root = liveness_fixture("lane-path");
+    let escape = root.join("Cargo.toml");
+    let escape = escape.to_str().expect("fixture path is utf-8");
+
+    let mut checked = lane("lean-escape", "lean", escape, "checked");
+    assert_legacy_accepted(&root, &checked);
+    assert!(
+        lane_codes(&root, &checked).contains("checker_artifact_path_unsafe"),
+        "{:?}",
+        lane_codes(&root, &checked)
+    );
+
+    // And on a DECLARED lane, where nothing checked anything at all. This one
+    // the pre-fix predicate never even evaluated: the `declared` arm was an
+    // empty match arm, so an unsafe path sat in the registry unremarked until
+    // the promotion that made it dangerous.
+    checked.status = "declared".to_owned();
+    assert!(
+        lane_codes(&root, &checked).contains("checker_artifact_path_unsafe"),
+        "a declared lane's artifact path is checkable today even though its artifact is \
+         not: {:?}",
+        lane_codes(&root, &checked)
     );
 }

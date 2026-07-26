@@ -11,10 +11,25 @@
 //!   class_escalation         — weaker claim class justifies a stronger one
 //!   unregistered_justifier   — justified_by names an unregistered row
 //!   proof_lane_unresolved    — proof-class clause without a resolvable lane
+//!   proof_lane_declared_while_clause_promoted
+//!                            — a clause off "stub" cites a still-declared lane
+//!   proof_lane_gate_*        — a "checked" lane's gate is undeclared, unresolved
+//!                              or not itself live
+//!   proof_lane_proves_nothing / proof_lane_admits_anything
+//!                            — a "checked" lane's artifact cannot report a
+//!                              failure (no proposition; `sorry`; no INVARIANT)
+//!   proof_lane_system_unreadable
+//!                            — a "checked" lane names a formal system no reader
+//!                              here adjudicates (completeness guard)
+//!   proof_lane_self_test_failed / checker_liveness_self_test_failed
+//!                            — the liveness readers failed a known answer, so no
+//!                              clean verdict below them is licensed (control)
 //!   twenty_id_violation      — the twenty-ID spine set is wrong
 //!   hash_mismatch            — twenty-ID table hash pin does not match
 //!   bad_field                — enum/shape violation on a row field
 //!   artifact_missing         — a "live"/"checked" row's artifact is absent
+//!   checker_*                — a "live" checker row is not registered, invoked
+//!                              or capable of failing
 //!   script_undeclared        — a scripts/*.sh is neither registered nor declared
 //!   script_disposition_*     — a non-gate declaration is dangling or conflicting
 //!   script_scan_empty        — the scripts/ scan found nothing (control)
@@ -304,36 +319,52 @@ fn validate_clause(
             ));
         }
     }
-    // Proof-class clauses must bind a resolvable proof lane.
-    if clause.claim_class == "proof" {
-        match &clause.proof_lane {
-            None => out.push(Violation::new(
-                "proof_lane_unresolved",
-                reg,
-                id,
-                "proof-class clause without a proof_lane",
-            )),
-            Some(lane_id) => {
-                if !r.proof_lanes.iter().any(|l| &l.id == lane_id) {
-                    out.push(Violation::new(
-                        "proof_lane_unresolved",
-                        reg,
-                        id,
-                        format!("proof_lane {lane_id:?} does not resolve in proof_lanes.toml"),
-                    ));
-                }
+    // Proof-class clauses must bind a resolvable proof lane; any clause that
+    // cites one at all (e.g. bounded_model → TLA+) must have it resolve. ONE
+    // lookup, because two copies of it is how the second law below came to be
+    // checked by neither.
+    let cited = clause
+        .proof_lane
+        .as_ref()
+        .map(|lane_id| (lane_id, r.proof_lanes.iter().find(|l| &l.id == lane_id)));
+    match cited {
+        None => {
+            if clause.claim_class == "proof" {
+                out.push(Violation::new(
+                    "proof_lane_unresolved",
+                    reg,
+                    id,
+                    "proof-class clause without a proof_lane",
+                ));
             }
         }
-    } else if let Some(lane_id) = &clause.proof_lane {
-        // Non-proof clauses may cite a lane (e.g. bounded_model → TLA+),
-        // but it must still resolve.
-        if !r.proof_lanes.iter().any(|l| &l.id == lane_id) {
-            out.push(Violation::new(
-                "proof_lane_unresolved",
-                reg,
-                id,
-                format!("proof_lane {lane_id:?} does not resolve in proof_lanes.toml"),
-            ));
+        Some((lane_id, None)) => out.push(Violation::new(
+            "proof_lane_unresolved",
+            reg,
+            id,
+            format!("proof_lane {lane_id:?} does not resolve in proof_lanes.toml"),
+        )),
+        Some((lane_id, Some(lane))) => {
+            // proof_lanes.toml's header, second law: "A proof-class clause may
+            // cite a declared lane ONLY WHILE ITS OWN STATUS IS \"stub\"." A
+            // declared lane's artifact does not exist yet, so a clause promoted
+            // off `stub` while citing one has been promoted against a proof
+            // nobody has written. The registry stated this combination was
+            // illegal and nothing rejected it
+            // (`fgdb-proof-lane-checked-is-only-file-existence-0f1l`).
+            if lane.status == "declared" && clause.status != "stub" {
+                out.push(Violation::new(
+                    "proof_lane_declared_while_clause_promoted",
+                    reg,
+                    id,
+                    format!(
+                        "clause status is {:?} while its proof_lane {lane_id:?} is still \
+                         \"declared\" (artifact {:?} does not exist yet); a declared lane may \
+                         be cited only while the citing clause is \"stub\"",
+                        clause.status, lane.artifact
+                    ),
+                ));
+            }
         }
     }
     check_justification(
@@ -637,8 +668,39 @@ fn validate_slo(r: &Registries, out: &mut Vec<Violation>) {
     }
 }
 
+/// Schema and checkedness for the `[[lane]]` rows of
+/// `registries/proof_lanes.toml`.
+///
+/// The checkedness half is [`crate::liveness`], not a second `is_file()` —
+/// `status = "checked"` was `root.join(artifact).is_file()`, the pre-`tl0o`
+/// checker read down to the missing path-safety guard, and the registry header's
+/// own definition ("the artifact exists in-repo AND is CI-checked") had no
+/// implementation of its second conjunct at all
+/// (`fgdb-proof-lane-checked-is-only-file-existence-0f1l`). "Is CI-checked" is
+/// the question `liveness` was written to answer, so the lane delegates rather
+/// than re-deriving: it names its gate and `liveness` proves that gate live.
+///
+/// Same shape as [`validate_checker_index`]: the self-test is consulted FIRST,
+/// because a reader that has stopped reading returns "no defects" for every row,
+/// which is byte-identical to what a healthy registry returns.
 fn validate_proof_lanes(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
     let reg = "proof_lanes";
+    let self_test = crate::liveness::self_test();
+    if !self_test.licensed() {
+        out.push(Violation::new(
+            "proof_lane_self_test_failed",
+            reg,
+            "<self-test>",
+            format!(
+                "the liveness readers got {} of {} known answers wrong ({}); refusing to \
+                 report any lane checked",
+                self_test.failures.len(),
+                self_test.cases,
+                self_test.failures.join(", ")
+            ),
+        ));
+    }
+    let prover = crate::liveness::Prover::new(root);
     let mut seen = BTreeSet::new();
     for lane in &r.proof_lanes {
         if !seen.insert(lane.id.clone()) {
@@ -661,17 +723,18 @@ fn validate_proof_lanes(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
             ));
         }
         match lane.status.as_str() {
-            "declared" => {}
-            "checked" => {
-                if !root.join(&lane.artifact).is_file() {
+            // Both statuses are adjudicated: a `declared` lane still owes a safe
+            // repository-relative artifact path, and that was never checked at
+            // all. The rest of the reads apply only to `checked`, which the
+            // prover decides — not this function, so there is one place that
+            // knows what the word means.
+            "declared" | "checked" => {
+                for defect in prover.assess_lane(lane, &r.checker_index) {
                     out.push(Violation::new(
-                        "artifact_missing",
+                        defect.kind.code(),
                         reg,
                         &lane.id,
-                        format!(
-                            "status is \"checked\" but artifact {:?} does not exist",
-                            lane.artifact
-                        ),
+                        format!("status is {:?} but {}", lane.status, defect.detail),
                     ));
                 }
             }

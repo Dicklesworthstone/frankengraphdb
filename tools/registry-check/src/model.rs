@@ -131,6 +131,17 @@ pub struct Lane {
     pub model_scope: String,
     pub artifact: String,
     pub status: String,
+    /// The `checker_index` symbol of the gate that runs this lane's prover.
+    ///
+    /// Optional in the parser and REQUIRED on a `status = "checked"` row, for
+    /// the same reason [`Checker::unit`] is required on a live one: the
+    /// registry's own header says `checked` means the artifact "is CI-checked",
+    /// and nothing in a `.lean` or `.tla` file says which gate — if any — runs
+    /// it. Declared by the row, never guessed; [`crate::liveness`] then proves
+    /// the named gate is itself live rather than trusting the name.
+    ///
+    /// A `declared` lane names no gate because there is nothing to run yet.
+    pub checked_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -386,6 +397,7 @@ pub fn proof_lanes_from(root: &Table) -> Result<Vec<Lane>, ReadError> {
             model_scope: get_str(t, "model_scope", &ctx)?,
             artifact: get_str(t, "artifact", &ctx)?,
             status: get_str(t, "status", &ctx)?,
+            checked_by: get_opt_str(t, "checked_by", &ctx)?,
         });
     }
     Ok(lanes)

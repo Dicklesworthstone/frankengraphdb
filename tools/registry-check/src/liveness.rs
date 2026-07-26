@@ -96,8 +96,44 @@
 //! capable of failing. Workspace membership comes from
 //! `appendix_a::workspace_member_paths`, the roster reader `unsafe_ledger`
 //! already shares.
+//!
+//! # The second registry: `proof_lanes.toml` (`…-checked-is-only-file-existence-0f1l`)
+//!
+//! `status = "checked"` on a proof lane was the SAME defect one artifact over.
+//! `registries/proof_lanes.toml`'s header defines it as "the artifact exists
+//! in-repo **and is CI-checked**"; `validate_proof_lanes` proved it with
+//! `root.join(&lane.artifact).is_file()` — the pre-`tl0o` checker read, down to
+//! the missing path-safety guard. Two laws in that header had no implementation
+//! at all:
+//!
+//! 1. **Nothing checks the proof.** No `lake build`, no `lean`, no TLC
+//!    invocation exists anywhere in the repository. A `.lean` file consisting of
+//!    `theorem foo : False := sorry` satisfied `checked`, and so did an empty
+//!    one. `sorry` is Lean's admit-anything tactic and is THE standard failure
+//!    mode of a formal lane: the file typechecks, the build is green, and
+//!    nothing is proven. For TLA+ it is worse — a `.tla` model with no `.cfg`
+//!    naming an `INVARIANT` is a TLC run that checks nothing and can only pass.
+//! 2. **"A declared lane may be cited only while the citing clause is `stub`"**
+//!    existed as prose and as no code. That half is a cross-registry rule about
+//!    clauses, so it lives in `validate`, next to the other clause laws; the
+//!    lane-side half is here.
+//!
+//! So a `checked` lane is adjudicated by [`Prover::assess_lane`] against the
+//! same three facts, and — this is the point of putting it in this module —
+//! **the INVOKED fact is answered by delegating to [`Prover::assess`]**. A lane
+//! declares `checked_by`, the `checker_index` symbol of the gate that runs its
+//! prover; that gate must be a registered row, `status = "live"`, and live in
+//! the full sense this module already defines. "Is CI-checked" is not a new
+//! question. It is the question this file was written to answer, asked about a
+//! different artifact, and a second implementation of it is exactly the
+//! duplication that produced `tl0o` (two readers for `is_file`) and
+//! `census-has-two-delimiter-readers` (two balance tests).
+//!
+//! [`mask_formal`] is the one genuinely new reader, and it is ONE reader for
+//! two languages: Lean and TLA+ differ only in their comment delimiters, and
+//! both nest. Writing two would be the same mistake in miniature.
 
-use crate::model::Checker;
+use crate::model::{Checker, Lane};
 use crate::unsafe_ledger::mask_source;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -106,6 +142,9 @@ use std::path::{Path, PathBuf};
 
 /// The registry this module adjudicates.
 pub const CHECKER_INDEX_PATH: &str = "registries/checker_index.toml";
+
+/// The second registry this module adjudicates.
+pub const PROOF_LANES_PATH: &str = "registries/proof_lanes.toml";
 
 /// The two things a checker row's `symbol` can name.
 ///
@@ -163,6 +202,18 @@ pub enum DefectKind {
     SymbolUnresolved,
     /// The unit a runner executes has no path to a failing outcome.
     CannotFail,
+    /// A `checked` proof lane did not name the gate that checks it.
+    LaneGateUndeclared,
+    /// A `checked` proof lane's declared gate is not a registered checker row.
+    LaneGateUnresolved,
+    /// A `checked` proof lane's declared gate is not itself live.
+    LaneGateNotLive,
+    /// The lane names a formal system no reader here can adjudicate.
+    LaneSystemUnreadable,
+    /// The artifact states no proposition, or the model checks no property.
+    LaneProvesNothing,
+    /// The artifact admits its own conclusion rather than proving it.
+    LaneAdmitsAnything,
 }
 
 impl DefectKind {
@@ -179,6 +230,12 @@ impl DefectKind {
             Self::Uninvocable => "checker_not_invocable",
             Self::SymbolUnresolved => "checker_symbol_unresolved",
             Self::CannotFail => "checker_cannot_fail",
+            Self::LaneGateUndeclared => "proof_lane_gate_undeclared",
+            Self::LaneGateUnresolved => "proof_lane_gate_unresolved",
+            Self::LaneGateNotLive => "proof_lane_gate_not_live",
+            Self::LaneSystemUnreadable => "proof_lane_system_unreadable",
+            Self::LaneProvesNothing => "proof_lane_proves_nothing",
+            Self::LaneAdmitsAnything => "proof_lane_admits_anything",
         }
     }
 }
@@ -917,6 +974,234 @@ fn shell_can_exit_nonzero(source: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Fact 3, restated for a proof artifact — the prover can still say no
+// ---------------------------------------------------------------------------
+
+/// The comment syntax of one formal language.
+///
+/// ONE reader serves both lanes. Lean and TLA+ differ in exactly three tokens
+/// and agree on everything that matters — both nest their block comments, and
+/// both carry double-quoted string literals — so writing `mask_lean` and
+/// `mask_tla` would be two implementations of one fact, which is the duplication
+/// this module's header is about.
+pub struct CommentSyntax {
+    /// Comment to end of line.
+    pub line: &'static str,
+    /// Block comment open; nests.
+    pub open: &'static str,
+    /// Block comment close.
+    pub close: &'static str,
+}
+
+/// Lean 4: `--` to end of line, `/- … -/` nesting (`/-!` and `/--` are block
+/// comments that happen to start with `/-`, so they need no special case).
+pub const LEAN_SYNTAX: CommentSyntax = CommentSyntax {
+    line: "--",
+    open: "/-",
+    close: "-/",
+};
+
+/// TLA+ and its TLC configuration files: `\*` to end of line, `(* … *)`
+/// nesting.
+pub const TLA_SYNTAX: CommentSyntax = CommentSyntax {
+    line: "\\*",
+    open: "(*",
+    close: "*)",
+};
+
+/// A formal source with its comments and string literals blanked.
+///
+/// Byte-exact, like `mask_source` and [`mask_shell`]: a blanked byte becomes one
+/// space, so an offset in the mask names the same column of the same line of the
+/// source. Without this, `-- the `sorry` below is gone now` reads as an admit and
+/// `\* INVARIANT Foo` reads as a checked property — which is
+/// `fgdb-regcheck-scansites-line-anchored-ds45` and
+/// `fgdb-regcheck-commented-arm-counts-live-ctv8` transposed into a language
+/// nobody has looked at yet. Block comments NEST, and a masker that stopped at
+/// the first `-/` would treat the tail of a nested doc comment as live code.
+///
+/// Deliberately byte-oriented throughout: `str` slicing at a non-boundary
+/// panics, and a masker that panics on a UTF-8 proof script — Lean sources are
+/// full of `∀`, `≤`, `⟨⟩` — is a checker that cannot read its own subject.
+pub fn mask_formal(source: &str, syntax: &CommentSyntax) -> String {
+    let bytes = source.as_bytes();
+    let mut out = vec![b' '; bytes.len()];
+    let (line, open, close) = (
+        syntax.line.as_bytes(),
+        syntax.open.as_bytes(),
+        syntax.close.as_bytes(),
+    );
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\n' {
+            out[index] = b'\n';
+            // A string literal does not span a line in either language; a block
+            // comment does.
+            in_string = false;
+            index += 1;
+            continue;
+        }
+        if depth > 0 {
+            if bytes[index..].starts_with(open) {
+                depth += 1;
+                index += open.len();
+            } else if bytes[index..].starts_with(close) {
+                depth -= 1;
+                index += close.len();
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if in_string {
+            if byte == b'\\' {
+                index += 2;
+                continue;
+            }
+            if byte == b'"' {
+                out[index] = b'"';
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if bytes[index..].starts_with(open) {
+            depth = 1;
+            index += open.len();
+            continue;
+        }
+        if bytes[index..].starts_with(line) {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            out[index] = b'"';
+            in_string = true;
+            index += 1;
+            continue;
+        }
+        out[index] = byte;
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The ways a Lean file can assert its conclusion instead of proving it.
+///
+/// `sorry` and `admit` are pure admits: the file typechecks, `lake build` exits
+/// zero, and the theorem is assumed. They are the exact analogue of a `main`
+/// that can only return `ExitCode::SUCCESS` — an outcome fixed before the prover
+/// reads anything.
+///
+/// `axiom` and `native_decide` are here for the same reason and with a caveat
+/// stated out loud: both CAN be legitimate, and neither is legitimate silently.
+/// An axiom is an unproven assumption and `native_decide` trusts the compiler's
+/// evaluator; a lane resting on either is making a claim its `model_scope` must
+/// state, and no machine-checkable disclosure field exists yet. So they are
+/// reported. That direction produces a loud false alarm on a lane that meant it
+/// and disclosed it in prose — which is recoverable — rather than a silent pass
+/// on one that did not, which is the failure this module exists to remove.
+const LEAN_ADMITS: &[&str] = &["sorry", "admit", "axiom", "native_decide"];
+
+/// The Lean keywords that state a proposition to be proved.
+///
+/// A file with none of these proves nothing whatever it contains — the empty
+/// file the bead names is only the smallest member of that class. `example` is
+/// included: an anonymous theorem is still a checked proposition.
+const LEAN_PROPOSITIONS: &[&str] = &["theorem", "lemma", "example"];
+
+/// The TLC configuration keywords that name something to check.
+///
+/// A `.cfg` without one of these is a model checker run that explores the state
+/// space and asserts nothing about it: it can only pass. `SPECIFICATION` is
+/// deliberately NOT required here — a config missing it is a loud TLC error, and
+/// this module's subject is the silent pass.
+const TLA_CHECKED_PROPERTIES: &[&str] = &["INVARIANT", "INVARIANTS", "PROPERTY", "PROPERTIES"];
+
+/// Every admit token present in this Lean source's live code.
+fn lean_admits(source: &str) -> Vec<&'static str> {
+    let masked = mask_formal(source, &LEAN_SYNTAX);
+    LEAN_ADMITS
+        .iter()
+        .filter(|admit| contains_whole_token(&masked, admit))
+        .copied()
+        .collect()
+}
+
+/// Does this Lean source state a proposition in live code?
+fn lean_states_a_proposition(source: &str) -> bool {
+    let masked = mask_formal(source, &LEAN_SYNTAX);
+    LEAN_PROPOSITIONS
+        .iter()
+        .any(|keyword| contains_whole_token(&masked, keyword))
+}
+
+/// Does this TLC configuration name something to check, in live code?
+///
+/// The keyword alone is not enough: `INVARIANT` with nothing after it names no
+/// operator, so the reader requires an operand. That is the same rule as
+/// [`rust_can_exit_nonzero`] reading the ARGUMENT of `ExitCode::from(` rather
+/// than counting the call — a checker that stops at the keyword is reading a
+/// call as evidence of what it does.
+fn tla_config_checks_something(source: &str) -> bool {
+    let masked = mask_formal(source, &TLA_SYNTAX);
+    let bytes = masked.as_bytes();
+    for keyword in TLA_CHECKED_PROPERTIES {
+        let mut from = 0;
+        while let Some(offset) = masked[from..].find(keyword) {
+            let at = from + offset;
+            from = at + keyword.len();
+            if at > 0 && is_ident_byte(bytes[at - 1]) {
+                continue;
+            }
+            let mut cursor = from;
+            while matches!(bytes.get(cursor), Some(b) if b.is_ascii_whitespace()) {
+                cursor += 1;
+            }
+            if matches!(bytes.get(cursor), Some(b) if is_ident_byte(*b)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Match `needle` only where it is a WHOLE token.
+///
+/// Stricter than [`contains_token`], which anchors only the left edge because
+/// its needles end in `!` or `(`. These needles are bare words, so both edges
+/// matter: `sorry` must not fire on `sorryAx`, and `axiom` must not fire on
+/// `axioms_used`.
+fn contains_whole_token(text: &str, needle: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = text[from..].find(needle) {
+        let at = from + offset;
+        from = at + needle.len();
+        let left_clear = at == 0 || !is_ident_byte(bytes[at - 1]);
+        let right_clear = !matches!(bytes.get(at + needle.len()), Some(b) if is_ident_byte(*b));
+        if left_clear && right_clear {
+            return true;
+        }
+    }
+    false
+}
+
+/// The TLC configuration a `.tla` model is checked under.
+///
+/// TLC takes a model and a config; the config is what names the invariant. The
+/// registry records one artifact path, so the companion is derived — the same
+/// stem with a `.cfg` extension, which is TLC's own convention.
+fn tla_config_path(artifact: &Path) -> PathBuf {
+    artifact.with_extension("cfg")
+}
+
+// ---------------------------------------------------------------------------
 // The adjudication
 // ---------------------------------------------------------------------------
 
@@ -980,6 +1265,17 @@ impl<'a> Prover<'a> {
     pub fn assess(&self, checker: &Checker) -> Vec<Defect> {
         assess_with(self, checker)
     }
+
+    /// Every reason `lane` is not the checked proof lane it claims to be.
+    ///
+    /// `checkers` is the `checker_index` roster, because the INVOKED fact for a
+    /// proof lane IS a checker-liveness question and is answered by
+    /// [`Prover::assess`] rather than by a second reader — see the module
+    /// header. As with [`Prover::assess`], an empty result means checked only if
+    /// [`self_test`] is licensed.
+    pub fn assess_lane(&self, lane: &Lane, checkers: &[Checker]) -> Vec<Defect> {
+        assess_lane_with(self, lane, checkers)
+    }
 }
 
 /// Every reason `checker` is not the live checker it claims to be.
@@ -988,6 +1284,14 @@ impl<'a> Prover<'a> {
 /// build a [`Prover`] and reuse it.
 pub fn assess(repo_root: &Path, checker: &Checker) -> Vec<Defect> {
     Prover::new(repo_root).assess(checker)
+}
+
+/// Every reason `lane` is not the checked proof lane it claims to be.
+///
+/// The single-row entry point. A caller adjudicating more than one row should
+/// build a [`Prover`] and reuse it.
+pub fn assess_lane(repo_root: &Path, lane: &Lane, checkers: &[Checker]) -> Vec<Defect> {
+    Prover::new(repo_root).assess_lane(lane, checkers)
 }
 
 fn assess_with(prover: &Prover<'_>, checker: &Checker) -> Vec<Defect> {
@@ -1134,6 +1438,158 @@ fn assess_with(prover: &Prover<'_>, checker: &Checker) -> Vec<Defect> {
             }
         }
     }
+}
+
+fn assess_lane_with(prover: &Prover<'_>, lane: &Lane, checkers: &[Checker]) -> Vec<Defect> {
+    let repo_root = prover.repo_root;
+    // PATH SAFETY APPLIES TO EVERY LANE ROW, whatever its status. `Path::join`
+    // with an absolute path DISCARDS the root, so `artifact = "/etc/hosts"` on a
+    // declared lane is a row that passes `is_file()` the instant somebody
+    // promotes it — the escape `appendix_a::safe_repository_relative` exists for,
+    // and which the lane reader never had. This is the one check a `declared`
+    // lane owes: its artifact does not exist yet, so nothing else about it can be
+    // read, but the SHAPE of the path is checkable today.
+    if !crate::appendix_a::safe_repository_relative(&lane.artifact) {
+        return vec![Defect::new(
+            DefectKind::ArtifactPathUnsafe,
+            format!(
+                "artifact {:?} is not a safe repository-relative path",
+                lane.artifact
+            ),
+        )];
+    }
+    if lane.status != "checked" {
+        return Vec::new();
+    }
+    let relative = Path::new(&lane.artifact);
+    let absolute = match artifact_path(repo_root, &lane.artifact) {
+        Ok(path) => path,
+        Err(defect) => return vec![defect],
+    };
+
+    let mut defects = Vec::new();
+
+    // INVOKED — "and is CI-checked". Delegated, in full, to the reader that
+    // already answers "is this gate live". A lane whose prover no gate runs is
+    // the proof-lane spelling of an artifact `cargo test` never compiles.
+    match lane.checked_by.as_deref() {
+        None => defects.push(Defect::new(
+            DefectKind::LaneGateUndeclared,
+            format!(
+                "checked lane {:?} declares no `checked_by`, so nothing says which gate \
+                 runs its prover",
+                lane.id
+            ),
+        )),
+        Some(symbol) => match checkers.iter().find(|row| row.symbol == symbol) {
+            None => defects.push(Defect::new(
+                DefectKind::LaneGateUnresolved,
+                format!("checked_by {symbol:?} does not resolve in checker_index.toml"),
+            )),
+            Some(gate) if gate.status != "live" => defects.push(Defect::new(
+                DefectKind::LaneGateNotLive,
+                format!(
+                    "checked_by {symbol:?} is a checker_index row with status {:?}; a lane \
+                     is CI-checked only if the gate that runs it is live",
+                    gate.status
+                ),
+            )),
+            Some(gate) => {
+                let gate_defects = prover.assess(gate);
+                if !gate_defects.is_empty() {
+                    defects.push(Defect::new(
+                        DefectKind::LaneGateNotLive,
+                        format!(
+                            "checked_by {symbol:?} claims `status = \"live\"` but is not live: {}",
+                            gate_defects
+                                .iter()
+                                .map(|defect| defect.detail.clone())
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ),
+                    ));
+                }
+            }
+        },
+    }
+
+    // CAPABLE OF FAILING — the prover must still be able to say no.
+    let Ok(source) = fs::read_to_string(&absolute) else {
+        defects.push(Defect::new(
+            DefectKind::ArtifactAbsent,
+            format!("artifact {:?} could not be read", lane.artifact),
+        ));
+        return defects;
+    };
+    match lane.lane.as_str() {
+        "lean" => {
+            if !lean_states_a_proposition(&source) {
+                defects.push(Defect::new(
+                    DefectKind::LaneProvesNothing,
+                    format!(
+                        "{:?} declares no `theorem`, `lemma` or `example` in live code, so \
+                         building it proves nothing",
+                        lane.artifact
+                    ),
+                ));
+            }
+            let admits = lean_admits(&source);
+            if !admits.is_empty() {
+                defects.push(Defect::new(
+                    DefectKind::LaneAdmitsAnything,
+                    format!(
+                        "{:?} contains {} in live code: the build succeeds whether or not the \
+                         theorem holds",
+                        lane.artifact,
+                        admits
+                            .iter()
+                            .map(|admit| format!("`{admit}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+        }
+        "tlaplus" => {
+            let config = tla_config_path(relative);
+            match fs::read_to_string(repo_root.join(&config)) {
+                Err(_) => defects.push(Defect::new(
+                    DefectKind::LaneProvesNothing,
+                    format!(
+                        "no TLC configuration at {:?}: a model with no config declares no \
+                         instance bounds and no property, so nothing is checked",
+                        config.display()
+                    ),
+                )),
+                Ok(config_source) => {
+                    if !tla_config_checks_something(&config_source) {
+                        defects.push(Defect::new(
+                            DefectKind::LaneProvesNothing,
+                            format!(
+                                "{:?} names no INVARIANT or PROPERTY in live text, so TLC \
+                                 explores the state space and asserts nothing about it",
+                                config.display()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        // COMPLETENESS GUARD. `validate` rejects an unknown `lane` value in its
+        // own schema pass, but a reader that falls through to "no defects" on a
+        // row type it does not understand fails OPEN — and the two readers would
+        // then have to be kept in step by hand, which is how this whole class
+        // starts. A system with no reader here is never checked.
+        other => defects.push(Defect::new(
+            DefectKind::LaneSystemUnreadable,
+            format!(
+                "lane names formal system {other:?}, which no reader here adjudicates; a \
+                 checked lane of an unreadable system cannot be distinguished from an \
+                 unchecked one"
+            ),
+        )),
+    }
+    defects
 }
 
 /// Does `fn <symbol>` exist in live code, whatever its attributes?
@@ -1381,6 +1837,127 @@ pub fn self_test() -> SelfTest {
         "shell_exit_survives_non_ascii_neighbours",
         shell_can_exit_nonzero("#!/usr/bin/env bash\necho \"héllo — wörld\"\nexit 1\n"),
         true,
+    );
+
+    // --- the Lean readers --------------------------------------------------
+    //
+    // The admit tokens are assembled from a `char` for the same reason
+    // `scanner_fixture` assembles its attribute that way: `LEAN_ADMITS` is
+    // matched over this crate's own sources by nothing today, but a literal
+    // `sorry` in a file named by a future lane is a real site, and a control
+    // that plants real sites is a control that will one day be wrong about
+    // itself.
+    let s = 's';
+    check(
+        "lean_admit_present",
+        lean_admits(&format!("theorem t : True := {s}orry\n")) == vec!["sorry"],
+        true,
+    );
+    check(
+        "lean_admit_absent",
+        lean_admits("theorem t : True := trivial\n").is_empty(),
+        true,
+    );
+    check(
+        "lean_admit_in_line_comment",
+        lean_admits(&format!("-- was {s}orry\ntheorem t : True := trivial\n")).is_empty(),
+        true,
+    );
+    check(
+        "lean_admit_in_block_comment",
+        lean_admits(&format!("/- {s}orry -/\ntheorem t : True := trivial\n")).is_empty(),
+        true,
+    );
+    check(
+        "lean_admit_in_nested_block_comment",
+        lean_admits(&format!(
+            "/- outer /- inner -/ {s}orry -/\ntheorem t : True := trivial\n"
+        ))
+        .is_empty(),
+        true,
+    );
+    check(
+        "lean_admit_in_string_literal",
+        lean_admits(&format!(
+            "theorem t : True := by trace \"{s}orry\"; trivial\n"
+        ))
+        .is_empty(),
+        true,
+    );
+    check(
+        "lean_admit_is_not_a_prefix_match",
+        lean_admits(&format!("theorem t : True := {s}orryAx_free\n")).is_empty(),
+        true,
+    );
+    check(
+        "lean_admit_axiom_is_reported",
+        lean_admits("axiom trust_me : True\n") == vec!["axiom"],
+        true,
+    );
+    check(
+        "lean_proposition_present",
+        lean_states_a_proposition("theorem t : True := trivial\n"),
+        true,
+    );
+    check(
+        "lean_proposition_absent_in_empty_file",
+        lean_states_a_proposition(""),
+        false,
+    );
+    check(
+        "lean_proposition_in_comment_is_not_a_proposition",
+        lean_states_a_proposition("-- theorem t : True := trivial\n"),
+        false,
+    );
+    // The mask must stay byte-aligned across the notation a Lean source is
+    // written in, or every offset read from it lands in the wrong column.
+    check(
+        "lean_mask_is_byte_aligned_over_notation",
+        mask_formal("theorem t : ∀ n, n ≤ n := by simp\n", &LEAN_SYNTAX).len()
+            == "theorem t : ∀ n, n ≤ n := by simp\n".len(),
+        true,
+    );
+    check(
+        "lean_admit_survives_notation_neighbours",
+        lean_admits(&format!("theorem t : ∀ n, n ≤ n := {s}orry\n")) == vec!["sorry"],
+        true,
+    );
+
+    // --- the TLA+ config reader -------------------------------------------
+    check(
+        "tla_config_checks_an_invariant",
+        tla_config_checks_something("SPECIFICATION Spec\nINVARIANT TypeOK\n"),
+        true,
+    );
+    check(
+        "tla_config_checks_a_property",
+        tla_config_checks_something("SPECIFICATION Spec\nPROPERTIES Liveness\n"),
+        true,
+    );
+    check(
+        "tla_config_checks_nothing",
+        tla_config_checks_something("SPECIFICATION Spec\nCONSTANTS N = 3\n"),
+        false,
+    );
+    check(
+        "tla_config_invariant_in_comment",
+        tla_config_checks_something("SPECIFICATION Spec\n\\* INVARIANT TypeOK\n"),
+        false,
+    );
+    check(
+        "tla_config_invariant_in_block_comment",
+        tla_config_checks_something("SPECIFICATION Spec\n(* INVARIANT TypeOK *)\n"),
+        false,
+    );
+    check(
+        "tla_config_keyword_without_an_operand",
+        tla_config_checks_something("SPECIFICATION Spec\nINVARIANT\n"),
+        false,
+    );
+    check(
+        "tla_config_keyword_is_not_a_suffix_match",
+        tla_config_checks_something("SPECIFICATION Spec\nMY_INVARIANT Foo\n"),
+        false,
     );
 
     SelfTest { failures, cases }
