@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 54
+registry_epoch = 55
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 54);
+    assert_eq!(epoch, 55);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -6248,6 +6248,19 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "TxnAllocationBindingRoot"
         )
     };
+    // A16's four exact AuthorityBoundHeader<Role> fields use the already
+    // registered generic-free wire family inline. They postdate the erratum
+    // and therefore stay out of its historical namespace witness.
+    let post_erratum_a16_inline_authority_headers = |schema: &str, name: &str| {
+        name == "authority_bound_header"
+            && matches!(
+                schema,
+                "ProtectedErrorReplayTimeBasis<Role>"
+                    | "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
+                    | "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+                    | "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+            )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_a21_field(&field.containing_schema)
             && !post_erratum_union(&field.exact_wire_type)
@@ -6273,6 +6286,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a07_weak_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a08_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a09_field(&field.containing_schema)
+            && !post_erratum_a16_inline_authority_headers(
+                &field.containing_schema,
+                &field.stable_name,
+            )
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 336,
@@ -6280,9 +6297,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 458,
+        pre_erratum.fields.len() + 462,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A08 lifecycle tranche"
+        "the historical witness must remove every post-erratum field cohort through the A16 inline-header tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
@@ -6729,19 +6746,60 @@ fn idr_j00a_predecessors_are_nonretaining_and_current_generations_stay_owned() {
     let identity = real_identity();
     let catalog = real_appendix_catalog();
     let expected = [
-        ("TxnOutcomeRecord", 0x0003, 18, "reserved", "a03"),
-        ("MetaPreparedCommandRecord", 0x0003, 35, "reserved", "a06"),
-        ("ShardPreparedPayloadRecord", 0x0003, 35, "reserved", "a06"),
-        ("PreparedCommitRecord", 0x0004, 12, "active", "a10"),
+        (
+            "TxnOutcomeRecord",
+            0x0003,
+            18,
+            "reserved",
+            "a03",
+            "WeakDigest",
+            "logical",
+            "weak_digest",
+        ),
+        (
+            "MetaPreparedCommandRecord",
+            0x0003,
+            35,
+            "reserved",
+            "a06",
+            "WeakDigest",
+            "logical",
+            "weak_digest",
+        ),
+        (
+            "ShardPreparedPayloadRecord",
+            0x0003,
+            35,
+            "reserved",
+            "a06",
+            "WeakDigest",
+            "logical",
+            "weak_digest",
+        ),
+        (
+            "PreparedCommitRecord",
+            0x0004,
+            12,
+            "active",
+            "a10",
+            "WeakDigest",
+            "logical",
+            "weak_digest",
+        ),
         (
             "TimeSubjectIssuanceReservation<Role>",
             0x0004,
             19,
             "reserved",
             "a16",
+            "digest256",
+            "inline",
+            "none",
         ),
     ];
-    for (schema, tag, order, status, slice) in expected {
+    for (schema, tag, order, status, slice, wire_type, identity_class, reference_semantics) in
+        expected
+    {
         let field = identity
             .fields
             .iter()
@@ -6751,10 +6809,10 @@ fn idr_j00a_predecessors_are_nonretaining_and_current_generations_stay_owned() {
             })
             .unwrap_or_else(|| panic!("{schema} nonretaining predecessor field exists"));
         assert_eq!(field.field_tag, tag);
-        assert_eq!(field.exact_wire_type, "WeakDigest");
+        assert_eq!(field.exact_wire_type, wire_type);
         assert_eq!(field.cardinality, "one");
-        assert_eq!(field.identity_class, "logical");
-        assert_eq!(field.reference_semantics, "weak_digest");
+        assert_eq!(field.identity_class, identity_class);
+        assert_eq!(field.reference_semantics, reference_semantics);
         assert_eq!(field.target_schema_id, None);
         assert_eq!(field.construction_order, order);
         assert_eq!(field.version_status, status);
@@ -6796,6 +6854,58 @@ fn idr_j00a_predecessors_are_nonretaining_and_current_generations_stay_owned() {
             plan.contains(owner),
             "current-generation owner is not stated: {owner}"
         );
+    }
+}
+
+#[test]
+fn idr_a16_authority_bound_headers_are_source_ordered_inline_values() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let expected = [
+        ("ProtectedErrorReplayTimeBasis<Role>", 0x0009, 17),
+        (
+            "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>",
+            0x0001,
+            30,
+        ),
+        (
+            "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>",
+            0x0001,
+            45,
+        ),
+        (
+            "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+            0x0003,
+            60,
+        ),
+    ];
+    for (schema, tag, construction_order) in expected {
+        let field = identity
+            .fields
+            .iter()
+            .find(|field| {
+                field.containing_schema == schema && field.stable_name == "authority_bound_header"
+            })
+            .unwrap_or_else(|| panic!("{schema}.authority_bound_header exists"));
+        assert_eq!(field.field_tag, tag);
+        assert_eq!(field.exact_wire_type, "AuthorityBoundHeader");
+        assert_eq!(field.cardinality, "one");
+        assert_eq!(field.identity_class, "inline");
+        assert_eq!(field.reference_semantics, "none");
+        assert_eq!(field.target_schema_id, None);
+        assert_eq!(field.construction_order, construction_order);
+        assert_eq!(field.version_status, "reserved");
+        assert_eq!(field.max_size_bytes, 256);
+        let source_key =
+            format!("field|{schema}|{schema}.authority_bound_header|authority_bound_header");
+        let target = catalog
+            .targets
+            .iter()
+            .find(|target| target.source_key == source_key)
+            .unwrap_or_else(|| panic!("{schema}.authority_bound_header has a source target"));
+        assert_eq!(target.slice_id, "a16");
+        assert_eq!(target.target_kind, "field");
+        assert_eq!(target.definition_status, "declared");
     }
 }
 

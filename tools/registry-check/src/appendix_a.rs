@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "e754ed08b0d28cd9f779936c6f500aac184ccd71d89f3b67e061e64f74910058";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2909;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2913;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "1dc100b3ae01aabe1ffb96262b7c5bceb182b67ef7d3eaa206a023fb51831068";
+    "e1defcfae2735386f6ab7c9ba14cd225c4bf7ff439611e9a0e83077424aea8f2";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 108;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "3bbf52bdb91cf15d0ced13d007b6d7a659ba1ca4177c8dc804faeb10ca203e67";
+    "5eedad2aab44f1f13b0c686f1f3106672efe9b0e47fb2b58ee2c565599391b70";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -62,7 +62,7 @@ pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 426;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "8ab1b477d52f889eb5d5c1326fbe1f1da8f62c7c565e767d4ae59d15f0f11301";
+    "be6ac1c7ebadc3848ac3ddbd8ff92ab83372c0f37bf36e191a6d06de88d44d56";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 427;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 386;
@@ -4566,7 +4566,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 426] 
         resolved_source_keys: &[
             "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a16:2191: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale: "a16:2191: nonretaining_predecessor_digest is the carrying field for the plan-named comparison digest, so it is fixed to digest256 with digest_class=weak_identity, reference_semantics=none, and identity_class=inline; a plan-named digest is not a wire type, and this field never contributes a traversal edge.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a11:ambiguity-adjudication:98bfc2c6ef27ede75714946eaa38ebe9b92541fbd58e123d1e2f8a793ce2d21a",
@@ -4626,7 +4626,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 426] 
         resolved_source_keys: &[
             "field|IdentityContinuityRecord|IdentityContinuityRecord.predecessor_digest|predecessor_digest",
         ],
-        rationale: "a09:1892: shorthand member `predecessor_digest` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `WeakDigest`; the derivation is that the appendix nonretaining-predecessor family is WeakDigest/32 with reference_semantics=weak_digest, digest_class=weak_identity and NO target_schema_id on all five landed rows (a03, a06 x2, a10, a16); that shape is what keeps a continuity chain from becoming a retaining edge. The single affected census key maps to that source form.",
+        rationale: "a09:1892: shorthand member `predecessor_digest` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `WeakDigest`; the derivation is that the appendix nonretaining-predecessor family is WeakDigest/32 with reference_semantics=weak_digest, digest_class=weak_identity and NO target_schema_id on the four applicable landed rows (a03, a06 x2, a10). A16's separately settled plan-named digest is carried as digest256/inline/none and is not a wire-type precedent. The WeakDigest shape here keeps a continuity chain from becoming a retaining edge. The single affected census key maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:0fc76e8406b9a839f450c938eaff50007c961724ba28ce1f64977219c65d0d15",

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 54
+registry_epoch = 55
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -3699,6 +3699,20 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in MacaroonRootIssuanceRecord; retained with the containing object and creates no reachability edge (a16:2173)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
 field_tag = 0x0003
 stable_name = "issuance_receipt_ref"
 exact_wire_type = "StrongRef"
@@ -4367,6 +4381,20 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseCohortRevocationReceipt this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "ProtectedErrorReplayTimeBasis<Role>"
+field_tag = 0x0009
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 17
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in ProtectedErrorReplayTimeBasis; retained with the containing object and creates no reachability edge (a16:2171)"
+version_status = "reserved"
+max_size_bytes = 256
 
 [[field]]
 containing_schema = "ProvisionalRetentionCutSet"
@@ -7538,6 +7566,20 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 45
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreSourceLeaseRecord; retained with the containing object and creates no reachability edge (a16:2237)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
 field_tag = 0x0005
 stable_name = "predecessor"
 exact_wire_type = "RestoreSourceLeasePredecessor"
@@ -9216,6 +9258,20 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in TimeAuthorityEpochTransitionRecord; retained with the containing object and creates no reachability edge (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
 field_tag = 0x0006
 stable_name = "plan_ref"
 exact_wire_type = "StrongRef"
@@ -9322,10 +9378,10 @@ max_size_bytes = 16777216
 containing_schema = "TimeSubjectIssuanceReservation<Role>"
 field_tag = 0x0004
 stable_name = "nonretaining_predecessor_digest"
-exact_wire_type = "WeakDigest"
+exact_wire_type = "digest256"
 cardinality = "one"
-identity_class = "logical"
-reference_semantics = "weak_digest"
+identity_class = "inline"
+reference_semantics = "none"
 construction_order = 19
 role_predicate = "true"
 retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a16:2191)"

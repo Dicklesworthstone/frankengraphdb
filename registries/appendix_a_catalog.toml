@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2909
+target_count = 2913
 projection_fallback_count = 108
-target_source_assignment_sha256 = "3bbf52bdb91cf15d0ced13d007b6d7a659ba1ca4177c8dc804faeb10ca203e67"
+target_source_assignment_sha256 = "5eedad2aab44f1f13b0c686f1f3106672efe9b0e47fb2b58ee2c565599391b70"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 37
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 54
+registry_epoch = 55
 
 [[logical_kind]]
 slice_id = "a03"
@@ -17677,10 +17677,10 @@ row_id = "a16:field:time-subject-issuance-reservation-role-nonretaining-predeces
 containing_schema = "TimeSubjectIssuanceReservation<Role>"
 field_tag = 0x0004
 stable_name = "nonretaining_predecessor_digest"
-exact_wire_type = "WeakDigest"
+exact_wire_type = "digest256"
 cardinality = "one"
-identity_class = "logical"
-reference_semantics = "weak_digest"
+identity_class = "inline"
+reference_semantics = "none"
 construction_order = 19
 role_predicate = "true"
 retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a16:2191)"
@@ -88412,7 +88412,7 @@ ambiguity_source_key = "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReserv
 source_locations = ["a16:2191"]
 resolution = "maps-to-source"
 resolved_source_keys = ["field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|nonretaining_predecessor_digest"]
-rationale = "a16:2191: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge."
+rationale = "a16:2191: nonretaining_predecessor_digest is the carrying field for the plan-named comparison digest, so it is fixed to digest256 with digest_class=weak_identity, reference_semantics=none, and identity_class=inline; a plan-named digest is not a wire type, and this field never contributes a traversal edge."
 
 [[ambiguity_adjudication]]
 row_id = "a11:ambiguity-adjudication:98bfc2c6ef27ede75714946eaa38ebe9b92541fbd58e123d1e2f8a793ce2d21a"
@@ -94433,7 +94433,7 @@ ambiguity_source_key = "ambiguity|field-type-ambiguous|IdentityContinuityRecord|
 source_locations = ["a09:1892"]
 resolution = "maps-to-source"
 resolved_source_keys = ["field|IdentityContinuityRecord|IdentityContinuityRecord.predecessor_digest|predecessor_digest"]
-rationale = "a09:1892: shorthand member `predecessor_digest` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `WeakDigest`; the derivation is that the appendix nonretaining-predecessor family is WeakDigest/32 with reference_semantics=weak_digest, digest_class=weak_identity and NO target_schema_id on all five landed rows (a03, a06 x2, a10, a16); that shape is what keeps a continuity chain from becoming a retaining edge. The single affected census key maps to that source form."
+rationale = "a09:1892: shorthand member `predecessor_digest` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `WeakDigest`; the derivation is that the appendix nonretaining-predecessor family is WeakDigest/32 with reference_semantics=weak_digest, digest_class=weak_identity and NO target_schema_id on the four applicable landed rows (a03, a06 x2, a10). A16's separately settled plan-named digest is carried as digest256/inline/none and is not a wire-type precedent. The WeakDigest shape here keeps a continuity chain from becoming a retaining edge. The single affected census key maps to that source form."
 
 [[ambiguity_adjudication]]
 row_id = "a09:ambiguity-adjudication:0fc76e8406b9a839f450c938eaff50007c961724ba28ce1f64977219c65d0d15"
@@ -94826,3 +94826,99 @@ source_locations = ["a15:2059"]
 resolution = "maps-to-source"
 resolved_source_keys = ["field|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|terminal_audit_gate"]
 rationale = "a15:2059 uses the compact shorthand `terminal_audit_gate`; the a10:1914 SequenceNeutralSpec law requires exactly one TerminalAuditGate even where compact Appendix prose omits its type, and a21:2699 fixes the exact source-ordered StructurallyInapplicable | NotRequired | Required union. Prose omission is not absence and does not authorize a local gate alias."
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:protected-error-replay-time-basis-role-authority-bound-header"
+containing_schema = "ProtectedErrorReplayTimeBasis<Role>"
+field_tag = 0x0009
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 17
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in ProtectedErrorReplayTimeBasis; retained with the containing object and creates no reachability edge (a16:2171)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:macaroon-root-issuance-record-role-authority-owning-role-authority-bound-header"
+containing_schema = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in MacaroonRootIssuanceRecord; retained with the containing object and creates no reachability edge (a16:2173)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-authority-bound-header"
+containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 45
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreSourceLeaseRecord; retained with the containing object and creates no reachability edge (a16:2237)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-authority-bound-header"
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in TimeAuthorityEpochTransitionRecord; retained with the containing object and creates no reachability edge (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[target]]
+row_id = "a16:target:field-protected-error-replay-time-basis-role-authority-bound-header"
+target_row_id = "a16:field:protected-error-replay-time-basis-role-authority-bound-header"
+slice_id = "a16"
+source_key = "field|ProtectedErrorReplayTimeBasis<Role>|ProtectedErrorReplayTimeBasis<Role>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-macaroon-root-issuance-record-role-authority-owning-role-authority-bound-header"
+target_row_id = "a16:field:macaroon-root-issuance-record-role-authority-owning-role-authority-bound-header"
+slice_id = "a16"
+source_key = "field|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-restore-source-lease-record-role-authority-owning-role-authority-bound-header"
+target_row_id = "a16:field:restore-source-lease-record-role-authority-owning-role-authority-bound-header"
+slice_id = "a16"
+source_key = "field|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-authority-epoch-transition-record-role-authority-owning-role-authority-bound-header"
+target_row_id = "a16:field:time-authority-epoch-transition-record-role-authority-owning-role-authority-bound-header"
+slice_id = "a16"
+source_key = "field|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>|TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
