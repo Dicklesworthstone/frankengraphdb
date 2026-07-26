@@ -460,3 +460,15 @@ symbol = "fg_inv_20_core_negative"
 kind = "stub"
 artifact = "crates/fgdb-secure-view/src/pre_observation.rs"
 status = "stub"
+
+# --- W1 workspace-wide determinism gate. ---
+# Per-crate suites assert Doctrine #4 for themselves; this one asserts it
+# ACROSS crates — two `cargo test --workspace` runs must agree, for the same
+# pinned tree, on every engine crate at once. Registered "live": the artifact
+# ships with a `--self-test` mutant panel, so the oracle is known to go red.
+
+[[checker]]
+symbol = "w1_cross_crate_determinism_e2e"
+kind = "script"
+artifact = "scripts/w1_cross_crate_determinism_e2e.sh"
+status = "live"
