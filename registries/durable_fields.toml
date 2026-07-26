@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 56
+registry_epoch = 57
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -1157,6 +1157,20 @@ role_predicate = "true"
 retention_and_cut_rule = "inline sequence-neutral ConstraintCoordinateKey embedded by value in the constraint state root; retained and cut with the containing root, names no selected head or future marker, and creates no reachability edge (a12:1974,1978)"
 version_status = "reserved"
 max_size_bytes = 256
+
+[[field]]
+containing_schema = "ContinuityAuthorityObservationImport<Role>"
+field_tag = 0x0002
+stable_name = "current_basis"
+exact_wire_type = "ContinuityAuthorityCurrentBasis<Role>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 56
+role_predicate = "true"
+retention_and_cut_rule = "inline closed ContinuityAuthorityCurrentBasis<Role> value embeds the exact current authority basis in the import; retained with the containing object and creates no reachability edge (a16:2227)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "ContinuityAuthorityObservationImport<Role>"
@@ -9150,6 +9164,20 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "ShardRestoreSourceLeaseProjection"
+field_tag = 0x0001
+stable_name = "source"
+exact_wire_type = "ShardRestoreSourceLeaseProjectionSource"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "inline closed ShardRestoreSourceLeaseProjectionSource value embeds the exact Bootstrap or Refresh source in the projection; retained with the containing object and creates no reachability edge (a16:2239)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "ShardTimeAuthorityRetirementAck"
 field_tag = 0x0005
 stable_name = "zero_live_old_profile_subject_proof_ref"
@@ -9206,6 +9234,36 @@ target_schema_id = "ShardTimeBoundSubjectRetirementProof"
 construction_order = 51
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the ShardTimeBoundSubjectRetirementProof this ShardTimeAuthorityRetirementFloor commits to; retained while the referrer is retained, and the acyclic order 36 <= 51 keeps the reference backward-only (a16:2205)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardTimeBoundSubjectInventoryCertificate"
+field_tag = 0x0008
+stable_name = "inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeBoundSubjectInventory"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Shard inventory certified by this certificate; retained while the certificate is retained, with the generic-free family target preserving the source-bound Shard instantiation and the acyclic order 33 <= 35 (a16:2197)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardTimeBoundSubjectRetirementProof"
+field_tag = 0x0002
+stable_name = "shard_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeBoundSubjectInventory"
+construction_order = 36
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Shard inventory discharged by this proof; retained while the proof is retained, with the generic-free family target preserving the source-bound Shard instantiation and the acyclic order 33 <= 36 (a16:2207)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -9280,6 +9338,21 @@ target_schema_id = "TimeAuthorityIssuanceFence"
 construction_order = 55
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the TimeAuthorityIssuanceFence this TimeAuthorityDrainHold commits to; retained while the referrer is retained, and the acyclic order 27 <= 55 keeps the reference backward-only (a16:2199)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityDrainHold<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "inventory_closure_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RoleTimeBoundSubjectInventoryClosure"
+construction_order = 55
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact role-bound inventory closure retained by this drain hold; retained while the hold is retained, with the generic-free family target preserving the source Role binding and the acyclic order 40 <= 55 (a16:2199)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -9403,6 +9476,50 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "subject_inventory_closure_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RoleTimeBoundSubjectInventoryClosure"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact role-bound inventory closure consumed by this transition; retained while the transition record is retained, with the generic-free family target preserving the source Role binding and the acyclic order 40 <= 60 (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000d
+stable_name = "drain_hold_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityDrainHold"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact role-bound drain hold authorizing this transition; retained while the transition record is retained, with the generic-free family target preserving the source Role binding and the acyclic order 55 <= 60 (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
+field_tag = 0x000f
+stable_name = "drain_floor_set"
+exact_wire_type = "RoleTimeAuthorityDrainFloorSet<Role>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline closed RoleTimeAuthorityDrainFloorSet<Role> value embeds the exact role-bound drain floors in the transition; retained with the containing object and creates no reachability edge (a16:2217)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>"
 field_tag = 0x0007
 stable_name = "online_macaroon_roots"
@@ -9415,6 +9532,51 @@ role_predicate = "true"
 retention_and_cut_rule = "closed union Local|Meta|Shard selected by the inventory own role - exactly one union value per inventory (cardinality one); the repeated record_refs live inside the Local/Meta arm payloads, and the Shard arm is deliberately uninhabited-empty (a16:2197)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "TimeBoundSubjectInventoryProof<Role>"
+field_tag = 0x0001
+stable_name = "inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeBoundSubjectInventory"
+construction_order = 34
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact role-bound inventory proven by this proof; retained while the proof is retained, with the generic-free family target preserving the source Role binding and the acyclic order 33 <= 34 (a16:2197)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeBoundSubjectRetirementProof<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "transition_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeAuthorityEpochTransitionRecord"
+construction_order = 61
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact role-bound epoch transition retired by this proof; retained while the proof is retained, with the generic-free family target preserving the source Role binding and the acyclic order 60 <= 61 (a16:2207)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TimeBoundSubjectRetirementProof<Role:AuthorityOwningRole>"
+field_tag = 0x0002
+stable_name = "current_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeBoundSubjectInventory"
+construction_order = 61
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact role-bound current inventory discharged by this proof; retained while the proof is retained, with the generic-free family target preserving the source Role binding and the acyclic order 33 <= 61 (a16:2207)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "TimeSubjectIssuanceReservation<Role>"
@@ -10365,7 +10527,7 @@ containing_schema = "ContinuityAuthorityCurrentBasis<Role>"
 union_path = "ContinuityAuthorityCurrentBasis<Role>"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ContinuityAuthorityCurrentBasis<Role>"]
+allowed_containing_schemas = ["ContinuityAuthorityCurrentBasis<Role>", "ContinuityAuthorityObservationImport<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -13193,7 +13355,7 @@ containing_schema = "RoleTimeAuthorityDrainFloorSet<Role>"
 union_path = "RoleTimeAuthorityDrainFloorSet<Role>"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["RoleTimeAuthorityDrainFloorSet<Role>"]
+allowed_containing_schemas = ["RoleTimeAuthorityDrainFloorSet<Role>", "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -13414,7 +13576,7 @@ containing_schema = "ShardRestoreSourceLeaseProjectionSource"
 union_path = "ShardRestoreSourceLeaseProjectionSource"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ShardRestoreSourceLeaseProjectionSource"]
+allowed_containing_schemas = ["ShardRestoreSourceLeaseProjectionSource", "ShardRestoreSourceLeaseProjection"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

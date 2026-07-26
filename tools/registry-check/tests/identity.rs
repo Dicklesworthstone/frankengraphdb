@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 56
+registry_epoch = 57
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 56);
+    assert_eq!(epoch, 57);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -4489,10 +4489,20 @@ fn idr_generic_signed_role_unions_resolve_through_their_family_rows() {
             .iter()
             .find(|union| union.union_name == signed)
             .expect("signed role union exists");
+        let expected_containers = match signed {
+            "RoleTimeAuthorityDrainFloorSet<Role>" => vec![
+                signed.to_owned(),
+                "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>".to_owned(),
+            ],
+            "ContinuityAuthorityCurrentBasis<Role>" => vec![
+                signed.to_owned(),
+                "ContinuityAuthorityObservationImport<Role>".to_owned(),
+            ],
+            _ => vec![signed.to_owned()],
+        };
         assert_eq!(
-            union.allowed_containing_schemas,
-            vec![signed.to_owned()],
-            "a whole-schema role union admits only its own signed form as container"
+            union.allowed_containing_schemas, expected_containers,
+            "a whole-schema role union must carry its exact self-rooted inline-consumer closure"
         );
         let family = identity::generic_free_family(signed);
         assert!(
@@ -5480,6 +5490,41 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("TimeValidationEvidence", "observation_import_ref")
         )
     };
+    // q7ut closes the remaining A16 generic StrongRef target-family law with
+    // eight exact field rows. They postdate the historical witness just like
+    // the earlier A16 reference cohort and therefore must be removed from its
+    // reconstruction by exact owner/member identity.
+    let post_erratum_a16_generic_target_family_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("ShardTimeBoundSubjectInventoryCertificate", "inventory_ref")
+                | (
+                    "ShardTimeBoundSubjectRetirementProof",
+                    "shard_inventory_ref"
+                )
+                | (
+                    "TimeAuthorityDrainHold<Role:AuthorityOwningRole>",
+                    "inventory_closure_ref"
+                )
+                | (
+                    "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+                    "subject_inventory_closure_ref"
+                )
+                | (
+                    "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+                    "drain_hold_ref"
+                )
+                | ("TimeBoundSubjectInventoryProof<Role>", "inventory_ref")
+                | (
+                    "TimeBoundSubjectRetirementProof<Role:AuthorityOwningRole>",
+                    "transition_record_ref"
+                )
+                | (
+                    "TimeBoundSubjectRetirementProof<Role:AuthorityOwningRole>",
+                    "current_inventory_ref"
+                )
+        )
+    };
     // A15 adds the first seven fully resolved KeyDestroyProposal members plus
     // the source-forced WeakStateIdentity basis. The two shared-union consumer
     // fields are already removed through `post_erratum_union`. Remove the
@@ -6364,6 +6409,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_union(&field.exact_wire_type)
             && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a16_reference_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a16_generic_target_family_field(
+                &field.containing_schema,
+                &field.stable_name,
+            )
             && !post_erratum_a15_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a11_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a05_field(&field.containing_schema, &field.stable_name)
@@ -6396,9 +6445,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 465,
+        pre_erratum.fields.len() + 476,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A18 wire-consumer tranche"
+        "the historical witness must remove every post-erratum field cohort through the A16 generic-target tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
@@ -7006,6 +7055,192 @@ fn idr_a16_authority_bound_headers_are_source_ordered_inline_values() {
         assert_eq!(target.target_kind, "field");
         assert_eq!(target.definition_status, "declared");
     }
+}
+
+#[test]
+fn idr_a16_generic_strong_targets_use_registered_family_symbols() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let expected = [
+        (
+            "ShardTimeBoundSubjectInventoryCertificate",
+            "inventory_ref",
+            0x0008,
+            35,
+            "TimeBoundSubjectInventory",
+        ),
+        (
+            "ShardTimeBoundSubjectRetirementProof",
+            "shard_inventory_ref",
+            0x0002,
+            36,
+            "TimeBoundSubjectInventory",
+        ),
+        (
+            "TimeAuthorityDrainHold<Role:AuthorityOwningRole>",
+            "inventory_closure_ref",
+            0x0004,
+            55,
+            "RoleTimeBoundSubjectInventoryClosure",
+        ),
+        (
+            "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+            "subject_inventory_closure_ref",
+            0x000c,
+            60,
+            "RoleTimeBoundSubjectInventoryClosure",
+        ),
+        (
+            "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+            "drain_hold_ref",
+            0x000d,
+            60,
+            "TimeAuthorityDrainHold",
+        ),
+        (
+            "TimeBoundSubjectInventoryProof<Role>",
+            "inventory_ref",
+            0x0001,
+            34,
+            "TimeBoundSubjectInventory",
+        ),
+        (
+            "TimeBoundSubjectRetirementProof<Role:AuthorityOwningRole>",
+            "transition_record_ref",
+            0x0001,
+            61,
+            "TimeAuthorityEpochTransitionRecord",
+        ),
+        (
+            "TimeBoundSubjectRetirementProof<Role:AuthorityOwningRole>",
+            "current_inventory_ref",
+            0x0002,
+            61,
+            "TimeBoundSubjectInventory",
+        ),
+    ];
+    for (schema, stable_name, field_tag, construction_order, target_schema_id) in expected {
+        let row = identity
+            .fields
+            .iter()
+            .find(|field| field.containing_schema == schema && field.stable_name == stable_name)
+            .unwrap_or_else(|| panic!("{schema}.{stable_name} exists"));
+        assert_eq!(row.field_tag, field_tag);
+        assert_eq!(row.exact_wire_type, "StrongRef");
+        assert_eq!(row.cardinality, "one");
+        assert_eq!(row.identity_class, "logical");
+        assert_eq!(row.reference_semantics, "strong");
+        assert_eq!(row.target_schema_id.as_deref(), Some(target_schema_id));
+        assert_eq!(row.construction_order, construction_order);
+        assert_eq!(row.version_status, "reserved");
+        assert_eq!(row.max_size_bytes, 40);
+
+        let source_key = format!("field|{schema}|{schema}.{stable_name}|{stable_name}");
+        let target = catalog
+            .targets
+            .iter()
+            .find(|target| target.source_key == source_key)
+            .unwrap_or_else(|| panic!("{schema}.{stable_name} has one source target"));
+        assert_eq!(target.slice_id, "a16");
+        assert_eq!(target.target_kind, "field");
+        assert_eq!(target.definition_status, "declared");
+    }
+
+    let mut signed_target = identity;
+    signed_target
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "ShardTimeBoundSubjectInventoryCertificate"
+                && field.stable_name == "inventory_ref"
+        })
+        .expect("inventory_ref exists")
+        .target_schema_id = Some("TimeBoundSubjectInventory<Shard>".to_owned());
+    assert!(
+        codes(&signed_target).contains(&"ref_target_unresolved".to_owned()),
+        "a source-signed instantiation must not replace the registered family identity"
+    );
+}
+
+#[test]
+fn idr_a16_logical_union_consumers_have_exact_self_rooted_closures() {
+    let identity = real_identity();
+    let expected = [
+        (
+            "ContinuityAuthorityCurrentBasis<Role>",
+            "ContinuityAuthorityObservationImport<Role>",
+            "current_basis",
+            0x0002,
+            56,
+        ),
+        (
+            "ShardRestoreSourceLeaseProjectionSource",
+            "ShardRestoreSourceLeaseProjection",
+            "source",
+            0x0001,
+            50,
+        ),
+        (
+            "RoleTimeAuthorityDrainFloorSet<Role>",
+            "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>",
+            "drain_floor_set",
+            0x000f,
+            60,
+        ),
+    ];
+    for (union_name, consumer, stable_name, field_tag, construction_order) in expected {
+        let union = identity
+            .ordinary_unions
+            .iter()
+            .find(|union| union.union_name == union_name)
+            .unwrap_or_else(|| panic!("{union_name} exists"));
+        assert_eq!(
+            union.allowed_containing_schemas,
+            vec![union_name.to_owned(), consumer.to_owned()]
+        );
+        let row = identity
+            .fields
+            .iter()
+            .find(|field| field.containing_schema == consumer && field.stable_name == stable_name)
+            .unwrap_or_else(|| panic!("{consumer}.{stable_name} exists"));
+        assert_eq!(row.field_tag, field_tag);
+        assert_eq!(row.exact_wire_type, union_name);
+        assert_eq!(row.cardinality, "one");
+        assert_eq!(row.identity_class, "inline");
+        assert_eq!(row.reference_semantics, "none");
+        assert_eq!(row.target_schema_id, None);
+        assert_eq!(row.construction_order, construction_order);
+        assert_eq!(row.version_status, "reserved");
+        assert_eq!(row.max_size_bytes, 16_777_216);
+    }
+
+    let mut missing_consumer = identity.clone();
+    missing_consumer
+        .ordinary_unions
+        .iter_mut()
+        .find(|union| union.union_name == "ContinuityAuthorityCurrentBasis<Role>")
+        .expect("current-basis union exists")
+        .allowed_containing_schemas
+        .pop();
+    let missing_codes = codes(&missing_consumer);
+    assert!(
+        missing_codes.contains(&"ordinary_union_logical_contract_mismatch".to_owned())
+            && missing_codes.contains(&"ordinary_union_field_mismatch".to_owned()),
+        "an actual inline consumer omitted from the closure must fail: {missing_codes:?}"
+    );
+
+    let mut unrelated_consumer = identity;
+    unrelated_consumer
+        .ordinary_unions
+        .iter_mut()
+        .find(|union| union.union_name == "ContinuityAuthorityCurrentBasis<Role>")
+        .expect("current-basis union exists")
+        .allowed_containing_schemas
+        .push("RootManifest".to_owned());
+    assert!(
+        codes(&unrelated_consumer).contains(&"ordinary_union_logical_contract_mismatch".to_owned()),
+        "an unrelated schema without a matching inline field must not enter the exact closure"
+    );
 }
 
 #[test]

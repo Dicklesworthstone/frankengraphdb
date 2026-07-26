@@ -31,7 +31,7 @@
 //!   reference_union_name_collision reference union shadows another wire type
 //!   ordinary_union_unresolved_schema containing schema has no unique identity class
 //!   ordinary_union_wire_contract_mismatch top-level union/wire cross-index drift
-//!   ordinary_union_logical_contract_mismatch whole-schema role union/logical kind drift
+//!   ordinary_union_logical_contract_mismatch whole-schema union/logical kind or consumer drift
 //!   ordinary_union_container_contract_mismatch open or inconsistent consumer closure
 //!   ordinary_union_arm_duplicate_tag duplicate ordinary-union arm tag
 //!   ordinary_union_arm_metadata_mismatch arm does not match its union owner
@@ -1068,7 +1068,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
     const WIRE: &str = "fnv1a64:9a4a40fb19ced38f";
-    const FIELDS: &str = "fnv1a64:73b4f599a5f1eb82";
+    const FIELDS: &str = "fnv1a64:721562ccd0ed20e1";
 
     let logical = rows_pin(
         r.logical
@@ -1225,7 +1225,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 56,
+            expected_epoch: 57,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,
@@ -2028,6 +2028,25 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             })
             .flatten();
         let top_level_logical_backed = top_level_logical_parent.is_some();
+        // A logical-backed whole-schema union owns its object body's tagged
+        // encoding, but the plan may also name that exact union as an inline
+        // field type in another schema. Keep the containing object first,
+        // then require the complete sorted set of actual inline consumers.
+        // This is an exact closure, not an open allowlist: an unrelated name
+        // without a matching field is rejected, and a field omitted from the
+        // closure is rejected below.
+        let mut top_level_logical_consumer_closure = vec![u.containing_schema.as_str()];
+        top_level_logical_consumer_closure.extend(
+            r.fields
+                .iter()
+                .filter(|field| {
+                    field.exact_wire_type == u.union_name
+                        && field.containing_schema != u.containing_schema
+                })
+                .map(|field| field.containing_schema.as_str()),
+        );
+        top_level_logical_consumer_closure[1..].sort_unstable();
+        top_level_logical_consumer_closure.dedup();
         // Resolution is by generic-free family: a generic-signed whole-schema
         // union or a union embedded in a generic-signed schema resolves
         // through the registered family row, which commits every expansion.
@@ -2054,13 +2073,13 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             if parent.status != u.version_status
                 || u.max_size_bytes > parent.max_size_bytes
                 || !role_predicate_implies(&u.role_predicate, &parent.role_predicate)
-                || u.allowed_containing_schemas.as_slice() != [u.containing_schema.as_str()]
+                || u.allowed_containing_schemas != top_level_logical_consumer_closure
             {
                 out.push(v(
                     "ordinary_union_logical_contract_mismatch",
                     "durable_fields",
                     row_id,
-                    "a whole-schema role union requires a same-name logical kind parent with identical lifecycle, a bound within the object bound, no broader role scope, and a self-only containing-schema closure",
+                    "a whole-schema union requires a same-name logical kind parent with identical lifecycle, a bound within the object bound, no broader role scope, and an exact self-rooted closure over every inline consumer",
                 ));
             }
         } else if top_level_shape {
