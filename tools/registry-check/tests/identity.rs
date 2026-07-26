@@ -272,6 +272,25 @@ fn rename_logical_command_input_union(identity: &mut IdentityRegistries, name: &
         .exact_wire_type = name.to_owned();
 }
 
+/// Reverse the cq4x capsule retarget so the pre-erratum durable-fields pin keeps
+/// reconstructing from live rows.  `CommitMarker.capsule_ref` is a pre-erratum
+/// field whose row was MODIFIED rather than added -- its `target_schema_id` moved
+/// from the g0 scaffold `CommitCapsule` to the source-named `CommittedEffectCapsule`
+/// (the plan spells `capsule_ref:StrongRef<CommittedEffectCapsule>` at 393/1912/1944
+/// and never mentions `CommitCapsule`).  A modification is invisible to the
+/// post-erratum row filters above, which only drop ADDED rows, so it has to be
+/// undone here the same way the A01 wire-type flips are.
+fn undo_cq4x_capsule_retarget(identity: &mut IdentityRegistries) {
+    let field = identity
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "CommitMarker" && field.stable_name == "capsule_ref"
+        })
+        .expect("CommitMarker.capsule_ref exists");
+    field.target_schema_id = Some("CommitCapsule".to_owned());
+}
+
 /// Reverse the transcript-visible A01 increment-2B exactness repairs so the
 /// pre-erratum durable-fields pin keeps reconstructing from live rows.  The
 /// repair's bound corrections are transcript-invisible (field max_size_bytes
@@ -5314,6 +5333,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
+    undo_cq4x_capsule_retarget(&mut pre_erratum);
     let reconstructed_previous_fields_pin = identity::assignment_pins(&pre_erratum)
         .into_iter()
         .find(|pin| pin.registry == "durable_fields")

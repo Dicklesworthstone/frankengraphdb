@@ -756,6 +756,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/closed_attempt_evidence_bundle/"
 
 [[kind]]
+object_kind = 0x0274
+name = "CommittedEffectCapsule"
+status = "reserved"
+construction_order = 12
+role_predicate = "true"
+max_size_bytes = 268435456
+golden_corpus = "corpus/logical/committed_effect_capsule/"
+
+[[kind]]
 object_kind = 0x0278
 name = "ConfigurationState"
 status = "reserved"
