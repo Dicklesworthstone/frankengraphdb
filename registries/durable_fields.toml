@@ -586,6 +586,20 @@ max_size_bytes = 2
 
 [[field]]
 containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x000d
+stable_name = "compatibility_row_id"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 128
+
+[[field]]
+containing_schema = "DurableCapabilityValidationEvidence"
 field_tag = 0x000f
 stable_name = "action_scope_digest"
 exact_wire_type = "digest256"

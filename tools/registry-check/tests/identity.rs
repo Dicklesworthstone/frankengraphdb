@@ -5014,7 +5014,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 109,
+        pre_erratum.fields.len() + 110,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A12 retention-cut tranche"
     );

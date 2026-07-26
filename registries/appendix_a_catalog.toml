@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2424
-projection_fallback_count = 104
-target_source_assignment_sha256 = "f09a2b81666664962983f7e8cce36eab993f0733c3553c072fa6d28cc9baf079"
+target_count = 2425
+projection_fallback_count = 105
+target_source_assignment_sha256 = "97756b5af045f12ca75cedf931398f3e6f4cf018f41bcfe5793c13dd4a731f01"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -15519,6 +15519,22 @@ bd_schema_major = 1
 bd_included_field_tags = []
 bd_excluded_field_tags = [21]
 recipe_pin = "fnv1a64:128f0e499b005f1f"
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:durable-capability-validation-evidence-compatibility-row-id"
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x000d
+stable_name = "compatibility_row_id"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 128
 
 [[union]]
 slice_id = "a01"
@@ -73599,6 +73615,14 @@ row_id = "a21:target:field-durable-capability-validation-evidence-body-digest"
 target_row_id = "a21:field:durable-capability-validation-evidence-body-digest"
 slice_id = "a21"
 source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.body_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-durable-capability-validation-evidence-compatibility-row-id"
+target_row_id = "a21:field:durable-capability-validation-evidence-compatibility-row-id"
+slice_id = "a21"
+source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.compatibility_row_id"
 target_kind = "field"
 definition_status = "declared"
 

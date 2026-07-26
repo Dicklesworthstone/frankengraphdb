@@ -1068,7 +1068,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
     const WIRE: &str = "fnv1a64:dfdc2a9fd42859af";
-    const FIELDS: &str = "fnv1a64:7dd6fe63b48a28ef";
+    const FIELDS: &str = "fnv1a64:ce9c827429509f3f";
 
     let logical = rows_pin(
         r.logical
