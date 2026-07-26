@@ -207,8 +207,11 @@ fn spine_neg_inactive_reachable_clause() {
 #[test]
 fn spine_gate_table_classes() {
     let r = real_registries();
-    // FG-CAL-01..03 and FG-EVID-01..04 in evidence.toml: statistical class
-    // with their required-disclosure fields.
+    // FG-CAL-01..03 and FG-EVID-01..05 in evidence.toml: statistical class
+    // with their required-disclosure fields. FG-EVID-05 (leakage/channel-capacity
+    // measurement) was added by fgdb-g0-threat-model-nqd, which needed a carrier
+    // for the derived-state/observable-metadata asset and found none of 01..04
+    // fit. This frozen list is the "same-commit-update" half of that change.
     let expected_evidence = [
         "FG-CAL-01",
         "FG-CAL-02",
@@ -217,6 +220,7 @@ fn spine_gate_table_classes() {
         "FG-EVID-02",
         "FG-EVID-03",
         "FG-EVID-04",
+        "FG-EVID-05",
     ];
     let actual: Vec<&str> = r.evidence.rows.iter().map(|row| row.id.as_str()).collect();
     assert_eq!(actual, expected_evidence, "evidence gate table drifted");
