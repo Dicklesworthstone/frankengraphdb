@@ -1675,6 +1675,87 @@ fn run_lint(r: &Registries, root: &Path) -> Result<usize, String> {
 fn run_closure(r: &Registries, manifest_path: &Path) -> Result<usize, String> {
     let manifest = model::load_manifest(manifest_path).map_err(|e| e.to_string())?;
     let report = closure::compute(r, &manifest);
+
+    // The control is reported FIRST and explicitly, exactly as the unsafe
+    // scanner's self-test is, so a reader can tell whether an empty reachable
+    // set was PROVEN to mean "this manifest enables nothing" or merely assumed.
+    let mut failures = 0usize;
+    println!(
+        "{}",
+        event(&[
+            ("event", s("closure_self_test")),
+            ("spine_clauses", n(report.spine_clauses as i64)),
+            ("saturated_reachable", n(report.saturated_reachable as i64)),
+            ("licensed", b(report.licensed())),
+            (
+                "outcome",
+                s(if report.licensed() { "pass" } else { "fail" })
+            ),
+        ])
+    );
+    if !report.licensed() {
+        failures += 1;
+        println!(
+            "{}",
+            event(&[
+                ("event", s("closure_self_test_failed")),
+                ("spine_clauses", n(report.spine_clauses as i64)),
+                (
+                    "msg",
+                    s(
+                        "a manifest enabling every atom the spine names still reaches no clause, \
+                       so the closure compiler reaches nothing at all; every \"closure \
+                       satisfied\" conclusion in this run would be unlicensed"
+                    )
+                ),
+                ("outcome", s("fail")),
+            ])
+        );
+    }
+
+    // The manifest's own positive claim about how much it reaches. Silence is
+    // never the same as agreement: without this, a manifest that stopped
+    // reaching its clauses, and one that never reached any, produce the same
+    // green bar.
+    let reached = report.reachable.len() as i64;
+    if reached != manifest.expected_reachable_clauses {
+        failures += 1;
+        println!(
+            "{}",
+            event(&[
+                ("event", s("closure_reachable_count_unexpected")),
+                ("manifest", s(&report.manifest)),
+                ("expected", n(manifest.expected_reachable_clauses)),
+                ("actual", n(reached)),
+                (
+                    "msg",
+                    s(
+                        "the manifest declares how many clauses its closure reaches; reality \
+                       differs. Either a capability landed and the manifest was not revisited, \
+                       or the closure compiler changed what it reaches"
+                    )
+                ),
+                ("outcome", s("fail")),
+            ])
+        );
+    }
+
+    // A misspelled atom enables nothing and is otherwise invisible.
+    for violation in validate::validate_manifest_atoms(r, &manifest) {
+        failures += 1;
+        println!(
+            "{}",
+            event(&[
+                ("event", s("violation")),
+                ("code", s(&violation.code)),
+                ("registry", s(&violation.registry)),
+                ("id", s(&violation.row_id)),
+                ("msg", s(&violation.msg)),
+                ("outcome", s("fail")),
+            ])
+        );
+    }
+
     println!(
         "{}",
         event(&[
@@ -1684,7 +1765,14 @@ fn run_closure(r: &Registries, manifest_path: &Path) -> Result<usize, String> {
             ("live", n(report.live.len() as i64)),
             ("absent", n(report.absent.len() as i64)),
             ("absent_clauses", arr(report.absent.iter().cloned())),
-            ("outcome", s(if report.ok() { "pass" } else { "fail" })),
+            (
+                "outcome",
+                s(if report.ok() && failures == 0 {
+                    "pass"
+                } else {
+                    "fail"
+                })
+            ),
         ])
     );
     for (capability, clauses) in &report.absent_capabilities {
@@ -1702,7 +1790,10 @@ fn run_closure(r: &Registries, manifest_path: &Path) -> Result<usize, String> {
         );
         eprintln!("capability {capability:?} absent: non-live reachable clauses {clauses:?}");
     }
-    Ok(report.absent.len())
+    // An unlicensed run, a reachable count that does not match what the
+    // manifest claims, and an undeclared atom each fail the gate on their own.
+    // Returning only `absent.len()` would have exited 0 for all three.
+    Ok(report.absent.len() + failures)
 }
 
 fn run() -> Result<usize, String> {

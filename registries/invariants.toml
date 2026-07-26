@@ -64,6 +64,43 @@ allowed_claim_classes = ["invariant", "proof", "bounded_model"]
 waiver_policy = "forbidden"
 twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 
+# The CLOSED vocabulary of capability atoms an activation_predicate or a
+# capability manifest may name (bead fgdb-regcheck-closure-vacuous-no-control-hp0f).
+#
+# Why this list has to exist. An atom that is misspelled evaluates false in
+# exactly the same way as an atom whose capability has not landed yet, so
+# `mvcc-visibilty` in a predicate makes its clause unreachable FOREVER, silently
+# escaping enforcement under a green verdict, and no gate could ever say so —
+# including after Genesis. Measured before this list existed: misspelling one
+# atom shrank the reachable set from 20 to 19 with no violation of any kind.
+# With the vocabulary closed, registry-check rejects the typo instead.
+#
+# Adding a capability means adding its atom here first. That is deliberate: the
+# vocabulary is a positive claim about what capabilities this system HAS, and it
+# is checked in both directions against the twenty-ID spine.
+capability_atoms = [
+    "authorization",
+    "base-semantics",
+    "branching",
+    "canonical-scalars",
+    "commit-stream",
+    "content-addressing",
+    "durable-formats",
+    "exclusive-ownership",
+    "garbage-collection",
+    "id-allocation",
+    "incremental-derivatives",
+    "merge-ladder",
+    "mvcc-storage",
+    "mvcc-visibility",
+    "obligation-tracking",
+    "replay-manifests",
+    "root-publication",
+    "serializable-isolation",
+    "ssi-witnesses",
+    "txn-lifecycle",
+]
+
 # -----------------------------------------------------------------------------
 # FG-INV-01
 # -----------------------------------------------------------------------------

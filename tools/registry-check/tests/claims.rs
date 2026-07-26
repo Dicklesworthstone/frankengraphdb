@@ -44,7 +44,8 @@ fn invariants_text_with(clause_snippet: &str) -> String {
          name = \"invariants\"\n\
          allowed_claim_classes = [\"invariant\", \"proof\", \"bounded_model\"]\n\
          waiver_policy = \"forbidden\"\n\
-         twenty_id_hash = \"fnv1a64:204a4b17c8ecc57f\"\n",
+         twenty_id_hash = \"fnv1a64:204a4b17c8ecc57f\"\n\
+         capability_atoms = [\"feature-x\", \"feature-y\"]\n",
     );
     for i in 1..=20 {
         out.push_str(&format!(
@@ -461,6 +462,7 @@ fn claims_closure_absent_capability_is_attributed() {
         features: vec!["feature-x".into()],
         postures: vec![],
         roles: vec![],
+        expected_reachable_clauses: 0,
     };
     let report = closure::compute(&r, &manifest);
     assert!(!report.ok());
@@ -477,6 +479,7 @@ fn claims_closure_absent_capability_is_attributed() {
         features: vec![],
         postures: vec![],
         roles: vec![],
+        expected_reachable_clauses: 0,
     };
     assert!(closure::compute(&r, &empty).ok());
 }

@@ -17,7 +17,7 @@
 //!   artifact_missing         — a "live"/"checked" row's artifact is absent
 
 use crate::hash::id_table_hash;
-use crate::model::{Clause, Registries};
+use crate::model::{Clause, Manifest, Registries};
 use crate::predicate;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -973,6 +973,94 @@ fn validate_active_logical_kind_arms(root: &Path, out: &mut Vec<Violation>) {
     }
 }
 
+/// Every capability atom named by an `activation_predicate` must be declared in
+/// the registry's `capability_atoms` vocabulary.
+///
+/// The atom space used to be OPEN, and that is not a cosmetic gap: an atom that
+/// is merely misspelled evaluates false exactly as an unlanded capability does,
+/// so `mvcc-visibilty` makes its clause unreachable forever. Measured before
+/// this check existed: misspelling one atom shrank the reachable set from 20 to
+/// 19 with no violation of any kind. In a tree where the other 19 clauses were
+/// live, the misspelled one would have escaped enforcement under a green
+/// verdict — permanently, and including after Genesis, because nothing in the
+/// system could ever notice.
+///
+/// Closing the vocabulary is what makes a typo a validation error instead of a
+/// silent absence. The same vocabulary is applied to capability manifests by
+/// [`validate_manifest_atoms`].
+fn validate_capability_atoms(r: &Registries, out: &mut Vec<Violation>) {
+    let reg = "invariants";
+    let declared: BTreeSet<&str> = r
+        .invariants
+        .capability_atoms
+        .iter()
+        .map(String::as_str)
+        .collect();
+    for inv in &r.invariants.invariants {
+        for clause in &inv.clauses {
+            let Ok(expr) = predicate::parse(&clause.activation_predicate) else {
+                // Already reported as `bad_field`; nothing to say twice.
+                continue;
+            };
+            let mut atoms = BTreeSet::new();
+            predicate::atoms(&expr, &mut atoms);
+            for atom in atoms {
+                if !declared.contains(atom.as_str()) {
+                    out.push(Violation::new(
+                        "undeclared_capability_atom",
+                        reg,
+                        &clause.key,
+                        format!(
+                            "activation_predicate names capability atom {atom:?}, which is not \
+                             in registry.capability_atoms. An undeclared atom is indistinguishable \
+                             from a misspelled one: both evaluate false, so the clause is \
+                             unreachable forever and no gate can say so"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Every atom a capability manifest enables must be declared in the same
+/// vocabulary.
+///
+/// This is the other half of the typo class. A manifest naming
+/// `mvcc-visibilty` silently enables nothing; the closure it produces is
+/// smaller than the one the author believed they had asked for, and the gate
+/// reports a pass over it.
+pub fn validate_manifest_atoms(r: &Registries, manifest: &Manifest) -> Vec<Violation> {
+    let declared: BTreeSet<&str> = r
+        .invariants
+        .capability_atoms
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut out = Vec::new();
+    for (field, atoms) in [
+        ("features", &manifest.features),
+        ("postures", &manifest.postures),
+        ("roles", &manifest.roles),
+    ] {
+        for atom in atoms {
+            if !declared.contains(atom.as_str()) {
+                out.push(Violation::new(
+                    "undeclared_manifest_atom",
+                    "manifest",
+                    &manifest.name,
+                    format!(
+                        "{field} names capability atom {atom:?}, which is not in \
+                         invariants.toml registry.capability_atoms; it enables nothing, and a \
+                         misspelling is indistinguishable from a capability that has not landed"
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// Run every check. `root` is the repository root (artifact resolution).
 pub fn validate_all(r: &Registries, root: &Path) -> Vec<Violation> {
     let mut out = Vec::new();
@@ -983,5 +1071,6 @@ pub fn validate_all(r: &Registries, root: &Path) -> Vec<Violation> {
     validate_proof_lanes(r, root, &mut out);
     validate_checker_index(r, root, &mut out);
     validate_active_logical_kind_arms(root, &mut out);
+    validate_capability_atoms(r, &mut out);
     out
 }

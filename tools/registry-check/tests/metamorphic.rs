@@ -1214,3 +1214,211 @@ fn a_root_forbid_is_recognised_at_any_column() {
          unsafe_code exactly as hard as it would on its own line"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Relation 10 — the activation closure must be able to fail, and a capability
+//               atom must mean something
+//               (`fgdb-regcheck-closure-vacuous-no-control-hp0f`)
+// ---------------------------------------------------------------------------
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("repo root")
+        .to_path_buf()
+}
+
+/// Load the real registry set with `invariants.toml` rewritten by `patch`.
+///
+/// Every other registry is copied verbatim, so what the relations below compare
+/// is exactly the transformation applied to the invariant spine.
+fn registries_with(tag: &str, patch: impl Fn(&str) -> String) -> registry_check::model::Registries {
+    let src = repo_root().join("registries");
+    let dir = std::env::temp_dir().join(format!("fgdb-metamorphic-atoms-{tag}"));
+    if dir.is_dir() {
+        fs::remove_dir_all(&dir).expect("clear fixture registries");
+    }
+    fs::create_dir_all(&dir).expect("fixture registries dir");
+    for entry in fs::read_dir(&src).expect("read registries") {
+        let path = entry.expect("registry entry").path();
+        if path.extension().is_some_and(|e| e == "toml") {
+            let text = fs::read_to_string(&path).expect("read registry");
+            let name = path.file_name().expect("registry file name");
+            let text = if name == "invariants.toml" {
+                patch(&text)
+            } else {
+                text
+            };
+            fs::write(dir.join(name), text).expect("write registry");
+        }
+    }
+    registry_check::model::load_registries(&dir).expect("patched registries load")
+}
+
+fn validation_codes(r: &registry_check::model::Registries) -> BTreeSet<String> {
+    registry_check::validate::validate_all(r, &repo_root())
+        .into_iter()
+        .map(|v| v.code)
+        .collect()
+}
+
+/// The control that licenses every "closure satisfied" verdict.
+///
+/// The shipped manifest enables nothing, so its closure reaches zero clauses and
+/// passes trivially — measured `clauses=20 reachable=0 live=0 absent=0 ok=true`
+/// with 20 of 20 clauses non-live. That green bar is indistinguishable from the
+/// one a BROKEN closure compiler would print, which is the whole
+/// looks-exactly-like-a-pass family. `saturated_reachable` is the non-vacuity
+/// control: what a manifest enabling every atom the spine names would reach. If
+/// it is zero while the spine holds clauses, the compiler reaches nothing at all
+/// and no conclusion from the run is licensed.
+#[test]
+fn a_zero_reach_closure_is_licensed_by_its_own_control() {
+    let r = registry_check::model::load_registries(&repo_root().join("registries"))
+        .expect("real registries");
+    let manifest = registry_check::model::load_manifest(
+        &repo_root().join("registries/sample_capability_manifest.toml"),
+    )
+    .expect("sample manifest");
+    let report = registry_check::closure::compute(&r, &manifest);
+
+    assert!(
+        report.spine_clauses > 0,
+        "control: the spine must hold clauses at all, or everything below is vacuous"
+    );
+    assert!(
+        report.saturated_reachable > 0,
+        "the closure compiler reaches NOTHING even with every atom the spine names \
+         enabled: a reachable set of {} is then a broken compiler, not an empty \
+         manifest, and `ok()` must not be reported as a pass",
+        report.reachable.len()
+    );
+    assert!(report.licensed(), "the run must be licensed: {report:?}");
+    assert_eq!(
+        report.reachable.len() as i64,
+        manifest.expected_reachable_clauses,
+        "the manifest declares how many clauses it reaches; silence is not agreement, \
+         so a drift in either direction must fail rather than pass quietly"
+    );
+}
+
+/// The difference direction: a manifest that enables a real atom must reach
+/// clauses. Without this, the licensing relation above could be satisfied by a
+/// checker that reaches everything and nothing distinguishes the two.
+#[test]
+fn enabling_a_real_atom_reaches_clauses() {
+    let r = registry_check::model::load_registries(&repo_root().join("registries"))
+        .expect("real registries");
+    let atom = registry_check::closure::spine_atoms(&r)
+        .into_iter()
+        .next()
+        .expect("the spine names at least one capability atom");
+    let manifest = registry_check::model::Manifest {
+        name: "one-atom".into(),
+        features: vec![atom.clone()],
+        postures: vec![],
+        roles: vec![],
+        expected_reachable_clauses: 0,
+    };
+    let report = registry_check::closure::compute(&r, &manifest);
+    assert!(
+        !report.reachable.is_empty(),
+        "enabling {atom:?} must reach the clauses whose predicate names it"
+    );
+}
+
+/// The metamorphic statement of the typo class. Renaming a capability atom
+/// CONSISTENTLY — in the vocabulary and in every predicate that names it —
+/// changes what the atom is called and nothing else, so the verdict must not
+/// move.
+///
+/// The rename is applied to the two places the atom is an ATOM — its vocabulary
+/// entry and the predicate that names it — and nowhere else. `mvcc-visibility`
+/// is also a proof-lane name in this registry set, and rewriting that too would
+/// be a different change wearing the same spelling: the first draft of this test
+/// did exactly that and produced `proof_lane_unresolved`, which is the relation
+/// working, not failing.
+#[test]
+fn consistently_renaming_a_capability_atom_changes_no_verdict() {
+    let rename = |text: &str| {
+        text.replace(
+            "activation_predicate = \"mvcc-visibility\"",
+            "activation_predicate = \"mvcc-observability\"",
+        )
+        .replace("    \"mvcc-visibility\",", "    \"mvcc-observability\",")
+    };
+    let base = validation_codes(&registries_with("rename_base", str::to_owned));
+    let renamed = validation_codes(&registries_with("rename_all", rename));
+    assert_eq!(
+        base, renamed,
+        "renaming an atom everywhere at once changes its spelling, not the spine's \
+         meaning:\n  base:    {base:?}\n  renamed: {renamed:?}"
+    );
+}
+
+/// And the direction that was previously invisible forever: renaming an atom in
+/// a PREDICATE but not in the vocabulary is a typo, and a typo evaluates false
+/// exactly as an unlanded capability does. Measured before the vocabulary
+/// existed: the reachable set silently shrank 20 -> 19 with no violation of any
+/// kind, so in a tree where the other 19 clauses were live the misspelled clause
+/// would have escaped enforcement under a green verdict, permanently.
+#[test]
+fn an_atom_named_only_by_a_predicate_is_reported() {
+    let base = validation_codes(&registries_with("typo_base", str::to_owned));
+    assert!(
+        !base.contains("undeclared_capability_atom"),
+        "control: the shipped spine declares every atom it names: {base:?}"
+    );
+    let typo = validation_codes(&registries_with("typo_pred", |text| {
+        // Only the predicate occurrence: the vocabulary entry keeps its spelling.
+        text.replace(
+            "activation_predicate = \"mvcc-visibility\"",
+            "activation_predicate = \"mvcc-visibilty\"",
+        )
+    }));
+    assert!(
+        typo.contains("undeclared_capability_atom"),
+        "a predicate naming an atom outside the vocabulary is a typo that makes its \
+         clause unreachable forever, and it must be reported: {typo:?}"
+    );
+}
+
+/// The same for a manifest: an atom it enables must exist, or the closure it
+/// asks for is quietly smaller than the one its author believed they declared.
+#[test]
+fn a_manifest_atom_outside_the_vocabulary_is_reported() {
+    let r = registry_check::model::load_registries(&repo_root().join("registries"))
+        .expect("real registries");
+    let real = registry_check::closure::spine_atoms(&r)
+        .into_iter()
+        .next()
+        .expect("at least one atom");
+    let good = registry_check::model::Manifest {
+        name: "good".into(),
+        features: vec![real.clone()],
+        postures: vec![],
+        roles: vec![],
+        expected_reachable_clauses: 0,
+    };
+    let typo = registry_check::model::Manifest {
+        name: "typo".into(),
+        features: vec![format!("{real}x")],
+        postures: vec![],
+        roles: vec![],
+        expected_reachable_clauses: 0,
+    };
+    assert!(
+        registry_check::validate::validate_manifest_atoms(&r, &good).is_empty(),
+        "control: a declared atom is accepted"
+    );
+    let codes: Vec<String> = registry_check::validate::validate_manifest_atoms(&r, &typo)
+        .into_iter()
+        .map(|v| v.code)
+        .collect();
+    assert!(
+        codes.contains(&"undeclared_manifest_atom".to_owned()),
+        "a manifest atom outside the vocabulary enables nothing and must be reported: \
+         {codes:?}"
+    );
+}

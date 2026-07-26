@@ -36,6 +36,10 @@ fn manifest(features: &[&str]) -> Manifest {
         features: features.iter().map(|s| s.to_string()).collect(),
         postures: vec![],
         roles: vec![],
+        // These synthetic manifests are built to exercise the closure directly,
+        // not to make a claim about how much they reach; the count pin is
+        // checked where a manifest is loaded from disk.
+        expected_reachable_clauses: 0,
     }
 }
 

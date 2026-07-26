@@ -78,6 +78,16 @@ pub struct InvariantRegistry {
     pub allowed_claim_classes: Vec<String>,
     pub waiver_policy: String,
     pub twenty_id_hash: String,
+    /// The closed vocabulary of capability atoms an `activation_predicate` or a
+    /// capability manifest may name.
+    ///
+    /// Without it the atom space is open, and an atom that is merely MISSPELLED
+    /// is indistinguishable from one whose capability has not landed yet: both
+    /// simply evaluate false. A clause whose predicate names `mvcc-visibilty`
+    /// is unreachable forever, silently escaping enforcement under a green
+    /// verdict, and no gate can ever say so. Closing the vocabulary is what
+    /// turns that permanent silence into a validation error.
+    pub capability_atoms: Vec<String>,
     pub invariants: Vec<Invariant>,
 }
 
@@ -137,6 +147,16 @@ pub struct Manifest {
     pub features: Vec<String>,
     pub postures: Vec<String>,
     pub roles: Vec<String>,
+    /// How many clauses this manifest CLAIMS its activation closure reaches.
+    ///
+    /// A positive claim, not an absence. The pre-Genesis sample manifest
+    /// enables nothing, so its closure reaches zero clauses and the gate passes
+    /// — and would pass identically if the closure compiler had silently
+    /// stopped reaching anything at all. Declaring the number is what makes a
+    /// zero mean "deliberately zero" instead of "nothing was examined", and it
+    /// is what fails the day Genesis makes the first clause reachable without
+    /// anyone revisiting this file.
+    pub expected_reachable_clauses: i64,
 }
 
 /// The complete registry set the validator operates on.
@@ -257,6 +277,7 @@ pub fn invariants_from(root: &Table) -> Result<InvariantRegistry, ReadError> {
         )?,
         waiver_policy: get_str(registry, "waiver_policy", "invariants.toml.registry")?,
         twenty_id_hash: get_str(registry, "twenty_id_hash", "invariants.toml.registry")?,
+        capability_atoms: get_str_array(registry, "capability_atoms", "invariants.toml.registry")?,
         invariants,
     })
 }
@@ -359,6 +380,7 @@ pub fn manifest_from(root: &Table) -> Result<Manifest, ReadError> {
         features: get_str_array(m, "features", "manifest")?,
         postures: get_str_array(m, "postures", "manifest")?,
         roles: get_str_array(m, "roles", "manifest")?,
+        expected_reachable_clauses: get_int(m, "expected_reachable_clauses", "manifest")?,
     })
 }
 
