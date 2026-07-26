@@ -648,8 +648,8 @@ fn promote_first_clause(
 ) -> (Registries, String) {
     let mut r = real_registries();
     let mut key = String::new();
-    'outer: for invariant in r.invariants.invariants.iter_mut() {
-        for clause in invariant.clauses.iter_mut() {
+    for invariant in r.invariants.invariants.iter_mut() {
+        if let Some(clause) = invariant.clauses.first_mut() {
             clause.status = status.to_string();
             if let Some(symbol) = checker {
                 clause.checker_entrypoint = symbol.to_string();
@@ -658,7 +658,7 @@ fn promote_first_clause(
                 clause.negative_test_entrypoint = symbol.to_string();
             }
             key = clause.key.clone();
-            break 'outer;
+            break;
         }
     }
     (r, key)
