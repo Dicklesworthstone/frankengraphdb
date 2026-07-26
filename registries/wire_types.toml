@@ -4179,3 +4179,1010 @@ wire_tag = 0x0003
 encoding_context = "inline Required payload carrying the exact StrongRef<AuditTicket>, StrongRef<AuditEventRecord>, and StrongRef<AuditTicketResolution> triple; exact payload-member registration remains producer-gated"
 allowed_containing_schemas = ["TerminalAuditGate"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x019d
+name = "ReplayLogicalStateEvidence"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2609 source definition; the arm set is the exact source bijection Local | Sharded in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayLogicalStateEvidence", "ReplayManifest"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x019e
+name = "ReplayLogicalStateEvidence.local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReplayLogicalStateEvidence"
+wire_tag = 0x0001
+encoding_context = "arm Local of closed union ReplayLogicalStateEvidence (a21:2609); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayLogicalStateEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x019f
+name = "ReplayLogicalStateEvidence.sharded"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReplayLogicalStateEvidence"
+wire_tag = 0x0002
+encoding_context = "arm Sharded of closed union ReplayLogicalStateEvidence (a21:2609); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayLogicalStateEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01a0
+name = "AuditCoverageClaimRef"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2619 source definition; the arm set is the exact source bijection Local | Meta in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditCoverageClaimRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01a1
+name = "AuditCoverageClaimRef.local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditCoverageClaimRef"
+wire_tag = 0x0001
+encoding_context = "arm Local of closed union AuditCoverageClaimRef (a21:2619); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditCoverageClaimRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01a2
+name = "AuditCoverageClaimRef.meta"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditCoverageClaimRef"
+wire_tag = 0x0002
+encoding_context = "arm Meta of closed union AuditCoverageClaimRef (a21:2619); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditCoverageClaimRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01a3
+name = "NonRequiredAuditEvidence"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2619 source definition; the arm set is the exact source bijection ProfileExempt | CoveredByParentClaim | LifecycleScaffolding in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["GlobalTxnOutcomeRecord", "NonRequiredAuditEvidence", "TxnOutcomeRecord"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01a4
+name = "NonRequiredAuditEvidence.profile_exempt"
+kind = "union_variant"
+status = "reserved"
+containing_union = "NonRequiredAuditEvidence"
+wire_tag = 0x0001
+encoding_context = "arm ProfileExempt of closed union NonRequiredAuditEvidence (a21:2619); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["NonRequiredAuditEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01a5
+name = "NonRequiredAuditEvidence.covered_by_parent_claim"
+kind = "union_variant"
+status = "reserved"
+containing_union = "NonRequiredAuditEvidence"
+wire_tag = 0x0002
+encoding_context = "arm CoveredByParentClaim of closed union NonRequiredAuditEvidence (a21:2619); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["NonRequiredAuditEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01a6
+name = "NonRequiredAuditEvidence.lifecycle_scaffolding"
+kind = "union_variant"
+status = "reserved"
+containing_union = "NonRequiredAuditEvidence"
+wire_tag = 0x0003
+encoding_context = "arm LifecycleScaffolding of closed union NonRequiredAuditEvidence (a21:2619); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["NonRequiredAuditEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01a7
+name = "AuthorizationAuditGate"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2621 source definition; the arm set is the exact source bijection StructurallyInapplicable | NotRequired | Required in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuthorizationAuditGate", "GlobalAuthorizationDecisionRecord", "GlobalReadAuthorizationDecisionRecord", "LifecycleAuthorizationDecisionRecord<Role>", "ReadAccessAdmissionRecord<Role>", "ReadResultReleaseDecisionRecord<Role>"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01a8
+name = "AuthorizationAuditGate.structurally_inapplicable"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuthorizationAuditGate"
+wire_tag = 0x0001
+encoding_context = "arm StructurallyInapplicable of closed union AuthorizationAuditGate (a21:2621); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuthorizationAuditGate"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01a9
+name = "AuthorizationAuditGate.not_required"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuthorizationAuditGate"
+wire_tag = 0x0002
+encoding_context = "arm NotRequired of closed union AuthorizationAuditGate (a21:2621); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuthorizationAuditGate"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01aa
+name = "AuthorizationAuditGate.required"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuthorizationAuditGate"
+wire_tag = 0x0003
+encoding_context = "arm Required of closed union AuthorizationAuditGate (a21:2621); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuthorizationAuditGate"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ab
+name = "ImportedOperationAuditAdmissionEvidence"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2623 source definition; the arm set is the exact source bijection NotRequired | Claimed in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ImportedOperationAuditAdmissionEvidence", "ReadAccessAdmissionRecord<Role>"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ac
+name = "ImportedOperationAuditAdmissionEvidence.not_required"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ImportedOperationAuditAdmissionEvidence"
+wire_tag = 0x0001
+encoding_context = "arm NotRequired of closed union ImportedOperationAuditAdmissionEvidence (a21:2623); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ImportedOperationAuditAdmissionEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ad
+name = "ImportedOperationAuditAdmissionEvidence.claimed"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ImportedOperationAuditAdmissionEvidence"
+wire_tag = 0x0002
+encoding_context = "arm Claimed of closed union ImportedOperationAuditAdmissionEvidence (a21:2623); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ImportedOperationAuditAdmissionEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ae
+name = "ImportedStatementAuditAdmissionEvidence"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2623 source definition; the arm set is the exact source bijection NotRequired | Claimed in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ImportedStatementAuditAdmissionEvidence", "ReadAccessAdmissionRecord<Role>"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01af
+name = "ImportedStatementAuditAdmissionEvidence.not_required"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ImportedStatementAuditAdmissionEvidence"
+wire_tag = 0x0001
+encoding_context = "arm NotRequired of closed union ImportedStatementAuditAdmissionEvidence (a21:2623); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ImportedStatementAuditAdmissionEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01b0
+name = "ImportedStatementAuditAdmissionEvidence.claimed"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ImportedStatementAuditAdmissionEvidence"
+wire_tag = 0x0002
+encoding_context = "arm Claimed of closed union ImportedStatementAuditAdmissionEvidence (a21:2623); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ImportedStatementAuditAdmissionEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01b1
+name = "ImportedReadAuditEvidence"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2623 source definition; the arm set is the exact source bijection TerminalAttempt | Statement in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ImportedReadAuditEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01b2
+name = "ImportedReadAuditEvidence.terminal_attempt"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ImportedReadAuditEvidence"
+wire_tag = 0x0001
+encoding_context = "arm TerminalAttempt of closed union ImportedReadAuditEvidence (a21:2623); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ImportedReadAuditEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01b3
+name = "ImportedReadAuditEvidence.statement"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ImportedReadAuditEvidence"
+wire_tag = 0x0002
+encoding_context = "arm Statement of closed union ImportedReadAuditEvidence (a21:2623); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ImportedReadAuditEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01b4
+name = "DurableCapabilityCurrentSecurityBasis"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2629 source definition; the arm set is the exact source bijection 0x0001 Local | 0x0002 Meta in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentSecurityBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01b5
+name = "DurableCapabilityCurrentSecurityBasis.0x0001_local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentSecurityBasis"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 Local of closed union DurableCapabilityCurrentSecurityBasis (a21:2629); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentSecurityBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01b6
+name = "DurableCapabilityCurrentSecurityBasis.0x0002_meta"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentSecurityBasis"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 Meta of closed union DurableCapabilityCurrentSecurityBasis (a21:2629); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentSecurityBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01b7
+name = "DurableCapabilityPresentedReplayRef"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged discriminant registered from the a21:2633 source definition; the arm set is the exact source bijection 0x0001 LocalTxnOutcome | 0x0002 MetaTxnOutcome | 0x0003 LocalSubscriptionCursor | 0x0004 MetaSubscriptionCursor | 0x0005 LocalBufferedResult | 0x0006 MetaBufferedResult | 0x0007 LocalDurableArtifactOutput | 0x0008 MetaDurableArtifactOutput | 0x0009 LocalMergeOutcome | 0x000a MetaMergeOutcome | 0x000b LocalReadYourWrites | 0x000c MetaReadYourWrites in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01b8
+name = "DurableCapabilityPresentedReplayRef.0x0001_local_txn_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 LocalTxnOutcome of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01b9
+name = "DurableCapabilityPresentedReplayRef.0x0002_meta_txn_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 MetaTxnOutcome of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ba
+name = "DurableCapabilityPresentedReplayRef.0x0003_local_subscription_cursor"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 LocalSubscriptionCursor of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01bb
+name = "DurableCapabilityPresentedReplayRef.0x0004_meta_subscription_cursor"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x0004
+encoding_context = "arm 0x0004 MetaSubscriptionCursor of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01bc
+name = "DurableCapabilityPresentedReplayRef.0x0005_local_buffered_result"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x0005
+encoding_context = "arm 0x0005 LocalBufferedResult of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01bd
+name = "DurableCapabilityPresentedReplayRef.0x0006_meta_buffered_result"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x0006
+encoding_context = "arm 0x0006 MetaBufferedResult of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01be
+name = "DurableCapabilityPresentedReplayRef.0x0007_local_durable_artifact_output"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x0007
+encoding_context = "arm 0x0007 LocalDurableArtifactOutput of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01bf
+name = "DurableCapabilityPresentedReplayRef.0x0008_meta_durable_artifact_output"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x0008
+encoding_context = "arm 0x0008 MetaDurableArtifactOutput of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01c0
+name = "DurableCapabilityPresentedReplayRef.0x0009_local_merge_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x0009
+encoding_context = "arm 0x0009 LocalMergeOutcome of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01c1
+name = "DurableCapabilityPresentedReplayRef.0x000a_meta_merge_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x000a
+encoding_context = "arm 0x000a MetaMergeOutcome of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01c2
+name = "DurableCapabilityPresentedReplayRef.0x000b_local_read_your_writes"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x000b
+encoding_context = "arm 0x000b LocalReadYourWrites of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01c3
+name = "DurableCapabilityPresentedReplayRef.0x000c_meta_read_your_writes"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityPresentedReplayRef"
+wire_tag = 0x000c
+encoding_context = "arm 0x000c MetaReadYourWrites of closed discriminant DurableCapabilityPresentedReplayRef (a21:2633); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01c4
+name = "DurableCapabilityLegacyReplayRef"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2633 source definition; the arm set is the exact source bijection 0x0001 TxnOutcome | 0x0002 ResumeSubscriptionCursor | 0x0003 ResumeBufferedResult | 0x0004 ResumeDurableArtifactOutput | 0x0005 MergeOutcome | 0x0006 ReadYourWrites in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01c5
+name = "DurableCapabilityLegacyReplayRef.0x0001_txn_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyReplayRef"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 TxnOutcome of closed union DurableCapabilityLegacyReplayRef (a21:2633); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01c6
+name = "DurableCapabilityLegacyReplayRef.0x0002_resume_subscription_cursor"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyReplayRef"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 ResumeSubscriptionCursor of closed union DurableCapabilityLegacyReplayRef (a21:2633); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01c7
+name = "DurableCapabilityLegacyReplayRef.0x0003_resume_buffered_result"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyReplayRef"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 ResumeBufferedResult of closed union DurableCapabilityLegacyReplayRef (a21:2633); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01c8
+name = "DurableCapabilityLegacyReplayRef.0x0004_resume_durable_artifact_output"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyReplayRef"
+wire_tag = 0x0004
+encoding_context = "arm 0x0004 ResumeDurableArtifactOutput of closed union DurableCapabilityLegacyReplayRef (a21:2633); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01c9
+name = "DurableCapabilityLegacyReplayRef.0x0005_merge_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyReplayRef"
+wire_tag = 0x0005
+encoding_context = "arm 0x0005 MergeOutcome of closed union DurableCapabilityLegacyReplayRef (a21:2633); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ca
+name = "DurableCapabilityLegacyReplayRef.0x0006_read_your_writes"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyReplayRef"
+wire_tag = 0x0006
+encoding_context = "arm 0x0006 ReadYourWrites of closed union DurableCapabilityLegacyReplayRef (a21:2633); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01cb
+name = "DurableCapabilityCurrentMembershipProof"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2635 source definition; the arm set is the exact source bijection 0x0001 LocalTxnOutcome | 0x0002 MetaTxnOutcome | 0x0003 LocalSubscriptionCursor | 0x0004 MetaSubscriptionCursor | 0x0005 LocalBufferedResult | 0x0006 MetaBufferedResult | 0x0007 LocalDurableArtifactOutput | 0x0008 MetaDurableArtifactOutput | 0x0009 LocalMergeOutcome | 0x000a MetaMergeOutcome | 0x000b LocalReadYourWrites | 0x000c MetaReadYourWrites in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01cc
+name = "DurableCapabilityCurrentMembershipProof.0x0001_local_txn_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 LocalTxnOutcome of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01cd
+name = "DurableCapabilityCurrentMembershipProof.0x0002_meta_txn_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 MetaTxnOutcome of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ce
+name = "DurableCapabilityCurrentMembershipProof.0x0003_local_subscription_cursor"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 LocalSubscriptionCursor of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01cf
+name = "DurableCapabilityCurrentMembershipProof.0x0004_meta_subscription_cursor"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x0004
+encoding_context = "arm 0x0004 MetaSubscriptionCursor of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01d0
+name = "DurableCapabilityCurrentMembershipProof.0x0005_local_buffered_result"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x0005
+encoding_context = "arm 0x0005 LocalBufferedResult of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01d1
+name = "DurableCapabilityCurrentMembershipProof.0x0006_meta_buffered_result"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x0006
+encoding_context = "arm 0x0006 MetaBufferedResult of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01d2
+name = "DurableCapabilityCurrentMembershipProof.0x0007_local_durable_artifact_output"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x0007
+encoding_context = "arm 0x0007 LocalDurableArtifactOutput of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01d3
+name = "DurableCapabilityCurrentMembershipProof.0x0008_meta_durable_artifact_output"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x0008
+encoding_context = "arm 0x0008 MetaDurableArtifactOutput of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01d4
+name = "DurableCapabilityCurrentMembershipProof.0x0009_local_merge_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x0009
+encoding_context = "arm 0x0009 LocalMergeOutcome of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01d5
+name = "DurableCapabilityCurrentMembershipProof.0x000a_meta_merge_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x000a
+encoding_context = "arm 0x000a MetaMergeOutcome of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01d6
+name = "DurableCapabilityCurrentMembershipProof.0x000b_local_read_your_writes"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x000b
+encoding_context = "arm 0x000b LocalReadYourWrites of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01d7
+name = "DurableCapabilityCurrentMembershipProof.0x000c_meta_read_your_writes"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipProof"
+wire_tag = 0x000c
+encoding_context = "arm 0x000c MetaReadYourWrites of closed union DurableCapabilityCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01d8
+name = "DurableCapabilityLegacyCurrentMembershipProof"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2635 source definition; the arm set is the exact source bijection 0x0001 TxnOutcome | 0x0002 ResumeSubscriptionCursor | 0x0003 ResumeBufferedResult | 0x0004 ResumeDurableArtifactOutput | 0x0005 MergeOutcome | 0x0006 ReadYourWrites in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01d9
+name = "DurableCapabilityLegacyCurrentMembershipProof.0x0001_txn_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyCurrentMembershipProof"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 TxnOutcome of closed union DurableCapabilityLegacyCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01da
+name = "DurableCapabilityLegacyCurrentMembershipProof.0x0002_resume_subscription_cursor"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyCurrentMembershipProof"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 ResumeSubscriptionCursor of closed union DurableCapabilityLegacyCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01db
+name = "DurableCapabilityLegacyCurrentMembershipProof.0x0003_resume_buffered_result"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyCurrentMembershipProof"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 ResumeBufferedResult of closed union DurableCapabilityLegacyCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01dc
+name = "DurableCapabilityLegacyCurrentMembershipProof.0x0004_resume_durable_artifact_output"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyCurrentMembershipProof"
+wire_tag = 0x0004
+encoding_context = "arm 0x0004 ResumeDurableArtifactOutput of closed union DurableCapabilityLegacyCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01dd
+name = "DurableCapabilityLegacyCurrentMembershipProof.0x0005_merge_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyCurrentMembershipProof"
+wire_tag = 0x0005
+encoding_context = "arm 0x0005 MergeOutcome of closed union DurableCapabilityLegacyCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01de
+name = "DurableCapabilityLegacyCurrentMembershipProof.0x0006_read_your_writes"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityLegacyCurrentMembershipProof"
+wire_tag = 0x0006
+encoding_context = "arm 0x0006 ReadYourWrites of closed union DurableCapabilityLegacyCurrentMembershipProof (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityLegacyCurrentMembershipProof"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01df
+name = "DurableCapabilityCurrentMembershipBasis"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2635 source definition; the arm set is the exact source bijection 0x0001 SameRole | 0x0002 LegacyLocalToMetaMigration in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01e0
+name = "DurableCapabilityCurrentMembershipBasis.0x0001_same_role"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipBasis"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 SameRole of closed union DurableCapabilityCurrentMembershipBasis (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01e1
+name = "DurableCapabilityCurrentMembershipBasis.0x0002_legacy_local_to_meta_migration"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityCurrentMembershipBasis"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 LegacyLocalToMetaMigration of closed union DurableCapabilityCurrentMembershipBasis (a21:2635); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityCurrentMembershipBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01e2
+name = "DurableCapabilityConsumerTerminalTarget"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2657 source definition; the arm set is the exact source bijection 0x0001 TerminalRecord | 0x0002 TerminalTombstone in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityConsumerTerminalTarget"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01e3
+name = "DurableCapabilityConsumerTerminalTarget.0x0001_terminal_record"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityConsumerTerminalTarget"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 TerminalRecord of closed union DurableCapabilityConsumerTerminalTarget (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityConsumerTerminalTarget"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01e4
+name = "DurableCapabilityConsumerTerminalTarget.0x0002_terminal_tombstone"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityConsumerTerminalTarget"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 TerminalTombstone of closed union DurableCapabilityConsumerTerminalTarget (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityConsumerTerminalTarget"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01e5
+name = "DurableCapabilityStatusPresentedReplayRef"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2693 source definition; the arm set is the exact source bijection 0x0001 LocalTxnOutcome | 0x0002 MetaTxnOutcome | 0x0003 LocalMergeOutcome | 0x0004 MetaMergeOutcome in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityStatusPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01e6
+name = "DurableCapabilityStatusPresentedReplayRef.0x0001_local_txn_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityStatusPresentedReplayRef"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 LocalTxnOutcome of closed union DurableCapabilityStatusPresentedReplayRef (a21:2693); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityStatusPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01e7
+name = "DurableCapabilityStatusPresentedReplayRef.0x0002_meta_txn_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityStatusPresentedReplayRef"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 MetaTxnOutcome of closed union DurableCapabilityStatusPresentedReplayRef (a21:2693); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityStatusPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01e8
+name = "DurableCapabilityStatusPresentedReplayRef.0x0003_local_merge_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityStatusPresentedReplayRef"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 LocalMergeOutcome of closed union DurableCapabilityStatusPresentedReplayRef (a21:2693); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityStatusPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01e9
+name = "DurableCapabilityStatusPresentedReplayRef.0x0004_meta_merge_outcome"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityStatusPresentedReplayRef"
+wire_tag = 0x0004
+encoding_context = "arm 0x0004 MetaMergeOutcome of closed union DurableCapabilityStatusPresentedReplayRef (a21:2693); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityStatusPresentedReplayRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ea
+name = "AuthenticatedDurableCapabilityStatusBasis"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2693 source definition; the arm set is the exact source bijection 0x0001 Local | 0x0002 Meta in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuthenticatedDurableCapabilityStatusBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01eb
+name = "AuthenticatedDurableCapabilityStatusBasis.0x0001_local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuthenticatedDurableCapabilityStatusBasis"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 Local of closed union AuthenticatedDurableCapabilityStatusBasis (a21:2693); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuthenticatedDurableCapabilityStatusBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ec
+name = "AuthenticatedDurableCapabilityStatusBasis.0x0002_meta"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuthenticatedDurableCapabilityStatusBasis"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 Meta of closed union AuthenticatedDurableCapabilityStatusBasis (a21:2693); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuthenticatedDurableCapabilityStatusBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ed
+name = "TimeAuthorityUnavailableStatusEvidence"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2695 source definition; the arm set is the exact source bijection 0x0001 BoundaryOverlap | 0x0002 CheckedArithmeticFailure | 0x0003 ProfileOrEpochUnavailable in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["TimeAuthorityUnavailableStatusEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ee
+name = "TimeAuthorityUnavailableStatusEvidence.0x0001_boundary_overlap"
+kind = "union_variant"
+status = "reserved"
+containing_union = "TimeAuthorityUnavailableStatusEvidence"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 BoundaryOverlap of closed union TimeAuthorityUnavailableStatusEvidence (a21:2695); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["TimeAuthorityUnavailableStatusEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01ef
+name = "TimeAuthorityUnavailableStatusEvidence.0x0002_checked_arithmetic_failure"
+kind = "union_variant"
+status = "reserved"
+containing_union = "TimeAuthorityUnavailableStatusEvidence"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 CheckedArithmeticFailure of closed union TimeAuthorityUnavailableStatusEvidence (a21:2695); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["TimeAuthorityUnavailableStatusEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01f0
+name = "TimeAuthorityUnavailableStatusEvidence.0x0003_profile_or_epoch_unavailable"
+kind = "union_variant"
+status = "reserved"
+containing_union = "TimeAuthorityUnavailableStatusEvidence"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 ProfileOrEpochUnavailable of closed union TimeAuthorityUnavailableStatusEvidence (a21:2695); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["TimeAuthorityUnavailableStatusEvidence"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01f1
+name = "DurableCapabilityStatusClassification"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2695 source definition; the arm set is the exact source bijection 0x0001 Usable | 0x0002 NotYetValid | 0x0003 Expired | 0x0004 TimeAuthorityUnavailable in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityStatusClassification"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01f2
+name = "DurableCapabilityStatusClassification.0x0001_usable"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityStatusClassification"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 Usable of closed union DurableCapabilityStatusClassification (a21:2695); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityStatusClassification"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01f3
+name = "DurableCapabilityStatusClassification.0x0002_not_yet_valid"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityStatusClassification"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 NotYetValid of closed union DurableCapabilityStatusClassification (a21:2695); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityStatusClassification"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01f4
+name = "DurableCapabilityStatusClassification.0x0003_expired"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityStatusClassification"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 Expired of closed union DurableCapabilityStatusClassification (a21:2695); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityStatusClassification"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01f5
+name = "DurableCapabilityStatusClassification.0x0004_time_authority_unavailable"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityStatusClassification"
+wire_tag = 0x0004
+encoding_context = "arm 0x0004 TimeAuthorityUnavailable of closed union DurableCapabilityStatusClassification (a21:2695); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityStatusClassification"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01f6
+name = "LifecycleOperation"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged union registered from the a21:2697 source definition; the arm set is the exact source bijection RegisterAttempt | PrepareAdmissionScaffolding | RequestTerminalAbort | StatusLookup | CapabilityManagement in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["LifecycleAuthorizationDecisionRecord<Role>", "LifecycleOperation"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01f7
+name = "LifecycleOperation.register_attempt"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LifecycleOperation"
+wire_tag = 0x0001
+encoding_context = "arm RegisterAttempt of closed union LifecycleOperation (a21:2697); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["LifecycleOperation"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01f8
+name = "LifecycleOperation.prepare_admission_scaffolding"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LifecycleOperation"
+wire_tag = 0x0002
+encoding_context = "arm PrepareAdmissionScaffolding of closed union LifecycleOperation (a21:2697); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["LifecycleOperation"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01f9
+name = "LifecycleOperation.request_terminal_abort"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LifecycleOperation"
+wire_tag = 0x0003
+encoding_context = "arm RequestTerminalAbort of closed union LifecycleOperation (a21:2697); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["LifecycleOperation"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01fa
+name = "LifecycleOperation.status_lookup"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LifecycleOperation"
+wire_tag = 0x0004
+encoding_context = "arm StatusLookup of closed union LifecycleOperation (a21:2697); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["LifecycleOperation"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01fb
+name = "LifecycleOperation.capability_management"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LifecycleOperation"
+wire_tag = 0x0005
+encoding_context = "arm CapabilityManagement of closed union LifecycleOperation (a21:2697); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["LifecycleOperation"]
+max_size_bytes = 16777216

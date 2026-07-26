@@ -4957,6 +4957,25 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         matches!(
             name,
             "KeyDestroyExternalAckRef"
+                | "AuditCoverageClaimRef"
+                | "AuthenticatedDurableCapabilityStatusBasis"
+                | "AuthorizationAuditGate"
+                | "DurableCapabilityConsumerTerminalTarget"
+                | "DurableCapabilityCurrentMembershipBasis"
+                | "DurableCapabilityCurrentMembershipProof"
+                | "DurableCapabilityCurrentSecurityBasis"
+                | "DurableCapabilityLegacyCurrentMembershipProof"
+                | "DurableCapabilityLegacyReplayRef"
+                | "DurableCapabilityPresentedReplayRef"
+                | "DurableCapabilityStatusClassification"
+                | "DurableCapabilityStatusPresentedReplayRef"
+                | "ImportedOperationAuditAdmissionEvidence"
+                | "ImportedReadAuditEvidence"
+                | "ImportedStatementAuditAdmissionEvidence"
+                | "LifecycleOperation"
+                | "NonRequiredAuditEvidence"
+                | "ReplayLogicalStateEvidence"
+                | "TimeAuthorityUnavailableStatusEvidence"
                 | "KeyDestroyFloorRef"
                 | "KeyDestructionTarget"
                 | "ExpectedStateCondition"
@@ -6292,7 +6311,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             )
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 336,
+        pre_erratum.ordinary_unions.len() + 355,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
