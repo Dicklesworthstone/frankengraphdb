@@ -12,12 +12,14 @@
 //!
 //! # Why this checker fails instead of skipping
 //!
-//! Today the workspace has zero islands and zero unsafe sites. A checker
-//! written the obvious way would report "0 sites, 0 orphans, pass" — and would
-//! report exactly the same thing if its scanner were broken, if the ledger file
-//! had been deleted, or if it could not read a single source file. That is the
+//! The workspace began with zero islands and zero unsafe sites; it now carries
+//! three islands with six ledgered sites, and every crate outside them still
+//! scans to zero. A checker written the obvious way would report "0 sites, 0
+//! orphans, pass" — and would report exactly the same thing if its scanner were
+//! broken, if the ledger file had been deleted, or if it could not read a
+//! single source file. That is the
 //! looks-exactly-like-a-pass family, and this session produced six bugs with
-//! that signature. Four structural answers:
+//! that signature. Five structural answers:
 //!
 //! 1. **The ledger is a positive claim, not an absence.** `[[island]]` rows
 //!    declare the intended roster with a `status`. A `present` island whose
@@ -38,9 +40,20 @@
 //!    literally with `allow(`, so a `cfg_attr`-wrapped allow was never counted,
 //!    never matched against the ledger, and never reported. That was invisible
 //!    only because ordinary crates inherit `forbid`, which no `allow` can lower
-//!    — and it would have become live the day the first island landed, since an
-//!    island root uses `deny`, which every one of those forms *can* lower. See
+//!    — and it became live the day the first island landed, since an island root
+//!    uses `deny`, which every one of those forms *can* lower. Three islands
+//!    have since landed, so this is not a hypothetical. See
 //!    [`LEVELS_BELOW_DENY`].
+//! 5. **Candidacy is structural too, not just the body.** An attribute is found
+//!    by masking the whole file once and looking for one at ANY column — never
+//!    by testing the trimmed prefix of a line. That prefix test was (4) with the
+//!    fix applied one layer too shallow, and it was wrong in both directions at
+//!    once: `impl T { #[allow(unsafe_code)] unsafe fn f() {} }` was not a
+//!    candidate at all, while a block-commented attribute — text the compiler
+//!    deletes — was counted as a real site, as was one inside a multi-line
+//!    string. The same test decided the crate-ROOT policy, where the fail-open
+//!    direction is sharper still: a commented-out `#![forbid(unsafe_code)]` read
+//!    as a live forbid. See [`scan_sites`] and [`root_unsafe_code_levels`].
 //!
 //! Every crate escapes the workspace `forbid` the moment its manifest omits
 //! `[lints] workspace = true`, which is invisible at the crate root — so that
@@ -305,126 +318,211 @@ const MAX_ATTRIBUTE_LINES: usize = 64;
 
 /// Find every site in one source text that relaxes `unsafe_code`.
 ///
-/// A line whose first non-whitespace is `//` is a comment and an attribute must
-/// begin its trimmed line, so an occurrence inside a string or a nested
-/// expression is excluded. Everything past that is decided **structurally**: the
-/// attribute is followed to its matching `]` across lines, its comments and
-/// string literals are blanked out, and it counts if any of
-/// [`LEVELS_BELOW_DENY`] names `unsafe_code` at any depth inside it. Prefix
-/// matching was the original bug — `cfg_attr(…, allow(unsafe_code))` walked
-/// straight past a scanner that required the body to start with `allow(`.
+/// The file is masked ONCE — comments and string, raw-string and character
+/// literals blanked, every other byte left where it was — and attributes are
+/// then found in that masked text **at any column**. Both halves of that were
+/// wrong in the scanner this replaced, which decided candidacy from the trimmed
+/// prefix of a line and so could only ever see an attribute that began one:
+///
+/// * **Fail-open.** `impl T { #[allow(unsafe_code)] unsafe fn f() {} }` scanned
+///   to zero sites. Sharing a line is valid Rust in item, statement and
+///   expression position, and rustfmt does not normalise it inside a macro
+///   body. Inside an island — whose root is `deny`, which an inner `allow` CAN
+///   lower — that placement compiles unsafe code with no ledger row, no
+///   `site_unledgered`, and no `unsafe_allow_outside_island`. It is the
+///   `cfg_attr` bypass one layer out: the attribute BODY was already read
+///   structurally, but only on the lines the scan deigned to consider.
+/// * **Fail-closed but harmful.** Text the compiler cannot see was counted
+///   anyway. A block-commented attribute, and one inside a multi-line string or
+///   raw string, all begin their line and all produced a site. The masker
+///   already understood every one of those constructs; it was simply run per
+///   candidate, starting AT the candidate, so it could never know that the line
+///   it was handed was already inside a `/*` opened above it. Inventing a site
+///   is the direction that puts a bogus row in the ledger, and the ledger's
+///   whole value is that its rows mean something.
+///
+/// Everything downstream of candidacy is unchanged: the attribute is followed
+/// to its matching `]`, and it counts if any of [`LEVELS_BELOW_DENY`] names
+/// `unsafe_code` at any depth inside it.
 pub fn scan_sites(path: &str, text: &str) -> Vec<ScannedSite> {
-    let lines: Vec<&str> = text.lines().collect();
+    let raw: Vec<&str> = text.lines().collect();
+    let masked = mask_source(text);
     let mut out = Vec::new();
-    for (index, raw) in lines.iter().enumerate() {
-        let line = raw.trim();
-        if line.starts_with("//") {
-            continue;
-        }
-        let inner = if line.starts_with("#![") {
-            true
-        } else if line.starts_with("#[") {
-            false
-        } else {
-            continue;
-        };
-        let (body, end) = attribute_body(&lines, index);
-        if !body_relaxes_unsafe_code(&body) {
+    for attribute in find_attributes(&masked) {
+        if !body_relaxes_unsafe_code(&attribute.body) {
             continue;
         }
         // The symbol is what a reviewer reads to know what the site covers: for
         // an outer attribute the item it precedes, for an inner one the module
         // it sits inside, which is broader and must not be reported as narrower.
-        let symbol = if inner {
+        let symbol = if attribute.inner {
             MODULE_SCOPE_SYMBOL.to_owned()
         } else {
-            symbol_after(&lines, end)
+            symbol_after(&masked, &raw, attribute.after)
         };
         out.push(ScannedSite {
             path: path.to_owned(),
-            line: index + 1,
+            line: attribute.line,
             symbol,
         });
     }
     out
 }
 
-/// The item an outer attribute applies to: the next line that is not blank, a
-/// comment, or another attribute. Intervening attributes are stepped over as
-/// whole spans, so a multi-line one cannot leave its own arguments standing in
-/// for the item.
-fn symbol_after(lines: &[&str], attribute_end: usize) -> String {
-    let mut index = attribute_end + 1;
-    while index < lines.len() {
-        let line = lines[index].trim();
-        if line.is_empty() || line.starts_with("//") {
-            index += 1;
-            continue;
-        }
-        if line.starts_with("#[") || line.starts_with("#![") {
-            index = attribute_body(lines, index).1 + 1;
-            continue;
-        }
-        return line.to_owned();
-    }
-    String::new()
+/// One attribute, located structurally in the masked text rather than by the
+/// shape of the line it happens to sit on.
+struct Attribute {
+    /// 1-based line the `#` sits on.
+    line: usize,
+    /// `true` for an inner (`#!`) attribute, which covers a whole module.
+    inner: bool,
+    /// The text between the outermost brackets, masked.
+    body: String,
+    /// Byte offset just past the closing `]`.
+    after: usize,
 }
 
-/// Collect one attribute starting at `start`, returning its body (the text
-/// between the outermost brackets, with comments and string literals blanked
-/// out) and the index of the line its `]` lands on.
+/// A source text with its comments and literals blanked out, plus the offset at
+/// which each line begins.
 ///
-/// The masking is what makes the structural match trustworthy in both
-/// directions: without it a `]` inside a string truncates the body early (a
-/// missed site) and an `allow(unsafe_code)` inside a `doc` string invents one
-/// (a bogus ledger row).
-fn attribute_body(lines: &[&str], start: usize) -> (String, usize) {
-    let stop = lines.len().min(start + MAX_ATTRIBUTE_LINES);
-    let mut masked = String::new();
+/// The mask is byte-exact: a blanked character is replaced by as many spaces as
+/// it occupied, so an offset in the masked text names the same column of the
+/// same source line, and a raw line cut at one can never be split inside a
+/// character.
+struct Masked {
+    text: String,
+    line_starts: Vec<usize>,
+}
+
+impl Masked {
+    /// The 1-based line containing `offset`.
+    fn line_of(&self, offset: usize) -> usize {
+        self.line_starts.partition_point(|start| *start <= offset)
+    }
+}
+
+/// Mask a whole source file in one pass, so comment and literal state carries
+/// across lines. Running the masker per candidate — which is what this scanner
+/// used to do — cannot see that a line is already inside a `/*` opened three
+/// lines above it, which is why commented-out attributes counted as real sites.
+fn mask_source(text: &str) -> Masked {
+    let mut out = String::with_capacity(text.len());
     let mut line_starts = Vec::new();
     let mut state = MaskState::Code;
+    for (index, line) in text.lines().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        line_starts.push(out.len());
+        mask_line(line, &mut state, &mut out);
+    }
+    Masked {
+        text: out,
+        line_starts,
+    }
+}
+
+/// Every attribute in the masked text, in source order.
+///
+/// The search advances one byte at a time rather than jumping past each
+/// attribute it finds: a malformed attribute that never closes must not be able
+/// to hide the rest of the file behind it.
+fn find_attributes(masked: &Masked) -> Vec<Attribute> {
+    let bytes = masked.text.as_bytes();
+    let mut out = Vec::new();
+    for at in 0..bytes.len() {
+        let Some((inner, open)) = attribute_open(bytes, at) else {
+            continue;
+        };
+        let close = matching_bracket(bytes, open);
+        out.push(Attribute {
+            line: masked.line_of(at),
+            inner,
+            body: masked.text[open + 1..close].to_owned(),
+            after: (close + 1).min(bytes.len()),
+        });
+    }
+    out
+}
+
+/// Does an attribute open at `at`? Yields whether it is inner, and the offset
+/// of its opening bracket.
+///
+/// This runs over MASKED text, where the `#` of a raw string (`r#"…"#`) is the
+/// only other `#` Rust admits and is never followed by `[`.
+fn attribute_open(bytes: &[u8], at: usize) -> Option<(bool, usize)> {
+    if bytes.get(at) != Some(&b'#') {
+        return None;
+    }
+    match bytes.get(at + 1) {
+        Some(b'[') => Some((false, at + 1)),
+        Some(b'!') if bytes.get(at + 2) == Some(&b'[') => Some((true, at + 2)),
+        _ => None,
+    }
+}
+
+/// The offset of the `]` closing the bracket at `open`.
+///
+/// Brackets inside comments and literals are already blanked, so only real ones
+/// are counted — without that a `]` in a string truncates the body early (a
+/// missed site). An attribute that has not closed within [`MAX_ATTRIBUTE_LINES`]
+/// stops there and is still checked over everything read, so the failure
+/// direction for a malformed attribute is a spurious site, never a missed one.
+fn matching_bracket(bytes: &[u8], open: usize) -> usize {
     let mut depth = 0usize;
-    let mut open = None;
-    let mut close = None;
-    for (offset, raw) in lines[start..stop].iter().enumerate() {
-        if offset > 0 {
-            masked.push('\n');
-        }
-        line_starts.push(masked.len());
-        let scan_from = masked.len();
-        // The first line is trimmed so the opening bracket is the first `[`.
-        let text = if offset == 0 { raw.trim_start() } else { raw };
-        mask_line(text, &mut state, &mut masked);
-        for (index, byte) in masked.as_bytes().iter().enumerate().skip(scan_from) {
-            match byte {
-                b'[' => {
-                    open.get_or_insert(index);
-                    depth += 1;
+    let mut lines = 0usize;
+    for (index, byte) in bytes.iter().enumerate().skip(open) {
+        match byte {
+            b'\n' => {
+                lines += 1;
+                if lines >= MAX_ATTRIBUTE_LINES {
+                    return index;
                 }
-                b']' if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close = Some(index);
-                        break;
-                    }
-                }
-                _ => {}
             }
-        }
-        if close.is_some() {
-            break;
+            b'[' => depth += 1,
+            b']' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => {}
         }
     }
-    let Some(open) = open else {
-        return (String::new(), start);
-    };
-    let close = close.unwrap_or(masked.len());
-    let end = start
-        + line_starts
-            .iter()
-            .rposition(|offset| *offset <= close)
-            .unwrap_or(0);
-    (masked[open + 1..close].to_owned(), end)
+    bytes.len()
+}
+
+/// The item an outer attribute applies to: the first code following it, with
+/// any further attributes stepped over as whole spans, so that a multi-line one
+/// cannot leave its own arguments standing in for the item.
+///
+/// The symbol is cut from the RAW line at the item's own column rather than
+/// taken as the whole trimmed line, so an attribute sharing a line with its
+/// item names the item and not everything printed to the left of it. Blank
+/// lines and comments need no special case here: the masker has already turned
+/// them into whitespace.
+fn symbol_after(masked: &Masked, raw: &[&str], after: usize) -> String {
+    let bytes = masked.text.as_bytes();
+    let mut at = after;
+    loop {
+        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+        match attribute_open(bytes, at) {
+            Some((_, open)) => at = matching_bracket(bytes, open) + 1,
+            None => break,
+        }
+    }
+    if at >= bytes.len() {
+        return String::new();
+    }
+    let line = masked.line_of(at);
+    let column = at - masked.line_starts[line - 1];
+    raw.get(line - 1)
+        .and_then(|text| text.get(column..))
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }
 
 /// Does this attribute body set `unsafe_code` to a level below `deny`?
@@ -471,18 +569,20 @@ fn body_sets_unsafe_code(body: &str, level: &str) -> bool {
 /// Only inner (`#!`) attributes are considered: an outer `#[forbid(...)]` binds
 /// one item, not the crate, and reporting it as a crate-root policy would
 /// overstate what the root actually guarantees.
+///
+/// It reads the SAME masked, any-column attribute stream [`scan_sites`] does,
+/// because the line-anchored candidacy test was wrong here in the direction that
+/// matters most: `/*\n#![forbid(unsafe_code)]\n*/` — a root policy that has been
+/// commented out — read as a live `forbid`, so `topology`'s `root_forbids_unsafe`
+/// said the crate was forbidding unsafe while the compiler had been told nothing
+/// at all.
 pub fn root_unsafe_code_levels(text: &str) -> BTreeSet<String> {
     const ALL_LEVELS: [&str; 5] = ["allow", "expect", "warn", "deny", "forbid"];
-    let lines: Vec<&str> = text.lines().collect();
+    let masked = mask_source(text);
     let mut out = BTreeSet::new();
-    for (index, raw) in lines.iter().enumerate() {
-        let line = raw.trim();
-        if line.starts_with("//") || !line.starts_with("#![") {
-            continue;
-        }
-        let (body, _) = attribute_body(&lines, index);
+    for attribute in find_attributes(&masked).iter().filter(|a| a.inner) {
         for level in ALL_LEVELS {
-            if body_sets_unsafe_code(&body, level) {
+            if body_sets_unsafe_code(&attribute.body, level) {
                 out.insert(level.to_owned());
             }
         }
@@ -550,7 +650,7 @@ fn mask_line(text: &str, state: &mut MaskState, out: &mut String) {
         match *state {
             MaskState::Block(depth) => {
                 if c == '*' && next == Some('/') {
-                    blank(out, 2);
+                    blank(out, &chars[i..i + 2]);
                     i += 2;
                     *state = if depth <= 1 {
                         MaskState::Code
@@ -558,24 +658,24 @@ fn mask_line(text: &str, state: &mut MaskState, out: &mut String) {
                         MaskState::Block(depth - 1)
                     };
                 } else if c == '/' && next == Some('*') {
-                    blank(out, 2);
+                    blank(out, &chars[i..i + 2]);
                     i += 2;
                     *state = MaskState::Block(depth + 1);
                 } else {
-                    blank(out, 1);
+                    blank(out, &chars[i..i + 1]);
                     i += 1;
                 }
             }
             MaskState::Str => {
                 if c == '\\' {
-                    blank(out, if next.is_some() { 2 } else { 1 });
+                    blank(out, &chars[i..chars.len().min(i + 2)]);
                     i += 2;
                 } else if c == '"' {
                     out.push('"');
                     i += 1;
                     *state = MaskState::Code;
                 } else {
-                    blank(out, 1);
+                    blank(out, &chars[i..i + 1]);
                     i += 1;
                 }
             }
@@ -585,20 +685,20 @@ fn mask_line(text: &str, state: &mut MaskState, out: &mut String) {
                     && chars[i + 1..i + 1 + hashes].iter().all(|c| *c == '#');
                 if closes {
                     out.push('"');
-                    blank(out, hashes);
+                    blank(out, &chars[i + 1..i + 1 + hashes]);
                     i += 1 + hashes;
                     *state = MaskState::Code;
                 } else {
-                    blank(out, 1);
+                    blank(out, &chars[i..i + 1]);
                     i += 1;
                 }
             }
             MaskState::Code => {
                 if c == '/' && next == Some('/') {
-                    blank(out, chars.len() - i);
+                    blank(out, &chars[i..]);
                     i = chars.len();
                 } else if c == '/' && next == Some('*') {
-                    blank(out, 2);
+                    blank(out, &chars[i..i + 2]);
                     i += 2;
                     *state = MaskState::Block(1);
                 } else if let Some((consumed, hashes)) = raw_string_open(&chars, i) {
@@ -618,7 +718,7 @@ fn mask_line(text: &str, state: &mut MaskState, out: &mut String) {
                     match char_literal_len(&chars, i) {
                         Some(len) => {
                             out.push('\'');
-                            blank(out, len - 2);
+                            blank(out, &chars[i + 1..i + len - 1]);
                             out.push('\'');
                             i += len;
                         }
@@ -636,9 +736,17 @@ fn mask_line(text: &str, state: &mut MaskState, out: &mut String) {
     }
 }
 
-fn blank(out: &mut String, count: usize) {
-    for _ in 0..count {
-        out.push(' ');
+/// Replace `masked` with one space per BYTE it occupied.
+///
+/// Byte-exactness is load-bearing, not tidiness: [`symbol_after`] cuts a raw
+/// source line at an offset found in the masked text, and a mask that collapsed
+/// a multi-byte character to a single space would move every offset after it —
+/// far enough to slice a line inside a character, which panics.
+fn blank(out: &mut String, masked: &[char]) {
+    for c in masked {
+        for _ in 0..c.len_utf8() {
+            out.push(' ');
+        }
     }
 }
 

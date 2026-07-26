@@ -46,16 +46,17 @@
 //!
 //! # Scope
 //!
-//! These relations cover the workspace-manifest readers. The same relations
-//! applied to the other readers in this crate are currently RED and are filed
-//! rather than encoded here, so that this suite stays a gate rather than a
-//! known-failing list: `fgdb-regcheck-commented-arm-counts-live-ctv8`,
-//! `fgdb-regcheck-scansites-line-anchored-ds45`,
-//! `fgdb-regcheck-two-readers-unsafe-relax-6amm`,
-//! `fgdb-regcheck-root-forbid-line-equality-fhnr`,
+//! These relations cover the workspace-manifest readers and the attribute
+//! readers. The same relations applied to the remaining readers in this crate
+//! are currently RED and are filed rather than encoded here, so that this suite
+//! stays a gate rather than a known-failing list:
+//! `fgdb-regcheck-commented-arm-counts-live-ctv8`,
 //! `fgdb-regcheck-closure-vacuous-no-control-hp0f`,
 //! `fgdb-regcheck-claimslint-allowlist-dead-excludes-5qcg`. As each is fixed,
-//! its relation belongs here.
+//! its relation belongs here. Already landed and pinned below:
+//! `fgdb-regcheck-two-readers-unsafe-relax-6amm` (relation 6),
+//! `fgdb-regcheck-root-forbid-line-equality-fhnr` (relation 7),
+//! `fgdb-regcheck-scansites-line-anchored-ds45` (relation 8).
 
 use registry_check::unsafe_ledger::{self, LEDGER_PATH};
 use std::collections::BTreeSet;
@@ -75,6 +76,9 @@ struct Member {
     unsafe_site: bool,
     /// `true` — carries `[lints] workspace = true`.
     inherits: bool,
+    /// Verbatim `src/lib.rs`, when the relation under test varies the source
+    /// itself rather than merely whether a site is present.
+    source: Option<String>,
 }
 
 impl Member {
@@ -83,6 +87,7 @@ impl Member {
             dir: dir.to_owned(),
             unsafe_site: false,
             inherits: true,
+            source: None,
         }
     }
 
@@ -91,6 +96,16 @@ impl Member {
             dir: dir.to_owned(),
             unsafe_site: true,
             inherits: true,
+            source: None,
+        }
+    }
+
+    fn with_source(dir: &str, source: String) -> Self {
+        Member {
+            dir: dir.to_owned(),
+            unsafe_site: false,
+            inherits: true,
+            source: Some(source),
         }
     }
 }
@@ -139,10 +154,10 @@ fn verdict(scope: &str, tag: &str, manifest: &str, members: &[Member]) -> Verdic
         // literal source text — the same precaution `scanner_fixture` takes,
         // for the same reason: the checker scans its own crate.
         let hash = '#';
-        let source = if member.unsafe_site {
-            format!("{hash}[allow(unsafe_code)]\npub unsafe fn probe() {{}}\n")
-        } else {
-            "pub fn probe() {}\n".to_owned()
+        let source = match (&member.source, member.unsafe_site) {
+            (Some(source), _) => source.clone(),
+            (None, true) => format!("{hash}[allow(unsafe_code)]\npub unsafe fn probe() {{}}\n"),
+            (None, false) => "pub fn probe() {}\n".to_owned(),
         };
         fs::write(dir.join("src/lib.rs"), source).expect("member source");
     }
@@ -699,4 +714,267 @@ fn a_root_deny_is_distinguished_from_a_root_forbid() {
     );
     assert!(denies, "a grouped, comment-trailed deny is still a deny");
     assert!(!forbids, "a deny is not a forbid");
+}
+
+// ---------------------------------------------------------------------------
+// Relation 8 — an attribute is a site because of what it says, not where the
+//              line breaks fall (`fgdb-regcheck-scansites-line-anchored-ds45`)
+// ---------------------------------------------------------------------------
+
+/// Placements of a real `allow(unsafe_code)` that all compile the same unsafe
+/// surface. Moving an attribute off the start of its line is a semantics-
+/// PRESERVING transformation of the source, so it must be a verdict-preserving
+/// one — every entry here is a relaxation a `deny` island root would otherwise
+/// reject, and every one of them scanned to ZERO sites under the line-anchored
+/// candidacy test this relation was written to bury.
+fn equivalent_site_placements() -> Vec<(&'static str, String)> {
+    let hash = '#';
+    vec![
+        // the control: the one form the old scanner could see
+        (
+            "line_leading",
+            format!("{hash}[allow(unsafe_code)]\npub unsafe fn probe() {{}}\n"),
+        ),
+        (
+            "sharing_a_line_with_a_preceding_token",
+            format!("pub mod m {{ {hash}[allow(unsafe_code)] pub unsafe fn probe() {{}} }}\n"),
+        ),
+        (
+            "trailing_a_sibling_attribute",
+            format!("{hash}[inline] {hash}[allow(unsafe_code)]\npub unsafe fn probe() {{}}\n"),
+        ),
+        (
+            "inner_attribute_sharing_a_line",
+            format!("pub mod m {{ {hash}![allow(unsafe_code)] pub unsafe fn probe() {{}} }}\n"),
+        ),
+        (
+            "statement_position",
+            format!("pub fn probe() {{ {hash}[allow(unsafe_code)] let _x = 1; }}\n"),
+        ),
+        // rustfmt does not normalise attribute placement inside a macro body,
+        // so this is not a hypothetical spelling
+        (
+            "indented_inside_a_macro_body",
+            format!(
+                "macro_rules! m {{ () => {{ {hash}[allow(unsafe_code)] unsafe fn probe() {{}} }} }}\n"
+            ),
+        ),
+        (
+            "cfg_attr_wrapped_and_sharing_a_line",
+            format!(
+                "pub mod m {{ {hash}[cfg_attr(unix, allow(unsafe_code))] pub unsafe fn probe() {{}} }}\n"
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn an_unledgered_site_is_found_at_any_column() {
+    let base = base_verdict("placement");
+    for (tag, source) in equivalent_site_placements() {
+        let members = vec![
+            Member::with_source("crates/fgdb-probe", source),
+            Member::clean("crates/fgdb-quiet"),
+        ];
+        let variant = verdict("placement", tag, BASE_MANIFEST, &members);
+        assert_eq!(
+            variant, base,
+            "`{tag}` relaxes unsafe_code exactly as the base source does — inside an \
+             island root, whose `deny` an inner `allow` CAN lower, it compiles unsafe \
+             code — so it must produce an identical verdict.\n  base:    {base:?}\n  \
+             variant: {variant:?}"
+        );
+    }
+}
+
+/// Stated separately from the equivalence relation for the same reason
+/// [`an_unledgered_site_is_found_under_every_roster_spelling`] is: this is the
+/// consequence a reader of the ledger actually cares about, and it fails with a
+/// message naming the harm rather than a set difference.
+#[test]
+fn no_placement_hides_a_site_from_the_scanner() {
+    for (tag, source) in equivalent_site_placements() {
+        let sites = registry_check::unsafe_ledger::scan_sites("<probe>", &source);
+        assert_eq!(
+            sites.len(),
+            1,
+            "`{tag}`: this source relaxes unsafe_code and the scanner found {} site(s) \
+             in it. A missed site is an unsafe surface with no ledger row, no \
+             `site_unledgered`, and no `unsafe_allow_outside_island`.",
+            sites.len()
+        );
+    }
+}
+
+/// Text the compiler deletes is not code. Commenting a site out, or quoting it
+/// inside a string, is a semantics-DESTROYING transformation, so the verdict
+/// must change — and specifically it must LOSE the site.
+///
+/// This is the fail-closed-but-harmful direction, and it is not a lesser one:
+/// the ledger's whole value is that its rows mean something, and a row
+/// describing a commented-out attribute is a row describing nothing. Under the
+/// line-anchored scan all four of these produced a real site, because each
+/// begins its line; the masker that already understood every one of these
+/// constructs was run per candidate, starting AT the candidate, so it could
+/// never learn that the line it was handed was already inside a `/*`.
+fn dead_text_placements() -> Vec<(&'static str, String)> {
+    let hash = '#';
+    vec![
+        (
+            "inside_a_block_comment",
+            format!(
+                "/*\n{hash}[allow(unsafe_code)]\npub unsafe fn probe() {{}}\n*/\npub fn probe() {{}}\n"
+            ),
+        ),
+        (
+            "inside_a_nested_block_comment",
+            format!(
+                "/* outer /* inner\n{hash}[allow(unsafe_code)]\n*/ still outer */\npub fn probe() {{}}\n"
+            ),
+        ),
+        (
+            "inside_a_multi_line_string",
+            format!("pub const S: &str = \"\n{hash}[allow(unsafe_code)]\n\";\n"),
+        ),
+        (
+            "inside_a_raw_string",
+            format!("pub const S: &str = r{hash}\"\n{hash}[allow(unsafe_code)]\n\"{hash};\n"),
+        ),
+        // the one form the line-anchored scan already excluded, kept as the
+        // regression control for the exclusion it did get right
+        (
+            "inside_a_line_comment",
+            format!("// {hash}[allow(unsafe_code)]\npub fn probe() {{}}\n"),
+        ),
+    ]
+}
+
+#[test]
+fn text_the_compiler_cannot_see_is_never_a_site() {
+    let base = base_verdict("deadtext");
+    for (tag, source) in dead_text_placements() {
+        let members = vec![
+            Member::with_source("crates/fgdb-probe", source),
+            Member::clean("crates/fgdb-quiet"),
+        ];
+        let variant = verdict("deadtext", tag, BASE_MANIFEST, &members);
+        assert_ne!(
+            variant, base,
+            "`{tag}` contains no live attribute at all, so it must not produce the \
+             same verdict as a workspace that does: {variant:?}"
+        );
+        for code in ["site_unledgered", "unsafe_allow_outside_island"] {
+            assert!(
+                !variant.codes.contains(code),
+                "`{tag}`: the checker reported {code:?} against text the compiler \
+                 deletes. A ledger row minted for it would describe nothing, which is \
+                 the one thing a ledger cannot survive. Codes: {:?}",
+                variant.codes
+            );
+        }
+        assert_eq!(
+            variant.crates_scanned, base.crates_scanned,
+            "`{tag}` must still inspect both crates — a verdict that loses the site \
+             because it stopped looking is not the same result"
+        );
+    }
+}
+
+/// The pairing that keeps the relation above from passing vacuously: the SAME
+/// attribute text, uncommented, must be a site. Without this a scanner that
+/// found nothing anywhere would satisfy `text_the_compiler_cannot_see_is_never_a_site`
+/// perfectly.
+#[test]
+fn the_dead_text_relation_has_a_live_control() {
+    let hash = '#';
+    let commented = format!("/*\n{hash}[allow(unsafe_code)]\npub unsafe fn probe() {{}}\n*/\n");
+    let live = commented.replace("/*\n", "").replace("*/\n", "");
+    assert!(
+        registry_check::unsafe_ledger::scan_sites("<live>", &live).len() == 1,
+        "control: with the comment delimiters removed this text IS a site"
+    );
+    assert!(
+        registry_check::unsafe_ledger::scan_sites("<commented>", &commented).is_empty(),
+        "and with them restored it is not"
+    );
+}
+
+/// A site that shares a line with its item must name the ITEM. The symbol is
+/// what a reviewer matches a ledger row against and what tells them how much
+/// code the row covers, so naming the whole line — `impl T { … }` — would both
+/// misidentify the site and overstate its scope.
+#[test]
+fn a_site_sharing_a_line_names_the_item_it_covers() {
+    let hash = '#';
+    let sites = registry_check::unsafe_ledger::scan_sites(
+        "<inline>",
+        &format!("impl T {{ {hash}[allow(unsafe_code)] unsafe fn f() {{}} }}\n"),
+    );
+    assert_eq!(sites.len(), 1, "one site: {sites:?}");
+    assert_eq!(sites[0].line, 1, "reported where it opens");
+    assert!(
+        sites[0].symbol.starts_with("unsafe fn f()"),
+        "the symbol must name the item the attribute covers, not the line it \
+         shares: {:?}",
+        sites[0].symbol
+    );
+}
+
+/// The same defect one layer up, where the fail-open direction is sharpest:
+/// `topology`'s `root_forbids_unsafe` comes from the crate-root attribute
+/// reader, and every ordinary crate is required to carry a root `forbid`. Under
+/// the line-anchored reader a root policy that had been COMMENTED OUT still read
+/// as a live one, so a crate that had silently withdrawn its own memory-safety
+/// declaration passed the law that exists to check exactly that.
+#[test]
+fn a_root_policy_the_compiler_cannot_see_is_not_a_policy() {
+    let hash = '#';
+    let (_, live, _) = topology_flags(
+        "root_live_control",
+        &format!("{hash}![forbid(unsafe_code)]\n"),
+        "pub fn f() {}\n",
+    );
+    assert!(
+        live,
+        "control: the live attribute must be read as forbidding, or the cases \
+         below pass by finding nothing anywhere"
+    );
+    for (tag, attr) in [
+        (
+            "root_block_comment",
+            format!("/*\n{hash}![forbid(unsafe_code)]\n*/\n"),
+        ),
+        (
+            "root_nested_block_comment",
+            format!("/* /*\n{hash}![forbid(unsafe_code)]\n*/ */\n"),
+        ),
+        (
+            "root_multi_line_string",
+            format!("const S: &str = \"\n{hash}![forbid(unsafe_code)]\n\";\n"),
+        ),
+    ] {
+        let (_, forbids, _) = topology_flags(tag, &attr, "pub fn f() {}\n");
+        assert!(
+            !forbids,
+            "`{tag}`: this crate root declares nothing to the compiler, and reporting \
+             it as forbidding unsafe_code launders an undeclared crate as a declared one"
+        );
+    }
+}
+
+/// And the equivalence direction for the root reader: an inner attribute that
+/// does not begin its line still binds the crate.
+#[test]
+fn a_root_forbid_is_recognised_at_any_column() {
+    let hash = '#';
+    let (_, forbids, _) = topology_flags(
+        "root_second_inner_on_one_line",
+        &format!("{hash}![no_std] {hash}![forbid(unsafe_code)]\n"),
+        "pub fn f() {}\n",
+    );
+    assert!(
+        forbids,
+        "two inner attributes on one line is valid Rust and the second one forbids \
+         unsafe_code exactly as hard as it would on its own line"
+    );
 }
