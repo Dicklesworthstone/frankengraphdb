@@ -111,6 +111,8 @@ const REGISTRY: &[(&str, Coverage)] = &[
         Coverage::Witnessed,
     ),
     ("unclassified_reference_wrapper", Coverage::Witnessed),
+    // ---- arm-payload family (fgdb-a11-residue-unresolved-schema-ref-laws-54sd) ----------
+    ("arm_payload_shape_field_row", Coverage::Witnessed),
     // ---- declared exemptions, each with a reason ---------------------------------------
     (
         "registry_epoch_mismatch",

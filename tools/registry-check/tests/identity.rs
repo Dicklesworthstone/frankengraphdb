@@ -5052,6 +5052,111 @@ fn idr_field_containing_schema_resolves_by_generic_free_family() {
     );
 }
 
+/// The StrongRef-only arm-payload law
+/// (`identity::STRONGREF_ONLY_ARM_PAYLOAD_SHAPES`), in all three directions it
+/// can be broken, plus the positive: the released tree satisfies it.
+///
+/// The law exists because a NAMED arm payload shape reads like a schema and the
+/// checker accepts both paths for it, so the choice had to be ruled
+/// (fgdb-a11-residue-unresolved-schema-ref-laws-54sd) rather than measured.
+/// These fixtures are what stops the ruling from decaying back into precedent.
+#[test]
+fn idr_strongref_only_arm_payload_shapes_stay_on_the_wire_path() {
+    let base = real_identity();
+    assert_eq!(
+        codes_without_assignment_drift(&base),
+        Vec::<String>::new(),
+        "the released tree satisfies the arm-payload law; every rejection below \
+         is therefore attributable to its own mutation"
+    );
+    assert!(
+        !identity::STRONGREF_ONLY_ARM_PAYLOAD_SHAPES.is_empty(),
+        "an empty governed set would make every assertion below vacuous"
+    );
+
+    for shape in &identity::STRONGREF_ONLY_ARM_PAYLOAD_SHAPES {
+        // 0. THE COMPLETENESS GUARD, and it lives here rather than in
+        //    `validate_identity` because it is a claim about the RELEASED
+        //    registries, not about any registry set: inside the validator it
+        //    fired on every synthetic fixture in the suite. Without it, guards
+        //    1 and 2 below pass VACUOUSLY once a governed row is renamed or
+        //    deleted, and the law has failed open.
+        assert!(
+            base.wire.iter().any(|w| w.name == shape.name),
+            "{} ({}) is governed by the arm-payload law and must stay a registered \
+             wire type; with no wire row the guards below bind nothing",
+            shape.name,
+            shape.source
+        );
+
+        // 1. A field row on a governed shape. This is the mistake the law is
+        //    written to stop, and it arrives with `field_unresolved_schema`
+        //    because a wire owner can never host a field row.
+        let mut with_field = base.clone();
+        let host = with_field
+            .logical
+            .iter()
+            .map(|k| k.construction_order)
+            .next()
+            .expect("a logical kind exists");
+        with_field.fields.push(FieldRow {
+            containing_schema: shape.name.into(),
+            field_tag: 0x7ff1,
+            stable_name: "arm_payload_fixture".into(),
+            exact_wire_type: "u64".into(),
+            cardinality: "one".into(),
+            identity_class: "scalar".into(),
+            reference_semantics: "none".into(),
+            target_schema_id: None,
+            construction_order: host,
+            role_predicate: "true".into(),
+            retention_and_cut_rule: "arm-payload-fixture".into(),
+            version_status: "active".into(),
+            max_size_bytes: 8,
+            digest_class: None,
+            transcript_recipe: None,
+            bd_domain_separator: None,
+            bd_schema_major: None,
+            bd_included_field_tags: None,
+            bd_excluded_field_tags: None,
+            recipe_pin: None,
+        });
+        let mut codes = codes_without_assignment_drift(&with_field);
+        codes.sort();
+        codes.dedup();
+        assert_eq!(
+            codes,
+            vec![
+                "arm_payload_shape_field_row".to_owned(),
+                "field_unresolved_schema".to_owned(),
+            ],
+            "{} must reject a field row",
+            shape.name
+        );
+
+        // 2. The shape moved wholesale onto the logical path — the wire row
+        //    gone, a logical kind in its place. `disjointness_dual_class`
+        //    cannot see this: nothing is dual, the class simply changed.
+        let mut relanded = base.clone();
+        relanded.wire.retain(|w| w.name != shape.name);
+        let template = relanded.logical[0].clone();
+        relanded.logical.push(LogicalKind {
+            object_kind: 0x7ff2,
+            name: shape.name.into(),
+            ..template
+        });
+        let mut codes = codes_without_assignment_drift(&relanded);
+        codes.sort();
+        codes.dedup();
+        assert_eq!(
+            codes,
+            vec!["arm_payload_shape_field_row".to_owned()],
+            "{} must reject a re-mint onto a field-owning class",
+            shape.name
+        );
+    }
+}
+
 #[test]
 fn idr_ordinary_union_arm_bound_must_fit_union_bound() {
     let mut identity = ordinary_top_level_union_fixture();

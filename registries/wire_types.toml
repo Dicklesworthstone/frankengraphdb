@@ -5186,3 +5186,21 @@ wire_tag = 0x0005
 encoding_context = "arm CapabilityManagement of closed union LifecycleOperation (a21:2697); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
 allowed_containing_schemas = ["LifecycleOperation"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01fc
+name = "DirectResumeCapability"
+kind = "record"
+status = "reserved"
+encoding_context = "a11:1936 arm payload shape of the generated closed `client_action_authority` field of SubscriptionDeliveryTransitionSpec<Role>, carried by the PauseForDisconnect and ResumeAfterDisconnect tags; body is the single member validation_ref:StrongRef<DurableCapabilityValidationEvidence>, committed byte-exactly by the covering arm payload digest and registered on the wire path with no field row under the StrongRef-only arm-payload-shape law"
+allowed_containing_schemas = ["SubscriptionDeliveryTransitionSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x01fd
+name = "DispositionReceipt"
+kind = "record"
+status = "reserved"
+encoding_context = "a11:1936 arm payload shape of the generated closed `client_action_authority` field of SubscriptionDeliveryTransitionSpec<Role>, carried by the AckBaselineComplete, AckDeltaComplete, AcknowledgeReset and CloseCursor tags; body is the single member receipt_ref:StrongRef<AuthenticatedClientSubscriptionDispositionReceipt<Role>>, committed byte-exactly by the covering arm payload digest and registered on the wire path with no field row under the StrongRef-only arm-payload-shape law"
+allowed_containing_schemas = ["SubscriptionDeliveryTransitionSpec"]
+max_size_bytes = 16777216

@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3157
+target_count = 3159
 projection_fallback_count = 108
-target_source_assignment_sha256 = "71237fcea4a97b632ef0506a0840feccfaab0bb92bb1e497999cef0a88383ddd"
+target_source_assignment_sha256 = "0f3bc2d8ec6e7b05a6227bac06301c8933fff7496a39d5af455cc320bd20c22e"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -12649,6 +12649,28 @@ containing_union = "LifecycleOperation"
 wire_tag = 0x0005
 encoding_context = "arm CapabilityManagement of closed union LifecycleOperation (a21:2697); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
 allowed_containing_schemas = ["LifecycleOperation"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a11"
+row_id = "a11:wire-type:direct-resume-capability"
+wire_type_id = 0x01fc
+name = "DirectResumeCapability"
+kind = "record"
+status = "reserved"
+encoding_context = "a11:1936 arm payload shape of the generated closed `client_action_authority` field of SubscriptionDeliveryTransitionSpec<Role>, carried by the PauseForDisconnect and ResumeAfterDisconnect tags; body is the single member validation_ref:StrongRef<DurableCapabilityValidationEvidence>, committed byte-exactly by the covering arm payload digest and registered on the wire path with no field row under the StrongRef-only arm-payload-shape law"
+allowed_containing_schemas = ["SubscriptionDeliveryTransitionSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a11"
+row_id = "a11:wire-type:disposition-receipt"
+wire_type_id = 0x01fd
+name = "DispositionReceipt"
+kind = "record"
+status = "reserved"
+encoding_context = "a11:1936 arm payload shape of the generated closed `client_action_authority` field of SubscriptionDeliveryTransitionSpec<Role>, carried by the AckBaselineComplete, AckDeltaComplete, AcknowledgeReset and CloseCursor tags; body is the single member receipt_ref:StrongRef<AuthenticatedClientSubscriptionDispositionReceipt<Role>>, committed byte-exactly by the covering arm payload digest and registered on the wire path with no field row under the StrongRef-only arm-payload-shape law"
+allowed_containing_schemas = ["SubscriptionDeliveryTransitionSpec"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -49958,7 +49980,7 @@ symbol = "DirectResumeCapability"
 generic_signature = ""
 source_key = "top|DirectResumeCapability"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a11:1936"]
 
 [[top_level_candidate]]
@@ -50028,7 +50050,7 @@ symbol = "DispositionReceipt"
 generic_signature = ""
 source_key = "top|DispositionReceipt"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a11:1936"]
 
 [[top_level_candidate]]
@@ -81840,6 +81862,22 @@ row_id = "a21:target:wire-type-read-your-writes-capability-lineage-key"
 target_row_id = "a21:wire-type:read-your-writes-capability-lineage-key"
 slice_id = "a21"
 source_key = "top|ReadYourWritesCapabilityLineageKey"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:wire-type-direct-resume-capability"
+target_row_id = "a11:wire-type:direct-resume-capability"
+slice_id = "a11"
+source_key = "top|DirectResumeCapability"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:wire-type-disposition-receipt"
+target_row_id = "a11:wire-type:disposition-receipt"
+slice_id = "a11"
+source_key = "top|DispositionReceipt"
 target_kind = "wire-type"
 definition_status = "declared"
 

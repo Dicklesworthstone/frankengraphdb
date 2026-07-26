@@ -18,6 +18,8 @@
 //!   range_status_mismatch   status/code-range coherence violation
 //!   disjointness_dual_class one schema name in two identity classes
 //!   field_unresolved_schema containing_schema resolves nowhere
+//!   arm_payload_shape_field_row  a StrongRef-only union-arm payload shape left
+//!                           the wire path or grew a field row
 //!   field_unresolved_wire_type  exact_wire_type resolves nowhere
 //!   bare_strong_ref         polymorphic strong ref without a generated union
 //!   ref_target_not_logical  strong/conditional target outside class 1
@@ -127,6 +129,88 @@ fn declared_field_reference_semantics(exact_wire_type: &str) -> Option<&'static 
 /// renamed only the generated union to `LogicalCommandInputRef`, without
 /// changing tags, targets, reachability, lifecycle, or encoded representation.
 pub const A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN: &str = "fnv1a64:bdbcdc27ccd92518";
+
+/// One NAMED union-arm payload shape governed by the StrongRef-only
+/// arm-payload law (`STRONGREF_ONLY_ARM_PAYLOAD_SHAPES`).
+#[derive(Debug, Clone, Copy)]
+pub struct ArmPayloadShape {
+    /// Generic-free family name, spelled as the source spells it.
+    pub name: &'static str,
+    /// `slice:line` of the source sentence that defines the shape.
+    pub source: &'static str,
+    /// The generated union field whose arms carry the shape.
+    pub carried_by: &'static str,
+    /// Every member of the shape's body. The law admits the shape only while
+    /// EVERY member is a retaining reference: one non-reference member and the
+    /// shape owes a real field body on a field-owning host instead.
+    pub members: &'static [&'static str],
+    /// The bead whose ruling placed the shape on the wire path.
+    pub ruling: &'static str,
+}
+
+/// LAW: **a union-arm payload shape — NAMED OR ANONYMOUS — whose body carries
+/// only retaining references takes the WIRE path, and owns NO `[[field]]`
+/// row.**
+///
+/// Stated because it was twice re-derived from the corpus and once decided the
+/// wrong way. The corpus reading is unanimous: of 72 landed self-owned ordinary
+/// unions registered as a wire type, the number of `[[field]]` rows naming any
+/// of them as `containing_schema` is ZERO, and `CommittedDeltaSourceRef.batch_ref`
+/// (`Local{batch_ref:StrongRef<LogicalDeltaBatch>,commit_seq}`) is the same edge
+/// shape already accepted on that path. The two laws below admit nothing else
+/// for an ANONYMOUS interior: `field_unresolved_schema` resolves a
+/// `containing_schema` only in {logical, bootstrap, physical, prebootstrap} —
+/// wire is not among them — and `ordinary_union_unresolved_schema` forbids the
+/// dual class that registering the owner as a logical kind would need.
+///
+/// The NAMED case is the one that had to be ruled rather than measured: a shape
+/// with its own name, reused by several arms, reads like a schema, and the
+/// checker accepts BOTH a logical kind with a field row and a wire record with
+/// none. `fgdb-a11-residue-unresolved-schema-ref-laws-54sd` ruled that the
+/// name changes nothing — a named shape and an anonymous interior take the same
+/// path — because a per-union exception moves the contradiction one hop and
+/// creates a named-vs-anonymous distinction that NOTHING in the checker encodes.
+///
+/// WHAT THIS COSTS, stated because it is a real cost and not a free win: the
+/// retaining references inside a wire-path shape get no row anywhere, so their
+/// edges are invisible to `dag_future_result`, to GC, and to the
+/// checkpoint-vector walkers. That is the `fgdb-owlp` latency class, accepted
+/// knowingly and CENSUSED there — not hand-waved.
+///
+/// WHAT THE CHECKER CAN AND CANNOT DO. It cannot choose the path for you: the
+/// source census records an arm payload as a digest, not as a parsed member
+/// list, so "carries only StrongRefs" is not derivable here. What it CAN do,
+/// and what `arm_payload_shape_field_row` below does, is hold every shape the
+/// ruling has already governed to that path: no field row may name one, and
+/// none may reappear in a field-owning identity class. The table is the
+/// enumeration of governed shapes; ADD A ROW HERE when a ruling puts another
+/// named shape on the wire path.
+///
+/// The third guard — that a governed shape is still ON the wire path at all,
+/// without which the other two pass vacuously on a deleted row — is a claim
+/// about the RELEASED registries rather than about any `IdentityRegistries`,
+/// so it lives in the test that loads them
+/// (`idr_strongref_only_arm_payload_shapes_stay_on_the_wire_path`). Asserting
+/// it inside `validate_identity` fired it on every synthetic fixture in the
+/// suite, which is a checker validating rows its input never claimed to have.
+pub const STRONGREF_ONLY_ARM_PAYLOAD_SHAPES: [ArmPayloadShape; 2] = [
+    ArmPayloadShape {
+        name: "DirectResumeCapability",
+        source: "a11:1936",
+        carried_by: "SubscriptionDeliveryTransitionSpec<Role>.client_action_authority",
+        members: &["validation_ref:StrongRef<DurableCapabilityValidationEvidence>"],
+        ruling: "fgdb-a11-residue-unresolved-schema-ref-laws-54sd",
+    },
+    ArmPayloadShape {
+        name: "DispositionReceipt",
+        source: "a11:1936",
+        carried_by: "SubscriptionDeliveryTransitionSpec<Role>.client_action_authority",
+        members: &[
+            "receipt_ref:StrongRef<AuthenticatedClientSubscriptionDispositionReceipt<Role>>",
+        ],
+        ruling: "fgdb-a11-residue-unresolved-schema-ref-laws-54sd",
+    },
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogicalKind {
@@ -1112,7 +1196,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:9a4a40fb19ced38f";
+    const WIRE: &str = "fnv1a64:cdc14de7d9f68c9b";
     const FIELDS: &str = "fnv1a64:4e26b837096443e5";
 
     let logical = rows_pin(
@@ -1603,6 +1687,62 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         m
     };
 
+    // LAW: the StrongRef-only arm-payload shapes take the wire path and own no
+    // field row (see STRONGREF_ONLY_ARM_PAYLOAD_SHAPES for the rule, the
+    // corpus that measured it, and the cost it accepts).
+    for shape in &STRONGREF_ONLY_ARM_PAYLOAD_SHAPES {
+        // NOTE the completeness guard — "a governed shape must still BE a
+        // registered wire type" — is NOT here. It is a claim about the RELEASED
+        // tree, not about an arbitrary `IdentityRegistries`, and asserting it
+        // here made every synthetic fixture in the suite fire it (measured: 4
+        // satisfiability witnesses went red on rows they never mention). It
+        // lives in `idr_strongref_only_arm_payload_shapes_stay_on_the_wire_path`,
+        // which runs against the real registries under `cargo test`. Without it
+        // the two guards below pass VACUOUSLY on a deleted row.
+        //
+        // The wrong path taken outright. `disjointness_dual_class` catches the
+        // shape registered in BOTH classes; this catches it moved wholesale
+        // into a field-owning one, which that law cannot see.
+        let field_owning: Vec<&str> = [
+            logical_by_name.get(shape.name).map(|_| "logical"),
+            bootstrap_names.contains(shape.name).then_some("bootstrap"),
+            physical_names.contains(shape.name).then_some("physical"),
+            prebootstrap_names
+                .contains(shape.name)
+                .then_some("prebootstrap"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !field_owning.is_empty() {
+            out.push(v(
+                "arm_payload_shape_field_row",
+                "identity",
+                shape.name,
+                format!(
+                    "{} ({}) is an arm payload shape of {} carrying only {:?}; it takes the wire \
+                     path with no field row under {}, but is registered in {field_owning:?}",
+                    shape.name, shape.source, shape.carried_by, shape.members, shape.ruling
+                ),
+            ));
+        }
+        for f in &r.fields {
+            if generic_free_family(f.containing_schema.as_str()) == shape.name {
+                out.push(v(
+                    "arm_payload_shape_field_row",
+                    "durable_fields",
+                    &format!("{}#{}", f.containing_schema, f.stable_name),
+                    format!(
+                        "{} ({}) is an arm payload shape of {}; a shape whose body carries only \
+                         retaining references takes the wire path and owns NO field row ({}). Its \
+                         members are committed byte-exactly by the covering arm payload digest",
+                        shape.name, shape.source, shape.carried_by, shape.ruling
+                    ),
+                ));
+            }
+        }
+    }
+
     for f in &r.fields {
         let row_id = format!("{}#{}", f.containing_schema, f.stable_name);
         // Containing schema must resolve in one identity class.  Resolution is
@@ -1620,14 +1760,31 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             || physical_names.contains(containing_family)
             || prebootstrap_names.contains(containing_family);
         if !resolves {
+            // A wire owner is the interesting sub-case and the message used to
+            // hide it: the family DOES resolve, in the one class that can never
+            // own a field row, and "resolves in no identity class" reads as a
+            // missing mint. It is not — it is the arm-payload law
+            // (STRONGREF_ONLY_ARM_PAYLOAD_SHAPES) refusing the row, and an
+            // author who mis-reads it re-mints the owner as a logical kind.
+            let detail = if wire_names.contains(containing_family) {
+                format!(
+                    "containing_schema {:?} resolves as a WIRE type, which can never own a field \
+                     row; its members are committed byte-exactly by the covering wire envelope. \
+                     Do not re-mint the owner as a logical kind to make this row land — see the \
+                     arm-payload law in identity::STRONGREF_ONLY_ARM_PAYLOAD_SHAPES",
+                    f.containing_schema
+                )
+            } else {
+                format!(
+                    "containing_schema {:?} resolves in no identity class",
+                    f.containing_schema
+                )
+            };
             out.push(v(
                 "field_unresolved_schema",
                 "durable_fields",
                 &row_id,
-                format!(
-                    "containing_schema {:?} resolves in no identity class",
-                    f.containing_schema
-                ),
+                detail,
             ));
         }
         // Tag uniqueness + validity.
