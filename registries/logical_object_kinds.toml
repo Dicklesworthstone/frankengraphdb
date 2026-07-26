@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 48
+registry_epoch = 49
 
 [[kind]]
 object_kind = 0x0001
@@ -2194,6 +2194,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_abandonment_receipt/"
+
+[[kind]]
+object_kind = 0x03d6
+name = "RestoreCanonicalAcquisitionWorkingSet"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_canonical_acquisition_working_set/"
 
 [[kind]]
 object_kind = 0x03d7
