@@ -54,9 +54,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 # Resolved to a real command, not a shell function: source_pin() pipes it
-# through xargs, and xargs cannot invoke a function. Getting this wrong is
-# silent — the pin comes back empty, every comparison of it succeeds, and the
-# concurrency guard below is disabled without a single error message.
+# through xargs, and xargs cannot invoke a function. Getting this wrong fails
+# in the worst possible way — measured, not theorised. `xargs some_function`
+# writes nothing to stdout, the trailing hash then digests an EMPTY STREAM, and
+# the pin comes back as the constant e3b0c442…b855 (sha256 of ""). That is 64
+# valid hex characters, identical on every tree, so it passes a length check
+# and every before/after comparison succeeds: the concurrency guard is disabled
+# with no error and no visible symptom. Hence both guards in source_pin below.
+readonly EMPTY_SHA256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 if command -v sha256sum >/dev/null 2>&1; then
   SHA256_CMD=(sha256sum)
 else
@@ -189,13 +194,29 @@ FIXTURE
 # short digest aborts. An empty pin compares equal to the next empty pin, which
 # would turn the guard below into a no-op that always reports "unchanged".
 source_pin() {
-  local pin
-  pin="$(find crates tools \( -name '*.rs' -o -name 'Cargo.toml' \) -type f \
-    | LC_ALL=C sort | xargs "${SHA256_CMD[@]}" \
+  local pin files count
+  files="$(find crates tools \( -name '*.rs' -o -name 'Cargo.toml' \) -type f | LC_ALL=C sort)"
+  count="$(printf '%s' "$files" | grep -c . || true)"
+  # An empty walk is never legitimate here and must not be pinnable. GNU xargs
+  # runs its command ONCE even with no input, so `find | xargs sha256sum` over
+  # an empty tree still emits a digest — another tree-independent constant that
+  # sails past both checks below. Assert the walk found something first.
+  if [ "$count" -lt 2 ]; then
+    echo "ERROR: source_pin matched $count source files; refusing to pin." >&2
+    echo "  Run from the repository root — an empty walk yields a constant digest." >&2
+    return 1
+  fi
+  pin="$(printf '%s\n' "$files" | xargs -r "${SHA256_CMD[@]}" \
     | "${SHA256_CMD[@]}" - | cut -d' ' -f1)"
   if [ "${#pin}" -ne 64 ]; then
     echo "ERROR: source_pin produced no usable digest ('$pin'); refusing to run" >&2
     echo "  Without a pin, a concurrent commit is indistinguishable from nondeterminism." >&2
+    return 1
+  fi
+  if [ "$pin" = "$EMPTY_SHA256" ]; then
+    echo "ERROR: source_pin digested an empty stream (got sha256 of \"\")." >&2
+    echo "  The file walk matched nothing, or the hash command was not invoked." >&2
+    echo "  This is length-check-proof: refusing to run rather than pin a constant." >&2
     return 1
   fi
   printf '%s\n' "$pin"
