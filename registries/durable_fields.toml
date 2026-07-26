@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 60
+registry_epoch = 61
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -2519,6 +2519,51 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "GlobalRestoreAbandonParticipantApplyCertificate"
+field_tag = 0x0010
+stable_name = "post_authorization_global_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStateRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalStateRoot immediately after the exact participant authorization; retained while the certificate is retained, and equal construction order 44 is legal because dag_future_result rejects only later targets (a18:2449)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalRestoreAbandonParticipantApplyCertificate"
+field_tag = 0x0012
+stable_name = "visibility_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableSemanticVisibilityCertificate"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Meta PortableSemanticVisibilityCertificate proving the authorization root is durably audit-visible; retained while the participant-apply certificate is retained (a18:2449)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalRestoreAbandonParticipantApplyCertificate"
+field_tag = 0x0013
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord governing the canonical signature set; retained while the participant-apply certificate is retained (a18:2449)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
 field_tag = 0x0007
 stable_name = "meta_terminal_tombstone_ref"
@@ -2545,6 +2590,36 @@ target_schema_id = "GlobalStateRoot"
 construction_order = 50
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the GlobalStateRoot this GlobalRestoreParticipantPinReleaseCompletionCertificate names; retained while the referrer is retained, and the acyclic order 31 <= 50 keeps the reference backward-only (a18:2419)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+field_tag = 0x000b
+stable_name = "visibility_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableSemanticVisibilityCertificate"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Meta PortableSemanticVisibilityCertificate proving the pin-release finalize root is durably audit-visible; retained while the completion certificate is retained (a18:2419)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+field_tag = 0x000c
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord governing the canonical signature set; retained while the completion certificate is retained (a18:2419)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -7368,6 +7443,21 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "RestoreShardAbandonAck"
+field_tag = 0x0010
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord governing the Shard acknowledgement signature set; retained while the acknowledgement is retained (a18:2451)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "RestoreShardBootstrapProjectionCertificate"
 field_tag = 0x0001
 stable_name = "projection_ref"
@@ -7630,6 +7720,21 @@ role_predicate = "true"
 retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonwidenable authority binding in RestoreSourceLeaseAuthorityObservationImport; retained with the owning record through its declared status/replay floor and creates no reachability edge (a18:2401)"
 version_status = "reserved"
 max_size_bytes = 256
+
+[[field]]
+containing_schema = "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "current_lease_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceLeaseRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the current RestoreSourceLeaseRecord<Role> whose authority observation is imported; retained while the import is retained, and equal construction order 30 is legal because dag_future_result rejects only later targets (a18:2401)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
@@ -7906,6 +8011,51 @@ role_predicate = "true"
 retention_and_cut_rule = "inline release-authorization body is retained and cut with its same-group certificate and creates no reachability edge (a18:2415)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RestoreTerminalPinReleaseAuthorization"
+field_tag = 0x0002
+stable_name = "post_release_meta_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStateRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the post-release Meta GlobalStateRoot bound by the authorization; retained while the authorization is retained, and equal construction order 44 is legal because dag_future_result rejects only later targets (a18:2415)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreTerminalPinReleaseAuthorization"
+field_tag = 0x0004
+stable_name = "visibility_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableSemanticVisibilityCertificate"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Meta PortableSemanticVisibilityCertificate proving the release-finalize root is durably audit-visible; retained while the authorization is retained (a18:2415)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreTerminalPinReleaseAuthorization"
+field_tag = 0x0005
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord governing the authorization signature set; retained while the authorization is retained (a18:2415)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ResultDeliveryLease"
@@ -9244,6 +9394,21 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the ConfigurationState this ShardReadWitnessBasis names; retained while the referrer is retained, and the acyclic order 5 <= 20 keeps the reference backward-only (a07:1722)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardRestoreAbandonmentTombstone"
+field_tag = 0x000b
+stable_name = "participant_apply_authorization_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalRestoreAbandonParticipantApplyCertificate"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "certified remote strong reference to the exact GlobalRestoreAbandonParticipantApplyCertificate authorizing this Shard tombstone; retained while the tombstone is retained, and equal construction order 44 is legal because dag_future_result rejects only later targets (a18:2439)"
+version_status = "reserved"
+max_size_bytes = 537
 
 [[field]]
 containing_schema = "ShardRestoreAbandonmentTombstone"

@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 60
+registry_epoch = 61
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 60);
+    assert_eq!(epoch, 61);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3583,6 +3583,204 @@ fn idr_object_creation_boundary_is_source_ordered_and_wire_backed() {
 }
 
 #[test]
+fn idr_a18_reserved_reference_targets_and_strong_fields_are_exact() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+
+    for (name, code, order, role, source_key) in [
+        (
+            "CertificateAttemptRecord",
+            0x0266,
+            16,
+            "true",
+            "projection|logical_object_kinds|CertificateAttemptRecord",
+        ),
+        (
+            "PortableSemanticVisibilityCertificate",
+            0x038f,
+            12,
+            "role-local || role-meta",
+            "top|PortableSemanticVisibilityCertificate<Meta>",
+        ),
+    ] {
+        let logical = identity
+            .logical
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("missing A18 reference target {name}"));
+        assert_eq!(logical.object_kind, code);
+        assert_eq!(logical.status, "reserved");
+        assert_eq!(logical.construction_order, order);
+        assert_eq!(logical.role_predicate, role);
+        assert_eq!(logical.max_size_bytes, 16_777_216);
+
+        let reservation = catalog
+            .reservations
+            .iter()
+            .find(|row| row.symbol == name)
+            .unwrap_or_else(|| panic!("missing reservation for {name}"));
+        assert_eq!(reservation.identity_class, "logical");
+        assert_eq!(reservation.code_reservation, format!("0x{code:04x}"));
+        assert_eq!(reservation.disposition, "existing");
+
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{name} must have one exact target");
+        assert_eq!(targets[0].target_kind, "logical-kind");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+
+    let portable_candidates = catalog
+        .top_level_candidates
+        .iter()
+        .filter(|row| row.symbol == "PortableSemanticVisibilityCertificate")
+        .collect::<Vec<_>>();
+    assert_eq!(portable_candidates.len(), 2);
+    assert!(
+        portable_candidates
+            .iter()
+            .all(|row| row.identity_class == "logical")
+    );
+
+    for (owner, name, tag, wire, target, max_size, source_key) in [
+        (
+            "GlobalRestoreAbandonParticipantApplyCertificate",
+            "post_authorization_global_state_root_ref",
+            0x0010,
+            "StrongRef",
+            "GlobalStateRoot",
+            40,
+            "field|GlobalRestoreAbandonParticipantApplyCertificate|GlobalRestoreAbandonParticipantApplyCertificate.post_authorization_global_state_root_ref|post_authorization_global_state_root_ref",
+        ),
+        (
+            "GlobalRestoreAbandonParticipantApplyCertificate",
+            "visibility_certificate_ref",
+            0x0012,
+            "StrongRef",
+            "PortableSemanticVisibilityCertificate",
+            40,
+            "field|GlobalRestoreAbandonParticipantApplyCertificate|GlobalRestoreAbandonParticipantApplyCertificate.visibility_certificate_ref|visibility_certificate_ref",
+        ),
+        (
+            "GlobalRestoreAbandonParticipantApplyCertificate",
+            "certificate_attempt_ref",
+            0x0013,
+            "StrongRef",
+            "CertificateAttemptRecord",
+            40,
+            "field|GlobalRestoreAbandonParticipantApplyCertificate|GlobalRestoreAbandonParticipantApplyCertificate.certificate_attempt_ref|certificate_attempt_ref",
+        ),
+        (
+            "GlobalRestoreParticipantPinReleaseCompletionCertificate",
+            "visibility_certificate_ref",
+            0x000b,
+            "StrongRef",
+            "PortableSemanticVisibilityCertificate",
+            40,
+            "field|GlobalRestoreParticipantPinReleaseCompletionCertificate|GlobalRestoreParticipantPinReleaseCompletionCertificate.visibility_certificate_ref|visibility_certificate_ref",
+        ),
+        (
+            "GlobalRestoreParticipantPinReleaseCompletionCertificate",
+            "certificate_attempt_ref",
+            0x000c,
+            "StrongRef",
+            "CertificateAttemptRecord",
+            40,
+            "field|GlobalRestoreParticipantPinReleaseCompletionCertificate|GlobalRestoreParticipantPinReleaseCompletionCertificate.certificate_attempt_ref|certificate_attempt_ref",
+        ),
+        (
+            "RestoreShardAbandonAck",
+            "certificate_attempt_ref",
+            0x0010,
+            "StrongRef",
+            "CertificateAttemptRecord",
+            40,
+            "field|RestoreShardAbandonAck|RestoreShardAbandonAck.certificate_attempt_ref|certificate_attempt_ref",
+        ),
+        (
+            "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>",
+            "current_lease_record_ref",
+            0x0004,
+            "StrongRef",
+            "RestoreSourceLeaseRecord",
+            40,
+            "field|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>.current_lease_record_ref|current_lease_record_ref",
+        ),
+        (
+            "RestoreTerminalPinReleaseAuthorization",
+            "post_release_meta_state_root_ref",
+            0x0002,
+            "StrongRef",
+            "GlobalStateRoot",
+            40,
+            "field|RestoreTerminalPinReleaseAuthorization|RestoreTerminalPinReleaseAuthorization.post_release_meta_state_root_ref|post_release_meta_state_root_ref",
+        ),
+        (
+            "RestoreTerminalPinReleaseAuthorization",
+            "visibility_certificate_ref",
+            0x0004,
+            "StrongRef",
+            "PortableSemanticVisibilityCertificate",
+            40,
+            "field|RestoreTerminalPinReleaseAuthorization|RestoreTerminalPinReleaseAuthorization.visibility_certificate_ref|visibility_certificate_ref",
+        ),
+        (
+            "RestoreTerminalPinReleaseAuthorization",
+            "certificate_attempt_ref",
+            0x0005,
+            "StrongRef",
+            "CertificateAttemptRecord",
+            40,
+            "field|RestoreTerminalPinReleaseAuthorization|RestoreTerminalPinReleaseAuthorization.certificate_attempt_ref|certificate_attempt_ref",
+        ),
+        (
+            "ShardRestoreAbandonmentTombstone",
+            "participant_apply_authorization_ref",
+            0x000b,
+            "CertifiedRemoteStrongRef",
+            "GlobalRestoreAbandonParticipantApplyCertificate",
+            537,
+            "field|ShardRestoreAbandonmentTombstone|ShardRestoreAbandonmentTombstone.participant_apply_authorization_ref|participant_apply_authorization_ref",
+        ),
+    ] {
+        let fields = identity
+            .fields
+            .iter()
+            .filter(|row| row.containing_schema == owner && row.stable_name == name)
+            .collect::<Vec<_>>();
+        assert_eq!(fields.len(), 1, "{owner}.{name} must exist exactly once");
+        let field = fields[0];
+        assert_eq!(field.field_tag, tag);
+        assert_eq!(field.exact_wire_type, wire);
+        assert_eq!(field.cardinality, "one");
+        assert_eq!(field.identity_class, "logical");
+        assert_eq!(field.reference_semantics, "strong");
+        assert_eq!(field.target_schema_id.as_deref(), Some(target));
+        let owner_order = identity
+            .logical
+            .iter()
+            .find(|row| row.name == identity::generic_free_family(owner))
+            .expect("field owner resolves")
+            .construction_order;
+        assert_eq!(field.construction_order, owner_order);
+        assert_eq!(field.version_status, "reserved");
+        assert_eq!(field.max_size_bytes, max_size);
+
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{owner}.{name} must have one target");
+        assert_eq!(targets[0].target_kind, "field");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+}
+
+#[test]
 fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     let identity = real_identity();
     let logical = identity
@@ -6103,8 +6301,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 )
         )
     };
-    // The a18 StrongRef field tranche. These rows are post-erratum additions,
-    // so exclude the exact owner/member cohort from the historical namespace.
+    // The a18 StrongRef field tranches. These rows are post-erratum additions,
+    // so exclude the exact owner/member cohorts from the historical namespace.
     let post_erratum_a18_field_tranche = |schema: &str, name: &str| {
         matches!(
             (schema, name),
@@ -6214,6 +6412,47 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | (
                     "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>",
                     "time_validation_evidence_ref"
+                )
+                | (
+                    "GlobalRestoreAbandonParticipantApplyCertificate",
+                    "post_authorization_global_state_root_ref"
+                )
+                | (
+                    "GlobalRestoreAbandonParticipantApplyCertificate",
+                    "visibility_certificate_ref"
+                )
+                | (
+                    "GlobalRestoreAbandonParticipantApplyCertificate",
+                    "certificate_attempt_ref"
+                )
+                | (
+                    "GlobalRestoreParticipantPinReleaseCompletionCertificate",
+                    "visibility_certificate_ref"
+                )
+                | (
+                    "GlobalRestoreParticipantPinReleaseCompletionCertificate",
+                    "certificate_attempt_ref"
+                )
+                | ("RestoreShardAbandonAck", "certificate_attempt_ref")
+                | (
+                    "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>",
+                    "current_lease_record_ref"
+                )
+                | (
+                    "RestoreTerminalPinReleaseAuthorization",
+                    "post_release_meta_state_root_ref"
+                )
+                | (
+                    "RestoreTerminalPinReleaseAuthorization",
+                    "visibility_certificate_ref"
+                )
+                | (
+                    "RestoreTerminalPinReleaseAuthorization",
+                    "certificate_attempt_ref"
+                )
+                | (
+                    "ShardRestoreAbandonmentTombstone",
+                    "participant_apply_authorization_ref"
                 )
                 | (
                     "RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>",
@@ -6686,9 +6925,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 486,
+        pre_erratum.fields.len() + 497,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A03 l6xd closeout"
+        "the historical witness must remove every post-erratum field cohort through the A18 reservation-backed StrongRef tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

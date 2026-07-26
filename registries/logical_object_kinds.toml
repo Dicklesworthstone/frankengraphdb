@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 53
+registry_epoch = 54
 
 [[kind]]
 object_kind = 0x0001
@@ -718,6 +718,15 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/certificate_attempt_plan/"
+
+[[kind]]
+object_kind = 0x0266
+name = "CertificateAttemptRecord"
+status = "reserved"
+construction_order = 16
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_attempt_record/"
 
 [[kind]]
 object_kind = 0x0269
@@ -2005,6 +2014,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/portable_restore_source_lease_release_terminal_evidence/"
+
+[[kind]]
+object_kind = 0x038f
+name = "PortableSemanticVisibilityCertificate"
+status = "reserved"
+construction_order = 12
+role_predicate = "role-local || role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_semantic_visibility_certificate/"
 
 [[kind]]
 object_kind = 0x0392

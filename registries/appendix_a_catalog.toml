@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3165
-projection_fallback_count = 108
-target_source_assignment_sha256 = "56a102f4551c6cfb2a9c39a56ca21716795ab6978335d42bf6670dcc5d3c41ff"
+target_count = 3178
+projection_fallback_count = 109
+target_source_assignment_sha256 = "b399d9462e805e7a4e8bfbdc005be5d2d7e72c24eceab0ddeff56c3d82106e51"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 53
+registry_epoch = 54
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 37
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 60
+registry_epoch = 61
 
 [[logical_kind]]
 slice_id = "a03"
@@ -41111,7 +41111,7 @@ symbol = "CertificateAttemptRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0266"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a04:reservation:certificate-nonpublication-proof"
@@ -44144,7 +44144,7 @@ symbol = "PortableSemanticVisibilityCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x038f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:portable-time-authority-issuance-close-terminal-evidence"
@@ -53830,7 +53830,7 @@ symbol = "PortableSemanticVisibilityCertificate"
 generic_signature = "<Local>"
 source_key = "top|PortableSemanticVisibilityCertificate<Local>"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a20:2605"]
 
 [[top_level_candidate]]
@@ -53840,7 +53840,7 @@ symbol = "PortableSemanticVisibilityCertificate"
 generic_signature = "<Meta>"
 source_key = "top|PortableSemanticVisibilityCertificate<Meta>"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1632"]
 
 [[top_level_candidate]]
@@ -100423,5 +100423,318 @@ row_id = "a03:target:field-txn-outcome-record-authority-bound-header"
 target_row_id = "a03:field:txn-outcome-record-authority-bound-header"
 slice_id = "a03"
 source_key = "field|TxnOutcomeRecord|TxnOutcomeRecord.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:global-restore-abandon-participant-apply-certificate-post-authorization-global-state-root-ref"
+containing_schema = "GlobalRestoreAbandonParticipantApplyCertificate"
+field_tag = 0x0010
+stable_name = "post_authorization_global_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStateRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalStateRoot immediately after the exact participant authorization; retained while the certificate is retained, and equal construction order 44 is legal because dag_future_result rejects only later targets (a18:2449)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-lease-authority-observation-import-role-authority-owning-role-current-lease-record-ref"
+containing_schema = "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "current_lease_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreSourceLeaseRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the current RestoreSourceLeaseRecord<Role> whose authority observation is imported; retained while the import is retained, and equal construction order 30 is legal because dag_future_result rejects only later targets (a18:2401)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-terminal-pin-release-authorization-post-release-meta-state-root-ref"
+containing_schema = "RestoreTerminalPinReleaseAuthorization"
+field_tag = 0x0002
+stable_name = "post_release_meta_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStateRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the post-release Meta GlobalStateRoot bound by the authorization; retained while the authorization is retained, and equal construction order 44 is legal because dag_future_result rejects only later targets (a18:2415)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:shard-restore-abandonment-tombstone-participant-apply-authorization-ref"
+containing_schema = "ShardRestoreAbandonmentTombstone"
+field_tag = 0x000b
+stable_name = "participant_apply_authorization_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalRestoreAbandonParticipantApplyCertificate"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "certified remote strong reference to the exact GlobalRestoreAbandonParticipantApplyCertificate authorizing this Shard tombstone; retained while the tombstone is retained, and equal construction order 44 is legal because dag_future_result rejects only later targets (a18:2439)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[target]]
+row_id = "a18:target:field-global-restore-abandon-participant-apply-certificate-post-authorization-global-state-root-ref"
+target_row_id = "a18:field:global-restore-abandon-participant-apply-certificate-post-authorization-global-state-root-ref"
+slice_id = "a18"
+source_key = "field|GlobalRestoreAbandonParticipantApplyCertificate|GlobalRestoreAbandonParticipantApplyCertificate.post_authorization_global_state_root_ref|post_authorization_global_state_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-lease-authority-observation-import-role-authority-owning-role-current-lease-record-ref"
+target_row_id = "a18:field:restore-source-lease-authority-observation-import-role-authority-owning-role-current-lease-record-ref"
+slice_id = "a18"
+source_key = "field|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>|RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>.current_lease_record_ref|current_lease_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-terminal-pin-release-authorization-post-release-meta-state-root-ref"
+target_row_id = "a18:field:restore-terminal-pin-release-authorization-post-release-meta-state-root-ref"
+slice_id = "a18"
+source_key = "field|RestoreTerminalPinReleaseAuthorization|RestoreTerminalPinReleaseAuthorization.post_release_meta_state_root_ref|post_release_meta_state_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-shard-restore-abandonment-tombstone-participant-apply-authorization-ref"
+target_row_id = "a18:field:shard-restore-abandonment-tombstone-participant-apply-authorization-ref"
+slice_id = "a18"
+source_key = "field|ShardRestoreAbandonmentTombstone|ShardRestoreAbandonmentTombstone.participant_apply_authorization_ref|participant_apply_authorization_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:certificate-attempt-record"
+object_kind = 0x0266
+name = "CertificateAttemptRecord"
+status = "reserved"
+construction_order = 16
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certificate_attempt_record/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:portable-semantic-visibility-certificate"
+object_kind = 0x038f
+name = "PortableSemanticVisibilityCertificate"
+status = "reserved"
+construction_order = 12
+role_predicate = "role-local || role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_semantic_visibility_certificate/"
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:global-restore-abandon-participant-apply-certificate-visibility-certificate-ref"
+containing_schema = "GlobalRestoreAbandonParticipantApplyCertificate"
+field_tag = 0x0012
+stable_name = "visibility_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableSemanticVisibilityCertificate"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Meta PortableSemanticVisibilityCertificate proving the authorization root is durably audit-visible; retained while the participant-apply certificate is retained (a18:2449)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:global-restore-abandon-participant-apply-certificate-certificate-attempt-ref"
+containing_schema = "GlobalRestoreAbandonParticipantApplyCertificate"
+field_tag = 0x0013
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord governing the canonical signature set; retained while the participant-apply certificate is retained (a18:2449)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:global-restore-participant-pin-release-completion-certificate-visibility-certificate-ref"
+containing_schema = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+field_tag = 0x000b
+stable_name = "visibility_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableSemanticVisibilityCertificate"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Meta PortableSemanticVisibilityCertificate proving the pin-release finalize root is durably audit-visible; retained while the completion certificate is retained (a18:2419)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:global-restore-participant-pin-release-completion-certificate-certificate-attempt-ref"
+containing_schema = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+field_tag = 0x000c
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord governing the canonical signature set; retained while the completion certificate is retained (a18:2419)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-shard-abandon-ack-certificate-attempt-ref"
+containing_schema = "RestoreShardAbandonAck"
+field_tag = 0x0010
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord governing the Shard acknowledgement signature set; retained while the acknowledgement is retained (a18:2451)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-terminal-pin-release-authorization-visibility-certificate-ref"
+containing_schema = "RestoreTerminalPinReleaseAuthorization"
+field_tag = 0x0004
+stable_name = "visibility_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableSemanticVisibilityCertificate"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact Meta PortableSemanticVisibilityCertificate proving the release-finalize root is durably audit-visible; retained while the authorization is retained (a18:2415)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-terminal-pin-release-authorization-certificate-attempt-ref"
+containing_schema = "RestoreTerminalPinReleaseAuthorization"
+field_tag = 0x0005
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord governing the authorization signature set; retained while the authorization is retained (a18:2415)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[target]]
+row_id = "a05:target:logical-kind-certificate-attempt-record"
+target_row_id = "a05:logical-kind:certificate-attempt-record"
+slice_id = "a05"
+source_key = "projection|logical_object_kinds|CertificateAttemptRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-portable-semantic-visibility-certificate"
+target_row_id = "a05:logical-kind:portable-semantic-visibility-certificate"
+slice_id = "a05"
+source_key = "top|PortableSemanticVisibilityCertificate<Meta>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-global-restore-abandon-participant-apply-certificate-visibility-certificate-ref"
+target_row_id = "a18:field:global-restore-abandon-participant-apply-certificate-visibility-certificate-ref"
+slice_id = "a18"
+source_key = "field|GlobalRestoreAbandonParticipantApplyCertificate|GlobalRestoreAbandonParticipantApplyCertificate.visibility_certificate_ref|visibility_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-global-restore-abandon-participant-apply-certificate-certificate-attempt-ref"
+target_row_id = "a18:field:global-restore-abandon-participant-apply-certificate-certificate-attempt-ref"
+slice_id = "a18"
+source_key = "field|GlobalRestoreAbandonParticipantApplyCertificate|GlobalRestoreAbandonParticipantApplyCertificate.certificate_attempt_ref|certificate_attempt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-global-restore-participant-pin-release-completion-certificate-visibility-certificate-ref"
+target_row_id = "a18:field:global-restore-participant-pin-release-completion-certificate-visibility-certificate-ref"
+slice_id = "a18"
+source_key = "field|GlobalRestoreParticipantPinReleaseCompletionCertificate|GlobalRestoreParticipantPinReleaseCompletionCertificate.visibility_certificate_ref|visibility_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-global-restore-participant-pin-release-completion-certificate-certificate-attempt-ref"
+target_row_id = "a18:field:global-restore-participant-pin-release-completion-certificate-certificate-attempt-ref"
+slice_id = "a18"
+source_key = "field|GlobalRestoreParticipantPinReleaseCompletionCertificate|GlobalRestoreParticipantPinReleaseCompletionCertificate.certificate_attempt_ref|certificate_attempt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-shard-abandon-ack-certificate-attempt-ref"
+target_row_id = "a18:field:restore-shard-abandon-ack-certificate-attempt-ref"
+slice_id = "a18"
+source_key = "field|RestoreShardAbandonAck|RestoreShardAbandonAck.certificate_attempt_ref|certificate_attempt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-terminal-pin-release-authorization-visibility-certificate-ref"
+target_row_id = "a18:field:restore-terminal-pin-release-authorization-visibility-certificate-ref"
+slice_id = "a18"
+source_key = "field|RestoreTerminalPinReleaseAuthorization|RestoreTerminalPinReleaseAuthorization.visibility_certificate_ref|visibility_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-terminal-pin-release-authorization-certificate-attempt-ref"
+target_row_id = "a18:field:restore-terminal-pin-release-authorization-certificate-attempt-ref"
+slice_id = "a18"
+source_key = "field|RestoreTerminalPinReleaseAuthorization|RestoreTerminalPinReleaseAuthorization.certificate_attempt_ref|certificate_attempt_ref"
 target_kind = "field"
 definition_status = "declared"
