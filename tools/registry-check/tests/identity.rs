@@ -15,6 +15,7 @@
 //! defect in the checker are both build breaks.
 
 use registry_check::appendix_a::{self, Catalog, Violation};
+use registry_check::architecture;
 use registry_check::identity::{
     self, FieldRow, IdentityRegistries, LogicalKind, WireType, bodydigest_pin,
     bodydigest_transcript,
@@ -1624,6 +1625,59 @@ fn appendix_a_top_level_generic_annotations_discharge_source_formals() {
             violation.code == "catalog_annotation_reference_semantics_mismatch"
         }),
         "a MarkerRef definition erased its identity semantics: {violations:?}"
+    );
+}
+
+/// An unresolvable bead ANYWHERE must not make the Appendix A repository
+/// bindings unavailable, and a bead Appendix A actually NAMES must still fail
+/// when it does not resolve. Those two are the whole contract, and they used to
+/// be one: the check consumed the TOTAL bead index, so a single orphaned record
+/// about anything at all returned `catalog_repository_beads_unavailable`, which
+/// blocked `appendix-regenerate` for every slice at once and stalled the
+/// catalog. Membership is what this check needs; totality is the architecture
+/// registry's own claim and is still enforced there.
+///
+/// PROVEN RED BY: pointing `verify_repository_bindings` back at
+/// `bead_provenance_index` — this test and
+/// `appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events`
+/// both go red while the tree carries an orphaned record.
+#[test]
+fn an_unrelated_orphan_bead_does_not_make_appendix_bindings_unavailable() {
+    let root = repo_root();
+    let catalog = real_appendix_catalog();
+
+    // The live tree is the strongest fixture available when it genuinely
+    // carries records that resolve nowhere. Guard against the test quietly
+    // becoming vacuous if the tree is later made total.
+    let registry = architecture::load_from_repo(&root).expect("architecture registry loads");
+    let membership =
+        architecture::bead_provenance_membership(&registry, &root).expect("membership resolves");
+    assert!(
+        !membership.is_empty(),
+        "membership must return the beads that DO resolve"
+    );
+    if architecture::bead_provenance_index(&registry, &root).is_err() {
+        let violations = appendix_a::verify_repository_bindings(&root, &catalog);
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.code == "catalog_repository_beads_unavailable"),
+            "an unresolvable bead elsewhere must not make Appendix bindings unavailable; got {:?}",
+            violations.iter().map(|v| v.code.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    // The other direction: a bead Appendix A NAMES but which does not resolve
+    // must still fail, attributed to the row that named it.
+    let mut broken = real_appendix_catalog();
+    broken.maintenance_proof.owner_bead_id = "fgdb-a-bead-that-does-not-exist".to_owned();
+    let violations = appendix_a::verify_repository_bindings(&root, &broken);
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.code == "catalog_maintenance_owner_bead_unresolved"),
+        "a named bead that resolves nowhere must still fail; got {:?}",
+        violations.iter().map(|v| v.code.as_str()).collect::<Vec<_>>()
     );
 }
 

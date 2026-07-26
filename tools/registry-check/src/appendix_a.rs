@@ -5583,13 +5583,23 @@ pub fn verify_repository_bindings(repo_root: &Path, catalog: &Catalog) -> Vec<Vi
             )];
         }
     };
-    let bead_entries = match architecture::bead_provenance_index(&architecture, repo_root) {
+    // MEMBERSHIP, not totality. This check needs one thing from the Beads
+    // index: whether the specific `owner_bead_id` values Appendix A names
+    // resolve. Consuming the TOTAL index coupled that question to every
+    // unrelated record in the project — one orphaned bead anywhere returned
+    // `catalog_repository_beads_unavailable`, which blocked
+    // `appendix-regenerate` for EVERY slice and stalled the catalog. Totality
+    // is the architecture registry's own claim and it still reports
+    // `bead_provenance_orphan` / `bead_provenance_not_total` for it.
+    // An unresolvable record is absent from this set, so a row naming one still
+    // fails below, attributed to that row rather than to the whole file.
+    let bead_entries = match architecture::bead_provenance_membership(&architecture, repo_root) {
         Ok(entries) => entries,
         Err(_) => {
             return vec![Violation::new(
                 "catalog_repository_beads_unavailable",
                 "repository_bindings",
-                "cannot resolve the authoritative Beads index needed by Appendix metadata",
+                "cannot read the authoritative Beads index needed by Appendix metadata",
             )];
         }
     };

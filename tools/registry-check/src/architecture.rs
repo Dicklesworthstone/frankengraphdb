@@ -2392,6 +2392,33 @@ pub fn resolve_bead_provenance(
     }
 }
 
+/// The set of beads that DO resolve, without requiring that every record in the
+/// file resolves.
+///
+/// [`bead_provenance_index`] is total by contract: one unresolvable record makes
+/// the whole call `Err`. That is the right contract for the architecture
+/// registry, which owns the claim that every bead maps to an ADR and reports
+/// `bead_provenance_orphan` / `bead_provenance_not_total` when it does not.
+///
+/// It is the wrong contract for a consumer that only needs MEMBERSHIP — "does
+/// the bead this row names resolve?" — because it couples that consumer to
+/// every unrelated record in the project. A bead filed about shell linting has
+/// no bearing on whether an Appendix A slice owner resolves, yet under the total
+/// contract it made the Appendix A loader fail, which blocked
+/// `appendix-regenerate` for every slice at once.
+///
+/// This accessor fails only when the beads file itself cannot be read or
+/// parsed, which is the genuine "unavailable" condition. Unresolvable records
+/// are simply absent from the returned set, so a membership test on them still
+/// fails — loudly, and attributed to the row that named them.
+pub fn bead_provenance_membership(
+    registry: &ArchitectureRegistry,
+    root: &Path,
+) -> Result<Vec<BeadProvenanceEntry>, String> {
+    let beads = load_bead_records(root, &registry.bead_provenance.source_path)?;
+    Ok(resolve_bead_records(registry, &beads).entries)
+}
+
 /// Public total provenance index named for robot/API consumers.
 pub fn bead_provenance_index(
     registry: &ArchitectureRegistry,
