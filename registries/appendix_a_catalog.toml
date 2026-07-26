@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2697
+target_count = 2702
 projection_fallback_count = 108
-target_source_assignment_sha256 = "8a0637a4742c469eb10411027104e404af2d3fd1e1ae7e60870e5d1b55d3fde3"
+target_source_assignment_sha256 = "0d33cf96b8d18525a1719d2b20e4b7c597c823e2b966ddc8eeaba7cab1f434d7"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -88588,6 +88588,87 @@ retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonw
 version_status = "reserved"
 max_size_bytes = 256
 
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:constraint-state-root-coordinate"
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x0004
+stable_name = "coordinate"
+exact_wire_type = "ConstraintCoordinateKey"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline sequence-neutral ConstraintCoordinateKey embedded by value in the constraint state root; retained and cut with the containing root, names no selected head or future marker, and creates no reachability edge (a12:1974,1978)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-authority-bound-header"
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in the sequence-neutral pre-order ledger transition; retained with the containing object, byte-matched against the basis role and containing command, and creates no reachability edge (a12:1992)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-basis"
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "basis"
+exact_wire_type = "ResourceLedgerBasis"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline nonretaining ResourceLedgerBasis embedded by value; commits the exact ledger generation, root digest and limit-policy epoch by weak identity, retained and cut with the transition, and creates no reachability edge (a12:1992)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-owner"
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "owner"
+exact_wire_type = "ResourceOwnerKey"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline closed ResourceOwnerKey union embedded by value; the selected arm names a stable owner key and never a future ObjectId, so it is retained and cut with the transition and creates no reachability edge (a12:1988,1992)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-authorization-decision-ref"
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "authorization_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuthorizationDecisionRecord"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact role-parameterized authorization decision that admitted this transition; retained while the transition is retained, with the target constructed no later than its owner (a12:1992)"
+version_status = "reserved"
+max_size_bytes = 40
+
 [[target]]
 row_id = "a18:target:field-authority-owning-restore-abandonment-tombstone-role-authority-owning-role-authority-bound-header"
 target_row_id = "a18:field:authority-owning-restore-abandonment-tombstone-role-authority-owning-role-authority-bound-header"
@@ -89506,4 +89587,44 @@ target_row_id = "a12:wire-type:resource-owner-key-maintenance"
 slice_id = "a12"
 source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|Maintenance"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-constraint-state-root-coordinate"
+target_row_id = "a12:field:constraint-state-root-coordinate"
+slice_id = "a12"
+source_key = "field|ConstraintStateRoot|ConstraintStateRoot.coordinate|coordinate"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-resource-ledger-transition-role-authority-owning-role-authority-bound-header"
+target_row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-authority-bound-header"
+slice_id = "a12"
+source_key = "field|ResourceLedgerTransition<Role:AuthorityOwningRole>|ResourceLedgerTransition<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-resource-ledger-transition-role-authority-owning-role-basis"
+target_row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-basis"
+slice_id = "a12"
+source_key = "field|ResourceLedgerTransition<Role:AuthorityOwningRole>|ResourceLedgerTransition<Role:AuthorityOwningRole>.basis|basis"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-resource-ledger-transition-role-authority-owning-role-owner"
+target_row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-owner"
+slice_id = "a12"
+source_key = "field|ResourceLedgerTransition<Role:AuthorityOwningRole>|ResourceLedgerTransition<Role:AuthorityOwningRole>.owner|owner"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-resource-ledger-transition-role-authority-owning-role-authorization-decision-ref"
+target_row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-authorization-decision-ref"
+slice_id = "a12"
+source_key = "field|ResourceLedgerTransition<Role:AuthorityOwningRole>|ResourceLedgerTransition<Role:AuthorityOwningRole>.authorization_decision_ref|authorization_decision_ref"
+target_kind = "field"
 definition_status = "declared"

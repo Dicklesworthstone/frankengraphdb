@@ -611,6 +611,20 @@ version_status = "active"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x0004
+stable_name = "coordinate"
+exact_wire_type = "ConstraintCoordinateKey"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline sequence-neutral ConstraintCoordinateKey embedded by value in the constraint state root; retained and cut with the containing root, names no selected head or future marker, and creates no reachability edge (a12:1974,1978)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
 containing_schema = "ContinuityAuthorityObservationImport<Role>"
 field_tag = 0x0003
 stable_name = "portable_observation_ref"
@@ -5080,6 +5094,63 @@ target_schema_id = "ReservationAuthorityHead"
 construction_order = 50
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the ReservationAuthorityHead this ReservationUseRecord names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a19:2509)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in the sequence-neutral pre-order ledger transition; retained with the containing object, byte-matched against the basis role and containing command, and creates no reachability edge (a12:1992)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "basis"
+exact_wire_type = "ResourceLedgerBasis"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline nonretaining ResourceLedgerBasis embedded by value; commits the exact ledger generation, root digest and limit-policy epoch by weak identity, retained and cut with the transition, and creates no reachability edge (a12:1992)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "owner"
+exact_wire_type = "ResourceOwnerKey"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline closed ResourceOwnerKey union embedded by value; the selected arm names a stable owner key and never a future ObjectId, so it is retained and cut with the transition and creates no reachability edge (a12:1988,1992)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "authorization_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuthorizationDecisionRecord"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact role-parameterized authorization decision that admitted this transition; retained while the transition is retained, with the target constructed no later than its owner (a12:1992)"
 version_status = "reserved"
 max_size_bytes = 40
 

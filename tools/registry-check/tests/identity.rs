@@ -5156,6 +5156,23 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("ActivatedRetentionCutSet", "provisional_cut_ref")
                 | ("ProvisionalRetentionCutSet", "basis_projection_digest")
                 | ("ProvisionalRetentionCutSet", "body_ref")
+                | ("ConstraintStateRoot", "coordinate")
+                | (
+                    "ResourceLedgerTransition<Role:AuthorityOwningRole>",
+                    "authority_bound_header"
+                )
+                | (
+                    "ResourceLedgerTransition<Role:AuthorityOwningRole>",
+                    "basis"
+                )
+                | (
+                    "ResourceLedgerTransition<Role:AuthorityOwningRole>",
+                    "owner"
+                )
+                | (
+                    "ResourceLedgerTransition<Role:AuthorityOwningRole>",
+                    "authorization_decision_ref"
+                )
         )
     };
     // a21 landed DurableCapabilityValidationEvidence's field table after the
@@ -5557,7 +5574,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 302,
+        pre_erratum.fields.len() + 307,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the a07 W12 tranches"
     );
