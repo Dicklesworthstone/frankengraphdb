@@ -21,5 +21,6 @@ pub mod jsonl;
 pub mod lint;
 pub mod model;
 pub mod predicate;
+pub mod threat;
 pub mod toml;
 pub mod validate;

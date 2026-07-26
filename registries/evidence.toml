@@ -122,3 +122,24 @@ required_disclosures = [
   "typed FreshnessBreach rate and fallback policy",
 ]
 binds_to = []
+
+# Added by fgdb-g0-threat-model-nqd. The threat model's derived-state/observable-
+# metadata asset needs a carrier, and none of FG-EVID-01..04 represents leakage:
+# 01 is decision-card/OPE completeness, 02 corpus health, 03 endurance, 04
+# derived-state freshness. §12.6 names the required disclosures exactly, so this
+# row is a transcription of the plan, not a new statistical claim.
+[[evidence]]
+id = "FG-EVID-05"
+claim_class = "statistical"
+qualified_claim = "Leakage / channel-capacity measurement (deployment-specific)"
+required_disclosures = [
+  "secret distribution",
+  "attacker observations",
+  "concurrency assumptions",
+  "padding schedule",
+  "sampling design",
+  "confidence bound",
+  "identity-level cumulative budget",
+  "adversarial CI fixtures do not prove universal noninterference or a global bits/query ceiling",
+]
+binds_to = []

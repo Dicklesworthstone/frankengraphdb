@@ -472,3 +472,24 @@ symbol = "w1_cross_crate_determinism_e2e"
 kind = "script"
 artifact = "scripts/w1_cross_crate_determinism_e2e.sh"
 status = "live"
+
+# --- G0 threat/trust model, authority lattice, and authority footprint. ---
+# Owner: fgdb-g0-threat-model-nqd.
+
+[[checker]]
+symbol = "threat_model"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/threat_model.rs"
+status = "live"
+
+[[checker]]
+symbol = "threat_registry_source"
+kind = "binary"
+artifact = "tools/registry-check/src/bin/threat-check.rs"
+status = "live"
+
+[[checker]]
+symbol = "g0_threat_e2e"
+kind = "script"
+artifact = "scripts/g0_threat_e2e.sh"
+status = "live"

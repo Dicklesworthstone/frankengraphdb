@@ -16,3 +16,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "registry-check"
 path = "src/main.rs"
+
+[[bin]]
+name = "threat-check"
+path = "src/bin/threat-check.rs"
