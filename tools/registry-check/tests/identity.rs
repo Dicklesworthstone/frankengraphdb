@@ -4412,7 +4412,7 @@ fn idr_field_containing_schema_resolves_by_generic_free_family() {
     drifted_order.fields[anchor_index].construction_order = host.construction_order + 1;
     assert_eq!(
         codes_without_assignment_drift(&drifted_order),
-        vec!["bad_field".to_owned()],
+        vec!["field_construction_order_mismatch".to_owned()],
         "a generic-hosted field must share its family's construction order"
     );
 }

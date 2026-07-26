@@ -1597,11 +1597,28 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             f.identity_class.as_str(),
             "scalar" | "inline" | "logical" | "physical" | "bootstrap_local"
         ) {
+            // LAW: the FIELD identity_class vocabulary is narrower than the
+            // top_level_candidate one. A candidate row legitimately carries
+            // `wire` or `prebootstrap` because it names what a symbol IS; a
+            // field row names what its value contributes to durable identity,
+            // and a field can never contribute wire or prebootstrap identity.
+            // The admitted set is unchanged - narrowing it to
+            // logical|physical|inline would reject 124 landed rows.
+            let code = if matches!(f.identity_class.as_str(), "wire" | "prebootstrap") {
+                "field_identity_class_not_a_field_class"
+            } else {
+                "field_identity_class_invalid"
+            };
             out.push(v(
-                "bad_field",
+                code,
                 "durable_fields",
                 &row_id,
-                "bad identity_class",
+                format!(
+                    "identity_class {:?} is not a field identity class; a field admits \
+                     scalar|inline|logical|physical|bootstrap_local (a top_level_candidate \
+                     row does take wire and prebootstrap)",
+                    f.identity_class
+                ),
             ));
         }
         if !matches!(
@@ -1685,18 +1702,24 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             ));
         }
         // Construction-order consistency with the containing logical kind.
-        if let Some(kind) = containing_logical
-            && f.construction_order != kind.construction_order
-        {
-            out.push(v(
-                "bad_field",
-                "durable_fields",
-                &row_id,
-                format!(
-                    "construction_order {} != containing kind's {}",
-                    f.construction_order, kind.construction_order
-                ),
-            ));
+        // LAW: a field's construction_order must EQUAL its containing kind's.
+        // Vacuity: the previous `if let Some(kind) = ... &&` skipped silently
+        // when the containing kind was absent. A schema that resolves to no
+        // kind is reported by field_unresolved_schema above, so the input is
+        // never evaluated-and-passed; it fails closed under that law.
+        match containing_logical {
+            Some(kind) if f.construction_order != kind.construction_order => {
+                out.push(v(
+                    "field_construction_order_mismatch",
+                    "durable_fields",
+                    &row_id,
+                    format!(
+                        "construction_order {} != containing kind {} order {}",
+                        f.construction_order, kind.name, kind.construction_order
+                    ),
+                ));
+            }
+            _ => {}
         }
         // Reference discipline. `external_root` is the distinct traversal
         // class for the bootstrap-slot root identity (Appendix A ~1435):
