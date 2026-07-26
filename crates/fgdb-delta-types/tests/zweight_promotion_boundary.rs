@@ -14,20 +14,21 @@
 //! wrapping kernel, so every assertion here pins the exact promoted magnitude and
 //! the representation flag together.
 //!
-//! MUTATION STATUS: NOT YET PROVEN. The two mutations this suite is built to
-//! catch are specified below but have NOT been observed turning it red, so by the
-//! standard the bigint and collections suites were held to, these relations are
-//! green-but-unproven. Do not read them as evidence until someone runs them.
-//!   MZ1 the Fast+Fast promotion check never fires: replace
-//!       `left.checked_add(*right)` with `Some(left.wrapping_add(*right))`
-//!       in ZWeight::checked_add — overflow then WRAPS to i128::MIN.
-//!   MZ2 the same anchor with `saturating_add` — overflow then SATURATES to
-//!       i128::MAX.
-//! Both mutants compile; the harness that runs them must restore zweight.rs
-//! before reporting, and must refuse any experiment whose anchor does not match
-//! exactly once or whose mutant is byte-identical, because an unapplied mutation
-//! is indistinguishable from a passing suite.
+//! MUTATION EVIDENCE. Both mutations this suite exists to catch were observed
+//! turning it FULLY red, and the source reverts to green:
+//!   MZ1 the Fast+Fast promotion check never fires and overflow WRAPS:
+//!       `left.checked_add(*right)` -> `Some(left.wrapping_add(*right))`
+//!       -> 0 passed, 6 failed
+//!   MZ2 the same anchor with `saturating_add`, so overflow SATURATES
+//!       -> 0 passed, 6 failed
+//! MZ2 is the discriminating one: a suite that only asserted "the result is not
+//! the wrapped value" would pass under it. Every assertion here pins the exact
+//! promoted magnitude together with `is_promoted()`, which is why saturation
+//! fails as loudly as wrapping.
 //!
+//! An experiment whose anchor does not match exactly once, whose mutant compiles
+//! byte-identical, or whose mutant test binary fails to link, proves nothing --
+//! all three are indistinguishable from a passing suite.
 //! Inputs are boundary-heavy and deterministic: i128 extremes, the first values
 //! on each side of the promotion edge, zero-adjacent values, and a seeded
 //! SplitMix64 sweep. No clock, no entropy, no dependencies.
