@@ -429,23 +429,65 @@ fn attribute_body(lines: &[&str], start: usize) -> (String, usize) {
 
 /// Does this attribute body set `unsafe_code` to a level below `deny`?
 fn body_relaxes_unsafe_code(body: &str) -> bool {
+    LEVELS_BELOW_DENY
+        .iter()
+        .any(|level| body_sets_unsafe_code(body, level))
+}
+
+/// Does this attribute body set `unsafe_code` to `level`, at any nesting depth?
+///
+/// `level` is matched as a whole identifier immediately followed by its
+/// parenthesised argument list, and `unsafe_code` as a whole identifier inside
+/// that list, so `dead_code` never reads as `unsafe_code`, `disallow` never as
+/// `allow`, and a `cfg_attr` wrapper is transparent.
+fn body_sets_unsafe_code(body: &str, level: &str) -> bool {
     let bytes = body.as_bytes();
-    for level in LEVELS_BELOW_DENY {
-        for at in standalone_idents(body, level) {
-            let mut open = at + level.len();
-            while bytes.get(open).is_some_and(u8::is_ascii_whitespace) {
-                open += 1;
-            }
-            if bytes.get(open) != Some(&b'(') {
-                continue;
-            }
-            let close = matching_paren(bytes, open);
-            if !standalone_idents(&body[open + 1..close], "unsafe_code").is_empty() {
-                return true;
-            }
+    for at in standalone_idents(body, level) {
+        let mut open = at + level.len();
+        while bytes.get(open).is_some_and(u8::is_ascii_whitespace) {
+            open += 1;
+        }
+        if bytes.get(open) != Some(&b'(') {
+            continue;
+        }
+        let close = matching_paren(bytes, open);
+        if !standalone_idents(&body[open + 1..close], "unsafe_code").is_empty() {
+            return true;
         }
     }
     false
+}
+
+/// Every lint level an INNER attribute at a crate root sets for `unsafe_code`.
+///
+/// This is the one reader for "what does this crate root declare about
+/// `unsafe_code`". It exists because `topology.rs` was answering that question
+/// with whole-line string equality against `#![forbid(unsafe_code)]`, which read
+/// as "declares nothing" for every ordinary respelling — a trailing comment, a
+/// lint grouped with a sibling, or inner spacing — while this module was already
+/// parsing attributes structurally two functions away. Two readers of one fact
+/// is how a fixed reader stays fixed while its twin rots.
+///
+/// Only inner (`#!`) attributes are considered: an outer `#[forbid(...)]` binds
+/// one item, not the crate, and reporting it as a crate-root policy would
+/// overstate what the root actually guarantees.
+pub fn root_unsafe_code_levels(text: &str) -> BTreeSet<String> {
+    const ALL_LEVELS: [&str; 5] = ["allow", "expect", "warn", "deny", "forbid"];
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = BTreeSet::new();
+    for (index, raw) in lines.iter().enumerate() {
+        let line = raw.trim();
+        if line.starts_with("//") || !line.starts_with("#![") {
+            continue;
+        }
+        let (body, _) = attribute_body(&lines, index);
+        for level in ALL_LEVELS {
+            if body_sets_unsafe_code(&body, level) {
+                out.insert(level.to_owned());
+            }
+        }
+    }
+    out
 }
 
 /// Byte offsets at which `needle` appears as a whole identifier, so

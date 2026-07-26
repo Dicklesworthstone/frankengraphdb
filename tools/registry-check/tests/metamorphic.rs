@@ -624,3 +624,79 @@ fn topology_and_ledger_agree_on_every_attribute_form() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Relation 7 — the root lint policy survives every respelling
+// ---------------------------------------------------------------------------
+
+/// Spellings of a crate-root `forbid` that all forbid exactly as hard as the
+/// canonical one. Whole-line string equality read every variant below as
+/// "declares nothing", which surfaces as `root_missing_forbid` against a crate
+/// that is doing the right thing.
+#[test]
+fn a_root_forbid_is_recognised_however_it_is_spelled() {
+    let hash = '#';
+    for (tag, attr) in [
+        ("canonical", format!("{hash}![forbid(unsafe_code)]\n")),
+        (
+            "trailing_comment",
+            format!("{hash}![forbid(unsafe_code)] // constitutional\n"),
+        ),
+        (
+            "grouped_with_sibling",
+            format!("{hash}![forbid(unsafe_code, unsafe_op_in_unsafe_fn)]\n"),
+        ),
+        (
+            "inner_spacing",
+            format!("{hash}![ forbid( unsafe_code ) ]\n"),
+        ),
+        (
+            "spread_across_lines",
+            format!("{hash}![forbid(\n    unsafe_code\n)]\n"),
+        ),
+    ] {
+        let (_, forbids, _) = topology_flags(tag, &attr, "pub fn f() {}\n");
+        assert!(
+            forbids,
+            "`{tag}` forbids unsafe_code at the crate root and must be read as doing so"
+        );
+    }
+}
+
+/// The difference direction: text that merely mentions the attribute, or sets a
+/// weaker level, must NOT be read as a root forbid.
+#[test]
+fn text_that_only_mentions_a_root_forbid_is_not_one() {
+    let hash = '#';
+    for (tag, attr) in [
+        ("doc_comment", format!("//! {hash}![forbid(unsafe_code)]\n")),
+        ("line_comment", format!("// {hash}![forbid(unsafe_code)]\n")),
+        (
+            "outer_not_inner",
+            format!("{hash}[forbid(unsafe_code)]\npub fn g() {{}}\n"),
+        ),
+        ("deny_not_forbid", format!("{hash}![deny(unsafe_code)]\n")),
+        ("nothing", String::new()),
+    ] {
+        let (_, forbids, _) = topology_flags(tag, &attr, "pub fn f() {}\n");
+        assert!(
+            !forbids,
+            "`{tag}` does not forbid unsafe_code at the crate root and must not be read as \
+             doing so"
+        );
+    }
+}
+
+/// `deny` is read with the same machinery and must not be confused with
+/// `forbid`: the island half of the topology law turns on exactly this.
+#[test]
+fn a_root_deny_is_distinguished_from_a_root_forbid() {
+    let hash = '#';
+    let (_, forbids, denies) = topology_flags(
+        "deny_grouped",
+        &format!("{hash}![deny(unsafe_code, unused)] // island root\n"),
+        "pub fn f() {}\n",
+    );
+    assert!(denies, "a grouped, comment-trailed deny is still a deny");
+    assert!(!forbids, "a deny is not a forbid");
+}

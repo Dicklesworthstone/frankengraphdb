@@ -1213,14 +1213,27 @@ pub fn scan_workspace(root: &Path) -> Result<WorkspaceScan, String> {
             .map_err(|error| format!("{}: {error}", member_manifest.display()))?;
         let mut scanned = scan_manifest(member, &text)?;
         let root_file = member_dir.join(&scanned.root_path);
-        if let Ok(source) = fs::read_to_string(&root_file) {
-            scanned.root_forbids_unsafe = source
-                .lines()
-                .any(|line| line.trim() == "#![forbid(unsafe_code)]");
-            scanned.root_denies_unsafe = source
-                .lines()
-                .any(|line| line.trim() == "#![deny(unsafe_code)]");
-        }
+        // The root lint policy is read as an ATTRIBUTE, not as a line of text.
+        // Whole-line equality against `#![forbid(unsafe_code)]` reported "no
+        // forbid" for a trailing comment, for `#![forbid(unsafe_code,
+        // unsafe_op_in_unsafe_fn)]`, and for inner spacing — three respellings
+        // that forbid exactly as hard as the canonical one — which surfaces as a
+        // spurious `root_missing_forbid` against a crate that is doing the right
+        // thing. `unsafe_ledger::root_unsafe_code_levels` is the one reader.
+        //
+        // An unreadable root is a failure, not a skip. Letting the read fall
+        // through left both flags at their `false` default, so the crate was
+        // reported as not forbidding when in truth it had never been examined —
+        // a wrong diagnosis wearing the right verdict.
+        let source = fs::read_to_string(&root_file).map_err(|error| {
+            format!(
+                "{}: cannot read the declared crate root, so its unsafe policy is unknown: {error}",
+                root_file.display()
+            )
+        })?;
+        let levels = crate::unsafe_ledger::root_unsafe_code_levels(&source);
+        scanned.root_forbids_unsafe = levels.contains("forbid");
+        scanned.root_denies_unsafe = levels.contains("deny");
         let src_dir = member_dir.join("src");
         if src_dir.is_dir() {
             let mut sources = Vec::new();
