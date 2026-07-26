@@ -3848,6 +3848,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ActivatedRetentionCutSetCheckpointInstallRecordRef"
+containing_schema = "ActivatedRetentionCutSet"
+union_path = "ActivatedRetentionCutSet.checkpoint_install_record_ref"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ActivatedRetentionCutSet"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "AdministrativeAbortAuthorizationRecordOperationRequestTerminalAbortStage"
 containing_schema = "AdministrativeAbortAuthorizationRecord<Role:AuthorityOwningRole>"
 union_path = "AdministrativeAbortAuthorizationRecord<Role:AuthorityOwningRole>.operation.RequestTerminalAbort.stage"
@@ -5712,6 +5723,28 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ProvisionalRetentionCutSetCheckpointRef"
+containing_schema = "ProvisionalRetentionCutSet"
+union_path = "ProvisionalRetentionCutSet.checkpoint_ref"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ProvisionalRetentionCutSet"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ProvisionalRetentionCutSetInstallInputRef"
+containing_schema = "ProvisionalRetentionCutSet"
+union_path = "ProvisionalRetentionCutSet.install_input_ref"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ProvisionalRetentionCutSet"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "PublicTerminalProgressProjection"
 containing_schema = "PublicTerminalProgressProjection"
 union_path = "PublicTerminalProgressProjection"
@@ -6640,6 +6673,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RetentionCutBodyRole"
+containing_schema = "RetentionCutBody"
+union_path = "RetentionCutBody.role"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RetentionCutBody"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RetentionMap"
 containing_schema = "RetentionMap"
 union_path = "RetentionMap"
@@ -7170,6 +7214,42 @@ allowed_containing_schemas = ["ValidatedRemoteConfigurationAnchor"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ActivatedRetentionCutSetCheckpointInstallRecordRef"
+containing_schema = "ActivatedRetentionCutSet"
+union_path = "ActivatedRetentionCutSet.checkpoint_install_record_ref"
+arm_tag = 0x0001
+source_arm_name = "StrongCommandRef"
+stable_name = "strong_command_ref"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ActivatedRetentionCutSetCheckpointInstallRecordRef"
+containing_schema = "ActivatedRetentionCutSet"
+union_path = "ActivatedRetentionCutSet.checkpoint_install_record_ref"
+arm_tag = 0x0002
+source_arm_name = "StrongGlobalCommandRef"
+stable_name = "strong_global_command_ref"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ActivatedRetentionCutSetCheckpointInstallRecordRef"
+containing_schema = "ActivatedRetentionCutSet"
+union_path = "ActivatedRetentionCutSet.checkpoint_install_record_ref"
+arm_tag = 0x0003
+source_arm_name = "StrongShardCommandRef"
+stable_name = "strong_shard_command_ref"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "AdministrativeAbortAuthorizationRecordOperationRequestTerminalAbortStage"
@@ -13042,6 +13122,84 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union_arm]]
+union_name = "ProvisionalRetentionCutSetCheckpointRef"
+containing_schema = "ProvisionalRetentionCutSet"
+union_path = "ProvisionalRetentionCutSet.checkpoint_ref"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "3c4a8988e015bf139cc01e25881d2841898a00a60f9498869139a946700ba36d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ProvisionalRetentionCutSetCheckpointRef"
+containing_schema = "ProvisionalRetentionCutSet"
+union_path = "ProvisionalRetentionCutSet.checkpoint_ref"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "063976688bd680c635d5f2cdc210a979b315ea302b762420e418140b7eda1f36"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ProvisionalRetentionCutSetCheckpointRef"
+containing_schema = "ProvisionalRetentionCutSet"
+union_path = "ProvisionalRetentionCutSet.checkpoint_ref"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "09ebd03b49495acf49e2f954e1ebcb1a11406cc384ea45cde3e2b0854deaa929"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ProvisionalRetentionCutSetInstallInputRef"
+containing_schema = "ProvisionalRetentionCutSet"
+union_path = "ProvisionalRetentionCutSet.install_input_ref"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "1002489f401b62217012f609abb4e99713ed566b57da8bd447d0fc31a5040cc5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ProvisionalRetentionCutSetInstallInputRef"
+containing_schema = "ProvisionalRetentionCutSet"
+union_path = "ProvisionalRetentionCutSet.install_input_ref"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "inline-record"
+payload_sha256 = "90b96fb598c39b2ff1e5e1c46f959b67275c8387badfa8787d6214ca86763c0f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ProvisionalRetentionCutSetInstallInputRef"
+containing_schema = "ProvisionalRetentionCutSet"
+union_path = "ProvisionalRetentionCutSet.install_input_ref"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "0108f71899458663b24efdeee67d409926e010d1a72af82d4a1285a4f0a38de2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "PublicTerminalProgressProjection"
 containing_schema = "PublicTerminalProgressProjection"
 union_path = "PublicTerminalProgressProjection"
@@ -16104,6 +16262,43 @@ source_arm_name = "LeaseExpired"
 stable_name = "lease_expired"
 payload_kind = "inline-record"
 payload_sha256 = "a99dfe70cd547545af4db7a66ffbe214b75117c3f670bbee140d09de818de185"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RetentionCutBodyRole"
+containing_schema = "RetentionCutBody"
+union_path = "RetentionCutBody.role"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RetentionCutBodyRole"
+containing_schema = "RetentionCutBody"
+union_path = "RetentionCutBody.role"
+arm_tag = 0x0002
+source_arm_name = "Meta"
+stable_name = "meta"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RetentionCutBodyRole"
+containing_schema = "RetentionCutBody"
+union_path = "RetentionCutBody.role"
+arm_tag = 0x0003
+source_arm_name = "Shard"
+stable_name = "shard"
+payload_kind = "inline-record"
+payload_sha256 = "b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
