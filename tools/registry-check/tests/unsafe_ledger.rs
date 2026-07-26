@@ -70,6 +70,62 @@ fn clean_workspace(tag: &str) -> PathBuf {
     root
 }
 
+/// The workspace as it will look the day the first island lands: the roster
+/// says `present`, the crate exists, its root uses `deny` rather than `forbid`
+/// — and its single unsafe site is written in the `cfg_attr`-wrapped form.
+///
+/// That form is the point. `deny` is exactly what a `cfg_attr`-wrapped allow
+/// CAN lower, so this workspace is where the site scanner stops being a
+/// formality and starts being the only thing standing between an unaudited
+/// raw-pointer kernel and a green CI run. `ledger_sites` is appended verbatim,
+/// so the same tree can be checked with the row present and absent.
+fn workspace_with_landed_island(tag: &str, ledger_sites: &str) -> PathBuf {
+    let root = clean_workspace(tag);
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"3\"\nmembers = [\n    \"crates/fgdb-ordinary\",\n    \"crates/fgdb-unsafe-simd\",\n]\n\n[workspace.lints.rust]\nunsafe_code = \"forbid\"\n",
+    )
+    .unwrap();
+    let island = root.join("crates/fgdb-unsafe-simd");
+    fs::create_dir_all(island.join("src")).unwrap();
+    fs::write(
+        island.join("Cargo.toml"),
+        "[package]\nname = \"fgdb-unsafe-simd\"\n",
+    )
+    .unwrap();
+    let hash = '#';
+    fs::write(
+        island.join("src/lib.rs"),
+        format!(
+            "{hash}![deny(unsafe_code)]\n\n\
+             {hash}[cfg_attr(target_arch = \"x86_64\", allow(unsafe_code))]\n\
+             unsafe fn kernel() {{}}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        root.join("registries/unsafe_boundary_ledger.toml"),
+        format!(
+            "{}{ledger_sites}",
+            LEDGER_HEAD.replace("status = \"planned\"", "status = \"present\"")
+        ),
+    )
+    .unwrap();
+    root
+}
+
+const ISLAND_SITE_ROW: &str = r#"
+[[site]]
+row_id = "simd-kernel-1"
+island = "fgdb-unsafe-simd"
+path = "crates/fgdb-unsafe-simd/src/lib.rs"
+symbol = "unsafe fn kernel() {}"
+stated_invariant = "the caller has proven the slice is 16-lane aligned"
+evidence = "kernel_dispatch_differential, miri lane"
+fallback = "SCALAR_KERNEL, bit-identical on every dispatch path"
+no_claim_boundary = "says nothing about targets outside the dispatch matrix"
+"#;
+
 fn codes(root: &Path) -> Vec<String> {
     check_workspace(root)
         .1
@@ -190,6 +246,97 @@ fn member_that_omits_lints_inheritance_fails() {
         codes(&root).contains(&"member_does_not_inherit_forbid".to_owned()),
         "a member without `[lints] workspace = true` escapes forbid silently"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The evasions. A site the scanner cannot see is worse than an absent ledger,
+// because the report says "0 sites" with the same confidence either way.
+// ---------------------------------------------------------------------------
+
+/// The bypass this suite exists to keep closed.
+///
+/// `#[cfg_attr(target_arch = "x86_64", allow(unsafe_code))]` is a real, ordinary
+/// thing to write in a SIMD island — and the first version of the scanner
+/// required the attribute body to begin literally with `allow(`, so it returned
+/// false, the site was never counted, never matched against the ledger, and
+/// never reported. It was harmless only for as long as every crate inherited
+/// `forbid`; an island root uses `deny`, which this form lowers.
+#[test]
+fn a_cfg_attr_wrapped_allow_inside_an_island_must_still_be_ledgered() {
+    let root = workspace_with_landed_island("cfg-attr-unledgered", "");
+    let (report, violations) = check_workspace(&root);
+    let found: Vec<&str> = violations.iter().map(|v| v.code.as_str()).collect();
+    assert_eq!(
+        report.scanned_sites.len(),
+        1,
+        "the wrapped allow must be COUNTED, not skipped: {:?}",
+        report.scanned_sites
+    );
+    assert_eq!(report.scanned_sites[0].symbol, "unsafe fn kernel() {}");
+    assert!(
+        found.contains(&"site_unledgered"),
+        "an unledgered site must fail even when its allow is wrapped, got {found:?}"
+    );
+    assert!(
+        !found.contains(&"unsafe_allow_outside_island"),
+        "an island is allowed to hold the site; it is not allowed to hold it unaudited"
+    );
+}
+
+/// The other half of the proof. Without this, "the wrapped form fails" would
+/// also be satisfied by a checker that had simply started failing everything.
+#[test]
+fn the_same_wrapped_site_passes_once_its_ledger_row_exists() {
+    let root = workspace_with_landed_island("cfg-attr-ledgered", ISLAND_SITE_ROW);
+    let (report, violations) = check_workspace(&root);
+    assert!(
+        violations.is_empty(),
+        "a ledgered island site is the one thing that must pass, got {violations:?}"
+    );
+    assert_eq!(report.scanned_sites.len(), 1);
+    assert!(report.orphan_rows.is_empty(), "the row matched its site");
+    assert_eq!(report.crates_scanned, 2);
+}
+
+/// An inner attribute relaxes everything up to the end of its module, which is
+/// the broadest form there is — and it was invisible for a different reason:
+/// the scanner only ever looked at lines beginning `#[`.
+#[test]
+fn a_module_scoped_allow_in_an_ordinary_crate_fails() {
+    let root = clean_workspace("module-scope");
+    let hash = '#';
+    fs::write(
+        root.join("crates/fgdb-ordinary/src/lib.rs"),
+        format!("{hash}![allow(unsafe_code)]\n\nunsafe fn sneaky() {{}}\n"),
+    )
+    .unwrap();
+    let found = codes(&root);
+    assert!(
+        found.contains(&"unsafe_allow_outside_island".to_owned()),
+        "got {found:?}"
+    );
+    assert!(found.contains(&"site_unledgered".to_owned()), "got {found:?}");
+}
+
+/// `expect` and `warn` are levels below `deny`, so both compile `unsafe` inside
+/// an island. A ledger that enumerated only `allow` would be enumerating a
+/// spelling, not the unsafe surface.
+#[test]
+fn expect_and_warn_are_relaxations_too() {
+    for (tag, level) in [("expect-level", "expect"), ("warn-level", "warn")] {
+        let root = clean_workspace(tag);
+        let hash = '#';
+        fs::write(
+            root.join("crates/fgdb-ordinary/src/lib.rs"),
+            format!("{hash}[{level}(unsafe_code)]\nunsafe fn sneaky() {{}}\n"),
+        )
+        .unwrap();
+        let found = codes(&root);
+        assert!(
+            found.contains(&"unsafe_allow_outside_island".to_owned()),
+            "{level} lowers deny just as allow does, got {found:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

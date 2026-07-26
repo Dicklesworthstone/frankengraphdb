@@ -17,19 +17,30 @@
 //! report exactly the same thing if its scanner were broken, if the ledger file
 //! had been deleted, or if it could not read a single source file. That is the
 //! looks-exactly-like-a-pass family, and this session produced six bugs with
-//! that signature. Three structural answers:
+//! that signature. Four structural answers:
 //!
 //! 1. **The ledger is a positive claim, not an absence.** `[[island]]` rows
 //!    declare the intended roster with a `status`. A `present` island whose
 //!    directory is missing fails; a `planned` island whose directory has
 //!    appeared fails. Silence is never the same as agreement.
-//! 2. **The scanner self-tests before it is trusted.** [`SCANNER_FIXTURE`] has
+//! 2. **The scanner self-tests before it is trusted.** [`scanner_fixture`] has
 //!    a known site count; if scanning it does not reproduce that count exactly,
 //!    the run fails with `site_scanner_self_test_failed` and every "zero sites"
 //!    conclusion in the same run is treated as unlicensed. This is the control
 //!    that makes an empty result mean something.
 //! 3. **Unreadable is a failure, not a skip.** A manifest or source file that
 //!    cannot be read fails the run; it never silently drops out of the scan.
+//! 4. **The scanner matches structure, not spelling.** An attribute relaxes
+//!    `unsafe_code` if a level weaker than `deny` names it *anywhere* inside the
+//!    attribute — nested in `cfg_attr`, spread across lines, spelled `expect` or
+//!    `warn`, or written as an inner `#!` attribute over a whole module. The
+//!    first version of this scanner required the attribute body to begin
+//!    literally with `allow(`, so a `cfg_attr`-wrapped allow was never counted,
+//!    never matched against the ledger, and never reported. That was invisible
+//!    only because ordinary crates inherit `forbid`, which no `allow` can lower
+//!    — and it would have become live the day the first island landed, since an
+//!    island root uses `deny`, which every one of those forms *can* lower. See
+//!    [`LEVELS_BELOW_DENY`].
 //!
 //! Every crate escapes the workspace `forbid` the moment its manifest omits
 //! `[lints] workspace = true`, which is invisible at the crate root — so that
@@ -40,7 +51,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::toml::{self, Table, get_str, get_table_array};
+use crate::toml::{self, get_str, get_table_array};
 
 /// Repo-relative location of the ledger.
 pub const LEDGER_PATH: &str = "registries/unsafe_boundary_ledger.toml";
@@ -57,23 +68,60 @@ pub const LEDGER_PATH: &str = "registries/unsafe_boundary_ledger.toml";
 /// line here, and `fixture_is_not_visible_in_this_source` pins that property so
 /// it cannot regress.
 ///
-/// The fixture is deliberately awkward — a multi-argument attribute, one
-/// occurrence inside a comment, and one inside a string literal — because a
-/// scanner that cannot tell those apart will miscount real islands.
+/// The fixture is deliberately awkward, and every awkward case is a form that
+/// has to be counted or has to be ignored for a real reason:
+///
+/// * counted — the plain attribute; a multi-argument attribute; an allow nested
+///   inside `cfg_attr` on one line and again spread across four lines; an
+///   `expect`, which suppresses `deny` exactly as `allow` does; and an inner
+///   `#!` attribute, which relaxes a whole module at once.
+/// * ignored — an occurrence in a comment; one inside a string literal; a
+///   `dead_code` allow; a bare `deny`; a `cfg_attr`-wrapped **forbid**, which
+///   has the shape of the evasion but tightens rather than relaxes; and a `doc`
+///   attribute whose *string* names an allow.
+///
+/// The last two are the ones that keep the matcher honest. A scanner that
+/// answered "does `unsafe_code` appear inside a `cfg_attr`" would count the
+/// forbid; one that answered "does the text contain `allow(unsafe_code)`" would
+/// count the doc string. Both are wrong in the direction that puts a bogus row
+/// in the ledger, and the ledger's whole value is that its rows mean something.
 pub fn scanner_fixture() -> String {
     let hash = '#';
     let allow = format!("{hash}[allow(unsafe_code)]");
     let allow_multi = format!("{hash}[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]");
+    let cfg_allow = format!("{hash}[cfg_attr(target_arch = \"x86_64\", allow(unsafe_code))]");
+    let cfg_allow_multiline = format!(
+        "{hash}[cfg_attr(\n    all(target_arch = \"aarch64\", target_feature = \"neon\"),\n    allow(unsafe_code)\n)]"
+    );
+    let expect_attr = format!("{hash}[expect(unsafe_code)]");
+    let dead = format!("{hash}[allow(dead_code)]");
+    let deny = format!("{hash}[deny(unsafe_code)]");
+    let cfg_forbid = format!("{hash}[cfg_attr(feature = \"paranoid\", forbid(unsafe_code))]");
+    let doc_decoy = format!("{hash}[doc = \"write allow(unsafe_code) at the site, never here\"]");
+    let inner_allow = format!("{hash}![allow(unsafe_code)]");
     format!(
         "{allow}\nunsafe fn one() {{}}\n\n\
          // {allow}  <- a comment, must NOT count\n\
          const NOT_A_SITE: &str = \"{allow}\";\n\n\
-         {allow_multi}\nunsafe fn two() {{}}\n"
+         {allow_multi}\nunsafe fn two() {{}}\n\n\
+         {cfg_allow}\nunsafe fn three() {{}}\n\n\
+         {cfg_allow_multiline}\nunsafe fn four() {{}}\n\n\
+         {expect_attr}\nunsafe fn five() {{}}\n\n\
+         {dead}\n{deny}\n{cfg_forbid}\n{doc_decoy}\nfn not_a_site() {{}}\n\n\
+         mod inner {{\n    {inner_allow}\n    unsafe fn six() {{}}\n}}\n"
     )
 }
 
 /// The exact number of real sites in [`scanner_fixture`].
-pub const SCANNER_FIXTURE_SITES: usize = 2;
+pub const SCANNER_FIXTURE_SITES: usize = 6;
+
+/// The symbol recorded for an inner (`#!`) attribute.
+///
+/// An inner attribute has no following item to name: it relaxes everything up
+/// to the end of the enclosing module. Reporting the next line as the symbol
+/// would understate that scope in the ledger row a reviewer then reads, which
+/// is evidence inflation written into the enforcement surface itself.
+pub const MODULE_SCOPE_SYMBOL: &str = "<module scope>";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
@@ -202,31 +250,62 @@ pub fn load_ledger(path: &Path) -> Result<UnsafeLedger, LoadError> {
     })
 }
 
-/// Find every real `#[allow(unsafe_code)]` site in one source text.
+/// The lint levels that leave `unsafe` COMPILING under a `deny(unsafe_code)`
+/// island root. `deny` and `forbid` are the only two that do not, which is why
+/// they are the only two missing here.
 ///
-/// Deliberately conservative about what counts: a line whose first
-/// non-whitespace is `//` is a comment, and an attribute that is not at the
-/// start of the trimmed line is inside a string or a nested expression. Both
-/// are excluded, and [`SCANNER_FIXTURE`] pins that behaviour.
+/// `expect` and `warn` belong on this list for exactly the reason `allow` does:
+/// a level weaker than `deny` *is* a relaxation of `deny`, whatever it is
+/// called. An `expect` compiles the item silently; a `warn` compiles it with a
+/// diagnostic that only fails a lane running `-D warnings`. Either way the
+/// unsafe surface grew without a ledger row, which is the single outcome this
+/// file exists to make impossible.
+const LEVELS_BELOW_DENY: [&str; 3] = ["allow", "expect", "warn"];
+
+/// How far an attribute may run before the scanner stops following it. A real
+/// attribute is a line or two; the cap only bounds the damage from a malformed
+/// one, and an attribute that never closes inside it is still checked over
+/// everything read, so the failure direction is a spurious site rather than a
+/// missed one.
+const MAX_ATTRIBUTE_LINES: usize = 64;
+
+/// Find every site in one source text that relaxes `unsafe_code`.
+///
+/// A line whose first non-whitespace is `//` is a comment and an attribute must
+/// begin its trimmed line, so an occurrence inside a string or a nested
+/// expression is excluded. Everything past that is decided **structurally**: the
+/// attribute is followed to its matching `]` across lines, its comments and
+/// string literals are blanked out, and it counts if any of
+/// [`LEVELS_BELOW_DENY`] names `unsafe_code` at any depth inside it. Prefix
+/// matching was the original bug — `cfg_attr(…, allow(unsafe_code))` walked
+/// straight past a scanner that required the body to start with `allow(`.
 pub fn scan_sites(path: &str, text: &str) -> Vec<ScannedSite> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     for (index, raw) in lines.iter().enumerate() {
         let line = raw.trim();
-        if line.starts_with("//") || !line.starts_with("#[") {
+        if line.starts_with("//") {
             continue;
         }
-        if !attribute_names_unsafe_code(line) {
+        let inner = if line.starts_with("#![") {
+            true
+        } else if line.starts_with("#[") {
+            false
+        } else {
+            continue;
+        };
+        let (body, end) = attribute_body(&lines, index);
+        if !body_relaxes_unsafe_code(&body) {
             continue;
         }
-        // The symbol is the next line that is not another attribute or blank;
-        // it is what a reviewer reads to know what the allow actually covers.
-        let symbol = lines[index + 1..]
-            .iter()
-            .map(|l| l.trim())
-            .find(|l| !l.is_empty() && !l.starts_with("#[") && !l.starts_with("//"))
-            .unwrap_or("")
-            .to_owned();
+        // The symbol is what a reviewer reads to know what the site covers: for
+        // an outer attribute the item it precedes, for an inner one the module
+        // it sits inside, which is broader and must not be reported as narrower.
+        let symbol = if inner {
+            MODULE_SCOPE_SYMBOL.to_owned()
+        } else {
+            symbol_after(&lines, end)
+        };
         out.push(ScannedSite {
             path: path.to_owned(),
             line: index + 1,
@@ -236,18 +315,299 @@ pub fn scan_sites(path: &str, text: &str) -> Vec<ScannedSite> {
     out
 }
 
-fn attribute_names_unsafe_code(line: &str) -> bool {
-    let Some(rest) = line.strip_prefix("#[") else {
-        return false;
+/// The item an outer attribute applies to: the next line that is not blank, a
+/// comment, or another attribute. Intervening attributes are stepped over as
+/// whole spans, so a multi-line one cannot leave its own arguments standing in
+/// for the item.
+fn symbol_after(lines: &[&str], attribute_end: usize) -> String {
+    let mut index = attribute_end + 1;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        if line.is_empty() || line.starts_with("//") {
+            index += 1;
+            continue;
+        }
+        if line.starts_with("#[") || line.starts_with("#![") {
+            index = attribute_body(lines, index).1 + 1;
+            continue;
+        }
+        return line.to_owned();
+    }
+    String::new()
+}
+
+/// Collect one attribute starting at `start`, returning its body (the text
+/// between the outermost brackets, with comments and string literals blanked
+/// out) and the index of the line its `]` lands on.
+///
+/// The masking is what makes the structural match trustworthy in both
+/// directions: without it a `]` inside a string truncates the body early (a
+/// missed site) and an `allow(unsafe_code)` inside a `doc` string invents one
+/// (a bogus ledger row).
+fn attribute_body(lines: &[&str], start: usize) -> (String, usize) {
+    let stop = lines.len().min(start + MAX_ATTRIBUTE_LINES);
+    let mut masked = String::new();
+    let mut line_starts = Vec::new();
+    let mut state = MaskState::Code;
+    let mut depth = 0usize;
+    let mut open = None;
+    let mut close = None;
+    for (offset, raw) in lines[start..stop].iter().enumerate() {
+        if offset > 0 {
+            masked.push('\n');
+        }
+        line_starts.push(masked.len());
+        let scan_from = masked.len();
+        // The first line is trimmed so the opening bracket is the first `[`.
+        let text = if offset == 0 { raw.trim_start() } else { raw };
+        mask_line(text, &mut state, &mut masked);
+        for (index, byte) in masked.as_bytes().iter().enumerate().skip(scan_from) {
+            match byte {
+                b'[' => {
+                    open.get_or_insert(index);
+                    depth += 1;
+                }
+                b']' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if close.is_some() {
+            break;
+        }
+    }
+    let Some(open) = open else {
+        return (String::new(), start);
     };
-    let Some(end) = rest.find(']') else {
-        return false;
-    };
-    let body = &rest[..end];
-    let Some(args) = body.strip_prefix("allow(").and_then(|b| b.strip_suffix(')')) else {
-        return false;
-    };
-    args.split(',').any(|a| a.trim() == "unsafe_code")
+    let close = close.unwrap_or(masked.len());
+    let end = start
+        + line_starts
+            .iter()
+            .rposition(|offset| *offset <= close)
+            .unwrap_or(0);
+    (masked[open + 1..close].to_owned(), end)
+}
+
+/// Does this attribute body set `unsafe_code` to a level below `deny`?
+fn body_relaxes_unsafe_code(body: &str) -> bool {
+    let bytes = body.as_bytes();
+    for level in LEVELS_BELOW_DENY {
+        for at in standalone_idents(body, level) {
+            let mut open = at + level.len();
+            while bytes.get(open).is_some_and(u8::is_ascii_whitespace) {
+                open += 1;
+            }
+            if bytes.get(open) != Some(&b'(') {
+                continue;
+            }
+            let close = matching_paren(bytes, open);
+            if !standalone_idents(&body[open + 1..close], "unsafe_code").is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Byte offsets at which `needle` appears as a whole identifier, so
+/// `dead_code` never reads as `unsafe_code` and `disallow` never as `allow`.
+fn standalone_idents(hay: &str, needle: &str) -> Vec<usize> {
+    let bytes = hay.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(found) = hay[from..].find(needle) {
+        let at = from + found;
+        from = at + needle.len();
+        let before = at == 0 || !ident(bytes[at - 1]);
+        let after = bytes.get(from).is_none_or(|b| !ident(*b));
+        if before && after {
+            out.push(at);
+        }
+    }
+    out
+}
+
+/// The offset of the `)` closing `open`, or the end of the slice when the
+/// attribute is malformed — checking too much beats stopping early.
+fn matching_paren(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    for (index, byte) in bytes.iter().enumerate().skip(open) {
+        match byte {
+            b'(' => depth += 1,
+            b')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => {}
+        }
+    }
+    bytes.len()
+}
+
+/// Where the masker is inside a construct that spans lines.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaskState {
+    Code,
+    Block(usize),
+    Str,
+    RawStr(usize),
+}
+
+/// Copy one line into `out` with the CONTENT of comments, strings, and
+/// character literals replaced by spaces. Delimiters survive so the result
+/// still reads as code, and every other byte keeps its position, so an offset
+/// found in the masked text names the same place in the source.
+fn mask_line(text: &str, state: &mut MaskState, out: &mut String) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match *state {
+            MaskState::Block(depth) => {
+                if c == '*' && next == Some('/') {
+                    blank(out, 2);
+                    i += 2;
+                    *state = if depth <= 1 {
+                        MaskState::Code
+                    } else {
+                        MaskState::Block(depth - 1)
+                    };
+                } else if c == '/' && next == Some('*') {
+                    blank(out, 2);
+                    i += 2;
+                    *state = MaskState::Block(depth + 1);
+                } else {
+                    blank(out, 1);
+                    i += 1;
+                }
+            }
+            MaskState::Str => {
+                if c == '\\' {
+                    blank(out, if next.is_some() { 2 } else { 1 });
+                    i += 2;
+                } else if c == '"' {
+                    out.push('"');
+                    i += 1;
+                    *state = MaskState::Code;
+                } else {
+                    blank(out, 1);
+                    i += 1;
+                }
+            }
+            MaskState::RawStr(hashes) => {
+                let closes = c == '"'
+                    && i + 1 + hashes <= chars.len()
+                    && chars[i + 1..i + 1 + hashes].iter().all(|c| *c == '#');
+                if closes {
+                    out.push('"');
+                    blank(out, hashes);
+                    i += 1 + hashes;
+                    *state = MaskState::Code;
+                } else {
+                    blank(out, 1);
+                    i += 1;
+                }
+            }
+            MaskState::Code => {
+                if c == '/' && next == Some('/') {
+                    blank(out, chars.len() - i);
+                    i = chars.len();
+                } else if c == '/' && next == Some('*') {
+                    blank(out, 2);
+                    i += 2;
+                    *state = MaskState::Block(1);
+                } else if let Some((consumed, hashes)) = raw_string_open(&chars, i) {
+                    for prefix in &chars[i..i + consumed] {
+                        out.push(*prefix);
+                    }
+                    i += consumed;
+                    *state = MaskState::RawStr(hashes);
+                } else if c == '"' {
+                    out.push('"');
+                    i += 1;
+                    *state = MaskState::Str;
+                } else if c == '\'' {
+                    // `'a` is a lifetime and must stay code; `'x'` is a literal
+                    // and must not, or a `'"'` opens a string that swallows the
+                    // rest of the attribute.
+                    match char_literal_len(&chars, i) {
+                        Some(len) => {
+                            out.push('\'');
+                            blank(out, len - 2);
+                            out.push('\'');
+                            i += len;
+                        }
+                        None => {
+                            out.push('\'');
+                            i += 1;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+    }
+}
+
+fn blank(out: &mut String, count: usize) {
+    for _ in 0..count {
+        out.push(' ');
+    }
+}
+
+/// If a raw string opens at `i`, the chars consumed through its opening quote
+/// and its hash count. `r`/`br` only start one when they are not the tail of a
+/// longer identifier.
+fn raw_string_open(chars: &[char], i: usize) -> Option<(usize, usize)> {
+    if chars[i] != 'r' && chars[i] != 'b' {
+        return None;
+    }
+    if i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+        return None;
+    }
+    let mut j = i;
+    if chars[j] == 'b' {
+        j += 1;
+    }
+    if chars.get(j) != Some(&'r') {
+        return None;
+    }
+    j += 1;
+    let mut hashes = 0;
+    while chars.get(j + hashes) == Some(&'#') {
+        hashes += 1;
+    }
+    if chars.get(j + hashes) != Some(&'"') {
+        return None;
+    }
+    Some((j + hashes + 1 - i, hashes))
+}
+
+/// The length of a character literal starting at `i`, or `None` for a lifetime.
+fn char_literal_len(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i + 1) == Some(&'\\') {
+        // The char after the backslash is the escape selector and is never the
+        // terminator, which is the whole difficulty of `'\''`.
+        let limit = chars.len().min(i + 14);
+        return (i + 3..limit)
+            .find(|j| chars[*j] == '\'')
+            .map(|end| end - i + 1);
+    }
+    if chars.get(i + 2) == Some(&'\'') {
+        return Some(3);
+    }
+    None
 }
 
 /// Walk a directory collecting `.rs` files. An unreadable directory is an
@@ -599,27 +959,98 @@ fn workspace_members(manifest: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// One attribute, as the scanner sees it. Assembled from a `char` for the
+    /// same reason the fixture is: a literal here would be a real site in this
+    /// file. `fixture_is_not_visible_in_this_source` is what pins that.
+    fn relaxes(attribute: &str) -> bool {
+        let hash = '#';
+        !scan_sites("<line>", &format!("{hash}{attribute}")).is_empty()
+    }
+
     #[test]
     fn scanner_reproduces_its_own_fixture_exactly() {
         // If this ever drifts, every "zero sites" result elsewhere is unlicensed.
         let sites = scan_sites("<fixture>", &scanner_fixture());
         assert_eq!(sites.len(), SCANNER_FIXTURE_SITES, "fixture site count");
-        assert_eq!(sites[0].symbol, "unsafe fn one() {}");
-        assert_eq!(sites[1].symbol, "unsafe fn two() {}");
+        let symbols: Vec<&str> = sites.iter().map(|s| s.symbol.as_str()).collect();
+        assert_eq!(
+            symbols,
+            vec![
+                "unsafe fn one() {}",
+                "unsafe fn two() {}",
+                "unsafe fn three() {}",
+                "unsafe fn four() {}",
+                "unsafe fn five() {}",
+                MODULE_SCOPE_SYMBOL,
+            ],
+            "each site must name what it actually covers"
+        );
     }
 
     #[test]
     fn scanner_rejects_comments_and_string_literals() {
-        // The two decoys in the fixture are the whole reason the count is 2
-        // and not 4; a naive `contains` scanner passes the count check by
-        // accident only when the decoys are absent.
-        assert!(!attribute_names_unsafe_code("// #[allow(unsafe_code)]"));
-        assert!(attribute_names_unsafe_code("#[allow(unsafe_code)]"));
-        assert!(attribute_names_unsafe_code(
-            "#[allow(unsafe_code, clippy::x)]"
+        // The decoys in the fixture are the whole reason the count is 6 and not
+        // 9; a naive `contains` scanner passes the count check by accident only
+        // when the decoys are absent.
+        let hash = '#';
+        assert!(
+            scan_sites("<line>", &format!("// {hash}[allow(unsafe_code)]")).is_empty(),
+            "an allow inside a comment is not a site"
+        );
+        assert!(relaxes("[allow(unsafe_code)]"));
+        assert!(relaxes("[allow(unsafe_code, clippy::x)]"));
+        assert!(!relaxes("[allow(dead_code)]"));
+        assert!(!relaxes("[deny(unsafe_code)]"));
+        assert!(!relaxes("[doc = \"allow(unsafe_code)\"]"));
+        assert!(!relaxes("[allow(clippy::unsafe_code_in_docs)]"));
+    }
+
+    /// The bypass this scanner was rewritten to close. Every one of these
+    /// compiles `unsafe` under the `deny(unsafe_code)` root of an island, and
+    /// every one of them was invisible to a scanner that required the attribute
+    /// body to begin with `allow(`.
+    #[test]
+    fn wrapped_and_renamed_relaxations_are_all_counted() {
+        assert!(relaxes("[cfg_attr(target_arch = \"x86_64\", allow(unsafe_code))]"));
+        assert!(relaxes(
+            "[cfg_attr(feature = \"a\", cfg_attr(feature = \"b\", allow(unsafe_code)))]"
         ));
-        assert!(!attribute_names_unsafe_code("#[allow(dead_code)]"));
-        assert!(!attribute_names_unsafe_code("#[deny(unsafe_code)]"));
+        assert!(relaxes("[expect(unsafe_code)]"));
+        assert!(relaxes("[warn(unsafe_code)]"));
+        assert!(relaxes("![allow(unsafe_code)]"));
+        assert!(relaxes("[ allow ( unsafe_code ) ]"));
+        // …and the shapes that merely LOOK like the evasion must stay out, or
+        // the ledger fills with rows describing nothing.
+        assert!(!relaxes("[cfg_attr(feature = \"a\", forbid(unsafe_code))]"));
+        assert!(!relaxes("[cfg_attr(feature = \"a\", deny(unsafe_code))]"));
+        assert!(!relaxes("![forbid(unsafe_code)]"));
+    }
+
+    #[test]
+    fn an_attribute_spread_across_lines_is_followed_to_its_bracket() {
+        let hash = '#';
+        let text = format!(
+            "{hash}[cfg_attr(\n    all(target_os = \"linux\"),\n    allow(unsafe_code)\n)]\nunsafe fn spread() {{}}\n"
+        );
+        let sites = scan_sites("<multiline>", &text);
+        assert_eq!(sites.len(), 1, "a wrapped allow does not stop being one");
+        assert_eq!(sites[0].line, 1, "the site is reported where it opens");
+        assert_eq!(
+            sites[0].symbol, "unsafe fn spread() {}",
+            "the symbol must skip the attribute's own arguments"
+        );
+    }
+
+    /// A `]` or a quote inside a string used to be able to truncate the body or
+    /// swallow the rest of it. Both directions are wrong, so both are pinned.
+    #[test]
+    fn string_and_char_literals_inside_an_attribute_do_not_confuse_the_scan() {
+        assert!(relaxes("[cfg_attr(all(x = \"]\"), allow(unsafe_code))]"));
+        assert!(relaxes("[cfg_attr(all(x = '\"'), allow(unsafe_code))]"));
+        assert!(relaxes(
+            "[cfg_attr(all(x = r#\"a \"quoted\" ]\"#), allow(unsafe_code))]"
+        ));
+        assert!(!relaxes("[doc = r#\"allow(unsafe_code)\"#]"));
     }
 
     /// The fixture must never be visible as real sites in this file. If this
