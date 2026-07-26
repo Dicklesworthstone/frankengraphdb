@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 44
+registry_epoch = 45
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 44);
+    assert_eq!(epoch, 45);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -4439,6 +4439,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "KeyDestroyFloorRef"
                 | "KeyDestructionTarget"
                 | "RoleTransitionActivationState"
+                | "RestoreSourceAcquisitionSourceGate"
                 | "LeaseWindowSuccessorProof"
                 | "TimeAuthorityObservationImport"
                 | "RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>"
@@ -4909,7 +4910,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 296,
+        pre_erratum.ordinary_unions.len() + 297,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
@@ -6350,6 +6351,138 @@ fn idr_canonical_pre_bootstrap_evidence_reencryption_proof_reserved_logical_shel
                 })
         }),
         "shorthand ambiguities must remain open until exact field types are settled"
+    );
+}
+
+#[test]
+fn idr_restore_source_acquisition_gate_is_a_logical_backed_whole_schema_union() {
+    let identity = real_identity();
+    let gate = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "RestoreSourceAcquisitionSourceGate")
+        .expect("RestoreSourceAcquisitionSourceGate logical kind exists");
+    let reference_free_control = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "PortableRestoreArchiveAcquisitionReceipt")
+        .expect("known reference-free a17 control exists");
+    assert_eq!(gate.object_kind, 0x03f1);
+    assert_eq!(gate.status, "reserved");
+    assert_eq!(
+        gate.construction_order,
+        reference_free_control.construction_order
+    );
+    assert_eq!(gate.construction_order, 6);
+    assert_eq!(gate.role_predicate, "true");
+    assert_eq!(gate.max_size_bytes, 16_777_216);
+    assert_eq!(
+        gate.golden_corpus,
+        "corpus/logical/restore_source_acquisition_source_gate/"
+    );
+
+    let union = identity
+        .ordinary_unions
+        .iter()
+        .find(|union| union.union_name == "RestoreSourceAcquisitionSourceGate")
+        .expect("RestoreSourceAcquisitionSourceGate whole-schema union exists");
+    assert!(
+        identity::ordinary_union_has_top_level_shape(union),
+        "whole-schema union name, containing schema, and path must agree exactly"
+    );
+    assert_eq!(union.field_tag, None);
+    assert_eq!(union.tag_wire_type, "u8");
+    assert_eq!(union.encoding_context, "closed-tagged");
+    assert_eq!(
+        union.allowed_containing_schemas,
+        ["RestoreSourceAcquisitionSourceGate"]
+    );
+    assert_eq!(union.role_predicate, "true");
+    assert_eq!(union.version_status, "reserved");
+    assert_eq!(union.max_size_bytes, 16_777_216);
+
+    let wire_parent_control = identity
+        .wire
+        .iter()
+        .find(|wire| wire.name == "WeakAuthorityAppliedIdentity")
+        .expect("known same-name wire-backed union control exists");
+    assert_eq!(wire_parent_control.kind, "union");
+    assert!(
+        identity
+            .wire
+            .iter()
+            .all(|wire| wire.name != "RestoreSourceAcquisitionSourceGate"),
+        "the source gate is logical-backed and must not invent a same-name wire parent"
+    );
+
+    let source_order = union
+        .arms
+        .iter()
+        .map(|arm| (arm.arm_tag, arm.source_arm_name.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        source_order,
+        [
+            (1, "RecoverSameIdentity"),
+            (2, "CloneDirectoryBound"),
+            (3, "CloneExternalCas"),
+        ],
+        "arm tags follow the source spelling, not the alphabetical census order"
+    );
+    assert_eq!(
+        union
+            .arms
+            .iter()
+            .map(|arm| arm.payload_sha256.as_deref())
+            .collect::<Vec<_>>(),
+        [
+            Some("eecb7071f9eb5a51f31222921c7a16df796f07c9c414cc2c78c2679201eff2ee"),
+            Some("28b1768d2aa78eda28de2a288da370d3ddff3b3508fd373ea915b2274a749e34"),
+            Some("ce4bc9ad93776471e07b96c4f2d4a618a7727eb2715a8fd5601a54d9ab2d5d11"),
+        ]
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|reservation| reservation.symbol == "RestoreSourceAcquisitionSourceGate")
+        .expect("RestoreSourceAcquisitionSourceGate permanent reservation exists");
+    assert_eq!(reservation.code_reservation, "0x03f1");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.disposition, "existing");
+
+    let source_key = "top|RestoreSourceAcquisitionSourceGate";
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == source_key)
+        .expect("RestoreSourceAcquisitionSourceGate source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+    assert_eq!(
+        catalog
+            .targets
+            .iter()
+            .filter(|target| {
+                target.source_key == source_key
+                    || target.source_key.starts_with(
+                        "union|RestoreSourceAcquisitionSourceGate|RestoreSourceAcquisitionSourceGate",
+                    )
+                    || target.source_key.starts_with(
+                        "arm|RestoreSourceAcquisitionSourceGate|RestoreSourceAcquisitionSourceGate|",
+                    )
+            })
+            .count(),
+        5,
+        "kind, whole-schema union, and three arms must each have one declared target"
+    );
+    assert!(
+        !identity
+            .fields
+            .iter()
+            .any(|field| field.containing_schema == "RestoreSourceAcquisitionSourceGate"),
+        "a whole-schema logical union has no synthetic anchoring field"
     );
 }
 

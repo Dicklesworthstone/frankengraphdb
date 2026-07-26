@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 44
+registry_epoch = 45
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -6346,6 +6346,17 @@ union_path = "RestoreRetentionAnchor<Role>"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RestoreRetentionAnchor<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreSourceAcquisitionSourceGate"
+containing_schema = "RestoreSourceAcquisitionSourceGate"
+union_path = "RestoreSourceAcquisitionSourceGate"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreSourceAcquisitionSourceGate"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -15092,6 +15103,45 @@ source_arm_name = "TerminalPinBasis"
 stable_name = "terminal_pin_basis"
 payload_kind = "inline-record"
 payload_sha256 = "d827318676abe5160760d64ad207dfbee120919c46abb59c8bd130d8a5ca412d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreSourceAcquisitionSourceGate"
+containing_schema = "RestoreSourceAcquisitionSourceGate"
+union_path = "RestoreSourceAcquisitionSourceGate"
+arm_tag = 0x0001
+source_arm_name = "RecoverSameIdentity"
+stable_name = "recover_same_identity"
+payload_kind = "inline-record"
+payload_sha256 = "eecb7071f9eb5a51f31222921c7a16df796f07c9c414cc2c78c2679201eff2ee"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreSourceAcquisitionSourceGate"
+containing_schema = "RestoreSourceAcquisitionSourceGate"
+union_path = "RestoreSourceAcquisitionSourceGate"
+arm_tag = 0x0002
+source_arm_name = "CloneDirectoryBound"
+stable_name = "clone_directory_bound"
+payload_kind = "inline-record"
+payload_sha256 = "28b1768d2aa78eda28de2a288da370d3ddff3b3508fd373ea915b2274a749e34"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreSourceAcquisitionSourceGate"
+containing_schema = "RestoreSourceAcquisitionSourceGate"
+union_path = "RestoreSourceAcquisitionSourceGate"
+arm_tag = 0x0003
+source_arm_name = "CloneExternalCas"
+stable_name = "clone_external_cas"
+payload_kind = "inline-record"
+payload_sha256 = "ce4bc9ad93776471e07b96c4f2d4a618a7727eb2715a8fd5601a54d9ab2d5d11"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

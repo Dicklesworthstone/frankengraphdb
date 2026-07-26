@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 45
+registry_epoch = 46
 
 [[kind]]
 object_kind = 0x0001
@@ -2356,6 +2356,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_source_access_revocation_operation_record/"
+
+[[kind]]
+object_kind = 0x03f1
+name = "RestoreSourceAcquisitionSourceGate"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_acquisition_source_gate/"
 
 [[kind]]
 object_kind = 0x03f2

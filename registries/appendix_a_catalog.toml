@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2184
+target_count = 2189
 projection_fallback_count = 90
-target_source_assignment_sha256 = "2c2a07da9da87b33532a2a5a4716fd0c4bc79d5992c6aa4b76695e2202d8b423"
+target_source_assignment_sha256 = "7c911f4f4b2b2ba66ce81e930ab59d417b1c8043ad6d3edd1e718cf0a17c5c07"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 45
+registry_epoch = 46
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 33
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 44
+registry_epoch = 45
 
 [[logical_kind]]
 slice_id = "a03"
@@ -4009,6 +4009,17 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_source_access_revocation_operation_record/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:restore-source-acquisition-source-gate"
+object_kind = 0x03f1
+name = "RestoreSourceAcquisitionSourceGate"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_acquisition_source_gate/"
 
 [[logical_kind]]
 slice_id = "a18"
@@ -25648,6 +25659,64 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+slice_id = "a17"
+row_id = "a17:union:restore-source-acquisition-source-gate-f09908607ae09d26"
+union_name = "RestoreSourceAcquisitionSourceGate"
+containing_schema = "RestoreSourceAcquisitionSourceGate"
+union_path = "RestoreSourceAcquisitionSourceGate"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreSourceAcquisitionSourceGate"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a17"
+row_id = "a17:union-arm:restore-source-acquisition-source-gate-recover-same-identity-0ce9f3e9962c45fb"
+union_name = "RestoreSourceAcquisitionSourceGate"
+containing_schema = "RestoreSourceAcquisitionSourceGate"
+union_path = "RestoreSourceAcquisitionSourceGate"
+arm_tag = 0x0001
+source_arm_name = "RecoverSameIdentity"
+stable_name = "recover_same_identity"
+payload_kind = "inline-record"
+payload_sha256 = "eecb7071f9eb5a51f31222921c7a16df796f07c9c414cc2c78c2679201eff2ee"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a17"
+row_id = "a17:union-arm:restore-source-acquisition-source-gate-clone-directory-bound-b969dca0886940cc"
+union_name = "RestoreSourceAcquisitionSourceGate"
+containing_schema = "RestoreSourceAcquisitionSourceGate"
+union_path = "RestoreSourceAcquisitionSourceGate"
+arm_tag = 0x0002
+source_arm_name = "CloneDirectoryBound"
+stable_name = "clone_directory_bound"
+payload_kind = "inline-record"
+payload_sha256 = "28b1768d2aa78eda28de2a288da370d3ddff3b3508fd373ea915b2274a749e34"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a17"
+row_id = "a17:union-arm:restore-source-acquisition-source-gate-clone-external-cas-c159b22eed91ae66"
+union_name = "RestoreSourceAcquisitionSourceGate"
+containing_schema = "RestoreSourceAcquisitionSourceGate"
+union_path = "RestoreSourceAcquisitionSourceGate"
+arm_tag = 0x0003
+source_arm_name = "CloneExternalCas"
+stable_name = "clone_external_cas"
+payload_kind = "inline-record"
+payload_sha256 = "ce4bc9ad93776471e07b96c4f2d4a618a7727eb2715a8fd5601a54d9ab2d5d11"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 slice_id = "a18"
 row_id = "a18:union:restore-source-key-access-cleanup-progress-sorted-resource-states-fc9773d6b4ca3e18"
 union_name = "RestoreSourceKeyAccessCleanupProgressSortedResourceStates"
@@ -35925,7 +35994,7 @@ symbol = "RestoreSourceAcquisitionSourceGate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03f1"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-source-key-access-cleanup-accumulator"
@@ -47054,7 +47123,7 @@ symbol = "RestoreSourceAcquisitionSourceGate"
 generic_signature = ""
 source_key = "top|RestoreSourceAcquisitionSourceGate"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2273"]
 
 [[top_level_candidate]]
@@ -68088,6 +68157,46 @@ row_id = "a08:target:union-arm-typed-certified-meta-projection-payload-ordered-s
 target_row_id = "a08:union-arm:typed-certified-meta-projection-payload-ordered-slot-deltas-record-after-value-strong-ref-a8412a99cdff6d46"
 slice_id = "a08"
 source_key = "arm|TypedCertifiedMetaProjectionPayload|TypedCertifiedMetaProjectionPayload.ordered_slot_deltas.record.after_value|StrongRef"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-restore-source-acquisition-source-gate"
+target_row_id = "a17:logical-kind:restore-source-acquisition-source-gate"
+slice_id = "a17"
+source_key = "top|RestoreSourceAcquisitionSourceGate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:union-restore-source-acquisition-source-gate-f09908607ae09d26"
+target_row_id = "a17:union:restore-source-acquisition-source-gate-f09908607ae09d26"
+slice_id = "a17"
+source_key = "union|RestoreSourceAcquisitionSourceGate|RestoreSourceAcquisitionSourceGate"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:union-arm-restore-source-acquisition-source-gate-recover-same-identity-0ce9f3e9962c45fb"
+target_row_id = "a17:union-arm:restore-source-acquisition-source-gate-recover-same-identity-0ce9f3e9962c45fb"
+slice_id = "a17"
+source_key = "arm|RestoreSourceAcquisitionSourceGate|RestoreSourceAcquisitionSourceGate|RecoverSameIdentity"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:union-arm-restore-source-acquisition-source-gate-clone-directory-bound-b969dca0886940cc"
+target_row_id = "a17:union-arm:restore-source-acquisition-source-gate-clone-directory-bound-b969dca0886940cc"
+slice_id = "a17"
+source_key = "arm|RestoreSourceAcquisitionSourceGate|RestoreSourceAcquisitionSourceGate|CloneDirectoryBound"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:union-arm-restore-source-acquisition-source-gate-clone-external-cas-c159b22eed91ae66"
+target_row_id = "a17:union-arm:restore-source-acquisition-source-gate-clone-external-cas-c159b22eed91ae66"
+slice_id = "a17"
+source_key = "arm|RestoreSourceAcquisitionSourceGate|RestoreSourceAcquisitionSourceGate|CloneExternalCas"
 target_kind = "union-arm"
 definition_status = "declared"
 
