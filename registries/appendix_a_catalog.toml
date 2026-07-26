@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2400
+target_count = 2405
 projection_fallback_count = 90
-target_source_assignment_sha256 = "b106b7d70bfcb4cd75c47116d5ac07697ef49a814bd79ef17d6e8ec6e284c6a2"
+target_source_assignment_sha256 = "aae7ac652107af50fb798f9a2814fc55cfd5dc602e9ca945be3912bc998ee714"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -5373,6 +5373,61 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16384
 golden_corpus = "corpus/logical/durable_capability_validation_evidence/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:certified-role-transition-successor-ref"
+object_kind = 0x026d
+name = "CertifiedRoleTransitionSuccessorRef"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certified_role_transition_successor_ref/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:legacy-retention-authority-transfer-certificate"
+object_kind = 0x02ef
+name = "LegacyRetentionAuthorityTransferCertificate"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/legacy_retention_authority_transfer_certificate/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:role-transition-meta-service-prepare-certificate"
+object_kind = 0x0421
+name = "RoleTransitionMetaServicePrepareCertificate"
+status = "reserved"
+construction_order = 31
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_transition_meta_service_prepare_certificate/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:role-transition-shard-operational-ack"
+object_kind = 0x042a
+name = "RoleTransitionShardOperationalAck"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_transition_shard_operational_ack/"
+
+[[logical_kind]]
+slice_id = "a05"
+row_id = "a05:logical-kind:sharding-freeze-spec"
+object_kind = 0x0486
+name = "ShardingFreezeSpec"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_freeze_spec/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -34909,7 +34964,7 @@ symbol = "CertifiedRoleTransitionSuccessorRef"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x026d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:certified-transition-artifact-ref"
@@ -36349,7 +36404,7 @@ symbol = "LegacyRetentionAuthorityTransferCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02ef"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:legacy-retention-authority-transfer-evidence"
@@ -39454,7 +39509,7 @@ symbol = "RoleTransitionMetaServicePrepareCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0421"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:role-transition-operational-bijection-proof"
@@ -39535,7 +39590,7 @@ symbol = "RoleTransitionShardOperationalAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x042a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a01:reservation:root-authority-trust-artifact"
@@ -40426,7 +40481,7 @@ symbol = "ShardingFreezeSpec"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0486"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a05:reservation:sharding-migration-retention-floor"
@@ -43005,7 +43060,7 @@ symbol = "CertifiedRoleTransitionSuccessorRef"
 generic_signature = ""
 source_key = "top|CertifiedRoleTransitionSuccessorRef"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1604"]
 
 [[top_level_candidate]]
@@ -45675,7 +45730,7 @@ symbol = "LegacyRetentionAuthorityTransferCertificate"
 generic_signature = ""
 source_key = "top|LegacyRetentionAuthorityTransferCertificate"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1608"]
 
 [[top_level_candidate]]
@@ -51015,7 +51070,7 @@ symbol = "RoleTransitionMetaServicePrepareCertificate"
 generic_signature = ""
 source_key = "top|RoleTransitionMetaServicePrepareCertificate"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1628"]
 
 [[top_level_candidate]]
@@ -51085,7 +51140,7 @@ symbol = "RoleTransitionShardOperationalAck"
 generic_signature = ""
 source_key = "top|RoleTransitionShardOperationalAck"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1638"]
 
 [[top_level_candidate]]
@@ -52175,7 +52230,7 @@ symbol = "ShardingFreezeSpec"
 generic_signature = ""
 source_key = "top|ShardingFreezeSpec"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a05:1594"]
 
 [[top_level_candidate]]
@@ -73054,6 +73109,46 @@ target_row_id = "a04:field:validated-remote-configuration-anchor-input-spec-dige
 slice_id = "a04"
 source_key = "field|ValidatedRemoteConfigurationAnchor|ValidatedRemoteConfigurationAnchor.input_spec_digest|input_spec_digest"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-certified-role-transition-successor-ref"
+target_row_id = "a05:logical-kind:certified-role-transition-successor-ref"
+slice_id = "a05"
+source_key = "top|CertifiedRoleTransitionSuccessorRef"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-legacy-retention-authority-transfer-certificate"
+target_row_id = "a05:logical-kind:legacy-retention-authority-transfer-certificate"
+slice_id = "a05"
+source_key = "top|LegacyRetentionAuthorityTransferCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-role-transition-meta-service-prepare-certificate"
+target_row_id = "a05:logical-kind:role-transition-meta-service-prepare-certificate"
+slice_id = "a05"
+source_key = "top|RoleTransitionMetaServicePrepareCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-role-transition-shard-operational-ack"
+target_row_id = "a05:logical-kind:role-transition-shard-operational-ack"
+slice_id = "a05"
+source_key = "top|RoleTransitionShardOperationalAck"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:logical-kind-sharding-freeze-spec"
+target_row_id = "a05:logical-kind:sharding-freeze-spec"
+slice_id = "a05"
+source_key = "top|ShardingFreezeSpec"
+target_kind = "logical-kind"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

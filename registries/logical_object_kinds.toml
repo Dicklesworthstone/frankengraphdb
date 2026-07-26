@@ -612,6 +612,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/certified_role_transition_ref/"
 
 [[kind]]
+object_kind = 0x026d
+name = "CertifiedRoleTransitionSuccessorRef"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/certified_role_transition_successor_ref/"
+
+[[kind]]
 object_kind = 0x026e
 name = "CertifiedTransitionArtifactRef"
 status = "reserved"
@@ -1213,6 +1222,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/leases_revoked_or_expired_through/"
+
+[[kind]]
+object_kind = 0x02ef
+name = "LegacyRetentionAuthorityTransferCertificate"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/legacy_retention_authority_transfer_certificate/"
 
 [[kind]]
 object_kind = 0x02f0
@@ -2655,6 +2673,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/role_transition_activation_state/"
 
 [[kind]]
+object_kind = 0x0421
+name = "RoleTransitionMetaServicePrepareCertificate"
+status = "reserved"
+construction_order = 31
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_transition_meta_service_prepare_certificate/"
+
+[[kind]]
 object_kind = 0x0425
 name = "RoleTransitionPromotionRootSeal"
 status = "reserved"
@@ -2671,6 +2698,15 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/role_transition_service_promotion_manifest/"
+
+[[kind]]
+object_kind = 0x042a
+name = "RoleTransitionShardOperationalAck"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/role_transition_shard_operational_ack/"
 
 [[kind]]
 object_kind = 0x042b
@@ -3058,6 +3094,15 @@ construction_order = 29
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/sharding_freeze_record/"
+
+[[kind]]
+object_kind = 0x0486
+name = "ShardingFreezeSpec"
+status = "reserved"
+construction_order = 29
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sharding_freeze_spec/"
 
 [[kind]]
 object_kind = 0x0487
