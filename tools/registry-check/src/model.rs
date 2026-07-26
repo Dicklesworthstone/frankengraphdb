@@ -141,6 +141,30 @@ pub struct Checker {
     pub status: String,
 }
 
+/// A `scripts/*.sh` deliverable that is deliberately NOT a registered gate.
+///
+/// `checker_index.toml` closes row -> file (a `live` row's artifact must exist).
+/// It never closed file -> row, so a script could sit in `scripts/` carrying
+/// every signal of a gate — `set -euo pipefail`, pinned counts, PASS/FAIL
+/// counters — while no runner and no registry knew it existed
+/// (`fgdb-orphan-w1-e2e-gates-unregistered-unrun-vuq8`). This table is the other
+/// direction: a script is either a registered checker or it says here, out loud,
+/// why it is not one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptDisposition {
+    pub path: String,
+    pub role: String,
+    pub reason: String,
+}
+
+/// The roles a non-gate script may declare.
+///
+/// `candidate` is a bounded, visible debt, not an escape hatch: it means the
+/// script's own assertions have been measured to hold but promoting it to a
+/// registered gate would make `scripts/check.sh` execute it, which is a claim
+/// about the whole swarm's gate chain and needs its own evidence.
+pub const SCRIPT_ROLES: [&str; 3] = ["runner", "advisory", "candidate"];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub name: String,
@@ -168,6 +192,7 @@ pub struct Registries {
     pub slo: SloRegistry,
     pub proof_lanes: Vec<Lane>,
     pub checker_index: Vec<Checker>,
+    pub script_dispositions: Vec<ScriptDisposition>,
 }
 
 fn registry_name(root: &Table, expected: &str, file: &str) -> Result<(), ReadError> {
@@ -355,6 +380,33 @@ pub fn proof_lanes_from(root: &Table) -> Result<Vec<Lane>, ReadError> {
     Ok(lanes)
 }
 
+/// Read the `[[script_disposition]]` table from `checker_index.toml`.
+///
+/// Deliberately a separate reader from [`checker_index_from`]: it answers a
+/// different question (why is this script NOT a gate) over a different table.
+/// One reader per fact — nothing else in the tree derives script dispositions.
+pub fn script_dispositions_from(root: &Table) -> Result<Vec<ScriptDisposition>, ReadError> {
+    registry_name(root, "checker_index", "checker_index.toml")?;
+    let mut out = Vec::new();
+    // Deliberately REQUIRED, not optional. TOML has no empty array-of-tables
+    // syntax, so an optional read would make "someone deleted every row" and
+    // "there are legitimately none" the same observation — and the second is
+    // never true while scripts/check.sh itself is a non-gate script. A zero
+    // result must be licensed; here the license is that the table must exist.
+    for (i, t) in get_table_array(root, "script_disposition", "checker_index.toml")?
+        .iter()
+        .enumerate()
+    {
+        let ctx = format!("checker_index.toml.script_disposition[{i}]");
+        out.push(ScriptDisposition {
+            path: get_str(t, "path", &ctx)?,
+            role: get_str(t, "role", &ctx)?,
+            reason: get_str(t, "reason", &ctx)?,
+        });
+    }
+    Ok(out)
+}
+
 pub fn checker_index_from(root: &Table) -> Result<Vec<Checker>, ReadError> {
     registry_name(root, "checker_index", "checker_index.toml")?;
     let mut checkers = Vec::new();
@@ -428,6 +480,8 @@ pub fn load_registries(dir: &Path) -> Result<Registries, LoadError> {
         proof_lanes: proof_lanes_from(&load_table(dir, "proof_lanes.toml")?)
             .map_err(|e| wrap("proof_lanes.toml", e))?,
         checker_index: checker_index_from(&load_table(dir, "checker_index.toml")?)
+            .map_err(|e| wrap("checker_index.toml", e))?,
+        script_dispositions: script_dispositions_from(&load_table(dir, "checker_index.toml")?)
             .map_err(|e| wrap("checker_index.toml", e))?,
     })
 }

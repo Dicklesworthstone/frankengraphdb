@@ -529,3 +529,49 @@ symbol = "g0_topology_e2e"
 kind = "script"
 artifact = "scripts/g0_topology_e2e.sh"
 status = "live"
+
+# =============================================================================
+# script_disposition — the FILE -> ROW direction (fgdb-orphan-w1-e2e-gates-
+# unregistered-unrun-vuq8).
+#
+# The [[checker]] rows above close row -> file: a "live" row's artifact must
+# exist. Nothing closed the other way, so a shell deliverable could sit in
+# scripts/ carrying every signal of a gate — set -euo pipefail, pinned counts,
+# PASS/FAIL counters — while no runner and no registry knew it existed. Six did.
+#
+# Every scripts/*.sh must now be either a [[checker]] artifact above or a row
+# here saying why it is not a gate. `role` is one of runner | advisory |
+# candidate. Enforced by validate_script_closure, which scans the filesystem
+# (not `git ls-files`, since an untracked script is already exempt from the
+# shell lint and must not be exempt twice).
+# =============================================================================
+
+[[script_disposition]]
+path = "scripts/check.sh"
+role = "runner"
+reason = "the runner itself: it derives and invokes the registered gates, so registering it would make it invoke itself"
+
+[[script_disposition]]
+path = "scripts/bead_provenance_preflight.sh"
+role = "advisory"
+reason = "pre-commit advisory for .beads/ authors, not part of any gate chain; its own header says 'Run it BEFORE you commit'. It is also currently defective (exits 0 on the pin-drift case it exists to catch) — fgdb-bead-provenance-preflight-misses-pin-drift-a5kb"
+
+[[script_disposition]]
+path = "scripts/w1_bigint_e2e.sh"
+role = "candidate"
+reason = "vuq8: assertions MEASURED to hold at 0ada651 (deterministic_transcript byte-identical across two runs; fgdb-bigint declares zero deps of any kind, satisfying the depth-1 cargo tree pin). Not promoted only because registration now makes check.sh execute it, and its `cargo test --all-targets` half is unverified in this environment"
+
+[[script_disposition]]
+path = "scripts/w1_codec_scalar_e2e.sh"
+role = "candidate"
+reason = "vuq8: assertions MEASURED to hold at 0ada651 — scalar_transcript is byte-identical across two runs and emits exactly the 5 evidence rows its pin requires. Not promoted only because registration now makes check.sh execute it"
+
+[[script_disposition]]
+path = "scripts/w1_codec_pipeline_scalar_e2e.sh"
+role = "candidate"
+reason = "vuq8: all four pins MEASURED to hold at 0ada651 — 67 evidence rows, 64 stream-vbyte, 2 identity, 68 transcript lines, byte-identical across two runs. Not promoted only because registration now makes check.sh execute it"
+
+[[script_disposition]]
+path = "scripts/w1_foundation_types_e2e.sh"
+role = "candidate"
+reason = "vuq8: all 16 pinned grep assertions MEASURED present at 0ada651, transcript byte-identical across seeds 1 and 2, and all six foundation crates declare zero deps so the cargo-tree universe check holds. Not promoted only because registration now makes check.sh execute it"

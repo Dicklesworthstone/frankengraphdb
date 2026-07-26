@@ -15,11 +15,15 @@
 //!   hash_mismatch            — twenty-ID table hash pin does not match
 //!   bad_field                — enum/shape violation on a row field
 //!   artifact_missing         — a "live"/"checked" row's artifact is absent
+//!   script_undeclared        — a scripts/*.sh is neither registered nor declared
+//!   script_disposition_*     — a non-gate declaration is dangling or conflicting
+//!   script_scan_empty        — the scripts/ scan found nothing (control)
 
 use crate::hash::id_table_hash;
-use crate::model::{Clause, Manifest, Registries};
+use crate::model::{Clause, Manifest, Registries, SCRIPT_ROLES, ScriptDisposition};
 use crate::predicate;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -729,6 +733,126 @@ fn validate_checker_index(r: &Registries, root: &Path, out: &mut Vec<Violation>)
     }
 }
 
+/// Close `checker_index.toml` in the FILE -> ROW direction.
+///
+/// [`validate_checker_index`] closes row -> file: a `live` row's artifact must
+/// exist. Nothing closed the other way, so a `scripts/*.sh` could carry every
+/// signal of a gate — `set -euo pipefail`, pinned counts, PASS/FAIL counters —
+/// while no runner and no registry knew it existed. Five did
+/// (`fgdb-orphan-w1-e2e-gates-unregistered-unrun-vuq8`), holding six hard-pinned
+/// magic numbers between them.
+///
+/// Since `scripts/check.sh` became registry-derived, registration is also what
+/// makes a script RUN, so this is the law that decides whether a deliverable is
+/// a gate at all.
+///
+/// The scan reads the filesystem rather than `git ls-files`: an UNTRACKED script
+/// is exempt from the git-based shell lint, so it must not also be exempt here.
+fn validate_script_closure(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
+    let reg = "checker_index";
+    let dir = root.join("scripts");
+
+    let mut on_disk: Vec<String> = match fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".sh"))
+            .map(|n| format!("scripts/{n}"))
+            .collect(),
+        Err(e) => {
+            out.push(Violation::new(
+                "script_scan_failed",
+                reg,
+                "scripts/",
+                format!("cannot read scripts/: {e} — refusing to report script closure as checked"),
+            ));
+            return;
+        }
+    };
+    on_disk.sort();
+
+    // CONTROL. Every verdict below is a statement about a set this function
+    // built by scanning a directory. If the scan comes back empty, the two
+    // readings — "there are no scripts" and "the scanner is broken" — are
+    // indistinguishable, and every "declared" verdict is then quantified over
+    // nothing. `scripts/check.sh` is itself a script, so zero is never correct.
+    if on_disk.is_empty() {
+        out.push(Violation::new(
+            "script_scan_empty",
+            reg,
+            "scripts/",
+            "scanned scripts/ and found no *.sh at all; a zero result here cannot be \
+             distinguished from a broken scan, so it is a violation rather than a pass",
+        ));
+        return;
+    }
+
+    let registered: BTreeSet<&str> = r
+        .checker_index
+        .iter()
+        .map(|c| c.artifact.as_str())
+        .filter(|a| a.starts_with("scripts/"))
+        .collect();
+    let declared: BTreeMap<&str, &ScriptDisposition> = r
+        .script_dispositions
+        .iter()
+        .map(|d| (d.path.as_str(), d))
+        .collect();
+
+    for path in &on_disk {
+        let is_registered = registered.contains(path.as_str());
+        let disposition = declared.get(path.as_str()).copied();
+        match (is_registered, disposition) {
+            (false, None) => out.push(Violation::new(
+                "script_undeclared",
+                reg,
+                path,
+                "shell deliverable is neither a registered checker artifact nor a \
+                 [[script_disposition]] row; register it, or say why it is not a gate",
+            )),
+            (true, Some(d)) => out.push(Violation::new(
+                "script_disposition_conflict",
+                reg,
+                path,
+                format!(
+                    "is a registered checker artifact AND declared a non-gate {:?}; \
+                     exactly one of the two must hold",
+                    d.role
+                ),
+            )),
+            _ => {}
+        }
+    }
+
+    let present: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
+    for d in &r.script_dispositions {
+        if !present.contains(d.path.as_str()) {
+            out.push(Violation::new(
+                "script_disposition_dangling",
+                reg,
+                &d.path,
+                "[[script_disposition]] names a script that does not exist",
+            ));
+        }
+        if !SCRIPT_ROLES.contains(&d.role.as_str()) {
+            out.push(Violation::new(
+                "bad_field",
+                reg,
+                &d.path,
+                format!("role {:?} not in {SCRIPT_ROLES:?}", d.role),
+            ));
+        }
+        if d.reason.trim().is_empty() {
+            out.push(Violation::new(
+                "bad_field",
+                reg,
+                &d.path,
+                "a non-gate declaration requires a reason",
+            ));
+        }
+    }
+}
+
 fn id_matches(id: &str, prefix: &str) -> bool {
     id.strip_prefix(prefix)
         .is_some_and(|rest| rest.len() == 2 && rest.bytes().all(|b| b.is_ascii_digit()))
@@ -1070,6 +1194,7 @@ pub fn validate_all(r: &Registries, root: &Path) -> Vec<Violation> {
     validate_slo(r, &mut out);
     validate_proof_lanes(r, root, &mut out);
     validate_checker_index(r, root, &mut out);
+    validate_script_closure(r, root, &mut out);
     validate_active_logical_kind_arms(root, &mut out);
     validate_capability_atoms(r, &mut out);
     out
