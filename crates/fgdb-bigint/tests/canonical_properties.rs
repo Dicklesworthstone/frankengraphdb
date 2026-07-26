@@ -18,6 +18,23 @@
 //!   `LimbLimit` enforcement separates a checked allocating op from an unchecked
 //!                           one: the wrong implementation returns Ok.
 //!
+//! MUTATION EVIDENCE. Every property below was observed RED under a named wrong
+//! kernel and GREEN on revert; a property no mutation can falsify is decoration
+//! that reads as coverage, which is worse than an absent test.
+//!   M1  checked_neg returns a clone            -> negation involution
+//!   M3  LimbLimit::ensure never rejects        -> limb-limit enforcement
+//!   M4  addition replaced by max               -> add-then-subtract, commut/assoc,
+//!                                                 div_rem, limb-limit
+//!   M5  checked_mul returns a+b                -> distributivity, div_rem
+//!   M8  from_canonical_limbs accepts a zero
+//!       carrying magnitude                     -> construction rejection
+//!   M9  to_i128 discards the sign              -> i128 round-trip
+//!   M10 from_canonical_limbs forces
+//!       Sign::Positive                         -> canonical-limb round-trip
+//! A mutation whose anchor does not match exactly once, or whose mutant compiles
+//! byte-identical to the original, is an INVALID experiment and proves nothing --
+//! an unapplied mutation is indistinguishable from a passing suite.
+//!
 //! Inputs are boundary-heavy by construction: limb edges, sign edges, and
 //! zero-adjacent values, plus a deterministic pseudo-random sweep so the suite is
 //! byte-reproducible under the determinism doctrine (no clock, no entropy).
