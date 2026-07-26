@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2523
-projection_fallback_count = 105
-target_source_assignment_sha256 = "f557159461b8b21f977b282d482cf3ca80286f29854450584295a52558d91340"
+target_count = 2524
+projection_fallback_count = 106
+target_source_assignment_sha256 = "d21e7d6923b8a54d08f6997dfb263cf2405f7a27bb99b5a37c72a86ab6920507"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 50
+registry_epoch = 51
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -2086,6 +2086,17 @@ construction_order = 46
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_source_acquisition_bundle/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:pre-bootstrap-dispatch-terminal-accumulator"
+object_kind = 0x0395
+name = "PreBootstrapDispatchTerminalAccumulator"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/pre_bootstrap_dispatch_terminal_accumulator/"
 
 [[logical_kind]]
 slice_id = "a03"
@@ -39758,7 +39769,7 @@ symbol = "PreBootstrapDispatchTerminalAccumulator"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0395"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a17:reservation:pre-bootstrap-journal-canonicalization-import-record"
@@ -56434,6 +56445,14 @@ row_id = "a17:target:logical-kind-restore-source-acquisition-bundle"
 target_row_id = "a17:logical-kind:restore-source-acquisition-bundle"
 slice_id = "a17"
 source_key = "top|RestoreSourceAcquisitionBundle<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-pre-bootstrap-dispatch-terminal-accumulator"
+target_row_id = "a17:logical-kind:pre-bootstrap-dispatch-terminal-accumulator"
+slice_id = "a17"
+source_key = "projection|logical_object_kinds|PreBootstrapDispatchTerminalAccumulator"
 target_kind = "logical-kind"
 definition_status = "declared"
 

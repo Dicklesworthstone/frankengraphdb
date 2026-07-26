@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 50
+registry_epoch = 51
 
 [[kind]]
 object_kind = 0x0001
@@ -1897,6 +1897,15 @@ construction_order = 27
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/portable_time_expiry_attestation/"
+
+[[kind]]
+object_kind = 0x0395
+name = "PreBootstrapDispatchTerminalAccumulator"
+status = "reserved"
+construction_order = 20
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/pre_bootstrap_dispatch_terminal_accumulator/"
 
 [[kind]]
 object_kind = 0x0397

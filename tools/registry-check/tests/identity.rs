@@ -7038,6 +7038,117 @@ fn idr_restore_source_acquisition_bundle_closes_the_bidirectional_order_interval
 }
 
 #[test]
+fn idr_pre_bootstrap_dispatch_terminal_accumulator_uses_the_accumulator_stratum() {
+    let identity = real_identity();
+    let logical = |name: &str| {
+        identity
+            .logical
+            .iter()
+            .find(|logical| logical.name == name)
+            .expect("named logical row exists")
+    };
+    let accumulator = logical("PreBootstrapDispatchTerminalAccumulator");
+    assert_eq!(accumulator.object_kind, 0x0395);
+    assert_eq!(accumulator.status, "reserved");
+    assert_eq!(accumulator.construction_order, 20);
+    assert_eq!(accumulator.role_predicate, "true");
+    assert_eq!(accumulator.max_size_bytes, 16_777_216);
+    assert_eq!(
+        accumulator.golden_corpus,
+        "corpus/logical/pre_bootstrap_dispatch_terminal_accumulator/"
+    );
+
+    for precedent in [
+        "RestoreLeaseOperationTerminalAccumulator",
+        "RestoreSourceKeyAccessCleanupAccumulator",
+    ] {
+        assert_eq!(
+            logical(precedent).construction_order,
+            accumulator.construction_order,
+            "{precedent} is the existing terminal-accumulator stratum precedent"
+        );
+    }
+
+    let plan = String::from_utf8(real_plan_source()).expect("the normative plan is UTF-8");
+    assert!(
+        plan.contains(
+            "The spec constructs `PreBootstrapDispatchTerminalAccumulator<Role>`, which compactly authenticates"
+        ),
+        "the projection fallback is licensed by the substantive normative definition"
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|row| row.symbol == "PreBootstrapDispatchTerminalAccumulator")
+        .expect("terminal accumulator permanent reservation exists");
+    assert_eq!(
+        reservation.row_id,
+        "a17:reservation:pre-bootstrap-dispatch-terminal-accumulator"
+    );
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x0395");
+    assert_eq!(reservation.disposition, "existing");
+
+    let source_disposition = catalog
+        .source_symbol_dispositions
+        .iter()
+        .find(|row| row.symbol == "PreBootstrapDispatchTerminalAccumulator")
+        .expect("terminal accumulator source disposition exists");
+    assert_eq!(
+        source_disposition.disposition, "reference-only",
+        "the census does not currently produce a structural top-level candidate"
+    );
+    assert!(
+        !catalog
+            .top_level_candidates
+            .iter()
+            .any(|row| row.symbol == "PreBootstrapDispatchTerminalAccumulator"),
+        "the shell must use the declared projection fallback until the parser owns the prose shape"
+    );
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|row| {
+            row.target_row_id == "a17:logical-kind:pre-bootstrap-dispatch-terminal-accumulator"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "the logical shell maps exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a17:target:logical-kind-pre-bootstrap-dispatch-terminal-accumulator"
+    );
+    assert_eq!(
+        targets[0].source_key,
+        "projection|logical_object_kinds|PreBootstrapDispatchTerminalAccumulator"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+    assert_eq!(targets[0].definition_status, "declared");
+
+    assert!(
+        !identity.fields.iter().any(|field| {
+            field.containing_schema == "PreBootstrapDispatchTerminalAccumulator"
+                || field
+                    .containing_schema
+                    .starts_with("PreBootstrapDispatchTerminalAccumulator<")
+        }),
+        "the shell must not invent fields absent from the shorthand census"
+    );
+    assert!(
+        !identity.ordinary_unions.iter().any(|union| {
+            union.containing_schema == "PreBootstrapDispatchTerminalAccumulator"
+                || union
+                    .containing_schema
+                    .starts_with("PreBootstrapDispatchTerminalAccumulator<")
+        }),
+        "the record-shaped accumulator must not manufacture a union"
+    );
+}
+
+#[test]
 fn idr_restore_canonical_acquisition_working_set_reserves_pre_freeze_stratum() {
     let identity = real_identity();
     let logical = identity
