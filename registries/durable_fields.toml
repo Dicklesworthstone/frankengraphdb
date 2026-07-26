@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 48
+registry_epoch = 49
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -4332,6 +4332,28 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "AuditResolutionOrigin"
+containing_schema = "AuditResolutionOrigin"
+union_path = "AuditResolutionOrigin"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuditResolutionOrigin"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "AuditResolutionOriginUnclaimedTerminalClass"
+containing_schema = "AuditResolutionOrigin"
+union_path = "AuditResolutionOrigin.Unclaimed.terminal_class"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuditResolutionOrigin"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "AuditTerminalAttemptRecordState"
 containing_schema = "AuditTerminalAttemptRecord"
 union_path = "AuditTerminalAttemptRecord.state"
@@ -4365,6 +4387,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "AuditTicketOwner"
+containing_schema = "AuditTicketOwner"
+union_path = "AuditTicketOwner"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuditTicketOwner"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "AuthenticatedClientResultAckReceiptPostureAndRole"
 containing_schema = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
 union_path = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.posture_and_role"
@@ -4393,6 +4426,17 @@ union_path = "AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRol
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["AuthorityOwningRestoreAbandonmentTombstone<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "BeginTerminalEvidence"
+containing_schema = "BeginTerminalEvidence"
+union_path = "BeginTerminalEvidence"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BeginTerminalEvidence"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -4459,6 +4503,17 @@ union_path = "BranchKeyEpochRecord.state"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["BranchKeyEpochRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "BufferedResultOwner"
+containing_schema = "BufferedResultOwner"
+union_path = "BufferedResultOwner"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BufferedResultOwner"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -4848,6 +4903,39 @@ allowed_containing_schemas = ["EscapingAllocationCause"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union]]
+union_name = "FinalCertificationSelection"
+containing_schema = "FinalCertificationSelection"
+union_path = "FinalCertificationSelection"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["FinalCertificationSelection"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "FinalCertificationSelectionLocalCommitTerminalWriteResult"
+containing_schema = "FinalCertificationSelection"
+union_path = "FinalCertificationSelection.LocalCommit.terminal_write_result"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["FinalCertificationSelection"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "FinalCertificationSelectionMetaCommitTerminalWriteResult"
+containing_schema = "FinalCertificationSelection"
+union_path = "FinalCertificationSelection.MetaCommit.terminal_write_result"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["FinalCertificationSelection"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union]]
 union_name = "GcDecisionRecordDecision"
@@ -5522,6 +5610,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "LocalOrderSubject"
+containing_schema = "LocalOrderSubject"
+union_path = "LocalOrderSubject"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalOrderSubject"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "LocalOutcomeCompactionSpec"
 containing_schema = "LocalOutcomeCompactionSpec"
 union_path = "LocalOutcomeCompactionSpec"
@@ -5788,6 +5887,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "MetaOrderSubject"
+containing_schema = "MetaOrderSubject"
+union_path = "MetaOrderSubject"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaOrderSubject"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "MetaPreparedCommandRecordStatus"
 containing_schema = "MetaPreparedCommandRecord"
 union_path = "MetaPreparedCommandRecord.status"
@@ -5949,6 +6059,17 @@ field_tag = 0x0009
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["OfflineMacaroonIssuerEpochFenceReceipt"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "OperationAuditAdmission"
+containing_schema = "OperationAuditAdmission"
+union_path = "OperationAuditAdmission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["OperationAuditAdmission"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -6154,6 +6275,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "PublicPostconditionProgressProjection"
+containing_schema = "PublicPostconditionProgressProjection"
+union_path = "PublicPostconditionProgressProjection"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PublicPostconditionProgressProjection"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "PublicTerminalProgressProjection"
 containing_schema = "PublicTerminalProgressProjection"
 union_path = "PublicTerminalProgressProjection"
@@ -6204,6 +6336,17 @@ union_path = "RaftMaintenanceCommand"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RaftMaintenanceCommand"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReadExecutionScope"
+containing_schema = "ReadExecutionScope"
+union_path = "ReadExecutionScope"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReadExecutionScope"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -7237,6 +7380,39 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union]]
+union_name = "SemanticTerminalDescriptor"
+containing_schema = "SemanticTerminalDescriptor"
+union_path = "SemanticTerminalDescriptor"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["SemanticTerminalDescriptor"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "SemanticTerminalDescriptorLocalTerminal"
+containing_schema = "SemanticTerminalDescriptor"
+union_path = "SemanticTerminalDescriptor.Local.terminal"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["SemanticTerminalDescriptor"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "SemanticTerminalDescriptorShardedTerminal"
+containing_schema = "SemanticTerminalDescriptor"
+union_path = "SemanticTerminalDescriptor.Sharded.terminal"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["SemanticTerminalDescriptor"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "ServicePromotionExternalOperationKind"
 containing_schema = "ServicePromotionExternalOperationKind"
 union_path = "ServicePromotionExternalOperationKind"
@@ -7375,6 +7551,28 @@ union_path = "ShardingMigrationState"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["ShardingMigrationState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "StatementAuditAdmission"
+containing_schema = "StatementAuditAdmission"
+union_path = "StatementAuditAdmission"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["StatementAuditAdmission"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "StatementPublishedOutput"
+containing_schema = "StatementPublishedOutput"
+union_path = "StatementPublishedOutput"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["StatementPublishedOutput"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -7592,6 +7790,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "TransactionErrorPolicy"
+containing_schema = "TransactionErrorPolicy"
+union_path = "TransactionErrorPolicy"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TransactionErrorPolicy"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "TxnAbortSpecRequiredAbortSource"
 containing_schema = "TxnAbortSpec"
 union_path = "TxnAbortSpec.required_abort_source"
@@ -7609,6 +7818,28 @@ union_path = "TxnAllocationSlotKey.posture"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["TxnAllocationSlotKey"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "TxnCompletionState"
+containing_schema = "TxnCompletionState"
+union_path = "TxnCompletionState"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TxnCompletionState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "TxnCompletionStateInProgressPhase"
+containing_schema = "TxnCompletionState"
+union_path = "TxnCompletionState.InProgress.phase"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TxnCompletionState"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -7653,6 +7884,17 @@ union_path = "WeakAuthorityAppliedIdentity"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["ValidatedRemoteConfigurationAnchor"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "WorkspaceReleaseEvidenceRef"
+containing_schema = "WorkspaceReleaseEvidenceRef"
+union_path = "WorkspaceReleaseEvidenceRef"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["WorkspaceReleaseEvidenceRef"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -7879,6 +8121,56 @@ payload_sha256 = "b3e3e77885db5c852a152a8e012ca1873c7619d7ea8327e3d0a6beeb9545c6
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditResolutionOrigin"
+containing_schema = "AuditResolutionOrigin"
+union_path = "AuditResolutionOrigin"
+arm_tag = 0x0001
+source_arm_name = "Unclaimed"
+stable_name = "unclaimed"
+payload_kind = "inline-record"
+payload_sha256 = "c7e27b6fe41f2e0e35a177bfac2f77b9d22722dec13c51b8e50f1520325950c2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditResolutionOrigin"
+containing_schema = "AuditResolutionOrigin"
+union_path = "AuditResolutionOrigin"
+arm_tag = 0x0002
+source_arm_name = "Claimed"
+stable_name = "claimed"
+payload_kind = "inline-record"
+payload_sha256 = "5c34e268c6c9631608910a6808ad2f696df7e6b17b47acaeaf3335eb1d421760"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditResolutionOriginUnclaimedTerminalClass"
+containing_schema = "AuditResolutionOrigin"
+union_path = "AuditResolutionOrigin.Unclaimed.terminal_class"
+arm_tag = 0x0001
+source_arm_name = "DeniedBeforeClaim"
+stable_name = "denied_before_claim"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "AuditResolutionOriginUnclaimedTerminalClass"
+containing_schema = "AuditResolutionOrigin"
+union_path = "AuditResolutionOrigin.Unclaimed.terminal_class"
+arm_tag = 0x0002
+source_arm_name = "AbandonedBeforeClaim"
+stable_name = "abandoned_before_claim"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "AuditTerminalAttemptRecordState"
@@ -8112,6 +8404,45 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "AuditTicketOwner"
+containing_schema = "AuditTicketOwner"
+union_path = "AuditTicketOwner"
+arm_tag = 0x0001
+source_arm_name = "Operation"
+stable_name = "operation"
+payload_kind = "inline-record"
+payload_sha256 = "d7a91b14b59a6d4d8e6eb976a7046e665b1eb9f71b281677cec34b8964572f88"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditTicketOwner"
+containing_schema = "AuditTicketOwner"
+union_path = "AuditTicketOwner"
+arm_tag = 0x0002
+source_arm_name = "Statement"
+stable_name = "statement"
+payload_kind = "inline-record"
+payload_sha256 = "364d56cad550fb0ef49dca731612effc374fe7659e829141b2d921d64e7f64b5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditTicketOwner"
+containing_schema = "AuditTicketOwner"
+union_path = "AuditTicketOwner"
+arm_tag = 0x0003
+source_arm_name = "Control"
+stable_name = "control"
+payload_kind = "inline-record"
+payload_sha256 = "2b72ef87c6ff7eec15920d21307124797cd0806d279b48aaf81b160689bb7229"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "AuthenticatedClientResultAckReceiptPostureAndRole"
 containing_schema = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
 union_path = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.posture_and_role"
@@ -8194,6 +8525,58 @@ source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
 stable_name = "directory_bound_embedded_no_catalog"
 payload_kind = "inline-record"
 payload_sha256 = "a1966600103926f245b7dc9250f98e11b8fb3983b75da31bf0ea2904eb10aea1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BeginTerminalEvidence"
+containing_schema = "BeginTerminalEvidence"
+union_path = "BeginTerminalEvidence"
+arm_tag = 0x0001
+source_arm_name = "Denied"
+stable_name = "denied"
+payload_kind = "inline-record"
+payload_sha256 = "2bfdaa26de146c79dad57f377c7ffd509aecb9791bf5fd467b3a6f47eddd2b04"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BeginTerminalEvidence"
+containing_schema = "BeginTerminalEvidence"
+union_path = "BeginTerminalEvidence"
+arm_tag = 0x0002
+source_arm_name = "AuthenticatedAbandon"
+stable_name = "authenticated_abandon"
+payload_kind = "inline-record"
+payload_sha256 = "b92a48e334f6c8994ac268b95689affb0dd0ffa7138ff13a13f22072e3cd282d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BeginTerminalEvidence"
+containing_schema = "BeginTerminalEvidence"
+union_path = "BeginTerminalEvidence"
+arm_tag = 0x0003
+source_arm_name = "RegionClosed"
+stable_name = "region_closed"
+payload_kind = "inline-record"
+payload_sha256 = "101886d0b4bfbd5811ac012f85656e794655ae5dc0108fb634eeb2574b234b4b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BeginTerminalEvidence"
+containing_schema = "BeginTerminalEvidence"
+union_path = "BeginTerminalEvidence"
+arm_tag = 0x0004
+source_arm_name = "Superseded"
+stable_name = "superseded"
+payload_kind = "inline-record"
+payload_sha256 = "8d1968314adea11f049629e7c97a4a1515139c81d95da7cea5afab570aa35fb6"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -8404,6 +8787,45 @@ source_arm_name = "Closed"
 stable_name = "closed"
 payload_kind = "inline-record"
 payload_sha256 = "1e8d9e9d296bcc02400ead75b3e8024ce03e1a24c30a42523f8d5a3ed54d02ee"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BufferedResultOwner"
+containing_schema = "BufferedResultOwner"
+union_path = "BufferedResultOwner"
+arm_tag = 0x0001
+source_arm_name = "TerminalRead"
+stable_name = "terminal_read"
+payload_kind = "inline-record"
+payload_sha256 = "5e6ea8a61d8bb24e9a5983ca0f0c3a094572327a84c73a99ce7116d57d26a159"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BufferedResultOwner"
+containing_schema = "BufferedResultOwner"
+union_path = "BufferedResultOwner"
+arm_tag = 0x0002
+source_arm_name = "AutocommitWriteTerminal"
+stable_name = "autocommit_write_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "40ad8b742f038309ad6aa13fc7d88d0cc1b4799bf08b6f88b4c7e88f25c374ce"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BufferedResultOwner"
+containing_schema = "BufferedResultOwner"
+union_path = "BufferedResultOwner"
+arm_tag = 0x0003
+source_arm_name = "Statement"
+stable_name = "statement"
+payload_kind = "inline-record"
+payload_sha256 = "62047b02348e66eed436eeeafd04fc9ed695b751d05a937f0090716fbbaa0959"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -9574,6 +9996,108 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "FinalCertificationSelection"
+containing_schema = "FinalCertificationSelection"
+union_path = "FinalCertificationSelection"
+arm_tag = 0x0001
+source_arm_name = "LocalCommit"
+stable_name = "local_commit"
+payload_kind = "inline-record"
+payload_sha256 = "23128d5ee5f52ce82158f06a90a97468d0cf8ec0f3ef6b5eb0ac052ceebf31ce"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "FinalCertificationSelection"
+containing_schema = "FinalCertificationSelection"
+union_path = "FinalCertificationSelection"
+arm_tag = 0x0002
+source_arm_name = "LocalAbort"
+stable_name = "local_abort"
+payload_kind = "inline-record"
+payload_sha256 = "555d377c1b9e505a715059c7e12834f2322990aa963a026d4c848abcb7156438"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "FinalCertificationSelection"
+containing_schema = "FinalCertificationSelection"
+union_path = "FinalCertificationSelection"
+arm_tag = 0x0003
+source_arm_name = "MetaCommit"
+stable_name = "meta_commit"
+payload_kind = "inline-record"
+payload_sha256 = "2bb46fd19e6f868161c2b169d7bb4157da4e7c0f607f89eb4b931e01094b8ab7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "FinalCertificationSelection"
+containing_schema = "FinalCertificationSelection"
+union_path = "FinalCertificationSelection"
+arm_tag = 0x0004
+source_arm_name = "MetaAbort"
+stable_name = "meta_abort"
+payload_kind = "inline-record"
+payload_sha256 = "d76ffe539b6a33998e009e778af2a832d3715075d90a27a8cf0b214657d9f97b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "FinalCertificationSelectionLocalCommitTerminalWriteResult"
+containing_schema = "FinalCertificationSelection"
+union_path = "FinalCertificationSelection.LocalCommit.terminal_write_result"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "FinalCertificationSelectionLocalCommitTerminalWriteResult"
+containing_schema = "FinalCertificationSelection"
+union_path = "FinalCertificationSelection.LocalCommit.terminal_write_result"
+arm_tag = 0x0002
+source_arm_name = "Prepared"
+stable_name = "prepared"
+payload_kind = "inline-record"
+payload_sha256 = "52e327d7057422901fd1d889ad7ce022520dfadb9b9fbdbd7b565bccd593f686"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "FinalCertificationSelectionMetaCommitTerminalWriteResult"
+containing_schema = "FinalCertificationSelection"
+union_path = "FinalCertificationSelection.MetaCommit.terminal_write_result"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "FinalCertificationSelectionMetaCommitTerminalWriteResult"
+containing_schema = "FinalCertificationSelection"
+union_path = "FinalCertificationSelection.MetaCommit.terminal_write_result"
+arm_tag = 0x0002
+source_arm_name = "Prepared"
+stable_name = "prepared"
+payload_kind = "inline-record"
+payload_sha256 = "067ff5b612e47b424e97e33d0a8d459da70000204d2c3fcfb7ce5c3e4d267dc9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "GcDecisionRecordDecision"
@@ -11729,6 +12253,32 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "LocalOrderSubject"
+containing_schema = "LocalOrderSubject"
+union_path = "LocalOrderSubject"
+arm_tag = 0x0001
+source_arm_name = "Terminal"
+stable_name = "terminal"
+payload_kind = "inline-record"
+payload_sha256 = "dea76d675ccf3cca145b8cd40a48c8bca0336dfb17bd79299954a93997a64ac8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "LocalOrderSubject"
+containing_schema = "LocalOrderSubject"
+union_path = "LocalOrderSubject"
+arm_tag = 0x0002
+source_arm_name = "Control"
+stable_name = "control"
+payload_kind = "inline-record"
+payload_sha256 = "43cfaad7e3c6de18a4fd5d48ee9498d14624f22a98f1d8f1690b58c932d103f1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "LocalOutcomeCompactionSpec"
 containing_schema = "LocalOutcomeCompactionSpec"
 union_path = "LocalOutcomeCompactionSpec"
@@ -12528,6 +13078,32 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "MetaOrderSubject"
+containing_schema = "MetaOrderSubject"
+union_path = "MetaOrderSubject"
+arm_tag = 0x0001
+source_arm_name = "Terminal"
+stable_name = "terminal"
+payload_kind = "inline-record"
+payload_sha256 = "55f565551f706ed39f4bd13d9408bc81767e1a14e2b56230366e2466e881ede6"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaOrderSubject"
+containing_schema = "MetaOrderSubject"
+union_path = "MetaOrderSubject"
+arm_tag = 0x0002
+source_arm_name = "Control"
+stable_name = "control"
+payload_kind = "inline-record"
+payload_sha256 = "2125f616aa09e9664f135dba2d0c3244e38123ea9ae4b93acc0ae7f066545b74"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "MetaPreparedCommandRecordStatus"
 containing_schema = "MetaPreparedCommandRecord"
 union_path = "MetaPreparedCommandRecord.status"
@@ -12985,6 +13561,45 @@ arm_tag = 0x0002
 source_arm_name = "Disabled"
 stable_name = "disabled"
 payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "OperationAuditAdmission"
+containing_schema = "OperationAuditAdmission"
+union_path = "OperationAuditAdmission"
+arm_tag = 0x0001
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "inline-record"
+payload_sha256 = "27acef18721dfa1ec3a2bf2c4742c60a7aae1d17ac79ef1599ad68f6f0987966"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "OperationAuditAdmission"
+containing_schema = "OperationAuditAdmission"
+union_path = "OperationAuditAdmission"
+arm_tag = 0x0002
+source_arm_name = "PendingUnclaimed"
+stable_name = "pending_unclaimed"
+payload_kind = "inline-record"
+payload_sha256 = "8eff44613fb2cff7b9feb281c99e5b15ac05a94b0c05d3ed3e632b9851327916"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "OperationAuditAdmission"
+containing_schema = "OperationAuditAdmission"
+union_path = "OperationAuditAdmission"
+arm_tag = 0x0003
+source_arm_name = "Claimed"
+stable_name = "claimed"
+payload_kind = "inline-record"
+payload_sha256 = "b2ed44da0ea3d4a22cd43e9cd0ff5a7215c9fcd36cde5fe96f2da444794ca17d"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -13642,6 +14257,32 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "PublicPostconditionProgressProjection"
+containing_schema = "PublicPostconditionProgressProjection"
+union_path = "PublicPostconditionProgressProjection"
+arm_tag = 0x0001
+source_arm_name = "Opaque"
+stable_name = "opaque"
+payload_kind = "inline-record"
+payload_sha256 = "1a2afd6d3db52adbcf65cb0f40b2a470d99969946c194ff6256be8b0ff8495fa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PublicPostconditionProgressProjection"
+containing_schema = "PublicPostconditionProgressProjection"
+union_path = "PublicPostconditionProgressProjection"
+arm_tag = 0x0002
+source_arm_name = "Disclosed"
+stable_name = "disclosed"
+payload_kind = "inline-record"
+payload_sha256 = "c0faeb91f9c69bbf04d951cd06f1817fac99d29258cf7a592dd8db477eeae943"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "PublicTerminalProgressProjection"
 containing_schema = "PublicTerminalProgressProjection"
 union_path = "PublicTerminalProgressProjection"
@@ -13825,6 +14466,84 @@ source_arm_name = "Shard"
 stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "259d58930b54ee5f66887b101a2b467696d4c806190710d77e0f550e0c9188aa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReadExecutionScope"
+containing_schema = "ReadExecutionScope"
+union_path = "ReadExecutionScope"
+arm_tag = 0x0001
+source_arm_name = "LocalTerminal"
+stable_name = "local_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "9461c4745b396704e91ea6da0400328206cbc22396e4400190b5c52b4fca782b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReadExecutionScope"
+containing_schema = "ReadExecutionScope"
+union_path = "ReadExecutionScope"
+arm_tag = 0x0002
+source_arm_name = "LocalStatement"
+stable_name = "local_statement"
+payload_kind = "inline-record"
+payload_sha256 = "de4f13d9c5789c9ffee9b0d0629077ff04756499ca668548176e338a599dbacc"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReadExecutionScope"
+containing_schema = "ReadExecutionScope"
+union_path = "ReadExecutionScope"
+arm_tag = 0x0003
+source_arm_name = "MetaTerminal"
+stable_name = "meta_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "36db1e5e207f8e0452cc70f852e145b337bf8009995330a4637bf87995c67309"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReadExecutionScope"
+containing_schema = "ReadExecutionScope"
+union_path = "ReadExecutionScope"
+arm_tag = 0x0004
+source_arm_name = "MetaStatement"
+stable_name = "meta_statement"
+payload_kind = "inline-record"
+payload_sha256 = "3db3367a41e507e32b9a963b050197dc53ee256777ac17c646cb37091f442ba1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReadExecutionScope"
+containing_schema = "ReadExecutionScope"
+union_path = "ReadExecutionScope"
+arm_tag = 0x0005
+source_arm_name = "ShardTerminal"
+stable_name = "shard_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "f4d1cdfe492aa3db4964fda9197a8c107f818a813c577f5487469be1f44f1c36"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReadExecutionScope"
+containing_schema = "ReadExecutionScope"
+union_path = "ReadExecutionScope"
+arm_tag = 0x0006
+source_arm_name = "ShardStatement"
+stable_name = "shard_statement"
+payload_kind = "inline-record"
+payload_sha256 = "2c588a7b2e6e541177f2689a7b766ce51b6de926e2ee0976335d499d8e9f5e5f"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -17183,6 +17902,110 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union_arm]]
+union_name = "SemanticTerminalDescriptor"
+containing_schema = "SemanticTerminalDescriptor"
+union_path = "SemanticTerminalDescriptor"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "7e8cab04a56dea08cdd7405faefcaba349e49d08e26ac88f6500246e00c70a4b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "SemanticTerminalDescriptor"
+containing_schema = "SemanticTerminalDescriptor"
+union_path = "SemanticTerminalDescriptor"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "sharded"
+payload_kind = "inline-record"
+payload_sha256 = "6c2e177dacab55243b1a63b62e936a9c1cad74a98a9ee0ae5d82722e494dcba5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "SemanticTerminalDescriptorLocalTerminal"
+containing_schema = "SemanticTerminalDescriptor"
+union_path = "SemanticTerminalDescriptor.Local.terminal"
+arm_tag = 0x0001
+source_arm_name = "Write"
+stable_name = "write"
+payload_kind = "inline-record"
+payload_sha256 = "2f6c037408e5c5299319751ecc161ca9fe5a429ebd2e219a86b78658dd5b9983"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "SemanticTerminalDescriptorLocalTerminal"
+containing_schema = "SemanticTerminalDescriptor"
+union_path = "SemanticTerminalDescriptor.Local.terminal"
+arm_tag = 0x0002
+source_arm_name = "Abort"
+stable_name = "abort"
+payload_kind = "inline-record"
+payload_sha256 = "43c8c9e10c87065732adaf39280e67f7a4c8973b8a96f5f1e33db9f86e5a7d77"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "SemanticTerminalDescriptorLocalTerminal"
+containing_schema = "SemanticTerminalDescriptor"
+union_path = "SemanticTerminalDescriptor.Local.terminal"
+arm_tag = 0x0003
+source_arm_name = "ReadClose"
+stable_name = "read_close"
+payload_kind = "inline-record"
+payload_sha256 = "f0c7ccfe673d4acd0ee14965d1cde03db3f71df1ca826221d9c9b3e0197be574"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "SemanticTerminalDescriptorShardedTerminal"
+containing_schema = "SemanticTerminalDescriptor"
+union_path = "SemanticTerminalDescriptor.Sharded.terminal"
+arm_tag = 0x0001
+source_arm_name = "Write"
+stable_name = "write"
+payload_kind = "inline-record"
+payload_sha256 = "27135cd95855c5386f6e9955a9e397640448ca288c7ba7f21cb1ee54aa2bec1e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "SemanticTerminalDescriptorShardedTerminal"
+containing_schema = "SemanticTerminalDescriptor"
+union_path = "SemanticTerminalDescriptor.Sharded.terminal"
+arm_tag = 0x0002
+source_arm_name = "Abort"
+stable_name = "abort"
+payload_kind = "inline-record"
+payload_sha256 = "61bf1dca00fc506dc49d31b1d69f5622eb0f38e0e06e273eb421af1e7f3ba462"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "SemanticTerminalDescriptorShardedTerminal"
+containing_schema = "SemanticTerminalDescriptor"
+union_path = "SemanticTerminalDescriptor.Sharded.terminal"
+arm_tag = 0x0003
+source_arm_name = "ReadClose"
+stable_name = "read_close"
+payload_kind = "inline-record"
+payload_sha256 = "620d15bf3256977777158110ec9cd006b2177336f40c43f848b286d05eecc5d6"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "ServicePromotionExternalOperationKind"
 containing_schema = "ServicePromotionExternalOperationKind"
 union_path = "ServicePromotionExternalOperationKind"
@@ -17777,6 +18600,71 @@ source_arm_name = "Resolved"
 stable_name = "resolved"
 payload_kind = "inline-record"
 payload_sha256 = "dd6e59aa7857e08090570a18ba15bd098d4578ab1594b94ea7708989dd88c08a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "StatementAuditAdmission"
+containing_schema = "StatementAuditAdmission"
+union_path = "StatementAuditAdmission"
+arm_tag = 0x0001
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "inline-record"
+payload_sha256 = "27acef18721dfa1ec3a2bf2c4742c60a7aae1d17ac79ef1599ad68f6f0987966"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "StatementAuditAdmission"
+containing_schema = "StatementAuditAdmission"
+union_path = "StatementAuditAdmission"
+arm_tag = 0x0002
+source_arm_name = "PendingUnclaimed"
+stable_name = "pending_unclaimed"
+payload_kind = "inline-record"
+payload_sha256 = "f338bc3692cde8f6ab50902fe3bbfb73e9f1ee4dcace12346e3ea3c1ebaa0f85"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "StatementAuditAdmission"
+containing_schema = "StatementAuditAdmission"
+union_path = "StatementAuditAdmission"
+arm_tag = 0x0003
+source_arm_name = "Claimed"
+stable_name = "claimed"
+payload_kind = "inline-record"
+payload_sha256 = "7c43f6c02ec134df895a6105d9c95092943753dc2d40c76e710d8545408b9cab"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "StatementPublishedOutput"
+containing_schema = "StatementPublishedOutput"
+union_path = "StatementPublishedOutput"
+arm_tag = 0x0001
+source_arm_name = "NoResult"
+stable_name = "no_result"
+payload_kind = "inline-record"
+payload_sha256 = "6b9f746ab051e4f54966e3b1c74b13c1425c5c765dc91d1d43dc2c8dd0a985d1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "StatementPublishedOutput"
+containing_schema = "StatementPublishedOutput"
+union_path = "StatementPublishedOutput"
+arm_tag = 0x0002
+source_arm_name = "Buffered"
+stable_name = "buffered"
+payload_kind = "inline-record"
+payload_sha256 = "6c7e2a63d26210679a50ef2706185326efa0da011cd5ba2f5448596ef87c8e31"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -18464,6 +19352,31 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "TransactionErrorPolicy"
+containing_schema = "TransactionErrorPolicy"
+union_path = "TransactionErrorPolicy"
+arm_tag = 0x0001
+source_arm_name = "AbortTransactionOnStatementError"
+stable_name = "abort_transaction_on_statement_error"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "TransactionErrorPolicy"
+containing_schema = "TransactionErrorPolicy"
+union_path = "TransactionErrorPolicy"
+arm_tag = 0x0002
+source_arm_name = "ContinueOnDeclaredRecoverable"
+stable_name = "continue_on_declared_recoverable"
+payload_kind = "inline-record"
+payload_sha256 = "fc38ec49efc62bc4eceec569bb2bb4298bdb9a9fdae2658cb671cfbf07c2b6e5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "TxnAbortSpecRequiredAbortSource"
 containing_schema = "TxnAbortSpec"
 union_path = "TxnAbortSpec.required_abort_source"
@@ -18506,6 +19419,93 @@ union_path = "TxnAllocationSlotKey.posture"
 arm_tag = 0x0002
 source_arm_name = "Sharded"
 stable_name = "sharded"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "TxnCompletionState"
+containing_schema = "TxnCompletionState"
+union_path = "TxnCompletionState"
+arm_tag = 0x0001
+source_arm_name = "InProgress"
+stable_name = "in_progress"
+payload_kind = "inline-record"
+payload_sha256 = "46d3c81b094725ee71f193452367f9af5ba3a235bc92cb6416f4ad703e4764fa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TxnCompletionState"
+containing_schema = "TxnCompletionState"
+union_path = "TxnCompletionState"
+arm_tag = 0x0002
+source_arm_name = "TerminalPending"
+stable_name = "terminal_pending"
+payload_kind = "inline-record"
+payload_sha256 = "1df21ace5828774a0812d9054b150580b5e5a7454fdada18466c88c5f83464e9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TxnCompletionState"
+containing_schema = "TxnCompletionState"
+union_path = "TxnCompletionState"
+arm_tag = 0x0003
+source_arm_name = "TerminalReady"
+stable_name = "terminal_ready"
+payload_kind = "inline-record"
+payload_sha256 = "66002b221db9958fba83873d51585814bd4045b9c2e7cab152d7f9745277c4f1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TxnCompletionStateInProgressPhase"
+containing_schema = "TxnCompletionState"
+union_path = "TxnCompletionState.InProgress.phase"
+arm_tag = 0x0001
+source_arm_name = "BeginStaging"
+stable_name = "begin_staging"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "TxnCompletionStateInProgressPhase"
+containing_schema = "TxnCompletionState"
+union_path = "TxnCompletionState.InProgress.phase"
+arm_tag = 0x0002
+source_arm_name = "Registered"
+stable_name = "registered"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "TxnCompletionStateInProgressPhase"
+containing_schema = "TxnCompletionState"
+union_path = "TxnCompletionState.InProgress.phase"
+arm_tag = 0x0003
+source_arm_name = "StatementOpen"
+stable_name = "statement_open"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "TxnCompletionStateInProgressPhase"
+containing_schema = "TxnCompletionState"
+union_path = "TxnCompletionState.InProgress.phase"
+arm_tag = 0x0004
+source_arm_name = "PrepareAdmitted"
+stable_name = "prepare_admitted"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
@@ -18705,6 +19705,32 @@ source_arm_name = "Shard"
 stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "1126f8d358d2d7cac029d698aa0e66457118484f25bcc95c6f1562a676652509"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "WorkspaceReleaseEvidenceRef"
+containing_schema = "WorkspaceReleaseEvidenceRef"
+union_path = "WorkspaceReleaseEvidenceRef"
+arm_tag = 0x0001
+source_arm_name = "MetaLocal"
+stable_name = "meta_local"
+payload_kind = "inline-record"
+payload_sha256 = "5e06d9032d0aa89a6bfa9cd8194318184e987158c8ef3ecafaa3a55d9c841dd9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "WorkspaceReleaseEvidenceRef"
+containing_schema = "WorkspaceReleaseEvidenceRef"
+union_path = "WorkspaceReleaseEvidenceRef"
+arm_tag = 0x0002
+source_arm_name = "ShardRemote"
+stable_name = "shard_remote"
+payload_kind = "inline-record"
+payload_sha256 = "e9cce4aa2ce95cf58a6a089c0147ef4602435278fe8f600eda376835323c2ec9"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
