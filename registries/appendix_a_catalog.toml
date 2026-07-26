@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2395
+target_count = 2399
 projection_fallback_count = 90
-target_source_assignment_sha256 = "0576c7c263b4220acef399b03a528c044e4a45e889a51227cd61a6bdfeaf522d"
+target_source_assignment_sha256 = "8b8cac944ec06ed20833528e0407a9f4485c5a531ba55aa7ce18a732d21532a6"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -15087,6 +15087,73 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the ConfigurationState this TopologyState names; retained while the referrer is retained, and the acyclic order 5 <= 40 keeps the reference backward-only (a04:1588)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:raft-state-root-role-matching-applied-cut-snapshot-ref"
+containing_schema = "RaftStateRoot<Role>"
+field_tag = 0x0004
+stable_name = "matching_applied_cut_snapshot_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RaftSnapshot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RaftSnapshot this RaftStateRoot names; retained while the referrer is retained, and the acyclic order 40 <= 40 keeps the reference backward-only (a04:1568)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-obligation-root-source-transfer-record-identity"
+containing_schema = "RemoteRetentionObligationRoot"
+field_tag = 0x000a
+stable_name = "source_transfer_record_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline value carried in the RemoteRetentionObligationRoot body; no reference and no retention edge (a04:1578)"
+version_status = "reserved"
+max_size_bytes = 159
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:topology-state-predecessor-topology-identity"
+containing_schema = "TopologyState"
+field_tag = 0x0018
+stable_name = "predecessor_topology_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+digest_class = "weak_identity"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "weak-identity digest only; it names no retained object and creates no retention edge, so nothing is held alive by this field (a04:1588)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:validated-remote-configuration-anchor-input-spec-digest"
+containing_schema = "ValidatedRemoteConfigurationAnchor"
+field_tag = 0x000b
+stable_name = "input_spec_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+digest_class = "weak_identity"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "weak-identity digest only; it names no retained object and creates no retention edge, so nothing is held alive by this field (a04:1586)"
+version_status = "reserved"
+max_size_bytes = 32
 
 [[union]]
 slice_id = "a01"
@@ -72936,6 +73003,38 @@ target_row_id = "a07:wire-type:workspace-release-evidence-ref-shard-remote"
 slice_id = "a07"
 source_key = "arm|WorkspaceReleaseEvidenceRef|WorkspaceReleaseEvidenceRef|ShardRemote"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-raft-state-root-role-matching-applied-cut-snapshot-ref"
+target_row_id = "a04:field:raft-state-root-role-matching-applied-cut-snapshot-ref"
+slice_id = "a04"
+source_key = "field|RaftStateRoot<Role>|RaftStateRoot<Role>.matching_applied_cut_snapshot_ref|matching_applied_cut_snapshot_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-obligation-root-source-transfer-record-identity"
+target_row_id = "a04:field:remote-retention-obligation-root-source-transfer-record-identity"
+slice_id = "a04"
+source_key = "field|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot.TransferredInPending.source_transfer_record_identity|source_transfer_record_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-topology-state-predecessor-topology-identity"
+target_row_id = "a04:field:topology-state-predecessor-topology-identity"
+slice_id = "a04"
+source_key = "field|TopologyState|TopologyState.predecessor_topology_identity|predecessor_topology_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-validated-remote-configuration-anchor-input-spec-digest"
+target_row_id = "a04:field:validated-remote-configuration-anchor-input-spec-digest"
+slice_id = "a04"
+source_key = "field|ValidatedRemoteConfigurationAnchor|ValidatedRemoteConfigurationAnchor.input_spec_digest|input_spec_digest"
+target_kind = "field"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

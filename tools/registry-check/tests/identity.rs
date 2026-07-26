@@ -4964,6 +4964,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("RemoteRetentionObligationRoot", "tombstone_ref")
                 | ("RemoteRetentionObligationRoot", "ack_leaf_ref")
                 | ("TopologyState", "meta_configuration_ref")
+                | ("RaftStateRoot<Role>", "matching_applied_cut_snapshot_ref")
+                | ("RemoteRetentionObligationRoot", "source_transfer_record_identity")
+                | ("TopologyState", "predecessor_topology_identity")
+                | ("ValidatedRemoteConfigurationAnchor", "input_spec_digest")
         )
     };
     pre_erratum.fields.retain(|field| {
@@ -4983,7 +4987,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 92,
+        pre_erratum.fields.len() + 96,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A14 GC anchor tranche"
     );

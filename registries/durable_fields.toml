@@ -1254,6 +1254,21 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "RaftStateRoot<Role>"
+field_tag = 0x0004
+stable_name = "matching_applied_cut_snapshot_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RaftSnapshot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RaftSnapshot this RaftStateRoot names; retained while the referrer is retained, and the acyclic order 40 <= 40 keeps the reference backward-only (a04:1568)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "RecoveryBridgeSpec"
 field_tag = 0x0001
 stable_name = "source_manifest_identity"
@@ -2365,6 +2380,20 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the CertifiedRoleTransitionRef this RemoteRetentionObligationRoot names; retained while the referrer is retained, and the acyclic order 29 <= 40 keeps the reference backward-only (a04:1578)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "RemoteRetentionObligationRoot"
+field_tag = 0x000a
+stable_name = "source_transfer_record_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline value carried in the RemoteRetentionObligationRoot body; no reference and no retention edge (a04:1578)"
+version_status = "reserved"
+max_size_bytes = 159
 
 [[field]]
 containing_schema = "RemoteRetentionObligationRoot"
@@ -4239,6 +4268,36 @@ role_predicate = "role-meta"
 retention_and_cut_rule = "inline applied-control identity retained with TopologyState; no independent reachability edge (a04:1588)"
 version_status = "reserved"
 max_size_bytes = 49
+
+[[field]]
+containing_schema = "TopologyState"
+field_tag = 0x0018
+stable_name = "predecessor_topology_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "weak-identity digest only; it names no retained object and creates no retention edge, so nothing is held alive by this field (a04:1588)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "ValidatedRemoteConfigurationAnchor"
+field_tag = 0x000b
+stable_name = "input_spec_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "weak-identity digest only; it names no retained object and creates no retention edge, so nothing is held alive by this field (a04:1586)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "ValidatedRemoteConfigurationAnchor"
