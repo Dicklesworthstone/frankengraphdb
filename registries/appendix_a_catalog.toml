@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3132
+target_count = 3135
 projection_fallback_count = 108
-target_source_assignment_sha256 = "68fbdd6632c958642444670d1d3d21187041d71da41dcdd96094b30eaba39623"
+target_source_assignment_sha256 = "a6afcd9178269145966e8d40bc5093784602b6297c9347288adecc91d2d951ff"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 37
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 55
+registry_epoch = 56
 
 [[logical_kind]]
 slice_id = "a03"
@@ -9008,7 +9008,7 @@ name = "Operational"
 kind = "record"
 status = "reserved"
 encoding_context = "canonical W12 role-transition/sharding spec record"
-allowed_containing_schemas = ["Operational"]
+allowed_containing_schemas = ["RestoreTerminalPinBasis<Role>"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -9626,7 +9626,7 @@ name = "CatalogAbandonPredecessor"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union CatalogAbandonPredecessor (a18)"
-allowed_containing_schemas = ["CatalogAbandonPredecessor"]
+allowed_containing_schemas = ["CatalogTombstoneRestoreTargetReceipt<Contract>"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -9714,7 +9714,7 @@ name = "RestoreTerminalPinReleaseAuthorizationBody"
 kind = "record"
 status = "reserved"
 encoding_context = "inline record carrying the RestoreTerminalPinReleaseAuthorizationBody field group (a18)"
-allowed_containing_schemas = ["RestoreTerminalPinReleaseAuthorizationBody"]
+allowed_containing_schemas = ["RestoreTerminalPinReleaseAuthorization"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -31552,7 +31552,7 @@ containing_schema = "CatalogAbandonPredecessor"
 union_path = "CatalogAbandonPredecessor"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["CatalogAbandonPredecessor"]
+allowed_containing_schemas = ["CatalogTombstoneRestoreTargetReceipt<Contract>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -92621,6 +92621,54 @@ version_status = "reserved"
 max_size_bytes = 256
 
 [[field]]
+slice_id = "a18"
+row_id = "a18:field:catalog-tombstone-restore-target-receipt-contract-predecessor"
+containing_schema = "CatalogTombstoneRestoreTargetReceipt<Contract>"
+field_tag = 0x0003
+stable_name = "predecessor"
+exact_wire_type = "CatalogAbandonPredecessor"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline closed predecessor evidence is retained and cut with the signed catalog-tombstone target receipt; it creates no reachability edge (a18:2427)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-terminal-pin-basis-role-terminal-disposition"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+field_tag = 0x0003
+stable_name = "terminal_disposition"
+exact_wire_type = "Operational"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline Operational fixes the exact operational terminal-basis arm and is retained and cut with that basis; it creates no reachability edge (a18:2373)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-terminal-pin-release-authorization-body"
+containing_schema = "RestoreTerminalPinReleaseAuthorization"
+field_tag = 0x0001
+stable_name = "body"
+exact_wire_type = "RestoreTerminalPinReleaseAuthorizationBody"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "inline release-authorization body is retained and cut with its same-group certificate and creates no reachability edge (a18:2415)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 slice_id = "a12"
 row_id = "a12:field:constraint-state-root-coordinate"
 containing_schema = "ConstraintStateRoot"
@@ -94589,6 +94637,30 @@ row_id = "a18:target:field-restore-terminal-cleanup-authority-role-authority-own
 target_row_id = "a18:field:restore-terminal-cleanup-authority-role-authority-owning-role-authority-bound-header"
 slice_id = "a18"
 source_key = "field|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-catalog-tombstone-restore-target-receipt-contract-predecessor"
+target_row_id = "a18:field:catalog-tombstone-restore-target-receipt-contract-predecessor"
+slice_id = "a18"
+source_key = "field|CatalogTombstoneRestoreTargetReceipt<Contract>|CatalogTombstoneRestoreTargetReceipt<Contract>.predecessor|predecessor"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-terminal-pin-basis-role-terminal-disposition"
+target_row_id = "a18:field:restore-terminal-pin-basis-role-terminal-disposition"
+slice_id = "a18"
+source_key = "field|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>.Operational.terminal_disposition|terminal_disposition"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-terminal-pin-release-authorization-body"
+target_row_id = "a18:field:restore-terminal-pin-release-authorization-body"
+slice_id = "a18"
+source_key = "field|RestoreTerminalPinReleaseAuthorization|RestoreTerminalPinReleaseAuthorization.body|body"
 target_kind = "field"
 definition_status = "declared"
 

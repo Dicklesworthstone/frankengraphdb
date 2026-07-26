@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 55
+registry_epoch = 56
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -791,6 +791,20 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the CatalogAuthorityHead this CanonicalCatalogRestoreTargetTerminalDisposition names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2429)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "CatalogTombstoneRestoreTargetReceipt<Contract>"
+field_tag = 0x0003
+stable_name = "predecessor"
+exact_wire_type = "CatalogAbandonPredecessor"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline closed predecessor evidence is retained and cut with the signed catalog-tombstone target receipt; it creates no reachability edge (a18:2427)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "CertificateAttemptPlan"
@@ -7681,6 +7695,20 @@ max_size_bytes = 256
 
 [[field]]
 containing_schema = "RestoreTerminalPinBasis<Role>"
+field_tag = 0x0003
+stable_name = "terminal_disposition"
+exact_wire_type = "Operational"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline Operational fixes the exact operational terminal-basis arm and is retained and cut with that basis; it creates no reachability edge (a18:2373)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RestoreTerminalPinBasis<Role>"
 field_tag = 0x0005
 stable_name = "physical_inventory_ref"
 exact_wire_type = "StrongRef"
@@ -7738,6 +7766,20 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the RestoreTerminalPhysicalInventory<Role,Disposition> this RestoreTerminalPinDurabilityReceipt names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a18:2369)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreTerminalPinReleaseAuthorization"
+field_tag = 0x0001
+stable_name = "body"
+exact_wire_type = "RestoreTerminalPinReleaseAuthorizationBody"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "inline release-authorization body is retained and cut with its same-group certificate and creates no reachability edge (a18:2415)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "ResultDeliveryLease"
@@ -10080,7 +10122,7 @@ containing_schema = "CatalogAbandonPredecessor"
 union_path = "CatalogAbandonPredecessor"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["CatalogAbandonPredecessor"]
+allowed_containing_schemas = ["CatalogTombstoneRestoreTargetReceipt<Contract>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

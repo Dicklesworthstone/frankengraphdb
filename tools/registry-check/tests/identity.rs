@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 55
+registry_epoch = 56
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 55);
+    assert_eq!(epoch, 56);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3073,6 +3073,66 @@ fn idr_key_destruction_target_consumer_closure_is_exact() {
     assert_eq!(
         wire_parent.allowed_containing_schemas, expected,
         "the wire parent must exactly mirror the ordinary-union consumer closure"
+    );
+}
+
+#[test]
+fn idr_a18_wire_consumer_allowlists_are_exact() {
+    let identity = real_identity();
+    for (wire_name, container, field_name, field_tag, construction_order) in [
+        (
+            "CatalogAbandonPredecessor",
+            "CatalogTombstoneRestoreTargetReceipt<Contract>",
+            "predecessor",
+            0x0003,
+            20,
+        ),
+        (
+            "Operational",
+            "RestoreTerminalPinBasis<Role>",
+            "terminal_disposition",
+            0x0003,
+            40,
+        ),
+        (
+            "RestoreTerminalPinReleaseAuthorizationBody",
+            "RestoreTerminalPinReleaseAuthorization",
+            "body",
+            0x0001,
+            44,
+        ),
+    ] {
+        let expected_consumers = vec![container.to_owned()];
+        let wire = identity
+            .wire
+            .iter()
+            .find(|wire| wire.name == wire_name)
+            .expect("A18 exact wire type exists");
+        assert_eq!(
+            wire.allowed_containing_schemas, expected_consumers,
+            "{wire_name} must admit exactly its source-derived A18 consumer"
+        );
+        let field = identity
+            .fields
+            .iter()
+            .find(|field| field.containing_schema == container && field.stable_name == field_name)
+            .expect("A18 exact field exists");
+        assert_eq!(field.field_tag, field_tag);
+        assert_eq!(field.exact_wire_type, wire_name);
+        assert_eq!(field.identity_class, "inline");
+        assert_eq!(field.reference_semantics, "none");
+        assert_eq!(field.construction_order, construction_order);
+    }
+
+    let union = identity
+        .ordinary_unions
+        .iter()
+        .find(|union| union.union_name == "CatalogAbandonPredecessor")
+        .expect("CatalogAbandonPredecessor ordinary union exists");
+    assert_eq!(
+        union.allowed_containing_schemas,
+        vec!["CatalogTombstoneRestoreTargetReceipt<Contract>".to_owned()],
+        "the ordinary union must exactly mirror its wire-parent consumer closure"
     );
 }
 
@@ -5949,6 +6009,19 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
             )
     };
+    // z542 opens the exact consumer closure for three already-registered wire
+    // types and adds the corresponding inline fields. They postdate the
+    // erratum and therefore stay out of its historical namespace witness.
+    let post_erratum_a18_wire_consumer_fields = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            (
+                "CatalogTombstoneRestoreTargetReceipt<Contract>",
+                "predecessor"
+            ) | ("RestoreTerminalPinBasis<Role>", "terminal_disposition")
+                | ("RestoreTerminalPinReleaseAuthorization", "body")
+        )
+    };
     // j00a replaces five retaining predecessor self-edges with newly catalogued
     // weak generation-adjacency digests. Remove those rows when reconstructing
     // the namespace that predates every post-erratum field increment.
@@ -6302,6 +6375,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 &field.containing_schema,
                 &field.stable_name,
             )
+            && !post_erratum_a18_wire_consumer_fields(&field.containing_schema, &field.stable_name)
             && !post_erratum_a04_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a10_field(&field.containing_schema, &field.stable_name)
@@ -6322,9 +6396,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 462,
+        pre_erratum.fields.len() + 465,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A16 inline-header tranche"
+        "the historical witness must remove every post-erratum field cohort through the A18 wire-consumer tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

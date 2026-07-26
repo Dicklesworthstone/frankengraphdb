@@ -2128,7 +2128,7 @@ name = "Operational"
 kind = "record"
 status = "reserved"
 encoding_context = "canonical W12 role-transition/sharding spec record"
-allowed_containing_schemas = ["Operational"]
+allowed_containing_schemas = ["RestoreTerminalPinBasis<Role>"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -2646,7 +2646,7 @@ name = "CatalogAbandonPredecessor"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union CatalogAbandonPredecessor (a18)"
-allowed_containing_schemas = ["CatalogAbandonPredecessor"]
+allowed_containing_schemas = ["CatalogTombstoneRestoreTargetReceipt<Contract>"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -2718,7 +2718,7 @@ name = "RestoreTerminalPinReleaseAuthorizationBody"
 kind = "record"
 status = "reserved"
 encoding_context = "inline record carrying the RestoreTerminalPinReleaseAuthorizationBody field group (a18)"
-allowed_containing_schemas = ["RestoreTerminalPinReleaseAuthorizationBody"]
+allowed_containing_schemas = ["RestoreTerminalPinReleaseAuthorization"]
 max_size_bytes = 16777216
 
 [[type]]
