@@ -27,8 +27,8 @@ plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 start_line = 1388
 end_line = 2728
 line_count = 1341
-byte_count = 1020717
-sha256 = "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1"
+byte_count = 1021081
+sha256 = "5ff06d712eb7f125d0c92db54cc9d485eb334f5dde805ad83d3d3fa32e573e4a"
 heading = "## Appendix A — On-Disk Object Formats (normative contract)"
 next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 
@@ -36,12 +36,12 @@ next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 target_count = 813
 target_ids_sha256 = "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"
 occurrence_count = 2458
-occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
+occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2580
+target_count = 2585
 projection_fallback_count = 106
-target_source_assignment_sha256 = "e0befcdd041ece0eb68de50368af529951098a94d82fea54c6b1f41486bab631"
+target_source_assignment_sha256 = "d4b747fa21195bd67bb97e8aa3ef0ccecc8b2ce0434d3b2d73e40930f7390820"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -156,8 +156,8 @@ title = "Appendix A exact catalog: Local logical state and durable transaction f
 start_line = 1464
 end_line = 1543
 line_count = 80
-byte_count = 69062
-sha256 = "9d761919535cdd27ad4783e5862ce119293973789e55db627ecc9d7bc0983db4"
+byte_count = 69131
+sha256 = "40b90aded14032e8d8d5a8173ab2fe8088d43bfbc33e5d04ffec6fa43612d574"
 predecessor = "a02"
 successor = "a04"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
@@ -165,13 +165,13 @@ definition_status = "declared"
 top_level_candidate_count = 89
 top_level_candidate_ids_sha256 = "afb3e8e0274c5192fe6de05504e4ba2355e9ff797bb4ed853a23e3ae3ac7920c"
 field_candidate_count = 732
-field_candidate_ids_sha256 = "20ddbe5dc9ba460cd3a3def620006d6a0cb32312b0f95f92a63893d4ccee30ee"
+field_candidate_ids_sha256 = "e28149f81bf37ae261abaa840bea82c8a39d88f23241c379ca5e6f8fe2c1ca12"
 union_candidate_count = 49
 union_candidate_ids_sha256 = "65e427afafb289ecfd92449f4f73381f84ea574f8f905560a2432372d79be485"
 arm_candidate_count = 129
 arm_candidate_ids_sha256 = "6c40ce7f70b31633b96fc946cfd8759e34b5ed1efad53239b69f7f76d9b09e24"
-ambiguity_count = 486
-ambiguity_ids_sha256 = "dcb1a859d16687c4d70931bef96b0fb3e601f9d3e0b9b473d11915b114292fea"
+ambiguity_count = 487
+ambiguity_ids_sha256 = "ccbb659ad50d9baaa64b67f15dc5f8aab9f12593007cb2c933b8f91b31884bd1"
 
 [[slice]]
 ordinal = 4
@@ -231,8 +231,8 @@ title = "Appendix A exact catalog: W12 Meta and Shard semantic core formats"
 start_line = 1659
 end_line = 1700
 line_count = 42
-byte_count = 38061
-sha256 = "18baef688b553fcb72987e546f95138b598f32a1389eeb72426a5f925684496e"
+byte_count = 38209
+sha256 = "e6c1d5924a456b28fceddabfd3b6269a446af214f595794d943483e6b326aa68"
 predecessor = "a05"
 successor = "a07"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
@@ -240,13 +240,13 @@ definition_status = "declared"
 top_level_candidate_count = 42
 top_level_candidate_ids_sha256 = "6f6b0b6f4d2ed2fcf71cce3a005e185b1251893f50d6a0846484ae287b984d71"
 field_candidate_count = 439
-field_candidate_ids_sha256 = "ca7d82fd38cccdb69789252fc8e3e11a49fb13acec807fa42993b8133c995815"
+field_candidate_ids_sha256 = "ed01f2d9670d4723a9b20b08e957ba8bc2c17ec7f0ef942553dc754235df03f6"
 union_candidate_count = 15
 union_candidate_ids_sha256 = "29e8e8f834cf4ddc73eb5faa5fbf76a72bd8a33cb9368cd85192c28e0ae2b724"
 arm_candidate_count = 51
 arm_candidate_ids_sha256 = "26ed5557dfe99c18410d1992312ffc09e1e9369113fbe87f9119d76251760bc6"
-ambiguity_count = 259
-ambiguity_ids_sha256 = "46252aded3dcbf089569cdfe09a2f3d207391262dbdf1838d2c1cddd7f5d7c85"
+ambiguity_count = 261
+ambiguity_ids_sha256 = "90fb814e1d1749a703f4bae95fa62ef514d25614b92b9679ff3b182255a9408f"
 
 [[slice]]
 ordinal = 7
@@ -331,8 +331,8 @@ title = "Appendix A exact catalog: Committed effects, commands, and logical delt
 start_line = 1910
 end_line = 1931
 line_count = 22
-byte_count = 16579
-sha256 = "7bad384e377f49ef7d102eefda083260874790f6af47f85d0b344ea4c0854e9e"
+byte_count = 16645
+sha256 = "a435edb51aa09ddb6df21f400b5ddc810f6d9e0dfa8511864921a6c25ffd2d50"
 predecessor = "a09"
 successor = "a11"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
@@ -340,13 +340,13 @@ definition_status = "declared"
 top_level_candidate_count = 16
 top_level_candidate_ids_sha256 = "3346cbd9cdd7222638acb3ce921177380298329a49ec01f0a0430b3ecee8a7c1"
 field_candidate_count = 134
-field_candidate_ids_sha256 = "afd046a5dca81c16f0e8ffca019eb5e80b8446bca23b393872fc95746e011042"
+field_candidate_ids_sha256 = "d3772f891d913f49a5fe58ab00825437de27209183f4efdeaea15d02c69b30aa"
 union_candidate_count = 4
 union_candidate_ids_sha256 = "75ebe16c9c17ce6e6b305ed0698851985ac53b2c42c6cc1683d7aaba03917211"
 arm_candidate_count = 13
 arm_candidate_ids_sha256 = "442fae0a7cf50d4c06719a00b37c26bfc16349763cf3f2cc9717b04039496fe7"
-ambiguity_count = 90
-ambiguity_ids_sha256 = "6bfc9a84c94791f6182df9904dc972d63ea0852970460884b0688a4e01bb0a97"
+ambiguity_count = 91
+ambiguity_ids_sha256 = "998ad5fd54b4df8725bf43e7f838f9d06c465dbb29dd9e80759072c1e2cf8bde"
 
 [[slice]]
 ordinal = 11
@@ -481,8 +481,8 @@ title = "Appendix A exact catalog: Rollback-protected authority-time formats and
 start_line = 2157
 end_line = 2246
 line_count = 90
-byte_count = 69768
-sha256 = "9fc751b96c0539ad956995a3e0bde2fe71e58fe4103aa80cbce9d1c687273427"
+byte_count = 69849
+sha256 = "375bd6ee859b02129bb32d3f15a659158d3665a56b990509874e0da076a0d6ad"
 predecessor = "a15"
 successor = "a17"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
@@ -490,13 +490,13 @@ definition_status = "declared"
 top_level_candidate_count = 94
 top_level_candidate_ids_sha256 = "4bb1be27c98bc73190b0aef537789ac881da9fdc817ea7fa73e2caada1aa6376"
 field_candidate_count = 1066
-field_candidate_ids_sha256 = "558e4fe8c4465637234fcb6611394784641ebd6cd213b1fb3285bbe3cf2f7c43"
+field_candidate_ids_sha256 = "76894eec3baeabfcdf65b285cc0c1e72b0fee8ee3001dc06a5b7c27af3c6b419"
 union_candidate_count = 32
 union_candidate_ids_sha256 = "607b6608ad46705470d526951c6a95c5e0fad3b37df576a6a13b69c1abe8a234"
 arm_candidate_count = 85
 arm_candidate_ids_sha256 = "4c48c8511f5d6e6d121cfd77a4b3d5ad0b1a40c1b9ebbd9dff78f03e50fc5f23"
-ambiguity_count = 825
-ambiguity_ids_sha256 = "bf9119647ec4065423958f4721e6cdead82b9b90ef4327313621c8940565c152"
+ambiguity_count = 826
+ambiguity_ids_sha256 = "62953c94d9d8952b8097bb524efa99cae16386d617294d0b246dfb6063cae4fa"
 
 [[slice]]
 ordinal = 17
@@ -16887,6 +16887,91 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the RestoreReconciliationCompletionProof<Shard> this RestoreShardReadyBarrier names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2565)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:txn-outcome-record-nonretaining-predecessor-digest"
+containing_schema = "TxnOutcomeRecord"
+field_tag = 0x0003
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 18
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a03:1524)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:meta-prepared-command-record-nonretaining-predecessor-digest"
+containing_schema = "MetaPreparedCommandRecord"
+field_tag = 0x0003
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a06:1698)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a06"
+row_id = "a06:field:shard-prepared-payload-record-nonretaining-predecessor-digest"
+containing_schema = "ShardPreparedPayloadRecord"
+field_tag = 0x0003
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 35
+role_predicate = "role-shard"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a06:1700)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:prepared-commit-record-nonretaining-predecessor-digest"
+containing_schema = "PreparedCommitRecord"
+field_tag = 0x0004
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a10:1922)"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-subject-issuance-reservation-role-nonretaining-predecessor-digest"
+containing_schema = "TimeSubjectIssuanceReservation<Role>"
+field_tag = 0x0004
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 19
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a16:2191)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[union]]
 slice_id = "a01"
@@ -75960,6 +76045,46 @@ source_key = "top|ReadYourWritesCapabilityLineageKey"
 target_kind = "wire-type"
 definition_status = "declared"
 
+[[target]]
+row_id = "a03:target:field-txn-outcome-record-nonretaining-predecessor-digest"
+target_row_id = "a03:field:txn-outcome-record-nonretaining-predecessor-digest"
+slice_id = "a03"
+source_key = "field|TxnOutcomeRecord|TxnOutcomeRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-meta-prepared-command-record-nonretaining-predecessor-digest"
+target_row_id = "a06:field:meta-prepared-command-record-nonretaining-predecessor-digest"
+slice_id = "a06"
+source_key = "field|MetaPreparedCommandRecord|MetaPreparedCommandRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a06:target:field-shard-prepared-payload-record-nonretaining-predecessor-digest"
+target_row_id = "a06:field:shard-prepared-payload-record-nonretaining-predecessor-digest"
+slice_id = "a06"
+source_key = "field|ShardPreparedPayloadRecord|ShardPreparedPayloadRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-prepared-commit-record-nonretaining-predecessor-digest"
+target_row_id = "a10:field:prepared-commit-record-nonretaining-predecessor-digest"
+slice_id = "a10"
+source_key = "field|PreparedCommitRecord|PreparedCommitRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:field-time-subject-issuance-reservation-role-nonretaining-predecessor-digest"
+target_row_id = "a16:field:time-subject-issuance-reservation-role-nonretaining-predecessor-digest"
+slice_id = "a16"
+source_key = "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|nonretaining_predecessor_digest"
+target_kind = "field"
+definition_status = "declared"
+
 [[source_symbol_disposition]]
 row_id = "a01:source-symbol-disposition:export-leaf"
 slice_id = "a01"
@@ -84696,9 +84821,9 @@ resolved_source_keys = ["top|TimeAuthorityRegistryTransitionReceipt"]
 rationale = "a16:2217: `TimeAuthorityRegistryTransitionReceipt {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|TimeAuthorityRegistryTransitionReceipt` itself, not an alias, enumeration, or citation."
 
 [[ambiguity_adjudication]]
-row_id = "a16:ambiguity-adjudication:5e71fa28a812b04cefab757b906e8af5e8d201fff5137a2e345789c0015f6cb6"
+row_id = "a16:ambiguity-adjudication:8382d602a7cfb3b34c9b3adc956a9aceaab94ee8e651d9eafad600a00a1f175a"
 slice_id = "a16"
-ambiguity_source_key = "ambiguity|ambiguous-schema-owner|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>|d81027816ba38a6cc4676ad6f6301fe68fdc41e6d486ada722261c2c964b7251|1|e98890295559e48247c398bdd64f7f6491a446e4a49fef5cc0cfd5dae7f7c634|leading named record has no explicit top-level ownership cue"
+ambiguity_source_key = "ambiguity|ambiguous-schema-owner|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>|771d2b92737a0ffbea4d2763e85896a473b9a256c4e28ce67b87bc1583758b98|1|e98890295559e48247c398bdd64f7f6491a446e4a49fef5cc0cfd5dae7f7c634|leading named record has no explicit top-level ownership cue"
 source_locations = ["a16:2191"]
 resolution = "maps-to-source"
 resolved_source_keys = ["top|TimeSubjectIssuanceReservation<Role>"]
@@ -85414,6 +85539,51 @@ source_locations = ["a09:1904"]
 resolution = "maps-to-source"
 resolved_source_keys = ["top|LocalFinalCertificationReserveSpec"]
 rationale = "a09:1904: the same span carries a second structural body for `top|LocalFinalCertificationReserveSpec`, whose own definition is a07:1750. a09 references the symbol and shows an installed record inside the same sentence, so the two bodies diverge for one source key. The divergence resolves to the a07 owner's definition; a09 contributes no competing structural claim."
+
+[[ambiguity_adjudication]]
+row_id = "a03:ambiguity-adjudication:8c725fa15a9bc362be089cd1c4a8a996d6f4e20664fcac5528a2df62b880ef17"
+slice_id = "a03"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|TxnOutcomeRecord|TxnOutcomeRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|3e4e3c9478ab77306a5f6dd8e456c8ffe9f19f18c63f88c98ffc9f366f3ca420|shorthand field has no exact type"
+source_locations = ["a03:1524"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|TxnOutcomeRecord|TxnOutcomeRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest"]
+rationale = "a03:1524: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge."
+
+[[ambiguity_adjudication]]
+row_id = "a06:ambiguity-adjudication:8723ace590fa1a79389ba18bd5aab08bcc1d3ebe7eb3a17528e939386f05cd0c"
+slice_id = "a06"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|MetaPreparedCommandRecord|MetaPreparedCommandRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|983566e6334d24084c27747e97f61d5b4677f958e4b2495c3d00c72b06f52703|shorthand field has no exact type"
+source_locations = ["a06:1698"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|MetaPreparedCommandRecord|MetaPreparedCommandRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest"]
+rationale = "a06:1698: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge."
+
+[[ambiguity_adjudication]]
+row_id = "a06:ambiguity-adjudication:d29cf70d19793cee02c2ad22e8df60d5ad6dd3357ba46123cc85f4d5728315f9"
+slice_id = "a06"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|ShardPreparedPayloadRecord|ShardPreparedPayloadRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|b555581d9afcce502838c9520cafa55a9b3fc5571da2c91d1045c7acbf410e09|shorthand field has no exact type"
+source_locations = ["a06:1700"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|ShardPreparedPayloadRecord|ShardPreparedPayloadRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest"]
+rationale = "a06:1700: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge."
+
+[[ambiguity_adjudication]]
+row_id = "a10:ambiguity-adjudication:a2ec9c9e4687c66ca7527a460cb9a9629e7e9297e0e9d39a307025de544f061f"
+slice_id = "a10"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|PreparedCommitRecord|PreparedCommitRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|13c8b4d84ea85afa96a67e30397af849c0c6d9af5702a2f53e2ce645100300c2|shorthand field has no exact type"
+source_locations = ["a10:1922"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|PreparedCommitRecord|PreparedCommitRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest"]
+rationale = "a10:1922: the bare nonretaining predecessor spelling matches PreparedRootHeader<Role> in the same prepared-root family and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge."
+
+[[ambiguity_adjudication]]
+row_id = "a16:ambiguity-adjudication:733086702e6b63491e3b2a762e92e10d4e93ed043291c93f73edc4769a46c3d2"
+slice_id = "a16"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|2c193dbc4032a49c21cf531f3f704a9e2cbc7fc8004bd836ecf285213b7d9b58|shorthand field has no exact type"
+source_locations = ["a16:2191"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|nonretaining_predecessor_digest"]
+rationale = "a16:2191: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge."
 
 [[field]]
 slice_id = "a18"

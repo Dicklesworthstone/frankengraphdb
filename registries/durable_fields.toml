@@ -1,6 +1,6 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1.
+# Appendix A lines 1388-2728; sha256=5ff06d712eb7f125d0c92db54cc9d485eb334f5dde805ad83d3d3fa32e573e4a.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
@@ -1450,6 +1450,21 @@ version_status = "reserved"
 max_size_bytes = 268435456
 
 [[field]]
+containing_schema = "MetaPreparedCommandRecord"
+field_tag = 0x0003
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a06:1698)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
 containing_schema = "MetaRestoreCompletionEvidence"
 field_tag = 0x0001
 stable_name = "cleanup_authority_ref"
@@ -1579,6 +1594,21 @@ role_predicate = "true"
 retention_and_cut_rule = "object_or_subobject_id realization inventory: names packed members without new schema surface; nonretaining locators — prepared OWNERSHIP retention is the obligation, not this edge (FG-INV-16)"
 version_status = "active"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "PreparedCommitRecord"
+field_tag = 0x0004
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a10:1922)"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
@@ -5759,6 +5789,21 @@ bd_excluded_field_tags = [1]
 recipe_pin = "fnv1a64:7f652e0dd29a56aa"
 
 [[field]]
+containing_schema = "ShardPreparedPayloadRecord"
+field_tag = 0x0003
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 35
+role_predicate = "role-shard"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a06:1700)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
 containing_schema = "ShardProtocolEvidence"
 field_tag = 0x0001
 stable_name = "evidence_body"
@@ -6013,6 +6058,21 @@ max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "TimeSubjectIssuanceReservation<Role>"
+field_tag = 0x0004
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 19
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a16:2191)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "TimeSubjectIssuanceReservation<Role>"
 field_tag = 0x0008
 stable_name = "state"
 exact_wire_type = "TimeSubjectIssuanceReservationState"
@@ -6109,6 +6169,21 @@ reference_semantics = "weak_digest"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "weak-identity digest only; it names no retained object and creates no retention edge, so nothing is held alive by this field (a04:1588)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "TxnOutcomeRecord"
+field_tag = 0x0003
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 18
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a03:1524)"
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"

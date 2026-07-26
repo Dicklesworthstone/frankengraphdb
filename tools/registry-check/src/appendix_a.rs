@@ -33,17 +33,17 @@ pub const HASH_ALGORITHM: &str = "sha256";
 pub const APPENDIX_START_LINE: i64 = 1388;
 pub const APPENDIX_END_LINE: i64 = 2728;
 pub const APPENDIX_LINE_COUNT: i64 = 1341;
-pub const APPENDIX_BYTE_COUNT: i64 = 1_020_717;
+pub const APPENDIX_BYTE_COUNT: i64 = 1_021_081;
 pub const APPENDIX_SHA256: &str =
-    "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
+    "5ff06d712eb7f125d0c92db54cc9d485eb334f5dde805ad83d3d3fa32e573e4a";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2580;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2585;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "1c30f7cd2ec6d5912868bdaa7612436764f4f3a33cd76af0f38397c51d08479c";
+    "021020cb3c0b8c1b3e0409aaa24a7c28d7adb918826f532d8c64495958007f40";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 106;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "e0befcdd041ece0eb68de50368af529951098a94d82fea54c6b1f41486bab631";
+    "d4b747fa21195bd67bb97e8aa3ef0ccecc8b2ce0434d3b2d73e40930f7390820";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -60,9 +60,9 @@ pub const COMPLETION_LAYER_SCHEMA_VERSION: i64 = 1;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT: usize = 4;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 391;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 396;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "3348d0d3b3eb48f7dec6fedde47f2dc380d17134b22e06fc7b8a88181e8b2ffc";
+    "2e525b9ec6e823bd918db91004c78c91144a0f58603b891f4808e4e7abebe2f2";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 400;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 413;
@@ -73,7 +73,7 @@ pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
 pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_458;
 pub const EXPECTED_REFERENCE_OCCURRENCE_SHA256: &str =
-    "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b";
+    "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48";
 pub const EXPECTED_G0_PROJECTION_ROW_COUNT: usize = 35;
 pub const EXPECTED_G0_PROJECTION_ROW_IDS_SHA256: &str =
     "ff344794c0f061e83016f9f4844591a75d07bff597d439258d2b2632fc810d61";
@@ -347,7 +347,7 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 0] = [];
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
-static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 391] = [
+static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 396] = [
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459",
         slice_id: "a01",
@@ -3660,9 +3660,9 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 391] 
         rationale: "a16:2217: `TimeAuthorityRegistryTransitionReceipt {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|TimeAuthorityRegistryTransitionReceipt` itself, not an alias, enumeration, or citation.",
     },
     AmbiguityAdjudicationContractPin {
-        row_id: "a16:ambiguity-adjudication:5e71fa28a812b04cefab757b906e8af5e8d201fff5137a2e345789c0015f6cb6",
+        row_id: "a16:ambiguity-adjudication:8382d602a7cfb3b34c9b3adc956a9aceaab94ee8e651d9eafad600a00a1f175a",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>|d81027816ba38a6cc4676ad6f6301fe68fdc41e6d486ada722261c2c964b7251|1|e98890295559e48247c398bdd64f7f6491a446e4a49fef5cc0cfd5dae7f7c634|leading named record has no explicit top-level ownership cue",
+        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>|771d2b92737a0ffbea4d2763e85896a473b9a256c4e28ce67b87bc1583758b98|1|e98890295559e48247c398bdd64f7f6491a446e4a49fef5cc0cfd5dae7f7c634|leading named record has no explicit top-level ownership cue",
         source_locations: &["a16:2191"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|TimeSubjectIssuanceReservation<Role>"],
@@ -4513,6 +4513,61 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 391] 
         resolved_source_keys: &["top|LocalFinalCertificationReserveSpec"],
         rationale: "a09:1904: the same span carries a second structural body for `top|LocalFinalCertificationReserveSpec`, whose own definition is a07:1750. a09 references the symbol and shows an installed record inside the same sentence, so the two bodies diverge for one source key. The divergence resolves to the a07 owner's definition; a09 contributes no competing structural claim.",
     },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a03:ambiguity-adjudication:8c725fa15a9bc362be089cd1c4a8a996d6f4e20664fcac5528a2df62b880ef17",
+        slice_id: "a03",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnOutcomeRecord|TxnOutcomeRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|3e4e3c9478ab77306a5f6dd8e456c8ffe9f19f18c63f88c98ffc9f366f3ca420|shorthand field has no exact type",
+        source_locations: &["a03:1524"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TxnOutcomeRecord|TxnOutcomeRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
+        ],
+        rationale: "a03:1524: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a06:ambiguity-adjudication:8723ace590fa1a79389ba18bd5aab08bcc1d3ebe7eb3a17528e939386f05cd0c",
+        slice_id: "a06",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|MetaPreparedCommandRecord|MetaPreparedCommandRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|983566e6334d24084c27747e97f61d5b4677f958e4b2495c3d00c72b06f52703|shorthand field has no exact type",
+        source_locations: &["a06:1698"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|MetaPreparedCommandRecord|MetaPreparedCommandRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
+        ],
+        rationale: "a06:1698: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a06:ambiguity-adjudication:d29cf70d19793cee02c2ad22e8df60d5ad6dd3357ba46123cc85f4d5728315f9",
+        slice_id: "a06",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|ShardPreparedPayloadRecord|ShardPreparedPayloadRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|b555581d9afcce502838c9520cafa55a9b3fc5571da2c91d1045c7acbf410e09|shorthand field has no exact type",
+        source_locations: &["a06:1700"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|ShardPreparedPayloadRecord|ShardPreparedPayloadRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
+        ],
+        rationale: "a06:1700: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a10:ambiguity-adjudication:a2ec9c9e4687c66ca7527a460cb9a9629e7e9297e0e9d39a307025de544f061f",
+        slice_id: "a10",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|PreparedCommitRecord|PreparedCommitRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|13c8b4d84ea85afa96a67e30397af849c0c6d9af5702a2f53e2ce645100300c2|shorthand field has no exact type",
+        source_locations: &["a10:1922"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|PreparedCommitRecord|PreparedCommitRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
+        ],
+        rationale: "a10:1922: the bare nonretaining predecessor spelling matches PreparedRootHeader<Role> in the same prepared-root family and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a16:ambiguity-adjudication:733086702e6b63491e3b2a762e92e10d4e93ed043291c93f73edc4769a46c3d2",
+        slice_id: "a16",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|2c193dbc4032a49c21cf531f3f704a9e2cbc7fc8004bd836ecf285213b7d9b58|shorthand field has no exact type",
+        source_locations: &["a16:2191"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
+        ],
+        rationale: "a16:2191: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+    },
 ];
 
 pub const PROJECTION_CLASSES: [&str; 6] = [
@@ -5037,8 +5092,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1464,
         end_line: 1543,
         line_count: 80,
-        byte_count: 69_062,
-        sha256: "9d761919535cdd27ad4783e5862ce119293973789e55db627ecc9d7bc0983db4",
+        byte_count: 69_131,
+        sha256: "40b90aded14032e8d8d5a8173ab2fe8088d43bfbc33e5d04ffec6fa43612d574",
     },
     SlicePin {
         ordinal: 4,
@@ -5070,8 +5125,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1659,
         end_line: 1700,
         line_count: 42,
-        byte_count: 38_061,
-        sha256: "18baef688b553fcb72987e546f95138b598f32a1389eeb72426a5f925684496e",
+        byte_count: 38_209,
+        sha256: "e6c1d5924a456b28fceddabfd3b6269a446af214f595794d943483e6b326aa68",
     },
     SlicePin {
         ordinal: 7,
@@ -5114,8 +5169,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1910,
         end_line: 1931,
         line_count: 22,
-        byte_count: 16_579,
-        sha256: "7bad384e377f49ef7d102eefda083260874790f6af47f85d0b344ea4c0854e9e",
+        byte_count: 16_645,
+        sha256: "a435edb51aa09ddb6df21f400b5ddc810f6d9e0dfa8511864921a6c25ffd2d50",
     },
     SlicePin {
         ordinal: 11,
@@ -5180,8 +5235,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 2157,
         end_line: 2246,
         line_count: 90,
-        byte_count: 69_768,
-        sha256: "9fc751b96c0539ad956995a3e0bde2fe71e58fe4103aa80cbce9d1c687273427",
+        byte_count: 69_849,
+        sha256: "375bd6ee859b02129bb32d3f15a659158d3665a56b990509874e0da076a0d6ad",
     },
     SlicePin {
         ordinal: 17,

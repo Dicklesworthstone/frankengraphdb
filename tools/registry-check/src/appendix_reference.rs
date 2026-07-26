@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(census.occurrence_count, 2_458);
         assert_eq!(
             census.occurrence_transcript_sha256,
-            "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
+            "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
         );
     }
 }

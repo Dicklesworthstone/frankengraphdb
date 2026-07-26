@@ -5266,6 +5266,20 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "RestoreSourceKeyAccessInventory<Role:AuthorityOwningRole>"
                     | "RestoreSourceLeaseAuthorityObservationImport<Role:AuthorityOwningRole>"
                     | "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
+        )
+    };
+    // j00a replaces five retaining predecessor self-edges with newly catalogued
+    // weak generation-adjacency digests. Remove those rows when reconstructing
+    // the namespace that predates every post-erratum field increment.
+    let post_erratum_j00a_field = |schema: &str, name: &str| {
+        name == "nonretaining_predecessor_digest"
+            && matches!(
+                schema,
+                "TxnOutcomeRecord"
+                    | "MetaPreparedCommandRecord"
+                    | "ShardPreparedPayloadRecord"
+                    | "PreparedCommitRecord"
+                    | "TimeSubjectIssuanceReservation<Role>"
             )
     };
     pre_erratum.fields.retain(|field| {
@@ -5286,6 +5300,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             )
             && !post_erratum_a04_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_j00a_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 329,
@@ -5293,9 +5308,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 218,
+        pre_erratum.fields.len() + 223,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the a18 inline AuthorityBoundHeader tranche"
+        "the historical witness must remove every post-erratum field cohort through j00a"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
@@ -5727,6 +5742,81 @@ fn idr_construction_dag_acyclic() {
 }
 
 #[test]
+fn idr_j00a_predecessors_are_nonretaining_and_current_generations_stay_owned() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let expected = [
+        ("TxnOutcomeRecord", 0x0003, 18, "reserved", "a03"),
+        ("MetaPreparedCommandRecord", 0x0003, 35, "reserved", "a06"),
+        ("ShardPreparedPayloadRecord", 0x0003, 35, "reserved", "a06"),
+        ("PreparedCommitRecord", 0x0004, 12, "active", "a10"),
+        (
+            "TimeSubjectIssuanceReservation<Role>",
+            0x0004,
+            19,
+            "reserved",
+            "a16",
+        ),
+    ];
+    for (schema, tag, order, status, slice) in expected {
+        let field = identity
+            .fields
+            .iter()
+            .find(|field| {
+                field.containing_schema == schema
+                    && field.stable_name == "nonretaining_predecessor_digest"
+            })
+            .unwrap_or_else(|| panic!("{schema} nonretaining predecessor field exists"));
+        assert_eq!(field.field_tag, tag);
+        assert_eq!(field.exact_wire_type, "WeakDigest");
+        assert_eq!(field.cardinality, "one");
+        assert_eq!(field.identity_class, "logical");
+        assert_eq!(field.reference_semantics, "weak_digest");
+        assert_eq!(field.target_schema_id, None);
+        assert_eq!(field.construction_order, order);
+        assert_eq!(field.version_status, status);
+        assert_eq!(field.max_size_bytes, 32);
+        assert_eq!(field.digest_class.as_deref(), Some("weak_identity"));
+        assert!(field.retention_and_cut_rule.contains("comparison-only"));
+        assert!(field.retention_and_cut_rule.contains("never traversed"));
+
+        let source_key = format!(
+            "field|{schema}|{schema}.nonretaining_predecessor_digest|nonretaining_predecessor_digest"
+        );
+        let target = catalog
+            .targets
+            .iter()
+            .find(|target| target.source_key == source_key)
+            .unwrap_or_else(|| panic!("{schema} source field has one catalog target"));
+        assert_eq!(target.slice_id, slice);
+        assert_eq!(target.target_kind, "field");
+    }
+
+    let plan = String::from_utf8(real_plan_source()).expect("plan is UTF-8");
+    for old in [
+        "predecessor_ref:StrongRef<TxnOutcomeRecord>?",
+        "predecessor_ref:StrongRef<MetaPreparedCommandRecord>?",
+        "predecessor_ref:StrongRef<ShardPreparedPayloadRecord>?",
+        "predecessor_ref:StrongRef<PreparedCommitRecord>?",
+        "predecessor_ref:StrongRef<TimeSubjectIssuanceReservation<Role>>?",
+    ] {
+        assert!(!plan.contains(old), "retaining predecessor survived: {old}");
+    }
+    for owner in [
+        "StrongRef<TxnOutcomeRecord>",
+        "StrongRef<MetaPreparedCommandRecord>",
+        "StrongRef<ShardPreparedPayloadRecord>",
+        "StrongRef<PreparedCommitRecord>",
+        "StrongRef<TimeSubjectIssuanceReservation<Role>>",
+    ] {
+        assert!(
+            plan.contains(owner),
+            "current-generation owner is not stated: {owner}"
+        );
+    }
+}
+
+#[test]
 fn idr_neg_self_edge() {
     let mut r = real_identity();
     let mut f = field("LogicalStatePayload", 90, "self_ref", 20);
@@ -5759,13 +5849,11 @@ fn idr_neg_mutual_edge() {
 
 #[test]
 fn idr_neg_self_edge_through_generic_family() {
-    // The two hosts that carry a `predecessor_ref` lineage member in the source
-    // (PreparedCommitRecord at a10:1922 and TimeSubjectIssuanceReservation at
-    // a16:2210) are registered under their bare families while the census owns
-    // them under a generic signature. A field row therefore names `Foo<Role>`
-    // as its containing schema, and the DAG law must still see the self-edge:
-    // resolving the owner by exact name skips every generic-signed row, so a
-    // lineage link modelled as a retaining reference would escape the law.
+    // j00a corrected the real lineage members to nonretaining digests. Keep the
+    // rejected alternative mutation-proven: a field row can still name
+    // `Foo<Role>` as its containing schema while the kind is registered under
+    // the bare family, and the DAG law must normalize that owner before testing
+    // a hypothetical retaining self-edge.
     let mut r = real_identity();
     let mut f = field(
         "TimeSubjectIssuanceReservation<Role>",
