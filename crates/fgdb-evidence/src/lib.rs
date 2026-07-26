@@ -156,6 +156,17 @@ impl ReplayClass {
         }
     }
 
+    /// Decodes one exact version-1 canonical spelling.
+    ///
+    /// The lookup deliberately derives from [`Self::ALL`] and
+    /// [`Self::as_str`] instead of maintaining a third vocabulary table. An
+    /// omitted or aliased variant therefore cannot silently survive a
+    /// canonical round trip.
+    #[must_use]
+    pub fn from_canonical_str(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|class| class.as_str() == value)
+    }
+
     /// Whether policy permits replay evidence of this class to be present.
     pub const fn may_be_present(self) -> bool {
         !matches!(self, Self::CryptoEntropy)
@@ -770,6 +781,171 @@ pub enum FallbackBehavior {
     FailClosed,
 }
 
+/// Version of the canonical transcript hashed to identify an evidence-envelope
+/// binding.
+pub const EVIDENCE_ENVELOPE_BINDING_VERSION: u16 = 1;
+
+const EVIDENCE_ENVELOPE_BINDING_DOMAIN: &[u8] = b"fgdb:evidence-envelope-binding:v1";
+const EVIDENCE_ENVELOPE_FIELD_COUNT: u8 = 6;
+
+fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_len(bytes: &mut Vec<u8>, value: usize) {
+    push_u64(
+        bytes,
+        u64::try_from(value).expect("Rust slice lengths fit in u64"),
+    );
+}
+
+fn push_sized_bytes(bytes: &mut Vec<u8>, value: &[u8]) {
+    push_len(bytes, value.len());
+    bytes.extend_from_slice(value);
+}
+
+fn push_field(bytes: &mut Vec<u8>, tag: u8, value: &[u8]) {
+    bytes.push(tag);
+    push_sized_bytes(bytes, value);
+}
+
+fn encode_string(value: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    push_sized_bytes(&mut bytes, value.as_bytes());
+    bytes
+}
+
+fn encode_optional_string(value: Option<&str>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match value {
+        None => bytes.push(0),
+        Some(value) => {
+            bytes.push(1);
+            push_sized_bytes(&mut bytes, value.as_bytes());
+        }
+    }
+    bytes
+}
+
+fn encode_string_list(values: &[String]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    push_len(&mut bytes, values.len());
+    for value in values {
+        push_sized_bytes(&mut bytes, value.as_bytes());
+    }
+    bytes
+}
+
+fn encode_evidence_claim(claim: &EvidenceClaim) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match claim {
+        EvidenceClaim::SafetyInvariant { invariant_id } => {
+            bytes.extend_from_slice(&[0, 1]);
+            push_field(&mut bytes, 1, &encode_string(invariant_id));
+        }
+        EvidenceClaim::FormalModelClaim {
+            model_name,
+            abstraction_boundary,
+            checked_bounds,
+            refinement_status,
+        } => {
+            bytes.extend_from_slice(&[1, 4]);
+            push_field(&mut bytes, 1, &encode_string(model_name));
+            push_field(&mut bytes, 2, &encode_string(abstraction_boundary));
+            push_field(
+                &mut bytes,
+                3,
+                &encode_optional_string(checked_bounds.as_deref()),
+            );
+            let status = match refinement_status {
+                fgdb_claim::RefinementStatus::ModelOnly => 0,
+                fgdb_claim::RefinementStatus::RefinedToImplementation => 1,
+            };
+            push_field(&mut bytes, 4, &[status]);
+        }
+        EvidenceClaim::StatisticalClaim {
+            population,
+            sampling_rule,
+            error_control,
+            power_or_effective_sample_size,
+            assumptions,
+        } => {
+            bytes.extend_from_slice(&[2, 5]);
+            push_field(&mut bytes, 1, &encode_string(population));
+            push_field(&mut bytes, 2, &encode_string(sampling_rule));
+            let mut encoded_control = Vec::new();
+            match error_control {
+                fgdb_claim::StatisticalErrorControl::Alpha(alpha) => {
+                    encoded_control.push(1);
+                    push_u64(&mut encoded_control, alpha.get().to_bits());
+                }
+                fgdb_claim::StatisticalErrorControl::NotApplicable => {
+                    encoded_control.push(0);
+                }
+            }
+            push_field(&mut bytes, 3, &encoded_control);
+            push_field(
+                &mut bytes,
+                4,
+                &encode_string(power_or_effective_sample_size),
+            );
+            push_field(&mut bytes, 5, &encode_string_list(assumptions));
+        }
+        EvidenceClaim::ConfigurationModelClaim {
+            model_version,
+            fitted_inputs,
+            sensitivity,
+            validity_domain,
+        } => {
+            bytes.extend_from_slice(&[3, 4]);
+            push_field(&mut bytes, 1, &encode_string(model_version));
+            push_field(&mut bytes, 2, &encode_string_list(fitted_inputs));
+            push_field(&mut bytes, 3, &encode_string(sensitivity));
+            push_field(&mut bytes, 4, &encode_string(validity_domain));
+        }
+        EvidenceClaim::EmpiricalGate {
+            fixture,
+            machine_profile,
+            sample_count,
+            variance_budget,
+            comparison_rule,
+        } => {
+            bytes.extend_from_slice(&[4, 5]);
+            push_field(&mut bytes, 1, &encode_string(fixture));
+            push_field(&mut bytes, 2, &encode_string(machine_profile));
+            push_field(&mut bytes, 3, &sample_count.to_le_bytes());
+            push_field(&mut bytes, 4, &encode_string(variance_budget));
+            push_field(&mut bytes, 5, &encode_string(comparison_rule));
+        }
+    }
+    bytes
+}
+
+fn encode_calibration_window(window: Option<CalibrationWindow>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match window {
+        None => bytes.push(0),
+        Some(window) => {
+            bytes.push(1);
+            push_u64(&mut bytes, window.start_seq());
+            push_u64(&mut bytes, window.end_seq());
+        }
+    }
+    bytes
+}
+
+fn encode_fallback(fallback: FallbackBehavior) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    match fallback {
+        FallbackBehavior::DeterministicPolicy { policy_oid } => {
+            bytes.push(0);
+            bytes.extend_from_slice(policy_oid.as_bytes());
+        }
+        FallbackBehavior::FailClosed => bytes.push(1),
+    }
+    bytes
+}
+
 /// Immutable binding of one evidence claim to its identity and declared
 /// context. Fields are read-only after construction (no setters, no `mut`
 /// accessors) — supersession means a new envelope.
@@ -831,6 +1007,26 @@ pub struct EvidenceEnvelope {
 }
 
 impl EvidenceEnvelope {
+    /// Constructs a complete binding. The fallback is a required argument, not
+    /// an optional advisory input.
+    ///
+    /// Omitting it is a compile-time error:
+    ///
+    /// ```compile_fail,E0061
+    /// use fgdb_claim::EvidenceClaim;
+    /// use fgdb_evidence::EvidenceEnvelope;
+    /// use fgdb_types::ObjectId;
+    ///
+    /// let _ = EvidenceEnvelope::new(
+    ///     EvidenceClaim::SafetyInvariant {
+    ///         invariant_id: "FG-INV-01".into(),
+    ///     },
+    ///     ObjectId([1; 32]),
+    ///     ObjectId([2; 32]),
+    ///     None,
+    ///     1,
+    /// );
+    /// ```
     pub fn new(
         claim: EvidenceClaim,
         evidence_oid: ObjectId,
@@ -866,6 +1062,42 @@ impl EvidenceEnvelope {
     }
     pub fn fallback(&self) -> FallbackBehavior {
         self.fallback
+    }
+
+    /// Encodes every bound field into the unique version-1 identity transcript.
+    ///
+    /// Variable-width values are length-delimited, sum types carry explicit
+    /// tags, and only logical contents are encoded: allocation capacity,
+    /// pointer identity, clocks, and entropy cannot affect the result.
+    #[must_use]
+    pub fn to_canonical_binding_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        push_sized_bytes(&mut bytes, EVIDENCE_ENVELOPE_BINDING_DOMAIN);
+        bytes.extend_from_slice(&EVIDENCE_ENVELOPE_BINDING_VERSION.to_le_bytes());
+        bytes.push(EVIDENCE_ENVELOPE_FIELD_COUNT);
+        push_field(&mut bytes, 1, &encode_evidence_claim(&self.claim));
+        push_field(&mut bytes, 2, self.evidence_oid.as_bytes());
+        push_field(&mut bytes, 3, self.selection_policy_oid.as_bytes());
+        push_field(
+            &mut bytes,
+            4,
+            &encode_calibration_window(self.calibration_window),
+        );
+        push_field(&mut bytes, 5, &self.regime_epoch.to_le_bytes());
+        push_field(&mut bytes, 6, &encode_fallback(self.fallback));
+        bytes
+    }
+
+    /// Hashes the canonical binding transcript with the caller's project-level
+    /// content-address function.
+    ///
+    /// `fgdb-evidence` deliberately does not duplicate the foundation hash
+    /// implementation or add another dependency. Consumers supply that one
+    /// deterministic hash kernel; this method guarantees that it receives the
+    /// complete, canonical envelope binding.
+    #[must_use]
+    pub fn binding_address_with(&self, content_hash: impl FnOnce(&[u8]) -> [u8; 32]) -> ObjectId {
+        ObjectId(content_hash(&self.to_canonical_binding_bytes()))
     }
 
     /// The lattice at the envelope boundary: may this envelope back a
