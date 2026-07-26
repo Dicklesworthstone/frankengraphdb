@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 58
+registry_epoch = 59
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -4783,6 +4783,20 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+field_tag = 0x0003
+stable_name = "source_basis"
+exact_wire_type = "RecoveryTransformSourceBasis<Role>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline closed RecoveryTransformSourceBasis<Role> value embeds the exact Local, Meta, or Shard acquisition basis in the transform plan; retained with the containing object and creates no reachability edge (a18:2457)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "RecoveryTransformSourceBasis<Role>"
 field_tag = 0x0001
 stable_name = "working_set_ref"
@@ -7694,6 +7708,20 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>"
+field_tag = 0x000d
+stable_name = "lease_operation_terminal_history"
+exact_wire_type = "RestoreLeaseOperationTerminalHistory<Role>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline closed RestoreLeaseOperationTerminalHistory<Role> value embeds the exact Detailed or Compacted terminal history in the release summary; retained with the containing object and creates no reachability edge (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>"
 field_tag = 0x0001
 stable_name = "authority_bound_header"
@@ -7750,6 +7778,20 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the RestoreTerminalPinDurabilityReceipt<Role,Operational> this RestoreTerminalPinBasis names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a18:2373)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreTerminalPinBasis<Role>"
+field_tag = 0x0011
+stable_name = "abandonment_tombstone_ref"
+exact_wire_type = "RestoreAbandonmentTombstoneRef<Role>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline closed RestoreAbandonmentTombstoneRef<Role> value embeds the exact role-refined abandonment tombstone reference in the Abandoned basis arm; retained with the containing object and creates no additional reachability edge (a18:2373)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "RestoreTerminalPinBasis<Role>"
@@ -12396,7 +12438,7 @@ containing_schema = "RecoveryTransformSourceBasis<Role>"
 union_path = "RecoveryTransformSourceBasis<Role>"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["RecoveryTransformSourceBasis<Role>"]
+allowed_containing_schemas = ["RecoveryTransformSourceBasis<Role>", "RecoveryIncarnationTransformPlan<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -12738,7 +12780,7 @@ containing_schema = "RestoreAbandonmentTombstoneRef<Role>"
 union_path = "RestoreAbandonmentTombstoneRef<Role>"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["RestoreAbandonmentTombstoneRef<Role>"]
+allowed_containing_schemas = ["RestoreAbandonmentTombstoneRef<Role>", "RestoreTerminalPinBasis<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -12837,7 +12879,7 @@ containing_schema = "RestoreLeaseOperationTerminalHistory<Role>"
 union_path = "RestoreLeaseOperationTerminalHistory<Role>"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["RestoreLeaseOperationTerminalHistory<Role>"]
+allowed_containing_schemas = ["RestoreLeaseOperationTerminalHistory<Role>", "RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

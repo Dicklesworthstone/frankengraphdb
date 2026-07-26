@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3154
+target_count = 3157
 projection_fallback_count = 108
-target_source_assignment_sha256 = "e18b668e21dc108a536070eab609c58dcae00ced9c7b097951cafb51cd2c580f"
+target_source_assignment_sha256 = "71237fcea4a97b632ef0506a0840feccfaab0bb92bb1e497999cef0a88383ddd"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 37
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 58
+registry_epoch = 59
 
 [[logical_kind]]
 slice_id = "a03"
@@ -31887,7 +31887,7 @@ containing_schema = "RecoveryTransformSourceBasis<Role>"
 union_path = "RecoveryTransformSourceBasis<Role>"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["RecoveryTransformSourceBasis<Role>"]
+allowed_containing_schemas = ["RecoveryTransformSourceBasis<Role>", "RecoveryIncarnationTransformPlan<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -32058,7 +32058,7 @@ containing_schema = "RestoreAbandonmentTombstoneRef<Role>"
 union_path = "RestoreAbandonmentTombstoneRef<Role>"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["RestoreAbandonmentTombstoneRef<Role>"]
+allowed_containing_schemas = ["RestoreAbandonmentTombstoneRef<Role>", "RestoreTerminalPinBasis<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -32200,7 +32200,7 @@ containing_schema = "RestoreLeaseOperationTerminalHistory<Role>"
 union_path = "RestoreLeaseOperationTerminalHistory<Role>"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["RestoreLeaseOperationTerminalHistory<Role>"]
+allowed_containing_schemas = ["RestoreLeaseOperationTerminalHistory<Role>", "RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -98116,6 +98116,54 @@ retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embeds the full nonw
 version_status = "reserved"
 max_size_bytes = 256
 
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:recovery-incarnation-transform-plan-role-source-basis"
+containing_schema = "RecoveryIncarnationTransformPlan<Role>"
+field_tag = 0x0003
+stable_name = "source_basis"
+exact_wire_type = "RecoveryTransformSourceBasis<Role>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline closed RecoveryTransformSourceBasis<Role> value embeds the exact Local, Meta, or Shard acquisition basis in the transform plan; retained with the containing object and creates no reachability edge (a18:2457)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-source-lease-release-operation-summary-role-authority-owning-role-lease-operation-terminal-history"
+containing_schema = "RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>"
+field_tag = 0x000d
+stable_name = "lease_operation_terminal_history"
+exact_wire_type = "RestoreLeaseOperationTerminalHistory<Role>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline closed RestoreLeaseOperationTerminalHistory<Role> value embeds the exact Detailed or Compacted terminal history in the release summary; retained with the containing object and creates no reachability edge (a18:2411)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a18"
+row_id = "a18:field:restore-terminal-pin-basis-role-abandonment-tombstone-ref"
+containing_schema = "RestoreTerminalPinBasis<Role>"
+field_tag = 0x0011
+stable_name = "abandonment_tombstone_ref"
+exact_wire_type = "RestoreAbandonmentTombstoneRef<Role>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline closed RestoreAbandonmentTombstoneRef<Role> value embeds the exact role-refined abandonment tombstone reference in the Abandoned basis arm; retained with the containing object and creates no additional reachability edge (a18:2373)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[target]]
 row_id = "a16:target:field-protected-error-replay-time-basis-role-authority-bound-header"
 target_row_id = "a16:field:protected-error-replay-time-basis-role-authority-bound-header"
@@ -98209,6 +98257,30 @@ row_id = "a16:target:field-time-bound-subject-retirement-proof-role-authority-ow
 target_row_id = "a16:field:time-bound-subject-retirement-proof-role-authority-owning-role-current-inventory-ref"
 slice_id = "a16"
 source_key = "field|TimeBoundSubjectRetirementProof<Role:AuthorityOwningRole>|TimeBoundSubjectRetirementProof<Role:AuthorityOwningRole>.current_inventory_ref|current_inventory_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-recovery-incarnation-transform-plan-role-source-basis"
+target_row_id = "a18:field:recovery-incarnation-transform-plan-role-source-basis"
+slice_id = "a18"
+source_key = "field|RecoveryIncarnationTransformPlan<Role>|RecoveryIncarnationTransformPlan<Role>.source_basis|source_basis"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-source-lease-release-operation-summary-role-authority-owning-role-lease-operation-terminal-history"
+target_row_id = "a18:field:restore-source-lease-release-operation-summary-role-authority-owning-role-lease-operation-terminal-history"
+slice_id = "a18"
+source_key = "field|RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>|RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>.lease_operation_terminal_history|lease_operation_terminal_history"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:field-restore-terminal-pin-basis-role-abandonment-tombstone-ref"
+target_row_id = "a18:field:restore-terminal-pin-basis-role-abandonment-tombstone-ref"
+slice_id = "a18"
+source_key = "field|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>.Abandoned.abandonment_tombstone_ref|abandonment_tombstone_ref"
 target_kind = "field"
 definition_status = "declared"
 

@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 58
+registry_epoch = 59
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 58);
+    assert_eq!(epoch, 59);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3133,6 +3133,100 @@ fn idr_a18_wire_consumer_allowlists_are_exact() {
         union.allowed_containing_schemas,
         vec!["CatalogTombstoneRestoreTargetReceipt<Contract>".to_owned()],
         "the ordinary union must exactly mirror its wire-parent consumer closure"
+    );
+}
+
+#[test]
+fn idr_a18_logical_union_consumers_have_exact_self_rooted_closures() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let expected = [
+        (
+            "RecoveryTransformSourceBasis<Role>",
+            "RecoveryIncarnationTransformPlan<Role>",
+            "source_basis",
+            0x0003,
+            20,
+            "field|RecoveryIncarnationTransformPlan<Role>|RecoveryIncarnationTransformPlan<Role>.source_basis|source_basis",
+        ),
+        (
+            "RestoreLeaseOperationTerminalHistory<Role>",
+            "RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>",
+            "lease_operation_terminal_history",
+            0x000d,
+            30,
+            "field|RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>|RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>.lease_operation_terminal_history|lease_operation_terminal_history",
+        ),
+        (
+            "RestoreAbandonmentTombstoneRef<Role>",
+            "RestoreTerminalPinBasis<Role>",
+            "abandonment_tombstone_ref",
+            0x0011,
+            40,
+            "field|RestoreTerminalPinBasis<Role>|RestoreTerminalPinBasis<Role>.Abandoned.abandonment_tombstone_ref|abandonment_tombstone_ref",
+        ),
+    ];
+    for (union_name, consumer, stable_name, field_tag, construction_order, source_key) in expected {
+        let union = identity
+            .ordinary_unions
+            .iter()
+            .find(|union| union.union_name == union_name)
+            .expect("A18 logical union exists");
+        assert_eq!(
+            union.allowed_containing_schemas,
+            vec![union_name.to_owned(), consumer.to_owned()]
+        );
+        let field = identity
+            .fields
+            .iter()
+            .find(|field| field.containing_schema == consumer && field.stable_name == stable_name)
+            .expect("A18 logical-union consumer field exists");
+        assert_eq!(field.field_tag, field_tag);
+        assert_eq!(field.exact_wire_type, union_name);
+        assert_eq!(field.cardinality, "one");
+        assert_eq!(field.identity_class, "inline");
+        assert_eq!(field.reference_semantics, "none");
+        assert_eq!(field.target_schema_id, None);
+        assert_eq!(field.construction_order, construction_order);
+        assert_eq!(field.version_status, "reserved");
+        assert_eq!(field.max_size_bytes, 16_777_216);
+
+        let target = catalog
+            .targets
+            .iter()
+            .find(|target| target.source_key == source_key)
+            .expect("A18 logical-union consumer target exists");
+        assert_eq!(target.slice_id, "a18");
+        assert_eq!(target.target_kind, "field");
+        assert_eq!(target.definition_status, "declared");
+    }
+
+    let mut missing_consumer = identity.clone();
+    missing_consumer
+        .ordinary_unions
+        .iter_mut()
+        .find(|union| union.union_name == "RecoveryTransformSourceBasis<Role>")
+        .expect("RecoveryTransformSourceBasis<Role> exists")
+        .allowed_containing_schemas
+        .pop();
+    let missing_codes = codes(&missing_consumer);
+    assert!(
+        missing_codes.contains(&"ordinary_union_logical_contract_mismatch".to_owned())
+            && missing_codes.contains(&"ordinary_union_field_mismatch".to_owned()),
+        "an actual A18 inline consumer omitted from the closure must fail: {missing_codes:?}"
+    );
+
+    let mut unrelated_consumer = identity;
+    unrelated_consumer
+        .ordinary_unions
+        .iter_mut()
+        .find(|union| union.union_name == "RecoveryTransformSourceBasis<Role>")
+        .expect("RecoveryTransformSourceBasis<Role> exists")
+        .allowed_containing_schemas
+        .push("RootManifest".to_owned());
+    assert!(
+        codes(&unrelated_consumer).contains(&"ordinary_union_logical_contract_mismatch".to_owned()),
+        "an unrelated schema without a matching A18 inline field must remain rejected"
     );
 }
 
@@ -6068,6 +6162,19 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("RestoreTerminalPinReleaseAuthorization", "body")
         )
     };
+    // p2yb extends the exact self-rooted closure for three logical-backed
+    // unions and adds their source-forced inline consumers.
+    let post_erratum_a18_logical_union_consumer_fields = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("RecoveryIncarnationTransformPlan<Role>", "source_basis")
+                | (
+                    "RestoreSourceLeaseReleaseOperationSummary<Role:AuthorityOwningRole>",
+                    "lease_operation_terminal_history"
+                )
+                | ("RestoreTerminalPinBasis<Role>", "abandonment_tombstone_ref")
+        )
+    };
     // j00a replaces five retaining predecessor self-edges with newly catalogued
     // weak generation-adjacency digests. Remove those rows when reconstructing
     // the namespace that predates every post-erratum field increment.
@@ -6426,6 +6533,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 &field.stable_name,
             )
             && !post_erratum_a18_wire_consumer_fields(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a18_logical_union_consumer_fields(
+                &field.containing_schema,
+                &field.stable_name,
+            )
             && !post_erratum_a04_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a10_field(&field.containing_schema, &field.stable_name)
@@ -6446,9 +6557,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 477,
+        pre_erratum.fields.len() + 480,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A16 generic-target tranche"
+        "the historical witness must remove every post-erratum field cohort through the A18 logical-union consumer tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
