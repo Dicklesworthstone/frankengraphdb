@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3146
+target_count = 3154
 projection_fallback_count = 108
-target_source_assignment_sha256 = "0c14930a3c1166b0ccc00e243bce3fa558ed3efdef1dd102c14b1adc0133b5ea"
+target_source_assignment_sha256 = "e18b668e21dc108a536070eab609c58dcae00ced9c7b097951cafb51cd2c580f"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 37
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 57
+registry_epoch = 58
 
 [[logical_kind]]
 slice_id = "a03"
@@ -99985,5 +99985,189 @@ row_id = "a21:target:union-arm-lifecycle-authority-source-role-authenticated-ses
 target_row_id = "a21:union-arm:lifecycle-authority-source-role-authenticated-session-d5d6127b5c729665"
 slice_id = "a21"
 source_key = "arm|LifecycleAuthoritySource<Role>|LifecycleAuthoritySource<Role>|AuthenticatedSession"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a16"
+row_id = "a16:field:time-authority-registry-role-authority-owning-role-profiles"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "profiles"
+exact_wire_type = "TimeAuthorityRegistryProfileState"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "profile_oid-indexed lifecycle state; each map element is exactly one profile state and lives/dies with the containing registry (a16:2181)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a16"
+row_id = "a16:union:time-authority-registry-profile-state-d122799f32ea5d5d"
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+field_tag = 0x0003
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TimeAuthorityRegistry<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-authority-registry-profile-state-active-for-issuance-e4d4545dcba9e70e"
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0001
+source_arm_name = "ActiveForIssuance"
+stable_name = "active_for_issuance"
+payload_kind = "inline-record"
+payload_sha256 = "f33d14d670d74b0bca6e9689d663af05d4577feb2e2286c335cbc661197cd61f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-authority-registry-profile-state-closing-requested-be7bba1617c8ad41"
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0002
+source_arm_name = "ClosingRequested"
+stable_name = "closing_requested"
+payload_kind = "inline-record"
+payload_sha256 = "d16db1e7f6efa7e28dde103bff4b16925a27baaa08a22cf5e54fa4882292e905"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-authority-registry-profile-state-issuance-closing-4c4ab3c1aba316c0"
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0003
+source_arm_name = "IssuanceClosing"
+stable_name = "issuance_closing"
+payload_kind = "inline-record"
+payload_sha256 = "924fb1f634734c4142c5647ce57b53a6590b00b820ff5c5ec9e02e97d2688c0c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-authority-registry-profile-state-issuance-quiescent-eef1bcb5832a19cb"
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0004
+source_arm_name = "IssuanceQuiescent"
+stable_name = "issuance_quiescent"
+payload_kind = "inline-record"
+payload_sha256 = "d29fbab089eb9f89e82e9cb2a5d470321832efb7d6a97a25baf308ed3a7a4305"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-authority-registry-profile-state-draining-c65803bbdc0c97c2"
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0005
+source_arm_name = "Draining"
+stable_name = "draining"
+payload_kind = "inline-record"
+payload_sha256 = "14c44763b6efd53bed2cb2455e01b0d10eb40bcff2ab21161d461ff06eb3ac9e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a16"
+row_id = "a16:union-arm:time-authority-registry-profile-state-retired-d4a228d36280f31d"
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0006
+source_arm_name = "Retired"
+stable_name = "retired"
+payload_kind = "inline-record"
+payload_sha256 = "69186534f277e4b437e2899bef4cf62ef8620d4d54e7f430c8b1ad4b0a7f4560"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a16:target:field-time-authority-registry-role-authority-owning-role-profiles"
+target_row_id = "a16:field:time-authority-registry-role-authority-owning-role-profiles"
+slice_id = "a16"
+source_key = "field|TimeAuthorityRegistry<Role:AuthorityOwningRole>|TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles|profiles"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-time-authority-registry-profile-state-d122799f32ea5d5d"
+target_row_id = "a16:union:time-authority-registry-profile-state-d122799f32ea5d5d"
+slice_id = "a16"
+source_key = "union|TimeAuthorityRegistry<Role:AuthorityOwningRole>|TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-authority-registry-profile-state-active-for-issuance-e4d4545dcba9e70e"
+target_row_id = "a16:union-arm:time-authority-registry-profile-state-active-for-issuance-e4d4545dcba9e70e"
+slice_id = "a16"
+source_key = "arm|TimeAuthorityRegistry<Role:AuthorityOwningRole>|TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles|ActiveForIssuance"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-authority-registry-profile-state-closing-requested-be7bba1617c8ad41"
+target_row_id = "a16:union-arm:time-authority-registry-profile-state-closing-requested-be7bba1617c8ad41"
+slice_id = "a16"
+source_key = "arm|TimeAuthorityRegistry<Role:AuthorityOwningRole>|TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles|ClosingRequested"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-authority-registry-profile-state-issuance-closing-4c4ab3c1aba316c0"
+target_row_id = "a16:union-arm:time-authority-registry-profile-state-issuance-closing-4c4ab3c1aba316c0"
+slice_id = "a16"
+source_key = "arm|TimeAuthorityRegistry<Role:AuthorityOwningRole>|TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles|IssuanceClosing"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-authority-registry-profile-state-issuance-quiescent-eef1bcb5832a19cb"
+target_row_id = "a16:union-arm:time-authority-registry-profile-state-issuance-quiescent-eef1bcb5832a19cb"
+slice_id = "a16"
+source_key = "arm|TimeAuthorityRegistry<Role:AuthorityOwningRole>|TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles|IssuanceQuiescent"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-authority-registry-profile-state-draining-c65803bbdc0c97c2"
+target_row_id = "a16:union-arm:time-authority-registry-profile-state-draining-c65803bbdc0c97c2"
+slice_id = "a16"
+source_key = "arm|TimeAuthorityRegistry<Role:AuthorityOwningRole>|TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles|Draining"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:union-arm-time-authority-registry-profile-state-retired-d4a228d36280f31d"
+target_row_id = "a16:union-arm:time-authority-registry-profile-state-retired-d4a228d36280f31d"
+slice_id = "a16"
+source_key = "arm|TimeAuthorityRegistry<Role:AuthorityOwningRole>|TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles|Retired"
 target_kind = "union-arm"
 definition_status = "declared"

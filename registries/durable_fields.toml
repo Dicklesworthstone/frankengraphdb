@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 57
+registry_epoch = 58
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -9520,6 +9520,20 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "profiles"
+exact_wire_type = "TimeAuthorityRegistryProfileState"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "profile_oid-indexed lifecycle state; each map element is exactly one profile state and lives/dies with the containing registry (a16:2181)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "TimeBoundSubjectInventory<Role:Local|Meta|Shard>"
 field_tag = 0x0007
 stable_name = "online_macaroon_roots"
@@ -13720,6 +13734,18 @@ union_path = "TimeAuthorityObservationImport"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["TimeAuthorityObservationImport"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+field_tag = 0x0003
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TimeAuthorityRegistry<Role:AuthorityOwningRole>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -26671,6 +26697,84 @@ source_arm_name = "Shard"
 stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "4f792838d90a9b715d2fa615c0c0ea99bbbe83497d548e0c0550a0367a53c8c2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0001
+source_arm_name = "ActiveForIssuance"
+stable_name = "active_for_issuance"
+payload_kind = "inline-record"
+payload_sha256 = "f33d14d670d74b0bca6e9689d663af05d4577feb2e2286c335cbc661197cd61f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0002
+source_arm_name = "ClosingRequested"
+stable_name = "closing_requested"
+payload_kind = "inline-record"
+payload_sha256 = "d16db1e7f6efa7e28dde103bff4b16925a27baaa08a22cf5e54fa4882292e905"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0003
+source_arm_name = "IssuanceClosing"
+stable_name = "issuance_closing"
+payload_kind = "inline-record"
+payload_sha256 = "924fb1f634734c4142c5647ce57b53a6590b00b820ff5c5ec9e02e97d2688c0c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0004
+source_arm_name = "IssuanceQuiescent"
+stable_name = "issuance_quiescent"
+payload_kind = "inline-record"
+payload_sha256 = "d29fbab089eb9f89e82e9cb2a5d470321832efb7d6a97a25baf308ed3a7a4305"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0005
+source_arm_name = "Draining"
+stable_name = "draining"
+payload_kind = "inline-record"
+payload_sha256 = "14c44763b6efd53bed2cb2455e01b0d10eb40bcff2ab21161d461ff06eb3ac9e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TimeAuthorityRegistryProfileState"
+containing_schema = "TimeAuthorityRegistry<Role:AuthorityOwningRole>"
+union_path = "TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles"
+arm_tag = 0x0006
+source_arm_name = "Retired"
+stable_name = "retired"
+payload_kind = "inline-record"
+payload_sha256 = "69186534f277e4b437e2899bef4cf62ef8620d4d54e7f430c8b1ad4b0a7f4560"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 57
+registry_epoch = 58
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 57);
+    assert_eq!(epoch, 58);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -5027,6 +5027,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         matches!(
             name,
             "KeyDestroyExternalAckRef"
+                | "TimeAuthorityRegistryProfileState"
                 | "AuthorityPermitRef<Role:AuthorityOwningRole>"
                 | "LifecycleAuthoritySource<Role>"
                 | "ReadCapablePermitRef<Role:AuthorityOwningRole>"
@@ -6440,12 +6441,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             )
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 361,
+        pre_erratum.ordinary_unions.len() + 362,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 476,
+        pre_erratum.fields.len() + 477,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A16 generic-target tranche"
     );
