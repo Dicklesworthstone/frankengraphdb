@@ -4153,7 +4153,11 @@ fn idr_a11_digest_header_and_marker_source_rows_are_exact() {
     assert_eq!(marker_source.field_tag, 0x0003);
     assert_eq!(marker_source.exact_wire_type, "CommitMarkerEffectSource");
     assert_eq!(marker_source.identity_class, "inline");
-    assert_eq!(marker_source.construction_order, 15);
+    // 15 -> 30 (fgdb-oicl): CommitMarker strongly references CommittedEffectCapsule,
+    // whose own body roots at TerminalWriteResultPreparation -> BufferedResultManifest@30,
+    // so 15 sat below its own floor. A field row's order must equal its containing
+    // kind's, so this witness moves with the kind.
+    assert_eq!(marker_source.construction_order, 30);
     let marker_union = identity
         .ordinary_unions
         .iter()
@@ -6337,17 +6341,19 @@ fn idr_assignment_history_and_epoch_are_frozen() {
 #[test]
 fn idr_a14_gc_decision_and_inventory_union_anchors_are_exact() {
     let identity = real_identity();
-    // GcDecisionRecord 15 -> 25 (fgdb-oicl): its own body strongly references
-    // GcProposal -> ConfigPayloadFloor -> MandatoryInventory@25, so no value below 25
-    // satisfies projection_dag_future_result once those interiors mint. The field
-    // rows carry the containing kind's order by law.
+    // GcDecisionRecord 15 -> 25 -> 40 (fgdb-oicl). 25 came from a matcher that read
+    // a reference by `strip_prefix`, so a repeated member spelled `[StrongRef<T>]`
+    // was dropped and the derived floor was too low -- the same under-reading
+    // fgdb-suhb traces to a real frozen violation. A balanced scan over every
+    // retaining wrapper puts the floor at 40. The field rows carry the containing
+    // kind's order by law.
     let expected_fields = [
         (
             "GcDecisionRecord",
             "applied_control_ref",
             0x0002,
             "AppliedControlRef",
-            25,
+            40,
             49,
         ),
         (
@@ -6355,7 +6361,7 @@ fn idr_a14_gc_decision_and_inventory_union_anchors_are_exact() {
             "decision",
             0x0007,
             "GcDecisionRecordDecision",
-            25,
+            40,
             16_777_216,
         ),
         (
@@ -6535,7 +6541,11 @@ fn idr_a12_retention_cut_fields_are_source_ordered_and_exact() {
         assert_eq!(field.identity_class, identity_class);
         assert_eq!(field.reference_semantics, reference_semantics);
         assert_eq!(field.target_schema_id.as_deref(), target);
-        assert_eq!(field.construction_order, 20);
+        // 20 -> 40 (fgdb-oicl): both cut sets strongly reference RetentionCutBody,
+        // whose own body is rooted at 40, so 20 sat below their shared floor. Still
+        // one shared literal only because the two owners still share one order -- it
+        // must be split per entry the moment they diverge.
+        assert_eq!(field.construction_order, 40);
         assert_eq!(field.role_predicate, "true");
         assert_eq!(field.version_status, "reserved");
         assert_eq!(field.max_size_bytes, max_size);
