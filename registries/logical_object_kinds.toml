@@ -2412,6 +2412,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/resource_ledger_state/"
 
 [[kind]]
+object_kind = 0x03d0
+name = "ResourceLedgerTransition"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_ledger_transition/"
+
+[[kind]]
 object_kind = 0x03d2
 name = "RestoreAbandonOperationRecord"
 status = "reserved"

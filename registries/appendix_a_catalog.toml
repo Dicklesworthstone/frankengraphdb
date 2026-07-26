@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2676
+target_count = 2697
 projection_fallback_count = 108
-target_source_assignment_sha256 = "79c3ea73d98110a8ff6ea80cdfceeeba0a724039909ed52e4b84cf4a3317a97b"
+target_source_assignment_sha256 = "8a0637a4742c469eb10411027104e404af2d3fd1e1ae7e60870e5d1b55d3fde3"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -5913,6 +5913,17 @@ role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/resource_ledger_state/"
 
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:resource-ledger-transition"
+object_kind = 0x03d0
+name = "ResourceLedgerTransition"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_ledger_transition/"
+
 [[physical_kind]]
 slice_id = "a02"
 row_id = "a02:physical-kind:ciphertext-record"
@@ -10925,6 +10936,134 @@ kind = "record"
 status = "reserved"
 encoding_context = "a12 embedded-by-value record; never a reference target"
 allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-owner-key"
+wire_type_id = 0x0189
+name = "ResourceOwnerKey"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Attempt | Statement | ResultDelivery | Subscription | DurableObject | Replay | BackupPin | PreparedClosure | Maintenance; the canonical resource-accounting owner key embedded by value in ResourceLedgerTransition<Role:AuthorityOwningRole> (a12:1964-1999)"
+allowed_containing_schemas = ["ResourceLedgerTransition<Role:AuthorityOwningRole>"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-owner-key-attempt"
+wire_type_id = 0x018a
+name = "ResourceOwnerKey.attempt"
+kind = "union_variant"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm Attempt of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-owner-key-statement"
+wire_type_id = 0x018b
+name = "ResourceOwnerKey.statement"
+kind = "union_variant"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm Statement of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-owner-key-result-delivery"
+wire_type_id = 0x018c
+name = "ResourceOwnerKey.result_delivery"
+kind = "union_variant"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm ResultDelivery of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-owner-key-subscription"
+wire_type_id = 0x018d
+name = "ResourceOwnerKey.subscription"
+kind = "union_variant"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0004
+status = "reserved"
+encoding_context = "arm Subscription of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-owner-key-durable-object"
+wire_type_id = 0x018e
+name = "ResourceOwnerKey.durable_object"
+kind = "union_variant"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0005
+status = "reserved"
+encoding_context = "arm DurableObject of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-owner-key-replay"
+wire_type_id = 0x018f
+name = "ResourceOwnerKey.replay"
+kind = "union_variant"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0006
+status = "reserved"
+encoding_context = "arm Replay of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-owner-key-backup-pin"
+wire_type_id = 0x0190
+name = "ResourceOwnerKey.backup_pin"
+kind = "union_variant"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0007
+status = "reserved"
+encoding_context = "arm BackupPin of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-owner-key-prepared-closure"
+wire_type_id = 0x0191
+name = "ResourceOwnerKey.prepared_closure"
+kind = "union_variant"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0008
+status = "reserved"
+encoding_context = "arm PreparedClosure of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-owner-key-maintenance"
+wire_type_id = 0x0192
+name = "ResourceOwnerKey.maintenance"
+kind = "union_variant"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0009
+status = "reserved"
+encoding_context = "arm Maintenance of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -35808,6 +35947,19 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:resource-owner-key-d67c63c3e9b62dce"
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ResourceLedgerTransition<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a07"
 row_id = "a07:union-arm:workspace-release-evidence-ref-meta-local-e0504f697521dc63"
@@ -35834,6 +35986,141 @@ source_arm_name = "ShardRemote"
 stable_name = "shard_remote"
 payload_kind = "inline-record"
 payload_sha256 = "e9cce4aa2ce95cf58a6a089c0147ef4602435278fe8f600eda376835323c2ec9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:resource-owner-key-attempt-dffe672738f2aa14"
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0001
+source_arm_name = "Attempt"
+stable_name = "attempt"
+payload_kind = "inline-record"
+payload_sha256 = "b603c3257ff57a4f972e003e1bb70c141966706128fa923ebe5646ad2df59077"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:resource-owner-key-statement-730887faded5b1f8"
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0002
+source_arm_name = "Statement"
+stable_name = "statement"
+payload_kind = "inline-record"
+payload_sha256 = "b38988e0979de2b1071a6863279347ba23c0bfb06e2eb4ea5a284f8e390b17a4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:resource-owner-key-result-delivery-8d12279921cac1c5"
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0003
+source_arm_name = "ResultDelivery"
+stable_name = "result_delivery"
+payload_kind = "inline-record"
+payload_sha256 = "40f7798e1f8c8a710331ed432343e9d27efeb90aeca4b121eb55a7d2145dd42e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:resource-owner-key-subscription-ef22ecf2371a7bc1"
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0004
+source_arm_name = "Subscription"
+stable_name = "subscription"
+payload_kind = "inline-record"
+payload_sha256 = "5089d2d47e1e182437d9b1317e4fc41d154fcf6c6a4c904be39c0110f2587a44"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:resource-owner-key-durable-object-e3df97080d164ec2"
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0005
+source_arm_name = "DurableObject"
+stable_name = "durable_object"
+payload_kind = "inline-record"
+payload_sha256 = "6f284a0ac9f957ada50c33e39ca51fc52d3525e6efa6500c3887879821a11798"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:resource-owner-key-replay-1e6b9dfb2c42e665"
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0006
+source_arm_name = "Replay"
+stable_name = "replay"
+payload_kind = "inline-record"
+payload_sha256 = "8af7da0018aa062f611fb5d30d2ca86ae3b9c04b3388369d130f3a303425a697"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:resource-owner-key-backup-pin-792734935e789c6d"
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0007
+source_arm_name = "BackupPin"
+stable_name = "backup_pin"
+payload_kind = "inline-record"
+payload_sha256 = "9e82fa8f3f793fae89aa8deb7c6d82aa4ae250a69c57418e0391cba4b4f1339a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:resource-owner-key-prepared-closure-3881988c1f8893ea"
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0008
+source_arm_name = "PreparedClosure"
+stable_name = "prepared_closure"
+payload_kind = "inline-record"
+payload_sha256 = "7af2355abae256c2dad9a568219d1e9a2d3fb28680c0d1a54b3248770d3cd634"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:resource-owner-key-maintenance-47e4d914943a9058"
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0009
+source_arm_name = "Maintenance"
+stable_name = "maintenance"
+payload_kind = "inline-record"
+payload_sha256 = "43064dcc91ecce3c1cd169d3718ad7199fe68e6749392d194fe7c608c8e8f183"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -40786,7 +41073,7 @@ symbol = "ResourceLedgerTransition"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03d0"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a12:reservation:resource-limit-policy"
@@ -51382,7 +51669,7 @@ symbol = "ResourceLedgerTransition"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|ResourceLedgerTransition<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1992"]
 
 [[top_level_candidate]]
@@ -51402,7 +51689,7 @@ symbol = "ResourceOwnerKey"
 generic_signature = ""
 source_key = "top|ResourceOwnerKey"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a12:1988"]
 
 [[top_level_candidate]]
@@ -89051,4 +89338,172 @@ target_row_id = "a07:field:never-registered-terminal-record-reservation-identity
 slice_id = "a07"
 source_key = "field|NeverRegisteredTerminalRecord|NeverRegisteredTerminalRecord.reservation_identity|reservation_identity"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-resource-ledger-transition"
+target_row_id = "a12:logical-kind:resource-ledger-transition"
+slice_id = "a12"
+source_key = "top|ResourceLedgerTransition<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-owner-key"
+target_row_id = "a12:wire-type:resource-owner-key"
+slice_id = "a12"
+source_key = "top|ResourceOwnerKey"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-resource-owner-key-d67c63c3e9b62dce"
+target_row_id = "a12:union:resource-owner-key-d67c63c3e9b62dce"
+slice_id = "a12"
+source_key = "union|ResourceOwnerKey|ResourceOwnerKey"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-resource-owner-key-attempt-dffe672738f2aa14"
+target_row_id = "a12:union-arm:resource-owner-key-attempt-dffe672738f2aa14"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|Attempt"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-resource-owner-key-statement-730887faded5b1f8"
+target_row_id = "a12:union-arm:resource-owner-key-statement-730887faded5b1f8"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|Statement"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-resource-owner-key-result-delivery-8d12279921cac1c5"
+target_row_id = "a12:union-arm:resource-owner-key-result-delivery-8d12279921cac1c5"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|ResultDelivery"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-resource-owner-key-subscription-ef22ecf2371a7bc1"
+target_row_id = "a12:union-arm:resource-owner-key-subscription-ef22ecf2371a7bc1"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|Subscription"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-resource-owner-key-durable-object-e3df97080d164ec2"
+target_row_id = "a12:union-arm:resource-owner-key-durable-object-e3df97080d164ec2"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|DurableObject"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-resource-owner-key-replay-1e6b9dfb2c42e665"
+target_row_id = "a12:union-arm:resource-owner-key-replay-1e6b9dfb2c42e665"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|Replay"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-resource-owner-key-backup-pin-792734935e789c6d"
+target_row_id = "a12:union-arm:resource-owner-key-backup-pin-792734935e789c6d"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|BackupPin"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-resource-owner-key-prepared-closure-3881988c1f8893ea"
+target_row_id = "a12:union-arm:resource-owner-key-prepared-closure-3881988c1f8893ea"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|PreparedClosure"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-resource-owner-key-maintenance-47e4d914943a9058"
+target_row_id = "a12:union-arm:resource-owner-key-maintenance-47e4d914943a9058"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|Maintenance"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-owner-key-attempt"
+target_row_id = "a12:wire-type:resource-owner-key-attempt"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|Attempt"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-owner-key-statement"
+target_row_id = "a12:wire-type:resource-owner-key-statement"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|Statement"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-owner-key-result-delivery"
+target_row_id = "a12:wire-type:resource-owner-key-result-delivery"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|ResultDelivery"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-owner-key-subscription"
+target_row_id = "a12:wire-type:resource-owner-key-subscription"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|Subscription"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-owner-key-durable-object"
+target_row_id = "a12:wire-type:resource-owner-key-durable-object"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|DurableObject"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-owner-key-replay"
+target_row_id = "a12:wire-type:resource-owner-key-replay"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|Replay"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-owner-key-backup-pin"
+target_row_id = "a12:wire-type:resource-owner-key-backup-pin"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|BackupPin"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-owner-key-prepared-closure"
+target_row_id = "a12:wire-type:resource-owner-key-prepared-closure"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|PreparedClosure"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-owner-key-maintenance"
+target_row_id = "a12:wire-type:resource-owner-key-maintenance"
+slice_id = "a12"
+source_key = "arm|ResourceOwnerKey|ResourceOwnerKey|Maintenance"
+target_kind = "wire-type"
 definition_status = "declared"

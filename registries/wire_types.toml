@@ -3967,3 +3967,111 @@ status = "reserved"
 encoding_context = "a12 embedded-by-value record; never a reference target"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0189
+name = "ResourceOwnerKey"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union: Attempt | Statement | ResultDelivery | Subscription | DurableObject | Replay | BackupPin | PreparedClosure | Maintenance; the canonical resource-accounting owner key embedded by value in ResourceLedgerTransition<Role:AuthorityOwningRole> (a12:1964-1999)"
+allowed_containing_schemas = ["ResourceLedgerTransition<Role:AuthorityOwningRole>"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x018a
+name = "ResourceOwnerKey.attempt"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0001
+encoding_context = "arm Attempt of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x018b
+name = "ResourceOwnerKey.statement"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0002
+encoding_context = "arm Statement of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x018c
+name = "ResourceOwnerKey.result_delivery"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0003
+encoding_context = "arm ResultDelivery of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x018d
+name = "ResourceOwnerKey.subscription"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0004
+encoding_context = "arm Subscription of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x018e
+name = "ResourceOwnerKey.durable_object"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0005
+encoding_context = "arm DurableObject of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x018f
+name = "ResourceOwnerKey.replay"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0006
+encoding_context = "arm Replay of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0190
+name = "ResourceOwnerKey.backup_pin"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0007
+encoding_context = "arm BackupPin of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0191
+name = "ResourceOwnerKey.prepared_closure"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0008
+encoding_context = "arm PreparedClosure of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0192
+name = "ResourceOwnerKey.maintenance"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ResourceOwnerKey"
+wire_tag = 0x0009
+encoding_context = "arm Maintenance of closed union ResourceOwnerKey"
+allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216

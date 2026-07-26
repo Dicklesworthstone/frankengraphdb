@@ -9772,6 +9772,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ResourceLedgerTransition<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RestoreAbandonAuthorityProfile<Role:AuthorityOwningRole>"
 containing_schema = "RestoreAbandonAuthorityProfile<Role:AuthorityOwningRole>"
 union_path = "RestoreAbandonAuthorityProfile<Role:AuthorityOwningRole>"
@@ -18827,6 +18838,123 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0001
+source_arm_name = "Attempt"
+stable_name = "attempt"
+payload_kind = "inline-record"
+payload_sha256 = "b603c3257ff57a4f972e003e1bb70c141966706128fa923ebe5646ad2df59077"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0002
+source_arm_name = "Statement"
+stable_name = "statement"
+payload_kind = "inline-record"
+payload_sha256 = "b38988e0979de2b1071a6863279347ba23c0bfb06e2eb4ea5a284f8e390b17a4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0003
+source_arm_name = "ResultDelivery"
+stable_name = "result_delivery"
+payload_kind = "inline-record"
+payload_sha256 = "40f7798e1f8c8a710331ed432343e9d27efeb90aeca4b121eb55a7d2145dd42e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0004
+source_arm_name = "Subscription"
+stable_name = "subscription"
+payload_kind = "inline-record"
+payload_sha256 = "5089d2d47e1e182437d9b1317e4fc41d154fcf6c6a4c904be39c0110f2587a44"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0005
+source_arm_name = "DurableObject"
+stable_name = "durable_object"
+payload_kind = "inline-record"
+payload_sha256 = "6f284a0ac9f957ada50c33e39ca51fc52d3525e6efa6500c3887879821a11798"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0006
+source_arm_name = "Replay"
+stable_name = "replay"
+payload_kind = "inline-record"
+payload_sha256 = "8af7da0018aa062f611fb5d30d2ca86ae3b9c04b3388369d130f3a303425a697"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0007
+source_arm_name = "BackupPin"
+stable_name = "backup_pin"
+payload_kind = "inline-record"
+payload_sha256 = "9e82fa8f3f793fae89aa8deb7c6d82aa4ae250a69c57418e0391cba4b4f1339a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0008
+source_arm_name = "PreparedClosure"
+stable_name = "prepared_closure"
+payload_kind = "inline-record"
+payload_sha256 = "7af2355abae256c2dad9a568219d1e9a2d3fb28680c0d1a54b3248770d3cd634"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ResourceOwnerKey"
+containing_schema = "ResourceOwnerKey"
+union_path = "ResourceOwnerKey"
+arm_tag = 0x0009
+source_arm_name = "Maintenance"
+stable_name = "maintenance"
+payload_kind = "inline-record"
+payload_sha256 = "43064dcc91ecce3c1cd169d3718ad7199fe68e6749392d194fe7c608c8e8f183"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "RestoreAbandonAuthorityProfile<Role:AuthorityOwningRole>"

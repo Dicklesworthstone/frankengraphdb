@@ -4652,6 +4652,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "ConstraintStateValue"
                 | "QuotaPath"
                 | "RetentionMap"
+                | "ResourceOwnerKey"
                 | "DeliveryTransitionAppliedRef"
                 | "LocalAttemptRegistrationSpec"
                 | "LocalAuditTicketOwner"
@@ -5551,7 +5552,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a07_weak_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 329,
+        pre_erratum.ordinary_unions.len() + 330,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
