@@ -565,6 +565,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgdb-unsafe-simd"
+version = "0.0.1"
+dependencies = [
+ "fgdb-collections",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
