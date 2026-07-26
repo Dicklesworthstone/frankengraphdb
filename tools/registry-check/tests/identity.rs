@@ -5691,6 +5691,18 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     let post_erratum_a07_weak_field = |schema: &str, name: &str| {
         schema == "NeverRegisteredTerminalRecord" && name == "reservation_identity"
     };
+    // The a09 storage-identity field cohort: IdentityContinuityRecord,
+    // IdRangeLease<Role:AuthorityOwningRole>, and TxnAllocationBindingRoot each
+    // had ZERO field rows before this landing, so the whole schema is a
+    // post-erratum addition and the historical witness reconstructs without it.
+    let post_erratum_a09_field = |schema: &str| {
+        matches!(
+            schema,
+            "IdentityContinuityRecord"
+                | "IdRangeLease<Role:AuthorityOwningRole>"
+                | "TxnAllocationBindingRoot"
+        )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_a21_field(&field.containing_schema)
             && !post_erratum_union(&field.exact_wire_type)
@@ -5719,6 +5731,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 &field.stable_name,
             )
             && !post_erratum_a07_weak_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a09_field(&field.containing_schema)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 331,
@@ -5726,9 +5739,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 314,
+        pre_erratum.fields.len() + 341,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the a07 W12 tranches"
+        "the historical witness must remove every post-erratum field cohort through the a09 storage-identity tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

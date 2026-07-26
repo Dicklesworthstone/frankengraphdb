@@ -298,6 +298,7 @@ BODY_RECIPES=(
   'GlobalKeyEnvelopeManifest#body_digest|fnv1a64:55336bfa5c150521'
   'MandatoryInventory#body_digest|fnv1a64:f7f952a57272b71d'
   'DurableCapabilityValidationEvidence#body_digest|fnv1a64:128f0e499b005f1f'
+  'IdRangeLease<Role:AuthorityOwningRole>#body_digest|fnv1a64:f2e158dde15f5714'
 )
 for recipe in "${BODY_RECIPES[@]}"; do
   row_id="${recipe%%|*}"

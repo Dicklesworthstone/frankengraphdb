@@ -1955,6 +1955,322 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in IdRangeLease; retained with the containing object and creates no reachability edge (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x0002
+stable_name = "lease_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "identity of this lease; lives/dies with the lease object (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "graph"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "identity of the graph whose identifier space this lease draws from; comparison input, never a reachability edge (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "element_kind"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "closed element-kind discriminant (vertex or edge identifier space) this lease is scoped to; lives/dies with the lease (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "allocation_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "allocation epoch this lease is issued under; every epoch/range pair remains permanently spent and can never overlap or recycle (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "partition"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "partition ordinal within the graph's element-kind space this lease is scoped to; lives/dies with the lease (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "half_open_range"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "canonical encoding of the half-open [start,end) leased offset bounds; lives/dies with the lease and is covered by the authenticated transcript (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x0008
+stable_name = "applied_control_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "inline applied-control identity of the control that installed this lease; it identifies the already-applied control without creating an independent reachability edge (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "time_authority_profile_oid"
+exact_wire_type = "oid256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "identity of the time-authority profile whose declared domain the issuance window is measured in; named for comparison, never followed locally (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "issuance_not_before"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "lower bound of the profiled issuance window, in the domain named by time_authority_profile_oid; covered by the authenticated transcript (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "issuance_not_after"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "upper bound of the profiled issuance window, in the domain named by time_authority_profile_oid; expiry ends issuance authority only through matching Expired evidence (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "permanent_spent_commitment"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "commitment to the permanently spent epoch/range set this lease contributes; comparison input, not reachability, and capacity is never returned (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
+field_tag = 0x000d
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "BodyDigest<IdRangeLease<Role:AuthorityOwningRole>>; registered body transcript includes every preceding field and excludes exactly body_digest (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:id-range-lease:v1"
+bd_schema_major = 1
+bd_included_field_tags = []
+bd_excluded_field_tags = [13]
+recipe_pin = "fnv1a64:f2e158dde15f5714"
+
+[[field]]
+containing_schema = "IdentityContinuityRecord"
+field_tag = 0x0001
+stable_name = "database_security_namespace_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "the security namespace this continuity record is scoped to; lives/dies with the record and creates no reachability edge (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "IdentityContinuityRecord"
+field_tag = 0x0002
+stable_name = "allocation_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "allocation epoch this continuity record certifies; comparison input for the anti-rollback check against the external registry copy, never a reachability edge (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "IdentityContinuityRecord"
+field_tag = 0x0003
+stable_name = "predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining continuity-chain adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "IdentityContinuityRecord"
+field_tag = 0x0004
+stable_name = "external_registry_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "identity of the external registry/witness holding the anti-rollback authoritative copy; named for comparison, never followed locally (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "IdentityContinuityRecord"
+field_tag = 0x0005
+stable_name = "cas_version"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "compare-and-set version of the external registry copy; byte-matched against the Chronicle copy under AllocationContinuityProfile::ExternalCas (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "IdentityContinuityRecord"
+field_tag = 0x0006
+stable_name = "status"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "closed status discriminant of the continuity record; lives/dies with the record (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "IdentityContinuityRecord"
+field_tag = 0x0007
+stable_name = "issued_at"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "issuance instant in the issuing registry's own declared time domain; comparison input only (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "IdentityContinuityRecord"
+field_tag = 0x0008
+stable_name = "signer_set_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "epoch of the threshold signer set that signed this record; comparison input for signature validation (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "IdentityContinuityRecord"
+field_tag = 0x0009
+stable_name = "threshold_signatures"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "canonically-sorted threshold signature set over the continuity record; lives/dies with the record (a09:1892)"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[field]]
 containing_schema = "KeyDestroyProposal"
 field_tag = 0x0004
 stable_name = "expected_current_configuration_ref"
@@ -7510,6 +7826,80 @@ retention_and_cut_rule = "weak-identity digest only; it names no retained object
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "TxnAllocationBindingRoot"
+field_tag = 0x0001
+stable_name = "generation"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "workspace generation this binding root belongs to; rebase and finalization preserve all existing leaves and may append only new escapes (a09:1900)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "TxnAllocationBindingRoot"
+field_tag = 0x0002
+stable_name = "attempt_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "weak-identity digest of the owning transaction attempt; it names no retained object and creates no retention edge (a09:1900)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "TxnAllocationBindingRoot"
+field_tag = 0x0003
+stable_name = "through_statement_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "highest statement sequence whose escapes this binding root covers; comparison input for rebase and finalization (a09:1900)"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "TxnAllocationBindingRoot"
+field_tag = 0x0004
+stable_name = "sorted_spent_commitments"
+exact_wire_type = "digest256"
+cardinality = "many"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "canonically-sorted set of permanent spent-range commitments carried by this binding root; comparison inputs only, and the spend is retained even after detailed binding evidence is cut (a09:1900)"
+version_status = "reserved"
+max_size_bytes = 16777216
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "TxnAllocationBindingRoot"
+field_tag = 0x0005
+stable_name = "root_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "TranscriptDigest<TxnAllocationBindingRoot> over the complete slot-key to binding leaf mapping; excludes exactly root_digest (a09:1900)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "domain-separated root transcript over the canonically-ordered TxnAllocationSlotKey -> EscapingAllocationBinding leaf set together with generation, attempt_identity, through_statement_seq and sorted_spent_commitments, excluding exactly root_digest (a09:1900)"
 
 [[field]]
 containing_schema = "TxnOutcomeRecord"
