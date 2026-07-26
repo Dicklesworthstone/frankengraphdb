@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # check.sh — the convenience quality-gate wrapper (AGENTS.md).
+# Bead: fgdb-gate-coverage-checksh-omits-live-gates-u7mw
 #
 # Runs every mandatory core check and every unique live checker artifact
 # declared by registries/checker_index.toml. Registered cargo-test artifacts
