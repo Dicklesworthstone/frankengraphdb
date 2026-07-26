@@ -190,10 +190,7 @@ fn the_harness_detects_a_deliberately_wrong_path() {
         wrong_output = fold_masks(wrong_output, wrong);
         scalar_output = fold_masks(scalar_output, expected);
     }
-    assert!(
-        mismatches > 0,
-        "a rotated mask must be caught case by case"
-    );
+    assert!(mismatches > 0, "a rotated mask must be caught case by case");
     assert_ne!(
         wrong_output, scalar_output,
         "the output digest must separate a drifting path from an agreeing one"

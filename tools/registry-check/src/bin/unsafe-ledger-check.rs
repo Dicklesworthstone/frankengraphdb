@@ -12,7 +12,8 @@ use registry_check::unsafe_ledger;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-pub const REPLAY_COMMAND: &str = "cargo run -p registry-check --bin unsafe-ledger-check -- --root .";
+pub const REPLAY_COMMAND: &str =
+    "cargo run -p registry-check --bin unsafe-ledger-check -- --root .";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);

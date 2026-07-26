@@ -54,6 +54,6 @@
 pub mod control_group;
 
 pub use control_group::{
-    CONTROL_GROUP_WIDTH, COMPILED_PATHS, DELETED_CONTROL, DispatchPath, EMPTY_CONTROL, GroupMasks,
+    COMPILED_PATHS, CONTROL_GROUP_WIDTH, DELETED_CONTROL, DispatchPath, EMPTY_CONTROL, GroupMasks,
     active_path, classify, classify_scalar, classify_via, prefetch_controls,
 };

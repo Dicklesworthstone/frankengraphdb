@@ -103,7 +103,10 @@ fn the_island_agrees_with_both_safe_backends_on_a_seeded_stream() {
         let tag = ControlTag::from_hash(state);
         let expected = SCALAR_CONTROL_GROUP_DISPATCH.classify(&group, tag);
         assert_eq!(SWAR_CONTROL_GROUP_DISPATCH.classify(&group, tag), expected);
-        assert_eq!(ISLAND_CONTROL_GROUP_DISPATCH.classify(&group, tag), expected);
+        assert_eq!(
+            ISLAND_CONTROL_GROUP_DISPATCH.classify(&group, tag),
+            expected
+        );
     }
 }
 
@@ -121,7 +124,10 @@ fn prefetching_a_control_array_changes_no_classification() {
         without.push(ISLAND_CONTROL_GROUP_DISPATCH.classify(&group, tag));
     }
     for start in 0..controls.len() {
-        fgdb_unsafe_simd::prefetch_controls(&controls, (start + CONTROL_GROUP_WIDTH) % controls.len());
+        fgdb_unsafe_simd::prefetch_controls(
+            &controls,
+            (start + CONTROL_GROUP_WIDTH) % controls.len(),
+        );
         let group = ControlGroup::gather_wrapping(&controls, start).expect("power-of-two controls");
         with.push(ISLAND_CONTROL_GROUP_DISPATCH.classify(&group, tag));
     }

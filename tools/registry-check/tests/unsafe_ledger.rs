@@ -211,7 +211,10 @@ fn unsafe_in_an_ordinary_crate_fails() {
         found.contains(&"unsafe_allow_outside_island".to_owned()),
         "got {found:?}"
     );
-    assert!(found.contains(&"site_unledgered".to_owned()), "got {found:?}");
+    assert!(
+        found.contains(&"site_unledgered".to_owned()),
+        "got {found:?}"
+    );
 }
 
 #[test]
@@ -397,7 +400,10 @@ fn a_module_scoped_allow_in_an_ordinary_crate_fails() {
         found.contains(&"unsafe_allow_outside_island".to_owned()),
         "got {found:?}"
     );
-    assert!(found.contains(&"site_unledgered".to_owned()), "got {found:?}");
+    assert!(
+        found.contains(&"site_unledgered".to_owned()),
+        "got {found:?}"
+    );
 }
 
 /// `expect` and `warn` are levels below `deny`, so both compile `unsafe` inside

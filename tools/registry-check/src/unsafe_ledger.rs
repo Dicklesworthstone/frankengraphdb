@@ -699,7 +699,9 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
                 "workspace_manifest_unreadable",
                 "Cargo.toml",
                 ws_path.display().to_string(),
-                format!("cannot read the workspace manifest, so no boundary claim can be made: {e}"),
+                format!(
+                    "cannot read the workspace manifest, so no boundary claim can be made: {e}"
+                ),
             ));
             return (report, v);
         }
@@ -1055,7 +1057,9 @@ mod tests {
     /// body to begin with `allow(`.
     #[test]
     fn wrapped_and_renamed_relaxations_are_all_counted() {
-        assert!(relaxes("[cfg_attr(target_arch = \"x86_64\", allow(unsafe_code))]"));
+        assert!(relaxes(
+            "[cfg_attr(target_arch = \"x86_64\", allow(unsafe_code))]"
+        ));
         assert!(relaxes(
             "[cfg_attr(feature = \"a\", cfg_attr(feature = \"b\", allow(unsafe_code)))]"
         ));
