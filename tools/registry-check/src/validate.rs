@@ -734,6 +734,171 @@ fn id_matches(id: &str, prefix: &str) -> bool {
         .is_some_and(|rest| rest.len() == 2 && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// `logical_object_kinds.toml` rows with `status = "active"` and the arms of the
+/// `active_logical_object_kinds!` invocation in `crates/fgdb-types/src/refs.rs`
+/// must biject, by code AND by name.
+///
+/// WHY THIS LIVES HERE. The binding is real but was enforced *only* by two
+/// `const _: () = assert!(...)` inside `fgdb-types`, so it fired at compile time
+/// of a foundation crate and nowhere else. A pane could add an `active` row,
+/// watch `registry-check all`, the identity suite, architecture-check and the G0
+/// identity e2e all report green, and leave the whole workspace unable to build.
+/// That is exactly what happened: 84418b2 added `DurableCapabilityValidationEvidence`
+/// (0x028f) as active with no arm, taking the count 10 -> 11, and `main` stayed
+/// broken for hours with every registry gate green.
+///
+/// The const assert also cannot say WHICH row is wrong — it only compares two
+/// counts, so its diagnostic is a bare `assertion failed: count_bytes(...) == ...`.
+/// This checker names the offending symbol in both directions.
+fn validate_active_logical_kind_arms(root: &Path, out: &mut Vec<Violation>) {
+    let reg = "logical_object_kinds";
+    let refs_path = root.join("crates/fgdb-types/src/refs.rs");
+    let toml_path = root.join("registries/logical_object_kinds.toml");
+
+    // An unreadable input is a violation, never a skip: a checker that silently
+    // does nothing is indistinguishable from one that passed.
+    let Ok(refs_src) = std::fs::read_to_string(&refs_path) else {
+        out.push(Violation::new(
+            "active_logical_kind_source_unreadable",
+            reg,
+            "refs.rs",
+            format!("cannot read {}; refusing to report the arm binding as checked", refs_path.display()),
+        ));
+        return;
+    };
+    let Ok(toml_src) = std::fs::read_to_string(&toml_path) else {
+        out.push(Violation::new(
+            "active_logical_kind_source_unreadable",
+            reg,
+            "logical_object_kinds.toml",
+            format!("cannot read {}", toml_path.display()),
+        ));
+        return;
+    };
+
+    // Arms: `    Variant = 0x0001 => "Name",` inside the invocation block.
+    let mut arms: BTreeMap<u32, String> = BTreeMap::new();
+    let mut inside = false;
+    let mut found_macro = false;
+    for line in refs_src.lines() {
+        let trimmed = line.trim();
+        if !inside {
+            if trimmed.starts_with("active_logical_object_kinds!") && trimmed.ends_with('{') {
+                inside = true;
+                found_macro = true;
+            }
+            continue;
+        }
+        if trimmed == "}" {
+            inside = false;
+            continue;
+        }
+        let Some((lhs, rhs)) = trimmed.split_once("=>") else {
+            continue;
+        };
+        let Some((_variant, code_text)) = lhs.split_once('=') else {
+            continue;
+        };
+        let code_text = code_text.trim().trim_end_matches(',').trim();
+        let Some(hex) = code_text.strip_prefix("0x") else {
+            continue;
+        };
+        let Ok(code) = u32::from_str_radix(hex, 16) else {
+            continue;
+        };
+        let name = rhs.trim().trim_end_matches(',').trim().trim_matches('"').to_owned();
+        if arms.insert(code, name).is_some() {
+            out.push(Violation::new(
+                "active_logical_kind_arm_duplicate",
+                reg,
+                &format!("0x{code:04x}"),
+                "two arms declare the same object_kind code",
+            ));
+        }
+    }
+    if !found_macro {
+        out.push(Violation::new(
+            "active_logical_kind_macro_absent",
+            reg,
+            "refs.rs",
+            "no `active_logical_object_kinds!` invocation found; the arm binding was NOT checked",
+        ));
+        return;
+    }
+
+    // Active rows out of the registry.
+    let mut active: BTreeMap<u32, String> = BTreeMap::new();
+    let (mut code, mut name, mut status) = (None, None, None);
+    let mut flush = |code: &mut Option<u32>, name: &mut Option<String>, status: &mut Option<String>,
+                     active: &mut BTreeMap<u32, String>| {
+        if let (Some(c), Some(n), Some(s)) = (*code, name.clone(), status.clone())
+            && s == "active"
+        {
+            active.insert(c, n);
+        }
+        *code = None;
+        *name = None;
+        *status = None;
+    };
+    for line in toml_src.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[[kind]]" {
+            flush(&mut code, &mut name, &mut status, &mut active);
+            continue;
+        }
+        if let Some(v) = trimmed.strip_prefix("object_kind = 0x") {
+            code = u32::from_str_radix(v.trim(), 16).ok();
+        } else if let Some(v) = trimmed.strip_prefix("name = ") {
+            name = Some(v.trim().trim_matches('"').to_owned());
+        } else if let Some(v) = trimmed.strip_prefix("status = ") {
+            status = Some(v.trim().trim_matches('"').to_owned());
+        }
+    }
+    flush(&mut code, &mut name, &mut status, &mut active);
+
+    if active.is_empty() {
+        out.push(Violation::new(
+            "active_logical_kind_none_parsed",
+            reg,
+            "logical_object_kinds.toml",
+            "parsed zero active rows; the registry format changed and this check is vacuous",
+        ));
+        return;
+    }
+
+    for (c, n) in &active {
+        match arms.get(c) {
+            Some(arm_name) if arm_name == n => {}
+            Some(arm_name) => out.push(Violation::new(
+                "active_logical_kind_name_mismatch",
+                reg,
+                n,
+                format!("row 0x{c:04x} is named {n:?} but its refs.rs arm is named {arm_name:?}"),
+            )),
+            None => out.push(Violation::new(
+                "active_logical_kind_without_arm",
+                reg,
+                n,
+                format!(
+                    "row 0x{c:04x} {n:?} is status=\"active\" but no `active_logical_object_kinds!` \
+                     arm declares it; fgdb-types will not compile. Either add the arm or make the \
+                     row status=\"reserved\""
+                ),
+            )),
+        }
+    }
+    for (c, n) in &arms {
+        if !active.contains_key(c) {
+            out.push(Violation::new(
+                "arm_without_active_logical_kind",
+                reg,
+                n,
+                format!("refs.rs arm 0x{c:04x} {n:?} has no status=\"active\" registry row"),
+            ));
+        }
+    }
+}
+
 /// Run every check. `root` is the repository root (artifact resolution).
 pub fn validate_all(r: &Registries, root: &Path) -> Vec<Violation> {
     let mut out = Vec::new();
@@ -743,5 +908,6 @@ pub fn validate_all(r: &Registries, root: &Path) -> Vec<Violation> {
     validate_slo(r, &mut out);
     validate_proof_lanes(r, root, &mut out);
     validate_checker_index(r, root, &mut out);
+    validate_active_logical_kind_arms(root, &mut out);
     out
 }
