@@ -4991,8 +4991,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("ProvisionalRetentionCutSet", "body_ref")
         )
     };
+    // a21 landed DurableCapabilityValidationEvidence's field table after the
+    // erratum, so those rows are not part of the pre-erratum namespace.
+    let post_erratum_a21_field =
+        |schema: &str| schema == "DurableCapabilityValidationEvidence";
     pre_erratum.fields.retain(|field| {
-        !post_erratum_union(&field.exact_wire_type)
+        !post_erratum_a21_field(&field.containing_schema)
+            && !post_erratum_union(&field.exact_wire_type)
             && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a16_reference_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a15_field(&field.containing_schema, &field.stable_name)
@@ -5009,7 +5014,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 100,
+        pre_erratum.fields.len() + 109,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A12 retention-cut tranche"
     );

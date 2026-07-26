@@ -492,6 +492,154 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0001
+stable_name = "schema_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0004
+stable_name = "presented_capability_commitment"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "weak_digest"
+target_schema_id = "CanonicalDurableCapabilityBytes"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0005
+stable_name = "presented_header_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "weak_digest"
+target_schema_id = "DurableCapabilityHeader"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0006
+stable_name = "presented_kind_body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "weak_digest"
+target_schema_id = "ExactDurableCapabilityKindBody"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0007
+stable_name = "verified_mac_transcript_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+target_schema_id = "DurableCapabilityMacInput"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(fgdb:transcript:durable-capability-mac-input:v1 || canonical(registered_mac_domain,header,exact_kind_body))"
+
+[[field]]
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x000b
+stable_name = "capability_format_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x000f
+stable_name = "action_scope_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+target_schema_id = "DurableCapabilityValidationActionScope"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(fgdb:transcript:durable-capability-validation-action-scope:v1 || canonical(DurableCapabilityValidationActionScope)); excludes the validation-evidence ref, response bytes, and any future command/applied record/root"
+
+[[field]]
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0013
+stable_name = "validator_semantics_registry_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+target_schema_id = "DurableCapabilityValidatorSemanticsRegistry"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(fgdb:transcript:durable-capability-validator-semantics-registry:v1 || canonical(schema_major,supported_capability_format_versions,MAC algorithm/domain registry,key-selection semantics,exact compatibility-row-set hash,lineage/current-security/time semantics,diagnostic contract)); all 256 bits stored and compared"
+
+[[field]]
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0015
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+target_schema_id = "DurableCapabilityValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:durable-capability-validation-evidence:v1"
+bd_schema_major = 1
+bd_included_field_tags = []
+bd_excluded_field_tags = [21]
+recipe_pin = "fnv1a64:128f0e499b005f1f"
+
+[[field]]
 containing_schema = "ExportLeaf<T>"
 field_tag = 0x0002
 stable_name = "target_identity"

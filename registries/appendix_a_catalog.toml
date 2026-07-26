@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2409
-projection_fallback_count = 90
-target_source_assignment_sha256 = "78dbdd1c2cf2758f94a9db766907da7a36b07f709b7ad1b40b24d842ec8d67c5"
+target_count = 2424
+projection_fallback_count = 104
+target_source_assignment_sha256 = "f09a2b81666664962983f7e8cce36eab993f0733c3553c072fa6d28cc9baf079"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -5428,6 +5428,72 @@ construction_order = 29
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/sharding_freeze_spec/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:durable-capability-header"
+object_kind = 0x0550
+name = "DurableCapabilityHeader"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 1024
+golden_corpus = "corpus/logical/durable_capability_header/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:exact-durable-capability-kind-body"
+object_kind = 0x0551
+name = "ExactDurableCapabilityKindBody"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 8192
+golden_corpus = "corpus/logical/exact_durable_capability_kind_body/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:canonical-durable-capability-bytes"
+object_kind = 0x0552
+name = "CanonicalDurableCapabilityBytes"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/canonical_durable_capability_bytes/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:durable-capability-mac-input"
+object_kind = 0x0553
+name = "DurableCapabilityMacInput"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/durable_capability_mac_input/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:durable-capability-validation-action-scope"
+object_kind = 0x0554
+name = "DurableCapabilityValidationActionScope"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 65536
+golden_corpus = "corpus/logical/durable_capability_validation_action_scope/"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:durable-capability-validator-semantics-registry"
+object_kind = 0x0555
+name = "DurableCapabilityValidatorSemanticsRegistry"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/durable_capability_validator_semantics_registry/"
 
 [[physical_kind]]
 slice_id = "a02"
@@ -15287,6 +15353,172 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the checkpoint-free retention cut body consumed by this provisional set; retained with the provisional authority and constructed no later than its owner (a12:1968,1970)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:durable-capability-validation-evidence-schema-version"
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0001
+stable_name = "schema_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:durable-capability-validation-evidence-presented-capability-commitment"
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0004
+stable_name = "presented_capability_commitment"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "weak_digest"
+target_schema_id = "CanonicalDurableCapabilityBytes"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:durable-capability-validation-evidence-presented-header-digest"
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0005
+stable_name = "presented_header_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "weak_digest"
+target_schema_id = "DurableCapabilityHeader"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:durable-capability-validation-evidence-presented-kind-body-digest"
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0006
+stable_name = "presented_kind_body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "weak_digest"
+target_schema_id = "ExactDurableCapabilityKindBody"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:durable-capability-validation-evidence-verified-mac-transcript-digest"
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0007
+stable_name = "verified_mac_transcript_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+target_schema_id = "DurableCapabilityMacInput"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(fgdb:transcript:durable-capability-mac-input:v1 || canonical(registered_mac_domain,header,exact_kind_body))"
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:durable-capability-validation-evidence-capability-format-version"
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x000b
+stable_name = "capability_format_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:durable-capability-validation-evidence-action-scope-digest"
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x000f
+stable_name = "action_scope_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+target_schema_id = "DurableCapabilityValidationActionScope"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(fgdb:transcript:durable-capability-validation-action-scope:v1 || canonical(DurableCapabilityValidationActionScope)); excludes the validation-evidence ref, response bytes, and any future command/applied record/root"
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:durable-capability-validation-evidence-validator-semantics-registry-digest"
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0013
+stable_name = "validator_semantics_registry_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+target_schema_id = "DurableCapabilityValidatorSemanticsRegistry"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(fgdb:transcript:durable-capability-validator-semantics-registry:v1 || canonical(schema_major,supported_capability_format_versions,MAC algorithm/domain registry,key-selection semantics,exact compatibility-row-set hash,lineage/current-security/time semantics,diagnostic contract)); all 256 bits stored and compared"
+
+[[field]]
+slice_id = "a21"
+row_id = "a21:field:durable-capability-validation-evidence-body-digest"
+containing_schema = "DurableCapabilityValidationEvidence"
+field_tag = 0x0015
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+target_schema_id = "DurableCapabilityValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "lives/dies with the validation evidence object"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:durable-capability-validation-evidence:v1"
+bd_schema_major = 1
+bd_included_field_tags = []
+bd_excluded_field_tags = [21]
+recipe_pin = "fnv1a64:128f0e499b005f1f"
 
 [[union]]
 slice_id = "a01"
@@ -44067,7 +44299,7 @@ symbol = "DurableCapabilityValidationActionScope"
 generic_signature = ""
 source_key = "top|DurableCapabilityValidationActionScope"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2651"]
 
 [[top_level_candidate]]
@@ -73247,6 +73479,126 @@ row_id = "a12:target:field-provisional-retention-cut-set-body-ref"
 target_row_id = "a12:field:provisional-retention-cut-set-body-ref"
 slice_id = "a12"
 source_key = "field|ProvisionalRetentionCutSet|ProvisionalRetentionCutSet.body_ref|body_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-durable-capability-header"
+target_row_id = "a21:logical-kind:durable-capability-header"
+slice_id = "a21"
+source_key = "projection|logical_object_kinds|DurableCapabilityHeader"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-exact-durable-capability-kind-body"
+target_row_id = "a21:logical-kind:exact-durable-capability-kind-body"
+slice_id = "a21"
+source_key = "projection|logical_object_kinds|ExactDurableCapabilityKindBody"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-canonical-durable-capability-bytes"
+target_row_id = "a21:logical-kind:canonical-durable-capability-bytes"
+slice_id = "a21"
+source_key = "projection|logical_object_kinds|CanonicalDurableCapabilityBytes"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-durable-capability-mac-input"
+target_row_id = "a21:logical-kind:durable-capability-mac-input"
+slice_id = "a21"
+source_key = "projection|logical_object_kinds|DurableCapabilityMacInput"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-durable-capability-validation-action-scope"
+target_row_id = "a21:logical-kind:durable-capability-validation-action-scope"
+slice_id = "a21"
+source_key = "top|DurableCapabilityValidationActionScope"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:logical-kind-durable-capability-validator-semantics-registry"
+target_row_id = "a21:logical-kind:durable-capability-validator-semantics-registry"
+slice_id = "a21"
+source_key = "projection|logical_object_kinds|DurableCapabilityValidatorSemanticsRegistry"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-durable-capability-validation-evidence-schema-version"
+target_row_id = "a21:field:durable-capability-validation-evidence-schema-version"
+slice_id = "a21"
+source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.schema_version"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-durable-capability-validation-evidence-presented-capability-commitment"
+target_row_id = "a21:field:durable-capability-validation-evidence-presented-capability-commitment"
+slice_id = "a21"
+source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.presented_capability_commitment"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-durable-capability-validation-evidence-presented-header-digest"
+target_row_id = "a21:field:durable-capability-validation-evidence-presented-header-digest"
+slice_id = "a21"
+source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.presented_header_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-durable-capability-validation-evidence-presented-kind-body-digest"
+target_row_id = "a21:field:durable-capability-validation-evidence-presented-kind-body-digest"
+slice_id = "a21"
+source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.presented_kind_body_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-durable-capability-validation-evidence-verified-mac-transcript-digest"
+target_row_id = "a21:field:durable-capability-validation-evidence-verified-mac-transcript-digest"
+slice_id = "a21"
+source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.verified_mac_transcript_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-durable-capability-validation-evidence-capability-format-version"
+target_row_id = "a21:field:durable-capability-validation-evidence-capability-format-version"
+slice_id = "a21"
+source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.capability_format_version"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-durable-capability-validation-evidence-action-scope-digest"
+target_row_id = "a21:field:durable-capability-validation-evidence-action-scope-digest"
+slice_id = "a21"
+source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.action_scope_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-durable-capability-validation-evidence-validator-semantics-registry-digest"
+target_row_id = "a21:field:durable-capability-validation-evidence-validator-semantics-registry-digest"
+slice_id = "a21"
+source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.validator_semantics_registry_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:field-durable-capability-validation-evidence-body-digest"
+target_row_id = "a21:field:durable-capability-validation-evidence-body-digest"
+slice_id = "a21"
+source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.body_digest"
 target_kind = "field"
 definition_status = "declared"
 

@@ -3922,3 +3922,57 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_reconciliation_status/"
+
+[[kind]]
+object_kind = 0x0550
+name = "DurableCapabilityHeader"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 1024
+golden_corpus = "corpus/logical/durable_capability_header/"
+
+[[kind]]
+object_kind = 0x0551
+name = "ExactDurableCapabilityKindBody"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 8192
+golden_corpus = "corpus/logical/exact_durable_capability_kind_body/"
+
+[[kind]]
+object_kind = 0x0552
+name = "CanonicalDurableCapabilityBytes"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/canonical_durable_capability_bytes/"
+
+[[kind]]
+object_kind = 0x0553
+name = "DurableCapabilityMacInput"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/durable_capability_mac_input/"
+
+[[kind]]
+object_kind = 0x0554
+name = "DurableCapabilityValidationActionScope"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 65536
+golden_corpus = "corpus/logical/durable_capability_validation_action_scope/"
+
+[[kind]]
+object_kind = 0x0555
+name = "DurableCapabilityValidatorSemanticsRegistry"
+status = "active"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16384
+golden_corpus = "corpus/logical/durable_capability_validator_semantics_registry/"
