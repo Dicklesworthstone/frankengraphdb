@@ -3913,3 +3913,39 @@ wire_tag = 0x0003
 encoding_context = "DirectoryBoundEmbeddedNoCatalog payload arm of RestorePromotionAuthorityProfile; Local-only"
 allowed_containing_schemas = ["RestorePromotionAuthorityProfile"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0183
+name = "ImportedReadYourWritesValidationProjection"
+kind = "record"
+status = "reserved"
+encoding_context = "a21 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0184
+name = "ReadAccessCommon"
+kind = "record"
+status = "reserved"
+encoding_context = "a21 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0185
+name = "ReadResultReleaseCommon"
+kind = "record"
+status = "reserved"
+encoding_context = "a21 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0186
+name = "ReadYourWritesCapabilityLineageKey"
+kind = "record"
+status = "reserved"
+encoding_context = "a21 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216

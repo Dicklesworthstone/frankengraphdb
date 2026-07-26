@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2524
+target_count = 2528
 projection_fallback_count = 106
-target_source_assignment_sha256 = "d21e7d6923b8a54d08f6997dfb263cf2405f7a27bb99b5a37c72a86ab6920507"
+target_source_assignment_sha256 = "1e65244e1a95897e1a0a0d89723063c266111cd281f02817535cfb9964599bb8"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -10749,6 +10749,50 @@ containing_union = "RestorePromotionAuthorityProfile"
 wire_tag = 0x0003
 encoding_context = "DirectoryBoundEmbeddedNoCatalog payload arm of RestorePromotionAuthorityProfile; Local-only"
 allowed_containing_schemas = ["RestorePromotionAuthorityProfile"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:imported-read-your-writes-validation-projection"
+wire_type_id = 0x0183
+name = "ImportedReadYourWritesValidationProjection"
+kind = "record"
+status = "reserved"
+encoding_context = "a21 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:read-access-common"
+wire_type_id = 0x0184
+name = "ReadAccessCommon"
+kind = "record"
+status = "reserved"
+encoding_context = "a21 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:read-result-release-common"
+wire_type_id = 0x0185
+name = "ReadResultReleaseCommon"
+kind = "record"
+status = "reserved"
+encoding_context = "a21 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:read-your-writes-capability-lineage-key"
+wire_type_id = 0x0186
+name = "ReadYourWritesCapabilityLineageKey"
+kind = "record"
+status = "reserved"
+encoding_context = "a21 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
 max_size_bytes = 16777216
 
 [[field]]
@@ -47091,7 +47135,7 @@ symbol = "ImportedReadYourWritesValidationProjection"
 generic_signature = ""
 source_key = "top|ImportedReadYourWritesValidationProjection"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2649"]
 
 [[top_level_candidate]]
@@ -50261,7 +50305,7 @@ symbol = "ReadAccessCommon"
 generic_signature = "<Role>"
 source_key = "top|ReadAccessCommon<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2625"]
 
 [[top_level_candidate]]
@@ -50321,7 +50365,7 @@ symbol = "ReadResultReleaseCommon"
 generic_signature = "<Role>"
 source_key = "top|ReadResultReleaseCommon<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2627"]
 
 [[top_level_candidate]]
@@ -50351,7 +50395,7 @@ symbol = "ReadYourWritesCapabilityLineageKey"
 generic_signature = ""
 source_key = "top|ReadYourWritesCapabilityLineageKey"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2635"]
 
 [[top_level_candidate]]
@@ -75882,6 +75926,38 @@ target_row_id = "a19:field:restore-shard-ready-barrier-reconciliation-completion
 slice_id = "a19"
 source_key = "field|RestoreShardReadyBarrier|RestoreShardReadyBarrier.reconciliation_completion_proof_ref|reconciliation_completion_proof_ref"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-imported-read-your-writes-validation-projection"
+target_row_id = "a21:wire-type:imported-read-your-writes-validation-projection"
+slice_id = "a21"
+source_key = "top|ImportedReadYourWritesValidationProjection"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-read-access-common"
+target_row_id = "a21:wire-type:read-access-common"
+slice_id = "a21"
+source_key = "top|ReadAccessCommon<Role>"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-read-result-release-common"
+target_row_id = "a21:wire-type:read-result-release-common"
+slice_id = "a21"
+source_key = "top|ReadResultReleaseCommon<Role>"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-read-your-writes-capability-lineage-key"
+target_row_id = "a21:wire-type:read-your-writes-capability-lineage-key"
+slice_id = "a21"
+source_key = "top|ReadYourWritesCapabilityLineageKey"
+target_kind = "wire-type"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
