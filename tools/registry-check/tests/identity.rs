@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 62
+registry_epoch = 63
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 62);
+    assert_eq!(epoch, 63);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -6973,12 +6973,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
             )
     };
-    // l6xd's A03 closeout adds the six top-level AuthorityBoundHeader members
-    // whose four remaining source occurrences already live inside committed
-    // LocalStatementIndex arm payloads. These rows postdate the A10 namespace
-    // erratum and must not contaminate its historical assignment witness.
-    let post_erratum_a03_inline_authority_headers = |schema: &str, name: &str| {
-        name == "authority_bound_header"
+    // l6xd's A03 closeout and its immediate beneficiary add twelve flat
+    // AuthorityBoundHeader members plus two flat AppliedControlRef members.
+    // The four LocalStatementIndex source occurrences remain committed by
+    // exact arm payloads. These rows postdate the A10 namespace erratum and
+    // must not contaminate its historical assignment witness.
+    let post_erratum_a03_inline_fields = |schema: &str, name: &str| {
+        (name == "authority_bound_header"
             && matches!(
                 schema,
                 "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
@@ -6987,6 +6988,17 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "LocalBeginReservationSpec"
                     | "LocalTxnWorkspaceGeneration"
                     | "TxnOutcomeRecord"
+                    | "LocalBeginReservationRecord"
+                    | "LocalBufferedResultManifest"
+                    | "ResultDeliveryPolicy<Role>"
+                    | "ResultDeliveryLeaseTimeBasis<Role>"
+                    | "LocalResultDeliveryLease"
+                    | "AdmittedTxnAbortCommand"
+            ))
+            || matches!(
+                (schema, name),
+                ("LocalAuditTicketClaimRecord", "claim_applied_ref")
+                    | ("LocalBeginReservationRecord", "applied_control_ref")
             )
     };
     pre_erratum.fields.retain(|field| {
@@ -7027,10 +7039,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 &field.containing_schema,
                 &field.stable_name,
             )
-            && !post_erratum_a03_inline_authority_headers(
-                &field.containing_schema,
-                &field.stable_name,
-            )
+            && !post_erratum_a03_inline_fields(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 363,
@@ -7038,9 +7047,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 497,
+        pre_erratum.fields.len() + 505,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A18 reservation-backed StrongRef tranche"
+        "the historical witness must remove every post-erratum field cohort through the A03 inline authority beneficiary tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

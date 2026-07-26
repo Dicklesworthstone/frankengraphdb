@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3188
+target_count = 3196
 projection_fallback_count = 109
-target_source_assignment_sha256 = "6aaad56ad3809d81b19d350198a94a12157c6a9444d370020cc205910441e3cb"
+target_source_assignment_sha256 = "e0426c7c127073237a5a4d1efdde1af3b09912c7bf58907b9befdedcee0f1df0"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 38
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 62
+registry_epoch = 63
 
 [[logical_kind]]
 slice_id = "a03"
@@ -101014,3 +101014,195 @@ source_locations = ["a02:1449"]
 resolution = "maps-to-source"
 resolved_source_keys = ["field|LocationForm|LocationForm.Explicit.sorted_symbol_inventory_and_locators|sorted_symbol_inventory_and_locators"]
 rationale = "a02:1449: the shorthand sorted_symbol_inventory_and_locators member is committed byte-exactly by the registered LocationForm Explicit arm payload digest; the single affected census key maps to that arm-interior source form."
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:local-audit-ticket-claim-record-claim-applied-ref"
+containing_schema = "LocalAuditTicketClaimRecord"
+field_tag = 0x0004
+stable_name = "claim_applied_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in the Local audit-ticket claim record; retained with the claim record and creates no reachability edge (a03:1470)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:local-begin-reservation-record-authority-bound-header"
+containing_schema = "LocalBeginReservationRecord"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the begin reservation record; retained with the record and creates no reachability edge (a03:1482)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:local-begin-reservation-record-applied-control-ref"
+containing_schema = "LocalBeginReservationRecord"
+field_tag = 0x0003
+stable_name = "applied_control_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in the begin reservation record; retained with the record and creates no reachability edge (a03:1482)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:local-buffered-result-manifest-authority-bound-header"
+containing_schema = "LocalBufferedResultManifest"
+field_tag = 0x0002
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the buffered result manifest; retained with the manifest and creates no reachability edge (a03:1490)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:result-delivery-policy-role-authority-bound-header"
+containing_schema = "ResultDeliveryPolicy<Role>"
+field_tag = 0x0002
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in the result delivery policy; retained with the policy and creates no reachability edge (a03:1492)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:result-delivery-lease-time-basis-role-authority-bound-header"
+containing_schema = "ResultDeliveryLeaseTimeBasis<Role>"
+field_tag = 0x0002
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in the result delivery lease time basis; retained with the basis and creates no reachability edge (a03:1494)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:local-result-delivery-lease-authority-bound-header"
+containing_schema = "LocalResultDeliveryLease"
+field_tag = 0x0008
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the result delivery lease; retained with the lease and creates no reachability edge (a03:1496)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:admitted-txn-abort-command-authority-bound-header"
+containing_schema = "AdmittedTxnAbortCommand"
+field_tag = 0x0002
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the admitted transaction abort command; retained with the command and creates no reachability edge (a03:1538)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[target]]
+row_id = "a03:target:field-local-audit-ticket-claim-record-claim-applied-ref"
+target_row_id = "a03:field:local-audit-ticket-claim-record-claim-applied-ref"
+slice_id = "a03"
+source_key = "field|LocalAuditTicketClaimRecord|LocalAuditTicketClaimRecord.claim_applied_ref|claim_applied_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-local-begin-reservation-record-authority-bound-header"
+target_row_id = "a03:field:local-begin-reservation-record-authority-bound-header"
+slice_id = "a03"
+source_key = "field|LocalBeginReservationRecord|LocalBeginReservationRecord.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-local-begin-reservation-record-applied-control-ref"
+target_row_id = "a03:field:local-begin-reservation-record-applied-control-ref"
+slice_id = "a03"
+source_key = "field|LocalBeginReservationRecord|LocalBeginReservationRecord.applied_control_ref|applied_control_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-local-buffered-result-manifest-authority-bound-header"
+target_row_id = "a03:field:local-buffered-result-manifest-authority-bound-header"
+slice_id = "a03"
+source_key = "field|LocalBufferedResultManifest|LocalBufferedResultManifest.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-result-delivery-policy-role-authority-bound-header"
+target_row_id = "a03:field:result-delivery-policy-role-authority-bound-header"
+slice_id = "a03"
+source_key = "field|ResultDeliveryPolicy<Role>|ResultDeliveryPolicy<Role>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-result-delivery-lease-time-basis-role-authority-bound-header"
+target_row_id = "a03:field:result-delivery-lease-time-basis-role-authority-bound-header"
+slice_id = "a03"
+source_key = "field|ResultDeliveryLeaseTimeBasis<Role>|ResultDeliveryLeaseTimeBasis<Role>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-local-result-delivery-lease-authority-bound-header"
+target_row_id = "a03:field:local-result-delivery-lease-authority-bound-header"
+slice_id = "a03"
+source_key = "field|LocalResultDeliveryLease|LocalResultDeliveryLease.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-admitted-txn-abort-command-authority-bound-header"
+target_row_id = "a03:field:admitted-txn-abort-command-authority-bound-header"
+slice_id = "a03"
+source_key = "field|AdmittedTxnAbortCommand|AdmittedTxnAbortCommand.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
