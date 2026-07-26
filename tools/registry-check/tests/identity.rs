@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 49
+registry_epoch = 50
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 49);
+    assert_eq!(epoch, 50);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -4979,6 +4979,18 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("ValidatedRemoteConfigurationAnchor", "input_spec_digest")
         )
     };
+    // A12 adds four fields whose source types, owners, and dependencies are all
+    // settled. Remove them as one cohort so the historical witness continues
+    // to reconstruct the namespace before post-erratum field increments.
+    let post_erratum_a12_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("ActivatedRetentionCutSet", "activation_applied_ref")
+                | ("ActivatedRetentionCutSet", "provisional_cut_ref")
+                | ("ProvisionalRetentionCutSet", "basis_projection_digest")
+                | ("ProvisionalRetentionCutSet", "body_ref")
+        )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_union(&field.exact_wire_type)
             && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
@@ -4989,6 +5001,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a04_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a04_field_tranche(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 326,
@@ -4996,9 +5009,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 96,
+        pre_erratum.fields.len() + 100,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A14 GC anchor tranche"
+        "the historical witness must remove every post-erratum field cohort through the A12 retention-cut tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
@@ -5173,6 +5186,104 @@ fn idr_a14_gc_decision_and_inventory_union_anchors_are_exact() {
             .collect::<Vec<_>>();
         assert_eq!(targets.len(), 1, "{source_key} maps exactly once");
         assert_eq!(targets[0].slice_id, "a14");
+        assert_eq!(targets[0].target_kind, "field");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+}
+
+#[test]
+fn idr_a12_retention_cut_fields_are_source_ordered_and_exact() {
+    let identity = real_identity();
+    let expected = [
+        (
+            "ActivatedRetentionCutSet",
+            "activation_applied_ref",
+            0x0003,
+            "AuthorityAppliedRef",
+            "inline",
+            "none",
+            None,
+            49,
+            None,
+        ),
+        (
+            "ActivatedRetentionCutSet",
+            "provisional_cut_ref",
+            0x0001,
+            "StrongRef",
+            "logical",
+            "strong",
+            Some("ProvisionalRetentionCutSet"),
+            40,
+            None,
+        ),
+        (
+            "ProvisionalRetentionCutSet",
+            "basis_projection_digest",
+            0x0004,
+            "WeakDigest",
+            "logical",
+            "weak_digest",
+            None,
+            32,
+            Some("weak_identity"),
+        ),
+        (
+            "ProvisionalRetentionCutSet",
+            "body_ref",
+            0x0001,
+            "StrongRef",
+            "logical",
+            "strong",
+            Some("RetentionCutBody"),
+            40,
+            None,
+        ),
+    ];
+    for (
+        schema,
+        name,
+        tag,
+        wire_type,
+        identity_class,
+        reference_semantics,
+        target,
+        max_size,
+        digest_class,
+    ) in expected
+    {
+        let field = identity
+            .fields
+            .iter()
+            .find(|field| field.containing_schema == schema && field.stable_name == name)
+            .unwrap_or_else(|| panic!("{schema}.{name} field exists"));
+        assert_eq!(field.field_tag, tag, "{schema}.{name} source-order tag");
+        assert_eq!(field.exact_wire_type, wire_type);
+        assert_eq!(field.cardinality, "one");
+        assert_eq!(field.identity_class, identity_class);
+        assert_eq!(field.reference_semantics, reference_semantics);
+        assert_eq!(field.target_schema_id.as_deref(), target);
+        assert_eq!(field.construction_order, 20);
+        assert_eq!(field.role_predicate, "true");
+        assert_eq!(field.version_status, "reserved");
+        assert_eq!(field.max_size_bytes, max_size);
+        assert_eq!(field.digest_class.as_deref(), digest_class);
+    }
+
+    let catalog = real_appendix_catalog();
+    for source_key in [
+        "field|ActivatedRetentionCutSet|ActivatedRetentionCutSet.activation_applied_ref|activation_applied_ref",
+        "field|ActivatedRetentionCutSet|ActivatedRetentionCutSet.provisional_cut_ref|provisional_cut_ref",
+        "field|ProvisionalRetentionCutSet|ProvisionalRetentionCutSet.basis_projection_digest|basis_projection_digest",
+        "field|ProvisionalRetentionCutSet|ProvisionalRetentionCutSet.body_ref|body_ref",
+    ] {
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|target| target.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{source_key} maps exactly once");
+        assert_eq!(targets[0].slice_id, "a12");
         assert_eq!(targets[0].target_kind, "field");
         assert_eq!(targets[0].definition_status, "declared");
     }

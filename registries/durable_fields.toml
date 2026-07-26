@@ -6,7 +6,36 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 49
+registry_epoch = 50
+
+[[field]]
+containing_schema = "ActivatedRetentionCutSet"
+field_tag = 0x0001
+stable_name = "provisional_cut_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ProvisionalRetentionCutSet"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact provisional cut strengthened by this activated cut; retained while the activated authority is retained, with the target constructed no later than its owner (a12:1972)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ActivatedRetentionCutSet"
+field_tag = 0x0003
+stable_name = "activation_applied_ref"
+exact_wire_type = "AuthorityAppliedRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "closed authority-applied identity for the activation that atomically replaced the provisional map entry; the selected inline arm names the already-applied command and carries no independent reachability edge (a12:1972)"
+version_status = "reserved"
+max_size_bytes = 49
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -1104,6 +1133,36 @@ role_predicate = "true"
 retention_and_cut_rule = "object_or_subobject_id realization inventory: names packed members without new schema surface; nonretaining locators — prepared OWNERSHIP retention is the obligation, not this edge (FG-INV-16)"
 version_status = "active"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ProvisionalRetentionCutSet"
+field_tag = 0x0001
+stable_name = "body_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RetentionCutBody"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the checkpoint-free retention cut body consumed by this provisional set; retained with the provisional authority and constructed no later than its owner (a12:1968,1970)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ProvisionalRetentionCutSet"
+field_tag = 0x0004
+stable_name = "basis_projection_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "weak identity of the exact role and checkpoint projection matched at apply time; comparison only and never a reachability edge (a12:1970)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "RaftConsensusCutProjection<Role>"

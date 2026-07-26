@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2405
+target_count = 2409
 projection_fallback_count = 90
-target_source_assignment_sha256 = "aae7ac652107af50fb798f9a2814fc55cfd5dc602e9ca945be3912bc998ee714"
+target_source_assignment_sha256 = "78dbdd1c2cf2758f94a9db766907da7a36b07f709b7ad1b40b24d842ec8d67c5"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 34
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 49
+registry_epoch = 50
 
 [[logical_kind]]
 slice_id = "a03"
@@ -15220,6 +15220,73 @@ role_predicate = "true"
 retention_and_cut_rule = "weak-identity digest only; it names no retained object and creates no retention edge, so nothing is held alive by this field (a04:1586)"
 version_status = "reserved"
 max_size_bytes = 32
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:activated-retention-cut-set-activation-applied-ref"
+containing_schema = "ActivatedRetentionCutSet"
+field_tag = 0x0003
+stable_name = "activation_applied_ref"
+exact_wire_type = "AuthorityAppliedRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "closed authority-applied identity for the activation that atomically replaced the provisional map entry; the selected inline arm names the already-applied command and carries no independent reachability edge (a12:1972)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:activated-retention-cut-set-provisional-cut-ref"
+containing_schema = "ActivatedRetentionCutSet"
+field_tag = 0x0001
+stable_name = "provisional_cut_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ProvisionalRetentionCutSet"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact provisional cut strengthened by this activated cut; retained while the activated authority is retained, with the target constructed no later than its owner (a12:1972)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:provisional-retention-cut-set-basis-projection-digest"
+containing_schema = "ProvisionalRetentionCutSet"
+field_tag = 0x0004
+stable_name = "basis_projection_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "weak identity of the exact role and checkpoint projection matched at apply time; comparison only and never a reachability edge (a12:1970)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:provisional-retention-cut-set-body-ref"
+containing_schema = "ProvisionalRetentionCutSet"
+field_tag = 0x0001
+stable_name = "body_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RetentionCutBody"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the checkpoint-free retention cut body consumed by this provisional set; retained with the provisional authority and constructed no later than its owner (a12:1968,1970)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[union]]
 slice_id = "a01"
@@ -73149,6 +73216,38 @@ target_row_id = "a05:logical-kind:sharding-freeze-spec"
 slice_id = "a05"
 source_key = "top|ShardingFreezeSpec"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-activated-retention-cut-set-activation-applied-ref"
+target_row_id = "a12:field:activated-retention-cut-set-activation-applied-ref"
+slice_id = "a12"
+source_key = "field|ActivatedRetentionCutSet|ActivatedRetentionCutSet.activation_applied_ref|activation_applied_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-activated-retention-cut-set-provisional-cut-ref"
+target_row_id = "a12:field:activated-retention-cut-set-provisional-cut-ref"
+slice_id = "a12"
+source_key = "field|ActivatedRetentionCutSet|ActivatedRetentionCutSet.provisional_cut_ref|provisional_cut_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-provisional-retention-cut-set-basis-projection-digest"
+target_row_id = "a12:field:provisional-retention-cut-set-basis-projection-digest"
+slice_id = "a12"
+source_key = "field|ProvisionalRetentionCutSet|ProvisionalRetentionCutSet.basis_projection_digest|basis_projection_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-provisional-retention-cut-set-body-ref"
+target_row_id = "a12:field:provisional-retention-cut-set-body-ref"
+slice_id = "a12"
+source_key = "field|ProvisionalRetentionCutSet|ProvisionalRetentionCutSet.body_ref|body_ref"
+target_kind = "field"
 definition_status = "declared"
 
 [[source_symbol_disposition]]
