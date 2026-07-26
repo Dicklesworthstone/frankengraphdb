@@ -23,5 +23,6 @@ pub mod model;
 pub mod predicate;
 pub mod threat;
 pub mod toml;
+pub mod topology;
 pub mod unsafe_ledger;
 pub mod validate;

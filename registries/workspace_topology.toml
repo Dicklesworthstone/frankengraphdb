@@ -1,0 +1,2370 @@
+# =============================================================================
+# workspace_topology.toml — the frozen workspace crate/layer topology (G0)
+# =============================================================================
+# Bead: fgdb-g0-workspace-topology-1q9m
+# Provenance: plan §18.1 (crate/layer table), §18.2 (build-it-ourselves
+# inventory), §1 constraints 1-2 (FG-CON-01/FG-CON-02), §2.1/§2.2/§2.3 (the
+# foundation asset tables), §15.2 (the fgdb-reference dependency allowlist),
+# §19 G0 (materialization), §19 workstream table (ownership).
+#
+# WHY THIS REGISTRY EXISTS. The closed dependency universe and the layer
+# direction are safety properties, not conventions. Without one executable map,
+# later work can add an external crate, invert Chronicle/Strata/Loom ownership,
+# duplicate an asupersync or fnx subsystem, link `fsqlite-*`, or relax the
+# unsafe policy — each of which reads exactly like ordinary progress in a diff.
+# This registry is the map; docs/WORKSPACE_TOPOLOGY.md is its published
+# rendering; `topology-check` is the gate.
+#
+# THIS IS A CONTRACT, NOT PERMISSION TO CREATE CRATES. A crate row is frozen
+# vocabulary. `activation_status = "active"` means the crate exists in the
+# workspace *with its first real final-abstraction slice*; "planned" means the
+# row is frozen and the directory MUST NOT exist yet. The registry therefore
+# forbids the empty prototype crate mechanically, in both directions.
+#
+# THE FIVE LAWS THIS REGISTRY ENFORCES THAT NOTHING ELSE DOES.
+#
+#   1. Crate-universe derivation. The crate set, its per-layer partition, and
+#      the order within each layer are DERIVED from the §18.1 table by parsing
+#      it, not transcribed. Every backticked `fgdb…` token in the table must be
+#      a registered crate, every registered crate must appear in its own
+#      layer's row, and the in-row order must match `layer_position` exactly.
+#      A crate the plan names and this registry forgot is a violation, which is
+#      the failure an eyeballed transcription cannot catch.
+#   2. Activation bijection against the live tree. Every Cargo workspace member
+#      resolves to an active crate row or a registered tooling member, and every
+#      active row resolves to a real manifest + crate root. A "planned" row with
+#      a directory, or a directory with no row, is a violation.
+#   3. Closed-universe resolution. Every dependency of every active crate
+#      resolves to a registered crate, or to a registered foundation project at
+#      its single pinned revision with default features disabled. There is no
+#      allow-list of externals to forget to update: anything unresolvable is a
+#      violation, `fsqlite-*` is a registered forbidden prefix, and `pyo3` is
+#      forbidden as a DIRECT dependency of every `fgdb-*` crate (FG-CON-01's
+#      packaging boundary), including `fgdb-python`.
+#   4. Inventory partition and coverage. Every capability in §18.2 is exactly
+#      one of build_here / consume_from / design_only. Coverage is proved by
+#      residue: each row's phrase is deleted from the frozen §18.2 source line,
+#      and what remains must be punctuation and registered rationale
+#      allowances. A capability the plan lists and this registry dropped leaves
+#      a residue token and fails, so "duplicate a foundation subsystem" cannot
+#      pass by omission.
+#   5. Unsafe-policy exactness. Exactly the three named `fgdb-unsafe-*` islands
+#      may carry `deny_ledgered`; every other crate carries `forbid`, the
+#      workspace default is `forbid`, and every ACTIVE forbid-crate root is
+#      scanned for the attribute and for `unsafe` usage.
+#
+# WHAT THIS REGISTRY DELIBERATELY DOES NOT DO.
+#
+#   * It does not own the unsafe-boundary LEDGER. Site-level rows (path,
+#     invariant, evidence, fallback, no-claim boundary) and the site<->row
+#     bijection belong to fgdb-w1-unsafe-ledger-icp, which also creates the
+#     islands. This registry owns the per-crate POLICY column only, and the
+#     three island rows sit at activation_status = "planned" until that bead
+#     lands them. Enforcing a bijection against a ledger that does not exist
+#     would manufacture a G0 fact from a W1 deliverable.
+#   * It does not invent the per-crate dependency graph. The plan fixes LAYER
+#     direction plus a handful of named crate-level edges; those named edges are
+#     `[[required_dependency]]` rows, checked the moment both endpoints are
+#     active and reported as `deferred` (never as `pass`) until then. Inventing
+#     the other ~200 edges would freeze guesses as contract.
+#   * It does not bind posture closures for crates that do not exist. The
+#     posture law runs over the LIVE dependency graph; with no composition crate
+#     active it reports `deferred` for all three postures. The closure evaluator
+#     itself is proved against synthetic fixtures in the suite, so the law is
+#     known to fire rather than assumed to.
+# =============================================================================
+
+schema_version = 1
+
+[registry]
+name = "workspace_topology"
+document_path = "docs/WORKSPACE_TOPOLOGY.md"
+replay_command = "cargo run -p registry-check --bin topology-check -- --root ."
+bound_constraints = ["FG-CON-01", "FG-CON-02"]
+# Workspace members that are deliberately NOT engine crates. G0 constitutional
+# tooling validates the registries and is std-only by the same constraint it
+# enforces; it is not part of any posture closure.
+tooling_members = ["tools/registry-check"]
+# The unsafe-boundary ledger (fgdb-w1-unsafe-ledger-icp) declares the same three
+# islands this registry does, with its own status column. Two registries that
+# both name the islands must not be able to disagree, so the path is declared
+# here and the island roster is checked as a bijection in both directions.
+# Site-level rows and the site<->allow bijection stay theirs; the crate-level
+# policy column stays ours.
+unsafe_ledger_registry = "registries/unsafe_boundary_ledger.toml"
+workspace_manifest = "Cargo.toml"
+workspace_unsafe_lint = "forbid"
+toolchain_channel = "nightly-2026-07-05"
+# Blocks the generated document embeds VERBATIM between markers. The other
+# blocks are pinned and hash-checked but not reproduced: a document that quotes
+# a quarter of the plan is a document nobody reads. These four ARE the contract.
+embedded_source_blocks = [
+  "plan-closed-universe-v1",
+  "plan-memory-safety-v1",
+  "plan-crate-layer-table-v1",
+  "plan-build-inventory-v1",
+]
+# Exact cardinalities the plan fixes by enumeration. A row added or dropped
+# without moving these is schema drift, not an edit.
+layer_count = 14
+crate_count = 70
+active_crate_count = 10
+planned_crate_count = 59
+reserved_crate_count = 1
+owner_scope_count = 14
+foundation_project_count = 3
+capability_count = 51
+build_here_count = 23
+consume_from_count = 19
+design_only_count = 9
+residue_allowance_count = 4
+required_dependency_count = 8
+asset_evidence_gap_count = 1
+forbidden_dependency_count = 3
+dependency_narrowing_count = 1
+posture_count = 3
+source_block_count = 11
+id_table_hash = "fnv1a64:b422bc59c3da23ca"
+semantic_contract_hash = "fnv1a64:06dc3e04b7b7a0ca"
+
+# -----------------------------------------------------------------------------
+# Checked source blocks. The generated document embeds these plan line ranges
+# verbatim between markers; the checker re-reads both sides and fails on drift.
+# `plan-crate-layer-table-v1` is additionally PARSED (law 1) and
+# `plan-build-inventory-v1` is additionally decomposed (law 4) — for those two
+# the pin is not decoration, it is the input to a derivation.
+# -----------------------------------------------------------------------------
+
+[[source_block]]
+id = "plan-closed-universe-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 37
+plan_end_line = 37
+line_count = 1
+byte_count = 1061
+fnv1a64 = "0x4145afb24082e377"
+covers = "§1 constraint 1 — the dependency universe is closed (FG-CON-01)"
+
+[[source_block]]
+id = "plan-memory-safety-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 38
+plan_end_line = 38
+line_count = 1
+byte_count = 570
+fnv1a64 = "0xf6598dc89fedc674"
+covers = "§1 constraint 2 — memory safety is structural (FG-CON-02)"
+
+[[source_block]]
+id = "plan-three-postures-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 41
+plan_end_line = 41
+line_count = 1
+byte_count = 376
+fnv1a64 = "0xb7ce112fce602ad2"
+covers = "§1 constraint 5 — single artifact, three postures"
+
+[[source_block]]
+id = "plan-asupersync-assets-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 58
+plan_end_line = 75
+line_count = 18
+byte_count = 5887
+fnv1a64 = "0xf4c674b2960c6e0c"
+covers = "§2.1 — the asupersync asset table (consume_from evidence)"
+
+[[source_block]]
+id = "plan-fnx-assets-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 81
+plan_end_line = 89
+line_count = 9
+byte_count = 2459
+fnv1a64 = "0x3768f87d4ec27de2"
+covers = "§2.2 — the franken_networkx asset table (consume_from evidence)"
+
+[[source_block]]
+id = "plan-frankensqlite-donor-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 95
+plan_end_line = 105
+line_count = 11
+byte_count = 3218
+fnv1a64 = "0x87134ba230bd874a"
+covers = "§2.3 — the frankensqlite donor table (design_only evidence)"
+
+[[source_block]]
+id = "plan-reference-allowlist-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 1156
+plan_end_line = 1156
+line_count = 1
+byte_count = 1924
+fnv1a64 = "0x4869259b5194c04d"
+covers = "§15.2 — the fgdb-reference dependency allowlist and its one sharing exception"
+
+[[source_block]]
+id = "plan-crate-layer-table-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 1285
+plan_end_line = 1300
+line_count = 16
+byte_count = 2642
+fnv1a64 = "0xcc94f5b08108d544"
+covers = "§18.1 — the crate/layer table (PARSED: the crate universe is derived from it)"
+
+[[source_block]]
+id = "plan-g0-materialization-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 1302
+plan_end_line = 1302
+line_count = 1
+byte_count = 236
+fnv1a64 = "0x539eaa5c90799968"
+covers = "§18 — what G0 materializes before Genesis implementation"
+
+[[source_block]]
+id = "plan-build-inventory-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 1306
+plan_end_line = 1306
+line_count = 1
+byte_count = 1392
+fnv1a64 = "0xb3b636c76dfb854b"
+covers = "§18.2 — build-it-ourselves inventory (DECOMPOSED: residue coverage)"
+
+[[source_block]]
+id = "plan-workstream-table-v1"
+plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+plan_start_line = 1319
+plan_end_line = 1332
+line_count = 14
+byte_count = 5939
+fnv1a64 = "0xfecc8909f6b9d2cf"
+covers = "§19 — the workstream table (ownership vocabulary)"
+
+# =============================================================================
+# LAYERS
+# =============================================================================
+# `source_order` is the §18.1 table position, checked against the parsed table.
+#
+# `allowed_outgoing_layers` is DERIVED, and the checker recomputes it:
+#
+#     allowed(L) = { M : M.source_order <= L.source_order } ∪ { unsafe_islands }
+#
+# The union term is the one exception to table order in this registry, and it is
+# registered rather than silent. The islands are leaf infrastructure (SIMD
+# kernels, arenas, VFS surfaces) consumed by every layer INCLUDING foundation
+# codec/crypto/collections kernels, while themselves consuming only foundation
+# types. That makes exactly one reciprocal LAYER pair — foundation <->
+# unsafe_islands, declared below — and no reciprocal CRATE pair: crate-level
+# acyclicity is checked unconditionally over the live graph, so the exception
+# buys a legal edge without buying a cycle.
+# -----------------------------------------------------------------------------
+
+[layer_law]
+reciprocal_pair = ["foundation", "unsafe_islands"]
+reciprocal_reason = "The unsafe islands are leaf infrastructure: foundation codec/crypto/collections kernels consume them (per fgdb-w1-unsafe-ledger-icp's own consumer list), and they consume foundation types. Crate-level acyclicity is enforced separately and unconditionally."
+crate_graph_must_be_acyclic = true
+
+[[layer]]
+id = "foundation"
+title = "Foundation"
+source_order = 1
+allowed_outgoing_layers = ["foundation", "unsafe_islands"]
+charter = "Canonical value/type/claim/policy/resource vocabulary, in-house codecs, sketches, collections, crypto, calibration, and evidence envelopes. No I/O, no durable state machines."
+
+[[layer]]
+id = "unsafe_islands"
+title = "Unsafe islands"
+source_order = 2
+allowed_outgoing_layers = ["foundation", "unsafe_islands"]
+charter = "The only crate roots not using forbid(unsafe_code); every site is ledgered and exposed only through safe APIs."
+
+[[layer]]
+id = "chronicle"
+title = "Chronicle"
+source_order = 3
+allowed_outgoing_layers = ["foundation", "unsafe_islands", "chronicle"]
+charter = "The append-only content-addressed commit substrate: identity/encoding/bootstrap, durable order, roots and capsules, branches, key management, audit, backup."
+
+[[layer]]
+id = "strata"
+title = "Strata"
+source_order = 4
+allowed_outgoing_layers = ["foundation", "unsafe_islands", "chronicle", "strata"]
+charter = "Graph-structured LSM storage: label-independent tiers, property storage, buffer pool, query scratch."
+
+[[layer]]
+id = "txn_secure_access"
+title = "Txn + secure access"
+source_order = 5
+allowed_outgoing_layers = [
+  "foundation",
+  "unsafe_islands",
+  "chronicle",
+  "strata",
+  "txn_secure_access",
+]
+charter = "MVCC/Graph-SSI, constraint enforcement, and the sole authorized storage/permit facade. Depends on Chronicle + Strata + the foundation policy verifier."
+
+[[layer]]
+id = "loom"
+title = "Loom"
+source_order = 6
+allowed_outgoing_layers = [
+  "foundation",
+  "unsafe_islands",
+  "chronicle",
+  "strata",
+  "txn_secure_access",
+  "loom",
+]
+charter = "Syntax, binder, algebra, planner, executor, linear algebra, and Datalog. All reads flow through fgdb-secure-view."
+
+[[layer]]
+id = "ripple"
+title = "Ripple"
+source_order = 7
+allowed_outgoing_layers = [
+  "foundation",
+  "unsafe_islands",
+  "chronicle",
+  "strata",
+  "txn_secure_access",
+  "loom",
+  "ripple",
+]
+charter = "Z-set delta algebra, circuits, incrementalizer, materialized views, subscriptions."
+
+[[layer]]
+id = "beacon"
+title = "Beacon"
+source_order = 8
+allowed_outgoing_layers = [
+  "foundation",
+  "unsafe_islands",
+  "chronicle",
+  "strata",
+  "txn_secure_access",
+  "loom",
+  "ripple",
+  "beacon",
+]
+charter = "Rebuildable secondary indexes: B-tree, full-text, vector ANN, path/connectivity."
+
+[[layer]]
+id = "prism"
+title = "Prism"
+source_order = 9
+allowed_outgoing_layers = [
+  "foundation",
+  "unsafe_islands",
+  "chronicle",
+  "strata",
+  "txn_secure_access",
+  "loom",
+  "ripple",
+  "beacon",
+  "prism",
+]
+charter = "The authorized projection bridge to franken_networkx: cursor/cache/materialization paths and native kernels."
+
+[[layer]]
+id = "warden"
+title = "Warden"
+source_order = 10
+allowed_outgoing_layers = [
+  "foundation",
+  "unsafe_islands",
+  "chronicle",
+  "strata",
+  "txn_secure_access",
+  "loom",
+  "ripple",
+  "beacon",
+  "prism",
+  "warden",
+]
+charter = "Capability issuance/revocation/discharges, policy administration, privacy and redaction. The verifier IR it administers lives in foundation, which is why no lower layer needs to depend on Warden."
+
+[[layer]]
+id = "surface_operations"
+title = "Surface/operations"
+source_order = 11
+allowed_outgoing_layers = [
+  "foundation",
+  "unsafe_islands",
+  "chronicle",
+  "strata",
+  "txn_secure_access",
+  "loom",
+  "ripple",
+  "beacon",
+  "prism",
+  "warden",
+  "surface_operations",
+]
+charter = "FGP state machine, Bolt subset, formats, the deterministic UDF VM, observatory, and the self-describing system graph."
+
+[[layer]]
+id = "aegis"
+title = "Aegis"
+source_order = 12
+allowed_outgoing_layers = [
+  "foundation",
+  "unsafe_islands",
+  "chronicle",
+  "strata",
+  "txn_secure_access",
+  "loom",
+  "ripple",
+  "beacon",
+  "prism",
+  "warden",
+  "surface_operations",
+  "aegis",
+]
+charter = "Multi-member consensus over the Chronicle order core, payload availability, anti-entropy, reconfiguration, fenced GC."
+
+[[layer]]
+id = "composition"
+title = "Composition"
+source_order = 13
+allowed_outgoing_layers = [
+  "foundation",
+  "unsafe_islands",
+  "chronicle",
+  "strata",
+  "txn_secure_access",
+  "loom",
+  "ripple",
+  "beacon",
+  "prism",
+  "warden",
+  "surface_operations",
+  "aegis",
+  "composition",
+]
+charter = "The three postures plus the two packaging boundaries. Composition crates are entry points: nothing below them may depend on them."
+
+[[layer]]
+id = "verification"
+title = "Verification"
+source_order = 14
+allowed_outgoing_layers = [
+  "foundation",
+  "unsafe_islands",
+  "chronicle",
+  "strata",
+  "txn_secure_access",
+  "loom",
+  "ripple",
+  "beacon",
+  "prism",
+  "warden",
+  "surface_operations",
+  "aegis",
+  "composition",
+  "verification",
+]
+charter = "Simulation, the executable reference oracle, consistency oracles, benches, conformance corpora, fuzzers. Never shipped in any posture closure."
+
+# =============================================================================
+# OWNERSHIP VOCABULARY
+# =============================================================================
+# `kind = "workstream"` rows carry a title that must appear VERBATIM in the §19
+# workstream table block. The two non-workstream scopes are typed as such
+# rather than smuggled in as fake workstream rows: G0 is a gate, and the
+# verification ladder is a bead family (§15) the workstream table does not name.
+# -----------------------------------------------------------------------------
+
+[[owner_scope]]
+id = "G0"
+kind = "gate"
+title = "Constitutional Contracts"
+plan_anchor = "§19 Gate G0"
+
+[[owner_scope]]
+id = "W1"
+kind = "workstream"
+title = "Bedrock + security foundations"
+plan_anchor = "§19 W1"
+
+[[owner_scope]]
+id = "W2"
+kind = "workstream"
+title = "Chronicle contracts + durability core"
+plan_anchor = "§19 W2"
+
+[[owner_scope]]
+id = "W3"
+kind = "workstream"
+title = "Strata"
+plan_anchor = "§19 W3"
+
+[[owner_scope]]
+id = "W4"
+kind = "workstream"
+title = "Transactions + Secure View"
+plan_anchor = "§19 W4"
+
+[[owner_scope]]
+id = "W5"
+kind = "workstream"
+title = "Loom"
+plan_anchor = "§19 W5"
+
+[[owner_scope]]
+id = "W6"
+kind = "workstream"
+title = "Ripple"
+plan_anchor = "§19 W6"
+
+[[owner_scope]]
+id = "W7"
+kind = "workstream"
+title = "Beacon"
+plan_anchor = "§19 W7"
+
+[[owner_scope]]
+id = "W8"
+kind = "workstream"
+title = "Prism + fnx upstream"
+plan_anchor = "§19 W8"
+
+[[owner_scope]]
+id = "W9"
+kind = "workstream"
+title = "Warden"
+plan_anchor = "§19 W9"
+
+[[owner_scope]]
+id = "W10"
+kind = "workstream"
+title = "Fabric + operations"
+plan_anchor = "§19 W10"
+
+[[owner_scope]]
+id = "W11"
+kind = "workstream"
+title = "Aegis replication + HA"
+plan_anchor = "§19 W11"
+
+[[owner_scope]]
+id = "W12"
+kind = "workstream"
+title = "Post-1.0 sharding"
+plan_anchor = "§19 W12"
+
+[[owner_scope]]
+id = "verification_ladder"
+kind = "bead_family"
+title = "Verification ladder"
+plan_anchor = "§15 (fgdb-verif-* beads; the §19 table names no verification workstream)"
+
+# =============================================================================
+# FOUNDATION PROJECTS — the entire legal external universe
+# =============================================================================
+# `linkage`:
+#   linked      — at least one active crate depends on it today
+#   linkable    — legal to depend on, nothing does yet
+#   design_only — designs may be adopted; the packages may NEVER be linked
+#
+# `package_prefixes` is normative and matches FG-CON-01's own wording ("the
+# `fnx-*` crates of `franken_networkx`") rather than an enumeration that would
+# rot every time a foundation adds a crate. `known_members` is documentation.
+#
+# `pinned_rev` is the single workspace-wide revision: two revisions of one
+# foundation is two versions of one capability, which is the duplicate-subsystem
+# failure wearing a git hash.
+# -----------------------------------------------------------------------------
+
+[[foundation_project]]
+id = "asupersync"
+title = "asupersync"
+linkage = "linked"
+git_url = "https://github.com/Dicklesworthstone/asupersync"
+pinned_rev = "e464a484cb65c1a55be0d9c925e6e9c20318edcb"
+package_prefixes = ["asupersync"]
+known_members = [
+  "asupersync",
+  "asupersync-macros",
+  "franken_kernel",
+  "franken_evidence",
+  "franken_decision",
+  "frankenlab",
+]
+default_features_must_be_disabled = true
+default_features_basis = "workspace_convention_unanimous"
+plan_anchor = "§2.1"
+
+[[foundation_project]]
+id = "franken_networkx"
+title = "franken_networkx (fnx-*)"
+linkage = "linked"
+git_url = "https://github.com/Dicklesworthstone/franken_networkx.git"
+pinned_rev = "9d710b1c33e99412c94de7fa4de2f7ce4954110f"
+package_prefixes = ["fnx-"]
+known_members = [
+  "fnx-algorithms",
+  "fnx-cgse",
+  "fnx-classes",
+  "fnx-conformance",
+  "fnx-convert",
+  "fnx-dispatch",
+  "fnx-durability",
+  "fnx-generators",
+  "fnx-python",
+  "fnx-readwrite",
+  "fnx-runtime",
+  "fnx-views",
+]
+default_features_must_be_disabled = false
+default_features_basis = "plan_permits_defaults: FG-CON-01 admits the fnx-* crates and, for the Python package, their already-pinned transitive binding runtime — the exact thing a blanket default-features=false rule would break"
+plan_anchor = "§2.2"
+
+[[foundation_project]]
+id = "frankensqlite"
+title = "frankensqlite (design-level only)"
+linkage = "design_only"
+git_url = "https://github.com/Dicklesworthstone/frankensqlite"
+pinned_rev = ""
+package_prefixes = ["fsqlite-"]
+known_members = []
+default_features_must_be_disabled = false
+default_features_basis = "not_applicable: nothing links it"
+plan_anchor = "§2.3"
+
+# Direct dependencies forbidden to every fgdb-* crate regardless of layer.
+# `pyo3` is FG-CON-01's packaging boundary: fgdb-python may consume fnx-python
+# and therefore its already-pinned transitive binding runtime, but no fgdb-*
+# crate may name PyO3 directly — including fgdb-python itself.
+[[forbidden_dependency]]
+id = "no-linked-frankensqlite"
+selector = "all_crates"
+package_prefix = "fsqlite-"
+plan_anchor = "§1 constraint 1, §2.3"
+reason = "frankensqlite is the architectural donor, not a dependency: graph objects are not SQLite pages. Designs are adopted; packages are never linked."
+
+[[forbidden_dependency]]
+id = "no-direct-pyo3"
+selector = "all_crates"
+package_prefix = "pyo3"
+plan_anchor = "§1 constraint 1"
+reason = "The engine, server, CLI, and durable formats stay free of the Python packaging boundary. fgdb-python reaches the binding runtime transitively through fnx-python only."
+
+[[forbidden_dependency]]
+id = "no-tooling-in-engine"
+selector = "all_crates"
+package_prefix = "registry-check"
+plan_anchor = "§18.1 (tooling is not an engine crate)"
+reason = "G0 constitutional tooling validates the registries; an engine crate depending on the validator would invert the gate."
+
+# =============================================================================
+# THE CRATE MAP
+# =============================================================================
+# `role_basis`:
+#   plan_parenthetical — `role` is verbatim from the §18.1 table and is checked
+#                        against the parsed block
+#   layer_charter      — descriptive prose derived from the layer charter; NOT a
+#                        plan quotation and not checked as one
+#
+# `posture_basis`:
+#   product_shape       — §1 constraint 5: one codebase, three postures; engine
+#                         crates participate in all three
+#   composition_entry   — the crate IS a posture entry point (§18.1 Composition)
+#   packaging_boundary  — §18.1 Composition + FG-CON-01 packaging boundary
+#   verification_layer  — never shipped in a posture closure (§15, §18.1)
+#   source_named        — the plan states the participation for this crate
+# -----------------------------------------------------------------------------
+
+# --- Foundation (13) -----------------------------------------------------------
+
+[[crate]]
+name = "fgdb-types"
+layer = "foundation"
+layer_position = 1
+role = "Core identity newtypes, bounded bytes, the typed reference family, and the canonical scalar value union."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "active"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-foundation-types-tjk"
+manifest_dir = "crates/fgdb-types"
+
+[[crate]]
+name = "fgdb-bigint"
+layer = "foundation"
+layer_position = 2
+role = "canonical exact integers"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "active"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-foundation-types-tjk"
+manifest_dir = "crates/fgdb-bigint"
+
+[[crate]]
+name = "fgdb-delta-types"
+layer = "foundation"
+layer_position = 3
+role = "G0/W2 delta schema only"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "active"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-foundation-types-tjk"
+manifest_dir = "crates/fgdb-delta-types"
+
+[[crate]]
+name = "fgdb-claim"
+layer = "foundation"
+layer_position = 4
+role = "The claim-type constitution as a type system: the six registry claim classes and the lattice law as a compile error."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "active"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-foundation-types-tjk"
+manifest_dir = "crates/fgdb-claim"
+
+[[crate]]
+name = "fgdb-authz-types"
+layer = "foundation"
+layer_position = 5
+role = "Authority, permit, and security-binding value types shared by the secure view and Warden."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-policy"
+layer = "foundation"
+layer_position = 6
+role = "restricted verifier IR"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-resource"
+layer = "foundation"
+layer_position = 7
+role = "Typed resource accounting and escrow vocabulary."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "active"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-resource-ledger-contract-ym2g"
+manifest_dir = "crates/fgdb-resource"
+
+[[crate]]
+name = "fgdb-codec"
+layer = "foundation"
+layer_position = 8
+role = "In-house compression kernels for the registered durable codec layer."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "active"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-codecs-3x8"
+manifest_dir = "crates/fgdb-codec"
+
+[[crate]]
+name = "fgdb-sketch"
+layer = "foundation"
+layer_position = 9
+role = "Deterministic frequency, degree, and cardinality summaries."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "active"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-sketch-calibrate-tpj"
+manifest_dir = "crates/fgdb-sketch"
+
+[[crate]]
+name = "fgdb-collections"
+layer = "foundation"
+layer_position = 10
+role = "ART/radix structures, succinct rank/select, and vectorized hash tables as safe scalar kernels."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "active"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-collections-lcg"
+manifest_dir = "crates/fgdb-collections"
+
+[[crate]]
+name = "fgdb-crypto"
+layer = "foundation"
+layer_position = 11
+role = "Keyed identity, AEAD/KDF profiles, and the primitives no audited foundation supplies."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-crypto-y5o"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-calibrate"
+layer = "foundation"
+layer_position = 12
+role = "Identity-bound calibration wrappers over the runtime's e-process/conformal machinery."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "active"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-sketch-calibrate-tpj"
+manifest_dir = "crates/fgdb-calibrate"
+
+[[crate]]
+name = "fgdb-evidence"
+layer = "foundation"
+layer_position = 13
+role = "Evidence envelopes and the disclosure fields every statistical claim must carry."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "active"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-foundation-types-tjk"
+manifest_dir = "crates/fgdb-evidence"
+
+# --- Unsafe islands (3) -------------------------------------------------------
+# Policy column only. Site-level ledger rows and the site<->row bijection belong
+# to fgdb-w1-unsafe-ledger-icp, which also lands these three directories.
+
+[[crate]]
+name = "fgdb-unsafe-simd"
+layer = "unsafe_islands"
+layer_position = 1
+role = "SIMD/vector kernels with bit-identical scalar fallbacks."
+role_basis = "layer_charter"
+unsafe_policy = "deny_ledgered"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-unsafe-ledger-icp"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-unsafe-arena"
+layer = "unsafe_islands"
+layer_position = 2
+role = "Bump/region arena internals and generational-handle plumbing behind safe APIs."
+role_basis = "layer_charter"
+unsafe_policy = "deny_ledgered"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-unsafe-ledger-icp"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-unsafe-vfs"
+layer = "unsafe_islands"
+layer_position = 3
+role = "Raw file/mapping syscall surfaces beneath the filesystem-profile layer."
+role_basis = "layer_charter"
+unsafe_policy = "deny_ledgered"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W1"
+owner_bead = "fgdb-w1-unsafe-ledger-icp"
+manifest_dir = ""
+
+# --- Chronicle (7) ------------------------------------------------------------
+
+[[crate]]
+name = "fgdb-ecs"
+layer = "chronicle"
+layer_position = 1
+role = "identity/encoding/bootstrap/object locator"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W2"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-order"
+layer = "chronicle"
+layer_position = 2
+role = "durable Raft log/state core and quorum-one driver"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W2"
+owner_bead = "fgdb-w2-order-raft-0a90"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-chronicle"
+layer = "chronicle"
+layer_position = 3
+role = "capsule/marker/logical-local roots, allocator, outcomes, checkpoints/retention, recovery/GC/scrub"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W2"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-branch"
+layer = "chronicle"
+layer_position = 4
+role = "Branch fork, merge, grants, and retirement over the shared commit stream."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W2"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-keymgr"
+layer = "chronicle"
+layer_position = 5
+role = "Key-envelope DAG, rotation, and the two-stage key lifecycle."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W2"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-audit"
+layer = "chronicle"
+layer_position = 6
+role = "The durable audit stream, its admission gates, and visibility pipeline."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W2"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-backup"
+layer = "chronicle"
+layer_position = 7
+role = "Local backup, receipt-first restore, and lease-fenced anchor shipping."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W2"
+owner_bead = ""
+manifest_dir = ""
+
+# --- Strata (4) ---------------------------------------------------------------
+
+[[crate]]
+name = "fgdb-strata"
+layer = "strata"
+layer_position = 1
+role = "label-independent tiers, seal/compact, stable-ID directory"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W3"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-props"
+layer = "strata"
+layer_position = 2
+role = "Property chunk storage, typed columns, and overflow promotion."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W3"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-buffer"
+layer = "strata"
+layer_position = 3
+role = "The MVCC-aware ARC buffer pool and aligned direct-I/O buffers."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W3"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-scratch"
+layer = "strata"
+layer_position = 4
+role = "Query-scoped spill scratch under bounded resources."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W3"
+owner_bead = ""
+manifest_dir = ""
+
+# --- Txn + secure access (3) --------------------------------------------------
+
+[[crate]]
+name = "fgdb-txn"
+layer = "txn_secure_access"
+layer_position = 1
+role = "MVCC, Graph-SSI/witness lifecycle, coordinator, final-effect merge ladder"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W4"
+owner_bead = "fgdb-w4-g1-txn-core-qpmg"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-constraints"
+layer = "txn_secure_access"
+layer_position = 2
+role = "branch-scoped canonical enforcement"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W4"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-secure-view"
+layer = "txn_secure_access"
+layer_position = 3
+role = "sole authorized storage/permit facade"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W4"
+owner_bead = ""
+manifest_dir = ""
+
+# --- Loom (8) -----------------------------------------------------------------
+
+[[crate]]
+name = "fgdb-gql"
+layer = "loom"
+layer_position = 1
+role = "syntax only"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W5"
+owner_bead = "fgdb-w5-parsers-nje"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-cypher"
+layer = "loom"
+layer_position = 2
+role = "syntax only"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W5"
+owner_bead = "fgdb-w5-parsers-nje"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-bind"
+layer = "loom"
+layer_position = 3
+role = "Name resolution, typing, and parameter binding for both surfaces."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W5"
+owner_bead = "fgdb-w5-binder-bt5"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-algebra"
+layer = "loom"
+layer_position = 4
+role = "The complete graph logical algebra and its answer contracts."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W5"
+owner_bead = "fgdb-w5-gla-algebra-lj2"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-planner"
+layer = "loom"
+layer_position = 5
+role = "Cost-based planning, statistics, and plan certificates."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W5"
+owner_bead = "fgdb-w5-planner-tvi"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-exec"
+layer = "loom"
+layer_position = 6
+role = "The vectorized, morsel-parallel, spillable factorized executor."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W5"
+owner_bead = "fgdb-w5-executor-olp"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-linalg"
+layer = "loom"
+layer_position = 7
+role = "Masked-semiring SpMV/SpMSpV kernels over Strata runs."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W5"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-datalog"
+layer = "loom"
+layer_position = 8
+role = "The validated recursive/Datalog profile over the same algebra."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W5"
+owner_bead = ""
+manifest_dir = ""
+
+# --- Ripple (3) ---------------------------------------------------------------
+
+[[crate]]
+name = "fgdb-ripple"
+layer = "ripple"
+layer_position = 1
+role = "Z-sets, circuits, incrementalizer"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W6"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-views"
+layer = "ripple"
+layer_position = 2
+role = "Policy-labeled materialized table and graph views."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W6"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-subs"
+layer = "ripple"
+layer_position = 3
+role = "Standing queries, subscriptions, resets, and resume cursors."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W6"
+owner_bead = ""
+manifest_dir = ""
+
+# --- Beacon (5) ---------------------------------------------------------------
+
+[[crate]]
+name = "fgdb-index-core"
+layer = "beacon"
+layer_position = 1
+role = "Shadow build, validate, activate, and watermark/tail-correctness shared by every index."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W7"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-btree"
+layer = "beacon"
+layer_position = 2
+role = "The in-house B-tree property index."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W7"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-fts"
+layer = "beacon"
+layer_position = 3
+role = "Segment-based inverted index, BM25, tokenizers, and Levenshtein automata."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W7"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-vector"
+layer = "beacon"
+layer_position = 4
+role = "HNSW generations, quantizers, and the IVF-PQ cold tier."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W7"
+owner_bead = "fgdb-w7-vector-79hu"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-pathidx"
+layer = "beacon"
+layer_position = 5
+role = "2-hop/landmark + the persistent-union-find temporal-connectivity index, §10.7"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W7"
+owner_bead = ""
+manifest_dir = ""
+
+# --- Prism (1) ----------------------------------------------------------------
+
+[[crate]]
+name = "fgdb-prism"
+layer = "prism"
+layer_position = 1
+role = "authorized projection bridge, fnx cursor/cache/materialization paths, native kernels"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W8"
+owner_bead = ""
+manifest_dir = ""
+
+# --- Warden (3) ---------------------------------------------------------------
+
+[[crate]]
+name = "fgdb-warden"
+layer = "warden"
+layer_position = 1
+role = "issuance/revocation/discharges/policy admin"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W9"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-privacy"
+layer = "warden"
+layer_position = 2
+role = "Differential-privacy state, budgets, and the irreversible-before-access rule."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W9"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-redaction"
+layer = "warden"
+layer_position = 3
+role = "Ticket-gated redaction, erasure cuts, and rollback reconciliation."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W9"
+owner_bead = ""
+manifest_dir = ""
+
+# --- Surface/operations (6) ---------------------------------------------------
+
+[[crate]]
+name = "fgdb-protocol"
+layer = "surface_operations"
+layer_position = 1
+role = "FGP state machine"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W10"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-bolt"
+layer = "surface_operations"
+layer_position = 2
+role = "The Bolt-compat subset with exact epoch/status parity."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W10"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-formats"
+layer = "surface_operations"
+layer_position = 3
+role = "Import/export profiles under explicit size, recursion, schema, and decompression limits."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W10"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-udf-vm"
+layer = "surface_operations"
+layer_position = 4
+role = "The deterministic UDF bytecode VM."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W10"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-observatory"
+layer = "surface_operations"
+layer_position = 5
+role = "Metrics, decision cards, replay grades, and operator-facing diagnostics."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W10"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-system-graph"
+layer = "surface_operations"
+layer_position = 6
+role = "The database's own runtime exposed as a read-only temporal property graph."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W10"
+owner_bead = ""
+manifest_dir = ""
+
+# --- Aegis (2 + 1 reserved) ---------------------------------------------------
+
+[[crate]]
+name = "fgdb-raft"
+layer = "aegis"
+layer_position = 1
+role = "multi-member protocol over `fgdb-order`"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W11"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-repl"
+layer = "aegis"
+layer_position = 2
+role = "payload availability, anti-entropy, reconfiguration, fenced GC"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W11"
+owner_bead = ""
+manifest_dir = ""
+
+# Named by §18.1 as belonging ONLY to W12. Registered so that creating it before
+# W12 is a violation naming its owner rather than an unremarkable new directory.
+[[crate]]
+name = "fgdb-shard"
+layer = "aegis"
+layer_position = 3
+role = "future `fgdb-shard` belongs only to W12"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "reserved"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W12"
+owner_bead = ""
+manifest_dir = ""
+
+# --- Composition (5) ----------------------------------------------------------
+
+[[crate]]
+name = "fgdb"
+layer = "composition"
+layer_position = 1
+role = "embedded API"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "entry_embedded"
+posture_basis = "composition_entry"
+owner = "W10"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-server"
+layer = "composition"
+layer_position = 2
+role = "top-level Fabric+Warden+Aegis composition"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "entry_server"
+posture_basis = "composition_entry"
+owner = "W10"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-cli"
+layer = "composition"
+layer_position = 3
+role = "The CLI binary with robot mode and a human mode."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "entry_cli"
+posture_basis = "composition_entry"
+owner = "W10"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-python"
+layer = "composition"
+layer_position = 4
+role = "allowed fnx-python packaging boundary only"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "packaging_boundary"
+posture_basis = "packaging_boundary"
+owner = "W10"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-adbc"
+layer = "composition"
+layer_position = 5
+role = "C-ABI ADBC packaging at the same boundary; §13.7"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "packaging_boundary"
+posture_basis = "packaging_boundary"
+owner = "W10"
+owner_bead = ""
+manifest_dir = ""
+
+# --- Verification (6) ---------------------------------------------------------
+
+[[crate]]
+name = "fgdb-sim"
+layer = "verification"
+layer_position = 1
+role = "The whole database under the lab runtime: virtual time, DPOR, chaos, crashpacks."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "test_only"
+posture_basis = "verification_layer"
+owner = "W1"
+owner_bead = "fgdb-verif-sim-q97e"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-reference"
+layer = "verification"
+layer_position = 2
+role = "executable semantics oracle"
+role_basis = "plan_parenthetical"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "test_only"
+posture_basis = "source_named"
+owner = "W1"
+owner_bead = "fgdb-verif-reference-3kkp"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-oracles"
+layer = "verification"
+layer_position = 3
+role = "SI/SSI, obligation-leak, quiescence, and Elle-class history oracles."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "test_only"
+posture_basis = "verification_layer"
+owner = "verification_ladder"
+owner_bead = "fgdb-verif-oracles-fqie"
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-bench"
+layer = "verification"
+layer_position = 4
+role = "The §17 bench harness: one binary per gate with committed baselines."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "test_only"
+posture_basis = "verification_layer"
+owner = "verification_ladder"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-conformance"
+layer = "verification"
+layer_position = 5
+role = "openCypher TCK and the GQL feature-conformance corpus keyed to ISO feature IDs."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "test_only"
+posture_basis = "verification_layer"
+owner = "verification_ladder"
+owner_bead = ""
+manifest_dir = ""
+
+[[crate]]
+name = "fgdb-fuzz"
+layer = "verification"
+layer_position = 6
+role = "Grammar, frame, format-reader, and SymbolRecord fuzz targets."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"
+posture_participation = "test_only"
+posture_basis = "verification_layer"
+owner = "verification_ladder"
+owner_bead = ""
+manifest_dir = ""
+
+# =============================================================================
+# POSTURES — the three shipped closures
+# =============================================================================
+# A posture's closure is the transitive dependency set of its entry crate over
+# the LIVE graph. `status`:
+#   deferred — the entry crate is not active yet, so there is no closure to
+#              check; the evaluator is proved against synthetic fixtures instead
+#   live     — the entry crate is active and its closure is checked
+# -----------------------------------------------------------------------------
+
+[[posture]]
+id = "embedded"
+title = "Embedded library"
+entry_crate = "fgdb"
+binary_name = ""
+plan_anchor = "§1 constraint 5(a), §13.1"
+status = "deferred"
+deferred_to = "the owner bead of fgdb (W10 composition)"
+
+[[posture]]
+id = "server"
+title = "Server binary"
+entry_crate = "fgdb-server"
+binary_name = "fgdbd"
+plan_anchor = "§1 constraint 5(b), §13"
+status = "deferred"
+deferred_to = "the owner bead of fgdb-server (W10 composition)"
+
+[[posture]]
+id = "cli"
+title = "CLI binary"
+entry_crate = "fgdb-cli"
+binary_name = "fgdb"
+plan_anchor = "§1 constraint 5(c)"
+status = "deferred"
+deferred_to = "the owner bead of fgdb-cli (W10 composition)"
+
+# =============================================================================
+# NAMED CRATE-LEVEL EDGES
+# =============================================================================
+# The plan fixes layer direction plus these named edges. Endpoint kinds:
+#   crate      — one registered crate
+#   layer      — any crate in that layer satisfies the obligation
+#   foundation — a registered foundation project (prefix match)
+#
+# Each row is checked the moment both endpoints have an active crate and is
+# reported as `deferred` — never as `pass` — until then. A row that can never
+# fire is worse than no row, so the checker emits the live/deferred split and
+# the suite asserts the split is what this registry says it is.
+# -----------------------------------------------------------------------------
+
+[[required_dependency]]
+id = "txn-over-chronicle"
+from = "txn_secure_access"
+from_kind = "layer"
+to = "chronicle"
+to_kind = "layer"
+plan_anchor = "§18.1 Txn + secure access"
+source_marker = "depends on Chronicle + Strata + foundation policy verifier"
+note = "The secure view cannot be a facade over storage it does not reach."
+
+[[required_dependency]]
+id = "txn-over-strata"
+from = "txn_secure_access"
+from_kind = "layer"
+to = "strata"
+to_kind = "layer"
+plan_anchor = "§18.1 Txn + secure access"
+source_marker = "depends on Chronicle + Strata + foundation policy verifier"
+note = "Block-granularity MVCC needs the block store in the same closure."
+
+[[required_dependency]]
+id = "txn-over-policy-verifier"
+from = "txn_secure_access"
+from_kind = "layer"
+to = "fgdb-policy"
+to_kind = "crate"
+plan_anchor = "§18.1 Txn + secure access"
+source_marker = "foundation policy verifier"
+note = "Caveats compile to mandatory planner predicates, so the verifier IR must sit BELOW the facade that enforces it — this is why fgdb-policy is a foundation crate and not a Warden crate."
+
+[[required_dependency]]
+id = "loom-reads-through-secure-view"
+from = "loom"
+from_kind = "layer"
+to = "fgdb-secure-view"
+to_kind = "crate"
+plan_anchor = "§18.1 Loom"
+source_marker = "all reads flow through `fgdb-secure-view`"
+note = "FG-INV-20: authorization precedes observation. A Loom crate reaching Strata directly would be a post-filter."
+
+[[required_dependency]]
+id = "raft-over-order"
+from = "fgdb-raft"
+from_kind = "crate"
+to = "fgdb-order"
+to_kind = "crate"
+plan_anchor = "§18.1 Aegis"
+source_marker = "multi-member protocol over `fgdb-order`"
+note = "Multi-member consensus extends the durable order core; it does not restate it."
+
+[[required_dependency]]
+id = "prism-over-fnx"
+from = "fgdb-prism"
+from_kind = "crate"
+to = "franken_networkx"
+to_kind = "foundation"
+plan_anchor = "§18.1 Prism, §2.2"
+source_marker = "fnx cursor/cache/materialization paths"
+note = "Prism is the bridge; a Prism that reimplemented an algorithm would duplicate a foundation capability."
+
+[[required_dependency]]
+id = "python-over-fnx-python"
+from = "fgdb-python"
+from_kind = "crate"
+to = "franken_networkx"
+to_kind = "foundation"
+plan_anchor = "§1 constraint 1, §18.1 Composition"
+source_marker = "allowed fnx-python packaging boundary only"
+note = "The binding runtime is reached transitively through fnx-python, never by a direct PyO3 dependency."
+
+[[required_dependency]]
+id = "calibrate-over-asupersync"
+from = "fgdb-calibrate"
+from_kind = "crate"
+to = "asupersync"
+to_kind = "foundation"
+plan_anchor = "§2.4"
+source_marker = "wraps the runtime's e-process/conformal machinery rather than reimplementing it"
+note = "Live today: the one required edge both of whose endpoints are already active, which is what keeps this law from being vacuous at G0."
+
+# =============================================================================
+# PER-CRATE DEPENDENCY NARROWING
+# =============================================================================
+# A narrowing row is STRICTER than the crate's layer allows. §15.2 states the
+# fgdb-reference allowlist and its single sharing exception verbatim; the
+# "nothing else" in that sentence is why `allowed_foundation_projects` is empty.
+# Widening this row is a map change that must accompany the bead needing it.
+# -----------------------------------------------------------------------------
+
+[[dependency_narrowing]]
+crate_name = "fgdb-reference"
+allowed_layers = ["foundation"]
+allowed_crates = ["fgdb-gql", "fgdb-cypher"]
+allowed_foundation_projects = []
+plan_anchor = "§15.2"
+source_marker = "carries a registered dependency allowlist"
+reason = "Importing any engine crate is a CI-rejected boundary violation in the unsafe-boundary-ledger style, so the differential cannot be quietly gutted by code sharing. The parser is the one recorded sharing exception."
+
+# =============================================================================
+# THE BUILD-VERSUS-CONSUME INVENTORY (§18.2 + §2.3)
+# =============================================================================
+# `disposition`:
+#   build_here  — we write it, because the universe is closed
+#   consume_from— a foundation supplies it and we must NOT restate it
+#   design_only — a frankensqlite design we adopt without linking anything
+#
+# COVERAGE IS PROVED, NOT ASSERTED. Every build_here and consume_from row's
+# `source_phrase` is deleted from the frozen §18.2 line; what remains must be
+# punctuation plus the four registered rationale allowances below. A capability
+# §18.2 names and this registry dropped therefore fails as leftover residue.
+#
+# Every design_only row's `source_phrase` must resolve to exactly one row of the
+# §2.3 donor table, and the mapping must be a bijection: nine designs, nine rows.
+#
+# Every consume_from row additionally names the foundation asset row that
+# supplies it (`foundation_asset`, resolved inside the §2.1/§2.2 blocks) — the
+# "exact package/source evidence" a duplicate-subsystem argument needs.
+# -----------------------------------------------------------------------------
+
+[[residue_allowance]]
+id = "not-built-marker"
+text = "**Explicitly not built**:"
+reason = "The section marker separating the two lists; not a capability."
+
+[[residue_allowance]]
+id = "asupersync-attribution"
+text = " — all asupersync"
+reason = "The attribution tail for the preceding consume_from run; each row carries the same attribution in its `foundation_project`."
+
+[[residue_allowance]]
+id = "fnx-attribution"
+text = " — all fnx"
+reason = "The attribution tail for the two fnx rows."
+
+[[residue_allowance]]
+id = "moat-rationale"
+text = "The closed-universe constraint, which sounds like an albatross, is the moat: the entire dependency surface is auditable, deterministic under lab, and owned."
+reason = "Rationale sentence, not an inventory item. Pinned verbatim so this allowance cannot be widened to hide a capability."
+
+# --- build_here (23) ----------------------------------------------------------
+
+[[capability]]
+id = "compression-codecs"
+disposition = "build_here"
+source_phrase = "Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like)"
+owner_crate = "fgdb-codec"
+foundation_project = ""
+foundation_asset = ""
+note = "Adjacency and identity-column codecs are graph-shaped; no foundation ships them."
+
+[[capability]]
+id = "exact-integers"
+disposition = "build_here"
+source_phrase = "canonical signed-limb exact integers"
+owner_crate = "fgdb-bigint"
+foundation_project = ""
+foundation_asset = ""
+note = "Canonical encoding is part of FG-INV-12 coherence, so the representation is ours."
+
+[[capability]]
+id = "sketches"
+disposition = "build_here"
+source_phrase = "sketches"
+owner_crate = "fgdb-sketch"
+foundation_project = ""
+foundation_asset = ""
+note = "Graph statistics sketches (§2.4)."
+
+[[capability]]
+id = "art-radix"
+disposition = "build_here"
+source_phrase = "ART/radix structures"
+owner_crate = "fgdb-collections"
+foundation_project = ""
+foundation_asset = ""
+note = ""
+
+[[capability]]
+id = "succinct-rank-select"
+disposition = "build_here"
+source_phrase = "succinct rank/select"
+owner_crate = "fgdb-collections"
+foundation_project = ""
+foundation_asset = ""
+note = ""
+
+[[capability]]
+id = "vectorized-hash-tables"
+disposition = "build_here"
+source_phrase = "vectorized hash tables"
+owner_crate = "fgdb-collections"
+foundation_project = ""
+foundation_asset = ""
+note = ""
+
+[[capability]]
+id = "btree"
+disposition = "build_here"
+source_phrase = "B-tree"
+owner_crate = "fgdb-btree"
+foundation_project = ""
+foundation_asset = ""
+note = "frankensqlite's B-tree is a design reference, not a dependency."
+
+[[capability]]
+id = "ann-index"
+disposition = "build_here"
+source_phrase = "HNSW + quantizers + IVF-PQ cold tier"
+owner_crate = "fgdb-vector"
+foundation_project = ""
+foundation_asset = ""
+note = "No hnswlib, ever (§1 constraint 1)."
+
+[[capability]]
+id = "persistent-union-find"
+disposition = "build_here"
+source_phrase = "persistent union-find"
+owner_crate = "fgdb-pathidx"
+foundation_project = ""
+foundation_asset = ""
+note = "The temporal-connectivity index of §10.7."
+
+[[capability]]
+id = "semiring-kernels"
+disposition = "build_here"
+source_phrase = "masked-semiring SpMV/SpMSpV kernels"
+owner_crate = "fgdb-linalg"
+foundation_project = ""
+foundation_asset = ""
+note = ""
+
+[[capability]]
+id = "inverted-index"
+disposition = "build_here"
+source_phrase = "inverted index + BM25 + Levenshtein automata"
+owner_crate = "fgdb-fts"
+foundation_project = ""
+foundation_asset = ""
+note = "No tantivy (§1 constraint 1); frankensqlite's FTS5 is the in-family behavioral reference."
+
+[[capability]]
+id = "tokenizers"
+disposition = "build_here"
+source_phrase = "tokenizers"
+owner_crate = "fgdb-fts"
+foundation_project = ""
+foundation_asset = ""
+note = "Unicode word-boundary plus language-pluggable stemmers."
+
+[[capability]]
+id = "format-readers"
+disposition = "build_here"
+source_phrase = "CSV/JSONL/Parquet-lite readers"
+owner_crate = "fgdb-formats"
+foundation_project = ""
+foundation_asset = ""
+note = "No arrow (§1 constraint 1). Legacy GRAPH formats are a separate, consumed capability."
+
+[[capability]]
+id = "query-parsers"
+disposition = "build_here"
+source_phrase = "GQL/Cypher parsers (hand-written recursive descent + Pratt — the frankensqlite parser school)"
+owner_crate = "fgdb-gql"
+foundation_project = ""
+foundation_asset = ""
+note = "fgdb-cypher is the second surface of the same capability; both are syntax-only."
+
+[[capability]]
+id = "circuit-runtime"
+disposition = "build_here"
+source_phrase = "the DBSP-style circuit runtime"
+owner_crate = "fgdb-ripple"
+foundation_project = ""
+foundation_asset = ""
+note = ""
+
+[[capability]]
+id = "raft"
+disposition = "build_here"
+source_phrase = "Raft"
+owner_crate = "fgdb-order"
+foundation_project = ""
+foundation_asset = ""
+note = "Raft SEQUENCING is ours (§2.4); membership, anti-entropy, coded fan-out, and convergent metadata are consumed compositions. fgdb-raft extends this core to multi-member."
+
+[[capability]]
+id = "fgp"
+disposition = "build_here"
+source_phrase = "FGP"
+owner_crate = "fgdb-protocol"
+foundation_project = ""
+foundation_asset = ""
+note = "The graph wire format only: every byte below it is asupersync networking."
+
+[[capability]]
+id = "bolt-subset"
+disposition = "build_here"
+source_phrase = "Bolt subset"
+owner_crate = "fgdb-bolt"
+foundation_project = ""
+foundation_asset = ""
+note = ""
+
+[[capability]]
+id = "crypto-profiles"
+disposition = "build_here"
+source_phrase = "crypto profiles/primitives not already supplied by an audited foundation"
+owner_crate = "fgdb-crypto"
+foundation_project = ""
+foundation_asset = ""
+note = "The phrase is scoped by construction: what the foundation audits, we consume."
+
+[[capability]]
+id = "mmr-accumulator"
+disposition = "build_here"
+source_phrase = "the MMR accumulator + transparency checkpoints"
+owner_crate = "fgdb-audit"
+foundation_project = ""
+foundation_asset = ""
+note = "The verifiability accumulator of §2.4."
+
+[[capability]]
+id = "calibration-scores"
+disposition = "build_here"
+source_phrase = "the Sextant calibration scores/ledgers (over asupersync's e-process core)"
+owner_crate = "fgdb-calibrate"
+foundation_project = ""
+foundation_asset = ""
+note = "The graph-specific scores and ledgers are ours; the e-process core underneath them is consumed, which is exactly what `calibrate-over-asupersync` requires."
+
+[[capability]]
+id = "udf-vm"
+disposition = "build_here"
+source_phrase = "the deterministic UDF bytecode VM (§13.8)"
+owner_crate = "fgdb-udf-vm"
+foundation_project = ""
+foundation_asset = ""
+note = ""
+
+[[capability]]
+id = "bench-harness"
+disposition = "build_here"
+source_phrase = "bench harness"
+owner_crate = "fgdb-bench"
+foundation_project = ""
+foundation_asset = ""
+note = "One bench binary per §17 gate, with a committed baseline and a variance budget."
+
+# A consume_from row whose capability the §2.1/§2.2 asset tables do not
+# enumerate. The default is strict — every consumed capability names exactly one
+# asset row — so an exception is a registered row, and the checker VERIFIES THE
+# ABSENCE: marking a row here while its asset row exists is itself a violation,
+# which is what stops this from becoming an escape hatch.
+#
+# MEASUREMENT (2026-07-26, this bead). §18.2 attributes "Kafka/JetStream
+# clients" to asupersync, and the capability is really there — `src/messaging/`
+# plus the optional `kafka` feature (`kafka = ["dep:rdkafka"]`, default-off) in
+# the pinned revision. What is missing is the §2.1 ASSET ROW: the table that
+# supplies our exact per-capability evidence never enumerates messaging clients.
+# So this is a plan documentation gap, not a capability we are inventing and not
+# a subsystem we should be building. Reported rather than papered over; adding
+# the §2.1 row is a plan edit this bead does not own.
+[[asset_evidence_gap]]
+capability_id = "queue-clients"
+verified_absent_from = "plan-asupersync-assets-v1"
+reason = "§18.2 names the capability; the §2.1 asset table has no messaging row. Verified present in the pinned foundation at src/messaging/ behind the default-off `kafka` feature — which is exactly what asupersync's mandatory default-features = false keeps out of our closure."
+
+# --- consume_from (19) --------------------------------------------------------
+
+[[capability]]
+id = "async-runtime"
+disposition = "consume_from"
+source_phrase = "async runtime"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "Region tree, obligations, `Outcome` lattice, three-lane scheduler"
+note = "No tokio, ever. Doctrine #3 (`Cx` everywhere) is only possible because the runtime is consumed whole."
+
+[[capability]]
+id = "scheduler"
+disposition = "consume_from"
+source_phrase = "scheduler"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "three-lane scheduler (cancel/EDF/ready)"
+note = ""
+
+[[capability]]
+id = "channels"
+disposition = "consume_from"
+source_phrase = "channels"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "Channels (two-phase reserve/commit MPSC, oneshot, broadcast, watch, session)"
+note = "The write-coordinator mailbox is a consumed channel, not a new one."
+
+[[capability]]
+id = "network-stacks"
+disposition = "consume_from"
+source_phrase = "TLS/QUIC/HTTP/gRPC stacks"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "Networking: TCP, UDP, QUIC (native), HTTP/1.1, HTTP/2 (HPACK, flow control), HTTP/3, WebSocket, TLS (rustls-backed), DNS, gRPC"
+note = "FrankenGraphDB writes zero protocol plumbing below the graph wire format."
+
+[[capability]]
+id = "raptorq"
+disposition = "consume_from"
+source_phrase = "RaptorQ"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "`src/raptorq/`: RFC 6330 systematic RaptorQ, GF(256) SIMD kernels, decode proofs, per-symbol authentication, deterministic decode planner"
+note = "frankensqlite's \"RaptorQ everywhere\" doctrine executed with asupersync's implementation."
+
+[[capability]]
+id = "macaroons"
+disposition = "consume_from"
+source_phrase = "macaroons"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "Security: macaroons, authenticated types; per-symbol auth on RaptorQ planes"
+note = "Warden administers consumed capability tokens; it does not implement the token format."
+
+[[capability]]
+id = "metrics-otel"
+disposition = "consume_from"
+source_phrase = "metrics/OTel"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "observability (metrics, OTel export, spectral wait-graph health)"
+note = ""
+
+[[capability]]
+id = "deterministic-lab"
+disposition = "consume_from"
+source_phrase = "deterministic lab"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "Lab runtime: virtual time, seeded deterministic scheduling, DPOR/Mazurkiewicz schedule exploration, chaos injection, futurelock detection, trace capture/replay, crashpacks"
+note = "fgdb-sim composes the lab; it is not a second lab."
+
+[[capability]]
+id = "supervision"
+disposition = "consume_from"
+source_phrase = "supervision"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "Spork/OTP: supervision topologies, gen_server, monitors, name-lease registry"
+note = "No detached background thread anywhere (§1 constraint 7)."
+
+[[capability]]
+id = "cluster-membership"
+disposition = "consume_from"
+source_phrase = "cluster membership (SWIM+Lifeguard)"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "Distributed protocol machines: SWIM+Lifeguard membership with gossip + lease reactor"
+note = ""
+
+[[capability]]
+id = "anti-entropy"
+disposition = "consume_from"
+source_phrase = "Merkle-range anti-entropy"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "Merkle-range anti-entropy"
+note = "fgdb-repl composes it over graph payloads."
+
+[[capability]]
+id = "symbol-distribution"
+disposition = "consume_from"
+source_phrase = "coded symbol distribution"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "fountain-coded symbol distribution"
+note = ""
+
+[[capability]]
+id = "crdt-obligation-ledgers"
+disposition = "consume_from"
+source_phrase = "CRDT obligation ledgers"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "CRDT obligation ledgers"
+note = ""
+
+[[capability]]
+id = "hlc"
+disposition = "consume_from"
+source_phrase = "HLC"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "hybrid-logical-clock mode"
+note = "The logical-command sequence/HLC contract is ours; the clock is consumed."
+
+[[capability]]
+id = "choreographic-projection"
+disposition = "consume_from"
+source_phrase = "choreographic projection"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "choreographic/session-typed"
+note = ""
+
+[[capability]]
+id = "forensics-tooling"
+disposition = "consume_from"
+source_phrase = "LDFI/delta-debug/dual-run/trace-export tooling"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = "Verification & forensics tooling: lineage-driven fault injection (LDFI), hierarchical delta-debugging + replay minimization + divergence diagnostics, dual-run lab-vs-live differential harness, TLA+ trace export"
+note = ""
+
+[[capability]]
+id = "queue-clients"
+disposition = "consume_from"
+source_phrase = "Kafka/JetStream clients"
+owner_crate = ""
+foundation_project = "asupersync"
+foundation_asset = ""
+note = "CDC egress composes consumed clients. This is the one consume_from row with no §2.1 asset row — see the asset_evidence_gap below."
+
+[[capability]]
+id = "graph-algorithms"
+disposition = "consume_from"
+source_phrase = "graph algorithms"
+owner_crate = ""
+foundation_project = "franken_networkx"
+foundation_asset = "`fnx-algorithms`: 550+ functions across 25+ families"
+note = "Reached through Prism's authorized projection, never by copying an algorithm into an fgdb crate."
+
+[[capability]]
+id = "legacy-formats"
+disposition = "consume_from"
+source_phrase = "legacy formats"
+owner_crate = ""
+foundation_project = "franken_networkx"
+foundation_asset = "`fnx-readwrite`: fuzz-hardened native parsers/writers for edgelist, adjlist, GraphML, GML, JSON node-link, Pajek, GEXF"
+note = "Distinct from the CSV/JSONL/Parquet-lite readers we build: those are tabular bulk-load formats, these are graph interchange formats."
+
+# --- design_only (9) ----------------------------------------------------------
+# Nine designs, nine §2.3 rows, one bijection. A design_only row names no
+# package because linking one would be the violation.
+
+[[capability]]
+id = "design-page-mvcc"
+disposition = "design_only"
+source_phrase = "**Page-granularity MVCC**"
+owner_crate = "fgdb-txn"
+foundation_project = "frankensqlite"
+foundation_asset = ""
+note = "Re-instantiated as block-granularity MVCC on Strata adjacency blocks; the donor's integer-only visibility rule does not transfer."
+
+[[capability]]
+id = "design-ssi"
+disposition = "design_only"
+source_phrase = "**SSI (page-Cahill/Fekete) + first-committer-wins + eager locking**"
+owner_crate = "fgdb-txn"
+foundation_project = "frankensqlite"
+foundation_asset = ""
+note = "Graph-SSI plus logical predicate witnesses; deadlock freedom and SSI soundness do not transfer by analogy."
+
+[[capability]]
+id = "design-merge-ladder"
+disposition = "design_only"
+source_phrase = "**Intent logs + deterministic rebase merge ladder**"
+owner_crate = "fgdb-txn"
+foundation_project = "frankensqlite"
+foundation_asset = ""
+note = "Context-derived graph rebase and explicit-base branch merge, with hit rate measured rather than assumed."
+
+[[capability]]
+id = "design-native-ecs"
+disposition = "design_only"
+source_phrase = "**Native mode / ECS**"
+owner_crate = "fgdb-ecs"
+foundation_project = "frankensqlite"
+foundation_asset = ""
+note = "Chronicle re-specifies the root protocol, full-digest identity, encoding variants, and final-capsule ordering."
+
+[[capability]]
+id = "design-write-coordinator"
+disposition = "design_only"
+source_phrase = "**WriteCoordinator**"
+owner_crate = "fgdb-txn"
+foundation_project = "frankensqlite"
+foundation_asset = ""
+note = "An ordering shape, not a promise that authorization or consensus is off the critical path."
+
+[[capability]]
+id = "design-arc-buffer-pool"
+disposition = "design_only"
+source_phrase = "**ARC buffer pool, MVCC-aware; cache-line-padded sharded lock/siread tables; aligned direct-I/O buffers; prefetch on descent**"
+owner_crate = "fgdb-buffer"
+foundation_project = "frankensqlite"
+foundation_asset = ""
+note = "The mechanical-sympathy checklist for the buffer manager."
+
+[[capability]]
+id = "design-time-travel"
+disposition = "design_only"
+source_phrase = "**Time travel**"
+owner_crate = "fgdb-chronicle"
+foundation_project = "frankensqlite"
+foundation_asset = ""
+note = "Temporal support rides the MVCC machinery; history is queryable for the configured retention contract, never described as unbounded."
+
+[[capability]]
+id = "design-encryption"
+disposition = "design_only"
+source_phrase = "**Encryption**"
+owner_crate = "fgdb-keymgr"
+foundation_project = "frankensqlite"
+foundation_asset = ""
+note = "Nonce, AAD, per-encoding DEK, symbol-MAC, rewrap, and KMS/HSM details are respecified; no correctness is inherited."
+
+[[capability]]
+id = "design-verification-posture"
+disposition = "design_only"
+source_phrase = "**Verification posture**"
+owner_crate = "fgdb-conformance"
+foundation_project = "frankensqlite"
+foundation_asset = ""
+note = "The QA house style: conformance corpora, differential harnesses, feature-universe ledgers, exit-criteria contracts."

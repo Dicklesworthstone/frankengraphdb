@@ -508,3 +508,24 @@ symbol = "unsafe_ledger_check"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/unsafe-ledger-check.rs"
 status = "live"
+
+# --- G0 workspace crate/layer topology and the build-versus-consume inventory. ---
+# Owner: fgdb-g0-workspace-topology-1q9m.
+
+[[checker]]
+symbol = "workspace_topology"
+kind = "cargo-test"
+artifact = "tools/registry-check/tests/workspace_topology.rs"
+status = "live"
+
+[[checker]]
+symbol = "topology_registry_source"
+kind = "binary"
+artifact = "tools/registry-check/src/bin/topology-check.rs"
+status = "live"
+
+[[checker]]
+symbol = "g0_topology_e2e"
+kind = "script"
+artifact = "scripts/g0_topology_e2e.sh"
+status = "live"
