@@ -1063,11 +1063,11 @@ pub fn generic_free_family(name: &str) -> &str {
 /// row, reassigning its code/tag, or silently changing a union arm therefore
 /// fails even when the resulting current snapshot is internally consistent.
 pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
-    const LOGICAL: &str = "fnv1a64:9c9d9c21e6c2efbf";
+    const LOGICAL: &str = "fnv1a64:98728d6b05543799";
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:b8849d5cd2ac1e24";
+    const WIRE: &str = "fnv1a64:47ebbd975ab988c4";
     const FIELDS: &str = "fnv1a64:c36fcef1140b5d55";
 
     let logical = rows_pin(

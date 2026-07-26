@@ -3949,3 +3949,21 @@ status = "reserved"
 encoding_context = "a21 embedded-by-value record; never a reference target"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0187
+name = "ConstraintCoordinateKey"
+kind = "record"
+status = "reserved"
+encoding_context = "a12 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0188
+name = "ResourceLedgerBasis"
+kind = "record"
+status = "reserved"
+encoding_context = "a12 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216

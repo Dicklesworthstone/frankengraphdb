@@ -156,8 +156,8 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"start_line":1388' \
     '"end_line":2728' \
     '"line_count":1341' \
-    '"byte_count":1020717' \
-    '"sha256":"71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1"' \
+    '"byte_count":1021081' \
+    '"sha256":"5ff06d712eb7f125d0c92db54cc9d485eb334f5dde805ad83d3d3fa32e573e4a"' \
     '"outcome":"pass"'; then
   ok "Appendix A exact source manifest is pinned"
 else
@@ -168,7 +168,7 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"target_count":813' \
     '"target_ids_sha256":"84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"' \
     '"occurrence_count":2458' \
-    '"occurrence_transcript_sha256":"9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"' \
+    '"occurrence_transcript_sha256":"027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"' \
     '"outcome":"pass"'; then
   ok "full-plan Appendix A reference census is pinned"
 else
@@ -178,8 +178,8 @@ EXPECT_TARGET_COUNT="$(catalog_manifest_value target_count)"
 EXPECT_FALLBACK_COUNT="$(catalog_manifest_value projection_fallback_count)"
 EXPECT_TARGET_ASSIGNMENT_SHA="$(catalog_manifest_value target_source_assignment_sha256)"
 EXPECT_RESERVATION_COUNT=813
-EXPECT_EXISTING_RESERVATION_COUNT=400
-EXPECT_RESERVED_RESERVATION_COUNT=413
+EXPECT_EXISTING_RESERVATION_COUNT=403
+EXPECT_RESERVED_RESERVATION_COUNT=410
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
     '"target_count":'"$EXPECT_TARGET_COUNT" \
@@ -297,6 +297,7 @@ BODY_RECIPES=(
   'ShardHistoryInventory#body_digest|fnv1a64:7f652e0dd29a56aa'
   'GlobalKeyEnvelopeManifest#body_digest|fnv1a64:55336bfa5c150521'
   'MandatoryInventory#body_digest|fnv1a64:f7f952a57272b71d'
+  'DurableCapabilityValidationEvidence#body_digest|fnv1a64:128f0e499b005f1f'
 )
 for recipe in "${BODY_RECIPES[@]}"; do
   row_id="${recipe%%|*}"

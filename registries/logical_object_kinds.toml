@@ -774,6 +774,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/constraint_reservation_record/"
 
 [[kind]]
+object_kind = 0x027e
+name = "ConstraintStateDirectoryRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_state_directory_root/"
+
+[[kind]]
+object_kind = 0x027f
+name = "ConstraintStateRoot"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_state_root/"
+
+[[kind]]
 object_kind = 0x0280
 name = "ContinuityAuthorityObservationImport"
 status = "reserved"
@@ -2347,6 +2365,15 @@ construction_order = 50
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/reservation_use_record/"
+
+[[kind]]
+object_kind = 0x03cf
+name = "ResourceLedgerState"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_ledger_state/"
 
 [[kind]]
 object_kind = 0x03d2

@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2585
+target_count = 2590
 projection_fallback_count = 106
-target_source_assignment_sha256 = "d4b747fa21195bd67bb97e8aa3ef0ccecc8b2ce0434d3b2d73e40930f7390820"
+target_source_assignment_sha256 = "b6fe2504c3f7b069269d621f96fb1bf9a03c5301b7a8ecbd4c3e626e3c716a5a"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -5803,6 +5803,39 @@ role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/witness_policy/"
 
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:constraint-state-directory-root"
+object_kind = 0x027e
+name = "ConstraintStateDirectoryRoot"
+status = "reserved"
+construction_order = 35
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_state_directory_root/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:constraint-state-root"
+object_kind = 0x027f
+name = "ConstraintStateRoot"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_state_root/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:resource-ledger-state"
+object_kind = 0x03cf
+name = "ResourceLedgerState"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_ledger_state/"
+
 [[physical_kind]]
 slice_id = "a02"
 row_id = "a02:physical-kind:ciphertext-record"
@@ -10792,6 +10825,28 @@ name = "ReadYourWritesCapabilityLineageKey"
 kind = "record"
 status = "reserved"
 encoding_context = "a21 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:constraint-coordinate-key"
+wire_type_id = 0x0187
+name = "ConstraintCoordinateKey"
+kind = "record"
+status = "reserved"
+encoding_context = "a12 embedded-by-value record; never a reference target"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-ledger-basis"
+wire_type_id = 0x0188
+name = "ResourceLedgerBasis"
+kind = "record"
+status = "reserved"
+encoding_context = "a12 embedded-by-value record; never a reference target"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 16777216
 
@@ -37045,7 +37100,7 @@ symbol = "ConstraintStateDirectoryRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x027e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a12:reservation:constraint-state-root"
@@ -37054,7 +37109,7 @@ symbol = "ConstraintStateRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x027f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:continuity-authority-observation-import"
@@ -40645,7 +40700,7 @@ symbol = "ResourceLedgerState"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03cf"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a12:reservation:resource-ledger-transition"
@@ -45360,7 +45415,7 @@ symbol = "ConstraintCoordinateKey"
 generic_signature = ""
 source_key = "top|ConstraintCoordinateKey"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a12:1974"]
 
 [[top_level_candidate]]
@@ -45420,7 +45475,7 @@ symbol = "ConstraintStateDirectoryRoot"
 generic_signature = ""
 source_key = "top|ConstraintStateDirectoryRoot"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1978"]
 
 [[top_level_candidate]]
@@ -45440,7 +45495,7 @@ symbol = "ConstraintStateRoot"
 generic_signature = ""
 source_key = "top|ConstraintStateRoot"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1978"]
 
 [[top_level_candidate]]
@@ -51230,7 +51285,7 @@ symbol = "ResourceLedgerBasis"
 generic_signature = ""
 source_key = "top|ResourceLedgerBasis"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a12:1992"]
 
 [[top_level_candidate]]
@@ -51240,7 +51295,7 @@ symbol = "ResourceLedgerState"
 generic_signature = ""
 source_key = "top|ResourceLedgerState"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1990"]
 
 [[top_level_candidate]]
@@ -86873,4 +86928,44 @@ target_row_id = "a18:field:restore-terminal-cleanup-authority-role-authority-own
 slice_id = "a18"
 source_key = "field|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>|RestoreTerminalCleanupAuthority<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-constraint-state-directory-root"
+target_row_id = "a12:logical-kind:constraint-state-directory-root"
+slice_id = "a12"
+source_key = "top|ConstraintStateDirectoryRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-constraint-state-root"
+target_row_id = "a12:logical-kind:constraint-state-root"
+slice_id = "a12"
+source_key = "top|ConstraintStateRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-resource-ledger-state"
+target_row_id = "a12:logical-kind:resource-ledger-state"
+slice_id = "a12"
+source_key = "top|ResourceLedgerState"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-constraint-coordinate-key"
+target_row_id = "a12:wire-type:constraint-coordinate-key"
+slice_id = "a12"
+source_key = "top|ConstraintCoordinateKey"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-ledger-basis"
+target_row_id = "a12:wire-type:resource-ledger-basis"
+slice_id = "a12"
+source_key = "top|ResourceLedgerBasis"
+target_kind = "wire-type"
 definition_status = "declared"
