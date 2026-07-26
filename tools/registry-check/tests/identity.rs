@@ -3200,6 +3200,96 @@ fn idr_weak_epoch_identity_reserved_wire_record_is_exact() {
 }
 
 #[test]
+fn idr_a13_branch_install_specs_are_forced_logical_at_the_source_floor() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let cases = [
+        (
+            "BranchForkSpec",
+            0x0556,
+            "top|BranchForkSpec<Role:AuthorityOwningRole>",
+            "a13:logical-kind:branch-fork-spec",
+            "a13:target:logical-kind-branch-fork-spec",
+            "corpus/logical/branch_fork_spec/",
+        ),
+        (
+            "BranchGrantSpec",
+            0x0557,
+            "top|BranchGrantSpec<Role:AuthorityOwningRole>",
+            "a13:logical-kind:branch-grant-spec",
+            "a13:target:logical-kind-branch-grant-spec",
+            "corpus/logical/branch_grant_spec/",
+        ),
+    ];
+
+    for (name, object_kind, source_key, logical_row_id, target_row_id, corpus) in cases {
+        let logical = identity
+            .logical
+            .iter()
+            .find(|row| row.name == name)
+            .expect("branch install spec logical kind exists");
+        assert_eq!(logical.object_kind, object_kind);
+        assert_eq!(logical.status, "reserved");
+        assert_eq!(
+            logical.construction_order, 80,
+            "the spec follows its already-built order-80 bundle"
+        );
+        assert_eq!(logical.role_predicate, "true");
+        assert_eq!(logical.max_size_bytes, 16_777_216);
+        assert_eq!(logical.golden_corpus, corpus);
+        assert!(
+            !identity.wire.iter().any(|row| row.name == name),
+            "a source record that owns durable fields cannot be wire-owned"
+        );
+
+        let candidate = catalog
+            .top_level_candidates
+            .iter()
+            .find(|row| row.source_key == source_key)
+            .expect("branch install spec source candidate exists");
+        assert_eq!(candidate.source_kind, "confirmed");
+        assert_eq!(candidate.identity_class, "logical");
+        assert_eq!(candidate.generic_signature, "<Role:AuthorityOwningRole>");
+
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{name} source maps exactly once");
+        assert_eq!(targets[0].row_id, target_row_id);
+        assert_eq!(targets[0].target_row_id, logical_row_id);
+        assert_eq!(targets[0].target_kind, "logical-kind");
+        assert_eq!(targets[0].definition_status, "declared");
+        assert!(
+            !catalog
+                .reservations
+                .iter()
+                .any(|reservation| reservation.symbol == name),
+            "fresh post-reservation logical kinds must not fabricate reservations"
+        );
+    }
+
+    for target in [
+        "BranchEpochBoundaryReservation",
+        "BranchForkBundle",
+        "BranchGrantBundle",
+        "PayloadAvailabilityCertificate",
+    ] {
+        let target_order = identity
+            .logical
+            .iter()
+            .find(|row| row.name == target)
+            .expect("branch install spec source dependency exists")
+            .construction_order;
+        assert!(
+            target_order <= 80,
+            "{target} must be constructed no later than either install spec"
+        );
+    }
+}
+
+#[test]
 fn idr_object_creation_boundary_is_source_ordered_and_wire_backed() {
     let identity = real_identity();
     let parent = identity

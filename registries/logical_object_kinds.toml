@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 51
+registry_epoch = 52
 
 [[kind]]
 object_kind = 0x0001
@@ -4264,3 +4264,21 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16384
 golden_corpus = "corpus/logical/durable_capability_validator_semantics_registry/"
+
+[[kind]]
+object_kind = 0x0556
+name = "BranchForkSpec"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_fork_spec/"
+
+[[kind]]
+object_kind = 0x0557
+name = "BranchGrantSpec"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_grant_spec/"

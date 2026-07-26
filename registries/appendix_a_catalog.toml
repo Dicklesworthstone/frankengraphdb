@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2591
+target_count = 2593
 projection_fallback_count = 106
-target_source_assignment_sha256 = "9fa86a81d749978336e2b986dee01ed06877e66726efb2a1aae43a7042c67ac0"
+target_source_assignment_sha256 = "092081ad88bc2dfb9f9b79f6f1368fdfb4236533d9c48934f6c13263678f7bdf"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 51
+registry_epoch = 52
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -3704,6 +3704,17 @@ golden_corpus = "corpus/logical/branch_fork_bundle/"
 
 [[logical_kind]]
 slice_id = "a13"
+row_id = "a13:logical-kind:branch-fork-spec"
+object_kind = 0x0556
+name = "BranchForkSpec"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_fork_spec/"
+
+[[logical_kind]]
+slice_id = "a13"
 row_id = "a13:logical-kind:branch-grant-bundle"
 object_kind = 0x0254
 name = "BranchGrantBundle"
@@ -3712,6 +3723,17 @@ construction_order = 80
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/branch_grant_bundle/"
+
+[[logical_kind]]
+slice_id = "a13"
+row_id = "a13:logical-kind:branch-grant-spec"
+object_kind = 0x0557
+name = "BranchGrantSpec"
+status = "reserved"
+construction_order = 80
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/branch_grant_spec/"
 
 [[logical_kind]]
 slice_id = "a13"
@@ -44556,7 +44578,7 @@ symbol = "BranchForkSpec"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|BranchForkSpec<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2031"]
 
 [[top_level_candidate]]
@@ -44576,7 +44598,7 @@ symbol = "BranchGrantSpec"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|BranchGrantSpec<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a13:2031"]
 
 [[top_level_candidate]]
@@ -67648,10 +67670,26 @@ target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
+row_id = "a13:target:logical-kind-branch-fork-spec"
+target_row_id = "a13:logical-kind:branch-fork-spec"
+slice_id = "a13"
+source_key = "top|BranchForkSpec<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
 row_id = "a13:target:logical-kind-branch-grant-bundle"
 target_row_id = "a13:logical-kind:branch-grant-bundle"
 slice_id = "a13"
 source_key = "top|BranchGrantBundle<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:logical-kind-branch-grant-spec"
+target_row_id = "a13:logical-kind:branch-grant-spec"
+slice_id = "a13"
+source_key = "top|BranchGrantSpec<Role:AuthorityOwningRole>"
 target_kind = "logical-kind"
 definition_status = "declared"
 
