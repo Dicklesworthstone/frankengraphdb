@@ -669,7 +669,10 @@ fn authority_dimension_from(table: &Table, index: usize) -> Result<AuthorityDime
     })
 }
 
-fn presentation_binding_from(table: &Table, index: usize) -> Result<PresentationBinding, ReadError> {
+fn presentation_binding_from(
+    table: &Table,
+    index: usize,
+) -> Result<PresentationBinding, ReadError> {
     let ctx = format!("threat_model.toml.presentation_binding[{index}]");
     exact_keys(table, &["name", "rank", "summary", "source_anchor"], &ctx)?;
     Ok(PresentationBinding {
@@ -1505,12 +1508,7 @@ fn check_sequence(
 /// name sequence and the sequence check passes. The suite caught exactly that
 /// (Read and Mutate both at 2 validated clean), which is the same
 /// looks-exactly-like-a-pass family as a vacuous fixture.
-fn check_dense_order(
-    label: &str,
-    orders: &[usize],
-    anchor: &str,
-    violations: &mut Vec<Violation>,
-) {
+fn check_dense_order(label: &str, orders: &[usize], anchor: &str, violations: &mut Vec<Violation>) {
     let mut sorted = orders.to_vec();
     sorted.sort_unstable();
     for window in sorted.windows(2) {
@@ -1816,7 +1814,10 @@ fn validate_authority_lattice(registry: &ThreatRegistry, violations: &mut Vec<Vi
     let identity_names: Vec<String> = {
         let mut sorted: Vec<&Identity> = registry.identities.iter().collect();
         sorted.sort_by_key(|identity| identity.source_order);
-        sorted.iter().map(|identity| identity.name.clone()).collect()
+        sorted
+            .iter()
+            .map(|identity| identity.name.clone())
+            .collect()
     };
     check_sequence(
         "identities",
@@ -1872,7 +1873,10 @@ fn validate_authority_lattice(registry: &ThreatRegistry, violations: &mut Vec<Vi
                 "identity_wire_tag_collision",
                 &identity.name,
                 "§12.1",
-                format!("wire_tag {:?} is shared with another identity", identity.wire_tag),
+                format!(
+                    "wire_tag {:?} is shared with another identity",
+                    identity.wire_tag
+                ),
             ));
         }
     }
@@ -2275,7 +2279,8 @@ fn validate_postures(registry: &ThreatRegistry, violations: &mut Vec<Violation>)
             ));
             continue;
         }
-        if let Some(law) = excluded_by(&law_ids, (service_class, role_posture, continuity_profile)) {
+        if let Some(law) = excluded_by(&law_ids, (service_class, role_posture, continuity_profile))
+        {
             violations.push(Violation::new(
                 "posture_excluded_cell",
                 id,
@@ -2533,7 +2538,13 @@ fn validate_actors_assets(registry: &ThreatRegistry, violations: &mut Vec<Violat
         sorted.sort_by_key(|actor| actor.source_order);
         sorted.iter().map(|actor| actor.id.clone()).collect()
     };
-    check_sequence("actors", &actor_ids, &ACTOR_ORDER, "actor_order", violations);
+    check_sequence(
+        "actors",
+        &actor_ids,
+        &ACTOR_ORDER,
+        "actor_order",
+        violations,
+    );
     check_dense_order(
         "actors",
         &registry
@@ -2662,7 +2673,11 @@ pub fn validate_threat(registry: &ThreatRegistry, root: &Path) -> Vec<Violation>
     validate_footprint(registry, &mut violations);
     validate_source_blocks(registry, root, &mut violations);
     violations.sort_by(|left, right| {
-        (&left.code, &left.subject, &left.message).cmp(&(&right.code, &right.subject, &right.message))
+        (&left.code, &left.subject, &left.message).cmp(&(
+            &right.code,
+            &right.subject,
+            &right.message,
+        ))
     });
     violations
 }
@@ -2877,7 +2892,14 @@ pub fn generate_document(registry: &ThreatRegistry, root: &Path) -> Result<Strin
     heading(&mut out, 2, "6. Stable security identities");
     table_head(
         &mut out,
-        &["#", "Identity", "Kind", "Epoch domain", "Rust newtype", "Wire tag"],
+        &[
+            "#",
+            "Identity",
+            "Kind",
+            "Epoch domain",
+            "Rust newtype",
+            "Wire tag",
+        ],
     );
     let mut identities: Vec<&Identity> = registry.identities.iter().collect();
     identities.sort_by_key(|identity| identity.source_order);

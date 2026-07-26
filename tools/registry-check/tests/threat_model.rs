@@ -33,7 +33,8 @@ fn registry() -> ThreatRegistry {
 }
 
 fn registry_text() -> String {
-    std::fs::read_to_string(repo_root().join(threat::REGISTRY_PATH)).expect("read threat_model.toml")
+    std::fs::read_to_string(repo_root().join(threat::REGISTRY_PATH))
+        .expect("read threat_model.toml")
 }
 
 /// Apply one textual mutation and return the violation codes it produces.
@@ -151,10 +152,7 @@ fn tm_actor_asset_assumption_complete() {
 fn tm_neg_exposure_cell_dropped() {
     // Drop one cell from the compromised-server row: the actor whose undefended
     // list is the whole point of the model.
-    let codes = codes_after(
-        "  \"key_material:A-NO-TEE\",\n",
-        "",
-    );
+    let codes = codes_after("  \"key_material:A-NO-TEE\",\n", "");
     assert_code(&codes, "exposure_missing");
 }
 
@@ -189,8 +187,7 @@ fn tm_footprint_all_postures_eleven_authorities() {
             assert!(
                 cells
                     .iter()
-                    .any(|cell| cell.posture_id == posture.id
-                        && cell.authority_id == authority.id),
+                    .any(|cell| cell.posture_id == posture.id && cell.authority_id == authority.id),
                 "missing cell {}/{}",
                 posture.id,
                 authority.id
@@ -273,7 +270,10 @@ fn tm_posture_product_space_is_closed() {
         );
         assert!(!cell.resolved_by.is_empty());
     }
-    let registered = cells.iter().filter(|c| c.resolution == "registered").count();
+    let registered = cells
+        .iter()
+        .filter(|c| c.resolution == "registered")
+        .count();
     let deferred = cells.iter().filter(|c| c.resolution == "deferred").count();
     let excluded = cells.iter().filter(|c| c.resolution == "excluded").count();
     assert_eq!((registered, deferred, excluded), (2, 2, 8));
@@ -425,7 +425,11 @@ impl Rng {
     }
 
     fn below(&mut self, bound: usize) -> usize {
-        if bound == 0 { 0 } else { (self.next() % bound as u64) as usize }
+        if bound == 0 {
+            0
+        } else {
+            (self.next() % bound as u64) as usize
+        }
     }
 }
 
@@ -491,14 +495,13 @@ fn tm_attenuation_narrowing_only() {
     let operators: Vec<(String, String)> = registry
         .authority_dimensions
         .iter()
-        .map(|dimension| {
-            (
-                dimension.id.clone(),
-                dimension.narrowing_operator.clone(),
-            )
-        })
+        .map(|dimension| (dimension.id.clone(), dimension.narrowing_operator.clone()))
         .collect();
-    assert_eq!(operators.len(), 27, "every §12.1/§12.2 dimension is modelled");
+    assert_eq!(
+        operators.len(),
+        27,
+        "every §12.1/§12.2 dimension is modelled"
+    );
 
     let mut widened_at_least_once = 0usize;
     for seed in 1u64..=256 {
@@ -775,8 +778,7 @@ fn tm_no_compromised_server_confidentiality_claim() {
 fn tm_claim_scan_rejects_an_overreaching_sentence() {
     // The scan must go red on a real overreach, or its green means nothing.
     let registry = registry();
-    let overreach =
-        "Graph data stays confidential even against a compromised server, by design.";
+    let overreach = "Graph data stays confidential even against a compromised server, by design.";
     let hits = scan_claims(overreach, &registry);
     assert!(
         hits.iter().any(|hit| hit.rule_id == "TMS-1"),
@@ -790,7 +792,10 @@ fn tm_claim_scan_rules_are_all_exercised() {
     // seen fire is a rule that may be syntactically incapable of firing.
     let registry = registry();
     let probes = [
-        ("TMS-1", "Data remains confidential against a compromised server."),
+        (
+            "TMS-1",
+            "Data remains confidential against a compromised server.",
+        ),
         ("TMS-2", "The cluster tolerates Byzantine replicas."),
         ("TMS-3", "These fixtures prove noninterference."),
         ("TMS-4", "A witness can undo the disclosure."),
@@ -859,7 +864,10 @@ fn tm_neg_operation_class_alphabetized() {
     // Census order is alphabetical; source order is normative. A genuine SWAP
     // keeps the set and the density intact and must still be rejected.
     let codes = codes_after_all(&[
-        ("name = \"Read\"\nordinal = 1", "name = \"Read\"\nordinal = 16"),
+        (
+            "name = \"Read\"\nordinal = 1",
+            "name = \"Read\"\nordinal = 16",
+        ),
         (
             "name = \"Replicate\"\nordinal = 16",
             "name = \"Replicate\"\nordinal = 1",
@@ -868,7 +876,10 @@ fn tm_neg_operation_class_alphabetized() {
     assert_code(&codes, "operation_class_order");
     // ... and the half-swap must be caught by a DIFFERENT law, so neither
     // defect can hide behind the other.
-    let half = codes_after("name = \"Read\"\nordinal = 1", "name = \"Read\"\nordinal = 2");
+    let half = codes_after(
+        "name = \"Read\"\nordinal = 1",
+        "name = \"Read\"\nordinal = 2",
+    );
     assert_code(&half, "ordinal_collision");
 }
 
@@ -915,8 +926,8 @@ fn tm_registered_rejections_cover_the_plan_rejections() {
 #[test]
 fn tm_bound_claims_resolve_to_live_registry_rows() {
     let registry = registry();
-    let invariants =
-        std::fs::read_to_string(repo_root().join("registries/invariants.toml")).expect("invariants");
+    let invariants = std::fs::read_to_string(repo_root().join("registries/invariants.toml"))
+        .expect("invariants");
     for id in &registry.registry.bound_invariants {
         assert!(
             invariants.contains(&format!("id = \"{id}\"")),
@@ -947,11 +958,7 @@ fn tm_bound_claims_resolve_to_live_registry_rows() {
 fn tm_checker_index_registers_every_threat_entrypoint() {
     let index = std::fs::read_to_string(repo_root().join("registries/checker_index.toml"))
         .expect("checker_index");
-    for symbol in [
-        "threat_model",
-        "threat_registry_source",
-        "g0_threat_e2e",
-    ] {
+    for symbol in ["threat_model", "threat_registry_source", "g0_threat_e2e"] {
         assert!(
             index.contains(&format!("symbol = \"{symbol}\"")),
             "checker_index.toml is missing a row for {symbol}"

@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use threat::{
     ThreatRegistry, Violation, check_source_blocks, expand_exposures, expand_footprint,
-    expand_product_space, generate_document, load_from_repo, load_threat,
-    recompute_id_table_hash, recompute_semantic_contract_hash, scan_claims,
+    expand_product_space, generate_document, load_from_repo, load_threat, recompute_id_table_hash,
+    recompute_semantic_contract_hash, scan_claims,
 };
 
 fn usage() -> String {
@@ -140,10 +140,7 @@ fn emit_registry_event(registry: &ThreatRegistry, violations: usize, document_ma
             ),
             ("document_matches", b(document_matches)),
             ("violations", n(violations as i64)),
-            (
-                "outcome",
-                s(if violations == 0 { "pass" } else { "fail" })
-            ),
+            ("outcome", s(if violations == 0 { "pass" } else { "fail" })),
         ])
     );
 }
@@ -301,10 +298,7 @@ fn emit_claim_scan(registry: &ThreatRegistry, document: &str) -> usize {
         );
         eprintln!(
             "claim-scan[{}] {}:{}: {}",
-            hit.rule_id,
-            registry.registry.document_path,
-            hit.line,
-            hit.trust_matrix_conflict
+            hit.rule_id, registry.registry.document_path, hit.line, hit.trust_matrix_conflict
         );
     }
     println!(
@@ -314,10 +308,7 @@ fn emit_claim_scan(registry: &ThreatRegistry, document: &str) -> usize {
             ("rules", n(registry.claim_scan_rules.len() as i64)),
             ("flags", n(hits.len() as i64)),
             ("evidence_class", s("lint")),
-            (
-                "outcome",
-                s(if hits.is_empty() { "pass" } else { "fail" })
-            ),
+            ("outcome", s(if hits.is_empty() { "pass" } else { "fail" })),
         ])
     );
     hits.len()
