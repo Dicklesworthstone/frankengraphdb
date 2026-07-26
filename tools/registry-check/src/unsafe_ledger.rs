@@ -44,7 +44,16 @@
 //!
 //! Every crate escapes the workspace `forbid` the moment its manifest omits
 //! `[lints] workspace = true`, which is invisible at the crate root — so that
-//! inheritance is checked per member rather than assumed.
+//! inheritance is checked per member rather than assumed. That check reads the
+//! manifest BY SECTION, via [`crate::topology::scan_manifest`], because the
+//! substring form it replaced was the same class of bug as (4) one layer down:
+//! `text.contains("[lints]") && text.contains("workspace = true")` is satisfied
+//! by a commented-out lint table, and by any crate carrying its own `[lints]`
+//! beside an idiomatic `dep = { workspace = true }`. Both were run against the
+//! real tree: this checker called the crate clean and exited 0 while
+//! `topology-check`, which had always parsed by section, failed the same tree
+//! with `lints_not_inherited`. Two checkers reading one fact must not be able to
+//! disagree, so there is now one reader.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -836,7 +845,42 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
                 // A member that omits `[lints] workspace = true` silently keeps
                 // its own (absent) lint table and escapes the workspace forbid.
                 // Nothing at the crate root reveals this.
-                let inherits = text.contains("[lints]") && text.contains("workspace = true");
+                //
+                // This must be a SECTION-AWARE read of the manifest, not a
+                // substring test, and the difference is not pedantic. The first
+                // version asked whether the text contained `[lints]` and
+                // `workspace = true` anywhere at all, which two ordinary
+                // manifests satisfy without inheriting anything: one whose lint
+                // table is a comment (`# TODO: restore [lints] workspace =
+                // true`), and one that carries its own `[lints]` table plus any
+                // idiomatic `dep = { workspace = true }` dependency. Both were
+                // run: `unsafe-ledger-check` reported the crate as inheriting
+                // `forbid` and exited 0 while `topology-check`, which has always
+                // parsed the manifest by section, failed the same tree with
+                // `lints_not_inherited`. Two checkers reading one fact and
+                // disagreeing means one of them is wrong; this was the wrong
+                // one. Reusing [`crate::topology::scan_manifest`] is what stops
+                // them from drifting apart again.
+                let inherits = match crate::topology::scan_manifest(member, &text) {
+                    Ok(scanned) => scanned.lints_workspace,
+                    Err(e) => {
+                        // Fail closed. An unparseable manifest is not evidence
+                        // of inheritance, and guessing `true` here would be the
+                        // looks-exactly-like-a-pass failure this file exists to
+                        // prevent.
+                        v.push(Violation::new(
+                            "member_manifest_unparseable",
+                            &name,
+                            manifest.display().to_string(),
+                            format!(
+                                "cannot parse the member manifest, so its lint inheritance is \
+                                 unknown and no boundary claim can be made: {e}"
+                            ),
+                        ));
+                        report.forbid_verdicts.insert(name.clone(), false);
+                        continue;
+                    }
+                };
                 report.forbid_verdicts.insert(name.clone(), inherits);
                 if !inherits && !is_island {
                     v.push(Violation::new(

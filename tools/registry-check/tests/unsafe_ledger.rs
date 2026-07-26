@@ -248,6 +248,88 @@ fn member_that_omits_lints_inheritance_fails() {
     );
 }
 
+/// The manifest half of the same silent hole, and the reason the inheritance
+/// verdict is a section-aware parse rather than a substring test.
+///
+/// The first version asked whether the manifest text contained `[lints]` and
+/// `workspace = true` *anywhere*. A crate that comments its lint table out
+/// satisfies that while inheriting nothing — and the comment is the honest
+/// spelling someone reaches for while debugging a lint, which is precisely when
+/// the boundary needs to hold. Run against the real tree, that checker reported
+/// `fgdb-types` as inheriting `forbid` and exited 0 with a raw-pointer deref in
+/// its source, while `topology-check` failed the same tree with
+/// `lints_not_inherited`.
+#[test]
+fn a_commented_out_lint_table_does_not_count_as_inheritance() {
+    let root = clean_workspace("commented-lints");
+    fs::write(
+        root.join("crates/fgdb-ordinary/Cargo.toml"),
+        "[package]\nname = \"fgdb-ordinary\"\n# TODO: restore [lints] workspace = true before release\n",
+    )
+    .unwrap();
+    assert!(
+        codes(&root).contains(&"member_does_not_inherit_forbid".to_owned()),
+        "prose naming the lint table is not the lint table"
+    );
+}
+
+/// The same hole reached without anyone doing anything odd at all.
+///
+/// `[lints]` carrying the crate's own lints and `dep = { workspace = true }` in
+/// `[dependencies]` are both idiomatic, and a workspace that grows a
+/// `[workspace.dependencies]` table produces the second spelling everywhere.
+/// Together they satisfy a substring test while the crate inherits no lint
+/// table at all, so `unsafe_code = "forbid"` does not reach it.
+#[test]
+fn an_own_lint_table_plus_a_workspace_dependency_is_not_inheritance() {
+    let root = clean_workspace("own-lints");
+    fs::write(
+        root.join("crates/fgdb-ordinary/Cargo.toml"),
+        "[package]\nname = \"fgdb-ordinary\"\n\n[lints]\nrust = { unused_imports = \"warn\" }\n\n[dependencies]\nfgdb-other = { workspace = true }\n",
+    )
+    .unwrap();
+    assert!(
+        codes(&root).contains(&"member_does_not_inherit_forbid".to_owned()),
+        "a crate's own [lints] table overrides inheritance rather than granting it"
+    );
+}
+
+/// The control for the two rows above: the same shape, inheriting for real.
+/// Without this, "both bypasses fail" would also be satisfied by a checker that
+/// had started failing every manifest it could not recognise.
+#[test]
+fn a_real_lint_table_beside_a_workspace_dependency_still_inherits() {
+    let root = clean_workspace("inherit-with-deps");
+    fs::write(
+        root.join("crates/fgdb-ordinary/Cargo.toml"),
+        "[package]\nname = \"fgdb-ordinary\"\n\n[lints]\nworkspace = true\n\n[dependencies]\nfgdb-other = { workspace = true }\n",
+    )
+    .unwrap();
+    assert!(
+        codes(&root).is_empty(),
+        "inheriting members must pass: {:?}",
+        codes(&root)
+    );
+}
+
+/// Fail closed on a manifest the scanner cannot read. Guessing `true` here
+/// would put the whole boundary behind a parser bug, which is the
+/// looks-exactly-like-a-pass family this suite exists to close.
+#[test]
+fn an_unparseable_manifest_fails_rather_than_being_assumed_to_inherit() {
+    let root = clean_workspace("unparseable");
+    fs::write(
+        root.join("crates/fgdb-ordinary/Cargo.toml"),
+        "[package]\nname = \"fgdb-ordinary\"\n\n[lints]\nworkspace = true\nthis line is not key = value at all = = =\n[unterminated\n",
+    )
+    .unwrap();
+    let found = codes(&root);
+    assert!(
+        found.contains(&"member_manifest_unparseable".to_owned()),
+        "an unreadable manifest is unknown, not clean: {found:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The evasions. A site the scanner cannot see is worse than an absent ledger,
 // because the report says "0 sites" with the same confidence either way.
@@ -435,8 +517,30 @@ fn the_real_workspace_passes_its_own_boundary_check() {
         "expected the real member list, got {}",
         report.crates_scanned
     );
+    // Policy-dependent, and both directions matter. An ordinary member that
+    // does not inherit has silently escaped `forbid`; an ISLAND that does
+    // inherit could not compile a single ledgered site, because `forbid` cannot
+    // be lowered — so a `true` verdict there is not a stricter reading of the
+    // law, it is the checker misreading the manifest.
+    //
+    // This assertion previously read `values().all(|v| *v)` and passed only
+    // because the verdict came from a substring test that matched the island
+    // manifest's own comment explaining why it omits the lint table. A green
+    // bar built on a false fact is the failure mode this suite is about.
+    for (name, inherits) in &report.forbid_verdicts {
+        let is_island = name.starts_with("fgdb-unsafe-");
+        assert_eq!(
+            *inherits, !is_island,
+            "{name}: inherits_workspace_forbid={inherits}, but is_island={is_island} \
+             (ordinary crates must inherit `forbid`; islands must not, or their \
+             ledgered allow sites cannot compile)"
+        );
+    }
     assert!(
-        report.forbid_verdicts.values().all(|v| *v),
-        "every real member must inherit the workspace forbid"
+        report
+            .forbid_verdicts
+            .keys()
+            .any(|name| name.starts_with("fgdb-unsafe-")),
+        "the island half of the rule above is vacuous unless an island is present"
     );
 }
