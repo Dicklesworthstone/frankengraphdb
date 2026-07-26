@@ -167,12 +167,12 @@ count = 138
 source_path = ".beads/issues.jsonl"
 resolution_precedence = ["direct_owner", "bet_label", "exact_override", "family_rule"]
 allowed_bet_labels = ["b1", "b2", "b3", "b4", "b5", "b6"]
-bead_count = 374
+bead_count = 375
 direct_owner_count = 98
-bet_label_count = 219
+bet_label_count = 220
 exact_override_count = 18
 family_rule_count = 39
-binding_hash = "fnv1a64:46c4b0afda3e5e3c"
+binding_hash = "fnv1a64:9a1d41a188c6389f"
 
 [[bead_family]]
 id = "appendix-a-catalog"
