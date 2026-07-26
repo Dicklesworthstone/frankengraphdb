@@ -4944,14 +4944,20 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             ("CertificateAttemptPlan", "configuration_ref")
                 | ("CertificateSignatureShare", "lock_ref")
                 | ("CertificateSignerLock", "plan_ref")
-                | ("RaftConsensusCutProjection<Role>", "configuration_at_cut_ref")
+                | (
+                    "RaftConsensusCutProjection<Role>",
+                    "configuration_at_cut_ref"
+                )
                 | ("RaftHardState", "configuration_state_ref")
                 | ("RaftHardState", "prepared_order_attempt_root_ref")
                 | ("RaftStateRoot<Role>", "hard_state_ref")
                 | ("RemoteConfigurationTrustRoot", "evidence_ref")
                 | ("RemoteConfigurationTrustRoot", "anchor_ref")
                 | ("RemoteRetentionConsumerRoot", "grant_evidence_ref")
-                | ("RemoteRetentionConsumerRoot", "new_authority_grant_evidence_ref")
+                | (
+                    "RemoteRetentionConsumerRoot",
+                    "new_authority_grant_evidence_ref"
+                )
                 | ("RemoteRetentionConsumerRoot", "request_record_ref")
                 | ("RemoteRetentionConsumerRoot", "request_leaf_ref")
                 | ("RemoteRetentionConsumerRoot", "ack_leaf_ref")
@@ -4965,7 +4971,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("RemoteRetentionObligationRoot", "ack_leaf_ref")
                 | ("TopologyState", "meta_configuration_ref")
                 | ("RaftStateRoot<Role>", "matching_applied_cut_snapshot_ref")
-                | ("RemoteRetentionObligationRoot", "source_transfer_record_identity")
+                | (
+                    "RemoteRetentionObligationRoot",
+                    "source_transfer_record_identity"
+                )
                 | ("TopologyState", "predecessor_topology_identity")
                 | ("ValidatedRemoteConfigurationAnchor", "input_spec_digest")
         )
@@ -6440,6 +6449,145 @@ fn idr_sealed_prebootstrap_dispatch_import_reserves_its_source_dag_stratum() {
     );
 
     let target_row_id = "a17:logical-kind:sealed-pre-bootstrap-dispatch-journal-import";
+    let a17 = catalog
+        .slices
+        .iter()
+        .find(|slice| slice.id == "a17")
+        .expect("a17 slice exists");
+    assert_eq!(
+        a17.definition_status, "declared",
+        "coverage must close before completion-layer authoring"
+    );
+    assert!(
+        !catalog
+            .annotations
+            .iter()
+            .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .semantic_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .expansion_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .evidence
+                .iter()
+                .any(|row| row.target_row_id == target_row_id),
+        "a declared shell must not skip coverage-first sequencing with premature completion rows"
+    );
+}
+
+#[test]
+fn idr_restore_source_acquisition_plan_import_follows_the_sealed_import() {
+    let identity = real_identity();
+    let logical = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "RestoreSourceAcquisitionPlanImportRecord")
+        .expect("RestoreSourceAcquisitionPlanImportRecord logical shell exists");
+    assert_eq!(logical.object_kind, 0x03f0);
+    assert_eq!(logical.status, "reserved");
+    assert_eq!(logical.construction_order, 11);
+    assert_eq!(logical.role_predicate, "true");
+    assert_eq!(logical.max_size_bytes, 16_777_216);
+    assert_eq!(
+        logical.golden_corpus,
+        "corpus/logical/restore_source_acquisition_plan_import_record/"
+    );
+
+    let sealed_import = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "SealedPreBootstrapDispatchJournalImport")
+        .expect("SealedPreBootstrapDispatchJournalImport predecessor exists");
+    assert_eq!(
+        logical.construction_order,
+        sealed_import.construction_order + 1,
+        "the plan import strongly retains the sealed journal import"
+    );
+    let plan_copy = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "CanonicalRestoreSourceAcquisitionPlanCopy")
+        .expect("CanonicalRestoreSourceAcquisitionPlanCopy predecessor exists");
+    assert_eq!(
+        logical.construction_order,
+        plan_copy.construction_order + 4,
+        "the generated refinement copies and sealed import form four source-DAG strata after the plan copy"
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|reservation| reservation.symbol == "RestoreSourceAcquisitionPlanImportRecord")
+        .expect("RestoreSourceAcquisitionPlanImportRecord permanent reservation exists");
+    assert_eq!(
+        reservation.row_id,
+        "a17:reservation:restore-source-acquisition-plan-import-record"
+    );
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x03f0");
+    assert_eq!(reservation.disposition, "existing");
+
+    let source_key = "top|RestoreSourceAcquisitionPlanImportRecord<Role:AuthorityOwningRole>";
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == source_key)
+        .expect("RestoreSourceAcquisitionPlanImportRecord source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == source_key)
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "source candidate must map exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a17:target:logical-kind-restore-source-acquisition-plan-import-record"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a17:logical-kind:restore-source-acquisition-plan-import-record"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+    assert_eq!(targets[0].definition_status, "declared");
+
+    assert!(
+        !identity
+            .fields
+            .iter()
+            .any(|field| { field.containing_schema == "RestoreSourceAcquisitionPlanImportRecord" }),
+        "the shell increment must not preempt its generated-reference field census"
+    );
+    assert!(
+        !identity.ordinary_unions.iter().any(|union| {
+            union.containing_schema == "RestoreSourceAcquisitionPlanImportRecord"
+                || union.union_name == "RestoreSourceAcquisitionPlanImportRecord"
+        }) && !identity.unions.iter().any(|union| {
+            union.containing_schema == "RestoreSourceAcquisitionPlanImportRecord"
+                || union.union_name == "RestoreSourceAcquisitionPlanImportRecord"
+        }),
+        "the record shell must not manufacture a same-name union or any arms"
+    );
+    assert!(
+        !catalog.ambiguity_adjudications.iter().any(|row| {
+            row.ambiguity_source_key
+                .contains("|RestoreSourceAcquisitionPlanImportRecord|")
+                || row.resolved_source_keys.iter().any(|source_key| {
+                    source_key.contains("|RestoreSourceAcquisitionPlanImportRecord|")
+                })
+        }),
+        "shorthand ambiguities must remain open until exact field types are settled"
+    );
+
+    let target_row_id = "a17:logical-kind:restore-source-acquisition-plan-import-record";
     let a17 = catalog
         .slices
         .iter()

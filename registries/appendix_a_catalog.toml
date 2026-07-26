@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2399
+target_count = 2400
 projection_fallback_count = 90
-target_source_assignment_sha256 = "8b8cac944ec06ed20833528e0407a9f4485c5a531ba55aa7ce18a732d21532a6"
+target_source_assignment_sha256 = "b106b7d70bfcb4cd75c47116d5ac07697ef49a814bd79ef17d6e8ec6e284c6a2"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 47
+registry_epoch = 48
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -2053,6 +2053,17 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/sealed_pre_bootstrap_dispatch_journal_import/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:restore-source-acquisition-plan-import-record"
+object_kind = 0x03f0
+name = "RestoreSourceAcquisitionPlanImportRecord"
+status = "reserved"
+construction_order = 11
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_acquisition_plan_import_record/"
 
 [[logical_kind]]
 slice_id = "a03"
@@ -38966,7 +38977,7 @@ symbol = "RestoreSourceAcquisitionPlanImportRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03f0"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a17:reservation:restore-source-acquisition-source-gate"
@@ -50074,7 +50085,7 @@ symbol = "RestoreSourceAcquisitionPlanImportRecord"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|RestoreSourceAcquisitionPlanImportRecord<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2293"]
 
 [[top_level_candidate]]
@@ -54590,6 +54601,14 @@ row_id = "a17:target:logical-kind-sealed-pre-bootstrap-dispatch-journal-import"
 target_row_id = "a17:logical-kind:sealed-pre-bootstrap-dispatch-journal-import"
 slice_id = "a17"
 source_key = "top|SealedPreBootstrapDispatchJournalImport<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-restore-source-acquisition-plan-import-record"
+target_row_id = "a17:logical-kind:restore-source-acquisition-plan-import-record"
+slice_id = "a17"
+source_key = "top|RestoreSourceAcquisitionPlanImportRecord<Role:AuthorityOwningRole>"
 target_kind = "logical-kind"
 definition_status = "declared"
 

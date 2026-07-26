@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 47
+registry_epoch = 48
 
 [[kind]]
 object_kind = 0x0001
@@ -2365,6 +2365,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_source_access_revocation_operation_record/"
+
+[[kind]]
+object_kind = 0x03f0
+name = "RestoreSourceAcquisitionPlanImportRecord"
+status = "reserved"
+construction_order = 11
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_acquisition_plan_import_record/"
 
 [[kind]]
 object_kind = 0x03f1
