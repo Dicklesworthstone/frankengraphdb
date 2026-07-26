@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 54
+registry_epoch = 55
 
 [[kind]]
 object_kind = 0x0001
@@ -828,6 +828,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/compacted_pre_bootstrap_evidence/"
 
 [[kind]]
+object_kind = 0x0277
+name = "ConfigPayloadFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/config_payload_floor/"
+
+[[kind]]
 object_kind = 0x0278
 name = "ConfigurationState"
 status = "reserved"
@@ -988,6 +997,15 @@ construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/gc_decision_record/"
+
+[[kind]]
+object_kind = 0x029f
+name = "GcProposal"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_proposal/"
 
 [[kind]]
 object_kind = 0x02a2

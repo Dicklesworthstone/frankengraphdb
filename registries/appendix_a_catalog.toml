@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3178
+target_count = 3180
 projection_fallback_count = 109
-target_source_assignment_sha256 = "b399d9462e805e7a4e8bfbdc005be5d2d7e72c24eceab0ddeff56c3d82106e51"
+target_source_assignment_sha256 = "e37a8eee3b0167d49d636f3648f001f3d2d709164f0b8f7824e7a5d8b5f3ec28"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 54
+registry_epoch = 55
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -41282,7 +41282,7 @@ symbol = "ConfigPayloadFloor"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0277"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a04:reservation:configuration-state"
@@ -41885,7 +41885,7 @@ symbol = "GcProposal"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x029f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:gc-reachability-proof"
@@ -49610,7 +49610,7 @@ symbol = "ConfigPayloadFloor"
 generic_signature = ""
 source_key = "top|ConfigPayloadFloor"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a14:2037"]
 
 [[top_level_candidate]]
@@ -50570,7 +50570,7 @@ symbol = "GcProposal"
 generic_signature = ""
 source_key = "top|GcProposal"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a14:2045"]
 
 [[top_level_candidate]]
@@ -100548,6 +100548,28 @@ role_predicate = "role-local || role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/portable_semantic_visibility_certificate/"
 
+[[logical_kind]]
+slice_id = "a14"
+row_id = "a14:logical-kind:config-payload-floor"
+object_kind = 0x0277
+name = "ConfigPayloadFloor"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/config_payload_floor/"
+
+[[logical_kind]]
+slice_id = "a14"
+row_id = "a14:logical-kind:gc-proposal"
+object_kind = 0x029f
+name = "GcProposal"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_proposal/"
+
 [[field]]
 slice_id = "a18"
 row_id = "a18:field:global-restore-abandon-participant-apply-certificate-visibility-certificate-ref"
@@ -100738,3 +100760,19 @@ slice_id = "a18"
 source_key = "field|RestoreTerminalPinReleaseAuthorization|RestoreTerminalPinReleaseAuthorization.certificate_attempt_ref|certificate_attempt_ref"
 target_kind = "field"
 definition_status = "declared"
+[[target]]
+row_id = "a14:target:logical-kind-config-payload-floor"
+target_row_id = "a14:logical-kind:config-payload-floor"
+slice_id = "a14"
+source_key = "top|ConfigPayloadFloor"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:logical-kind-gc-proposal"
+target_row_id = "a14:logical-kind:gc-proposal"
+slice_id = "a14"
+source_key = "top|GcProposal"
+target_kind = "logical-kind"
+definition_status = "declared"
+
