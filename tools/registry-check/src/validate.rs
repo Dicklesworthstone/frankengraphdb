@@ -26,6 +26,10 @@
 //!                              live checker (promotion law)
 //!   clause_negative_test_is_its_own_checker
 //!                            — an enforced clause's negative test IS its checker
+//!   enforcement_coverage_incomplete / _empty / _drift
+//!                            — "every ID has a live checker" examined fewer ids
+//!                              than exist, had nothing to examine, or disagrees
+//!                              with the declared enforced counts
 //!   checker_liveness_self_test_failed
 //!                            — the liveness readers failed a known answer, so no
 //!                              clean verdict anywhere below is licensed (control;
@@ -384,69 +388,6 @@ fn validate_clause(
     // one, because its entire purpose is to prove the checker can go red — a
     // negative test that cannot itself fail proves nothing, which is exactly the
     // shape of every defect in this family.
-    if enforced == Some(true) {
-        for (field, symbol) in [
-            ("checker_entrypoint", &clause.checker_entrypoint),
-            ("negative_test_entrypoint", &clause.negative_test_entrypoint),
-        ] {
-            // An unresolved symbol is already reported above; reporting it twice
-            // would say the row is two different kinds of broken.
-            let Some(row) = r.checker_index.iter().find(|c| &c.symbol == symbol) else {
-                continue;
-            };
-            if row.status != "live" {
-                out.push(Violation::new(
-                    "clause_promoted_without_live_checker",
-                    reg,
-                    id,
-                    format!(
-                        "clause status is {:?} but {field} {symbol:?} is a checker_index row \
-                         with status {:?}; a clause is enforced only in the change that lands \
-                         its checker",
-                        clause.status, row.status
-                    ),
-                ));
-                continue;
-            }
-            let defects = prover.assess(row);
-            if !defects.is_empty() {
-                out.push(Violation::new(
-                    "clause_promoted_without_live_checker",
-                    reg,
-                    id,
-                    format!(
-                        "clause status is {:?} but {field} {symbol:?} claims \
-                         `status = \"live\"` without being live: {}",
-                        clause.status,
-                        defects
-                            .iter()
-                            .map(|defect| defect.detail.clone())
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ),
-                ));
-            }
-        }
-        // The degenerate case. A clause may legitimately put its checker and its
-        // negative test in the same ARTIFACT — all twenty shipped clauses do,
-        // and `claims.rs` holds both `claims_hash_twenty_id_pin` and
-        // `claims_neg_waiver_present` — so requiring distinct artifacts would
-        // reject the shipped shape. Distinct SYMBOLS is the real rule: one
-        // symbol cannot be both the proof and the proof that the proof can fail.
-        if clause.checker_entrypoint == clause.negative_test_entrypoint {
-            out.push(Violation::new(
-                "clause_negative_test_is_its_own_checker",
-                reg,
-                id,
-                format!(
-                    "clause status is {:?} and its negative_test_entrypoint is its \
-                     checker_entrypoint ({:?}); a checker cannot be the evidence that it can \
-                     go red",
-                    clause.status, clause.checker_entrypoint
-                ),
-            ));
-        }
-    }
     // Dependencies must be registered clause keys or top-level FG-INV IDs.
     for dep in &clause.dependencies {
         if !clause_keys.contains(dep) && !invariant_ids.contains(dep) {
@@ -458,6 +399,17 @@ fn validate_clause(
             ));
         }
     }
+    if enforced == Some(true) {
+        for defect in prover.assess_clause(clause, &r.checker_index) {
+            out.push(Violation::new(
+                defect.kind.code(),
+                reg,
+                id,
+                format!("clause status is {:?} but {}", clause.status, defect.detail),
+            ));
+        }
+    }
+
     // Proof-class clauses must bind a resolvable proof lane; any clause that
     // cites one at all (e.g. bounded_model → TLA+) must have it resolve. ONE
     // lookup, because two copies of it is how the second law below came to be
@@ -827,6 +779,139 @@ fn validate_slo(r: &Registries, out: &mut Vec<Violation>) {
 /// Same shape as [`validate_checker_index`]: the self-test is consulted FIRST,
 /// because a reader that has stopped reading returns "no defects" for every row,
 /// which is byte-identical to what a healthy registry returns.
+/// AGENTS.md's hardest rule, made non-vacuous
+/// (`fgdb-fginv-spine-zero-live-checkers-v05b`).
+///
+/// *Spec-First Workflow* item 2: **"CI cross-checks that every ID has a live
+/// checker."** The hard rule under it: "no subsystem ships against an unenforced
+/// invariant. A workstream exit gate (G1-G4) cannot pass while any invariant it
+/// depends on lacks a live checker."
+///
+/// Every clause is `stub` and every entrypoint resolves to a `stub` row, so that
+/// cross-check quantified over an EMPTY SET and passed. That is the purest form
+/// of the family this file has spent the evening closing — not a reader that
+/// answers wrongly, but a universally-quantified law with nothing to quantify
+/// over, whose exit code is identical to a fully enforced spine's.
+///
+/// The fix is not "make the twenty live" — that is the verification programme,
+/// not a law. It is to make the emptiness *accounted for*:
+///
+/// * the ledger examines EVERY id `expected_invariant_ids()` names and says so;
+///   a law that examined fewer has not passed, it has stopped looking;
+/// * a spine with no clauses at all is a violation, never a pass, exactly as
+///   `script_scan_empty` is for the scripts/ scan;
+/// * the enforced counts are DECLARED in the registry and checked in BOTH
+///   directions — too few means a clause silently regressed, too many means one
+///   was promoted without the gate review the doctrine requires.
+///
+/// "Is this clause's apparatus live" is not re-derived here: it is
+/// `liveness::Prover::assess_clause`, the same reader the promotion law
+/// (`...-nllh`) uses, which is itself `Prover::assess` — the reader `tl0o` built
+/// and `0f1l` consumed. Four faces, one reader.
+fn validate_enforcement_coverage(
+    r: &Registries,
+    prover: &crate::liveness::Prover<'_>,
+    out: &mut Vec<Violation>,
+) {
+    let reg = "invariants";
+    let mut accounted: Vec<String> = Vec::new();
+    let mut clauses_total = 0usize;
+    let mut enforced_clauses: Vec<String> = Vec::new();
+    let mut enforced_invariants: Vec<String> = Vec::new();
+
+    for invariant in &r.invariants.invariants {
+        accounted.push(invariant.id.clone());
+        // An invariant with no clauses enforces nothing: there is no apparatus
+        // to be live. Seeding `true` here would let an emptied invariant count
+        // as enforced, which is this bug one level down.
+        let mut every_clause_enforced = !invariant.clauses.is_empty();
+        for clause in &invariant.clauses {
+            clauses_total += 1;
+            let enforced = clause_status_is_enforced(&clause.status) == Some(true)
+                && prover.assess_clause(clause, &r.checker_index).is_empty();
+            if enforced {
+                enforced_clauses.push(clause.key.clone());
+            } else {
+                every_clause_enforced = false;
+            }
+        }
+        if every_clause_enforced {
+            enforced_invariants.push(invariant.id.clone());
+        }
+    }
+
+    // COMPLETENESS GUARD. The ledger must have accounted for the whole spine.
+    // `expected_invariant_ids()` is the ONE reader for what the spine must be;
+    // `validate_invariants` consumes it to check the registry, this consumes it
+    // to check the LEDGER. Without it a spine that shrank to nothing reports
+    // "0 enforced, 0 declared, pass" — a law that succeeded by having nothing to
+    // check.
+    let expected_ids = expected_invariant_ids();
+    if accounted != expected_ids {
+        out.push(Violation::new(
+            "enforcement_coverage_incomplete",
+            reg,
+            "<coverage>",
+            format!(
+                "the enforcement ledger accounted for {} invariant ids {:?}, but the spine is \
+                 {} ids {:?}; a coverage law that examined fewer rows than exist has not \
+                 passed, it has stopped looking",
+                accounted.len(),
+                accounted,
+                expected_ids.len(),
+                expected_ids
+            ),
+        ));
+    }
+
+    // A law with nothing to check has NOT passed. Same instrument as
+    // `script_scan_empty`: zero rows and a broken reader are indistinguishable
+    // at the exit code, so zero is a violation rather than a pass.
+    if clauses_total == 0 {
+        out.push(Violation::new(
+            "enforcement_coverage_empty",
+            reg,
+            "<coverage>",
+            "the spine declares no clauses at all, so \"every ID has a live checker\" is \
+             quantified over the empty set; a zero here cannot be distinguished from a \
+             registry that failed to load, so it is a violation rather than a pass",
+        ));
+        return;
+    }
+
+    // The declared expectations, checked in BOTH directions.
+    for (what, measured, declared, moved) in [
+        (
+            "clauses",
+            enforced_clauses.len() as i64,
+            r.invariants.expected_enforced_clauses,
+            &enforced_clauses,
+        ),
+        (
+            "invariant ids",
+            enforced_invariants.len() as i64,
+            r.invariants.expected_enforced_invariants,
+            &enforced_invariants,
+        ),
+    ] {
+        if measured != declared {
+            out.push(Violation::new(
+                "enforcement_coverage_drift",
+                reg,
+                "<coverage>",
+                format!(
+                    "registry declares {declared} enforced {what}, measured {measured} over \
+                     {clauses_total} clauses in {} invariant ids; enforced now: {moved:?}. \
+                     Too few means a clause regressed to stub; too many means one was \
+                     promoted without the gate review the doctrine requires — either way the \
+                     declaration and the tree disagree about what this project enforces",
+                    accounted.len()
+                ),
+            ));
+        }
+    }
+}
+
 fn validate_proof_lanes(
     r: &Registries,
     prover: &crate::liveness::Prover<'_>,
@@ -1427,6 +1512,7 @@ pub fn validate_all(r: &Registries, root: &Path) -> Vec<Violation> {
     }
     validate_constitution(r, &mut out);
     validate_invariants(r, &prover, &mut out);
+    validate_enforcement_coverage(r, &prover, &mut out);
     validate_evidence(r, &mut out);
     validate_slo(r, &mut out);
     validate_proof_lanes(r, &prover, &mut out);

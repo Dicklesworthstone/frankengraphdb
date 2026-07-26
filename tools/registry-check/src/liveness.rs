@@ -133,7 +133,7 @@
 //! two languages: Lean and TLA+ differ only in their comment delimiters, and
 //! both nest. Writing two would be the same mistake in miniature.
 
-use crate::model::{Checker, Lane};
+use crate::model::{Checker, Clause, Lane};
 use crate::unsafe_ledger::mask_source;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -214,6 +214,11 @@ pub enum DefectKind {
     LaneProvesNothing,
     /// The artifact admits its own conclusion rather than proving it.
     LaneAdmitsAnything,
+    /// A clause's declared enforcement apparatus is not a live checker.
+    ClauseCheckerNotLive,
+    /// A clause's negative test IS its checker, so nothing proves the checker
+    /// can go red.
+    ClauseNegativeTestIsItsOwnChecker,
 }
 
 impl DefectKind {
@@ -236,6 +241,8 @@ impl DefectKind {
             Self::LaneSystemUnreadable => "proof_lane_system_unreadable",
             Self::LaneProvesNothing => "proof_lane_proves_nothing",
             Self::LaneAdmitsAnything => "proof_lane_admits_anything",
+            Self::ClauseCheckerNotLive => "clause_promoted_without_live_checker",
+            Self::ClauseNegativeTestIsItsOwnChecker => "clause_negative_test_is_its_own_checker",
         }
     }
 }
@@ -1276,6 +1283,21 @@ impl<'a> Prover<'a> {
     pub fn assess_lane(&self, lane: &Lane, checkers: &[Checker]) -> Vec<Defect> {
         assess_lane_with(self, lane, checkers)
     }
+
+    /// Every reason `clause`'s declared enforcement apparatus is not live.
+    ///
+    /// Says nothing about the clause's STATUS — that is the caller's question,
+    /// and the two callers ask it from opposite directions. `validate_clause`
+    /// asks "this clause is enforced, may it be?"
+    /// (`fgdb-clause-promotion-to-live-is-unguarded-nllh`);
+    /// `validate_enforcement_coverage` asks "how many of the twenty IDs have
+    /// live enforcement?" (`fgdb-fginv-spine-zero-live-checkers-v05b`). Same
+    /// fact, one reader — a coverage ledger that re-derived "is this apparatus
+    /// live" beside the promotion law would drift from it, and the weaker of the
+    /// two would win by being the one that happened to run.
+    pub fn assess_clause(&self, clause: &Clause, checkers: &[Checker]) -> Vec<Defect> {
+        assess_clause_with(self, clause, checkers)
+    }
 }
 
 /// Every reason `checker` is not the live checker it claims to be.
@@ -1588,6 +1610,72 @@ fn assess_lane_with(prover: &Prover<'_>, lane: &Lane, checkers: &[Checker]) -> V
                  unchecked one"
             ),
         )),
+    }
+    defects
+}
+
+/// Every reason `clause`'s declared enforcement apparatus is not live.
+///
+/// The single-clause entry point. A caller adjudicating more than one should
+/// build a [`Prover`] and reuse it.
+pub fn assess_clause(repo_root: &Path, clause: &Clause, checkers: &[Checker]) -> Vec<Defect> {
+    Prover::new(repo_root).assess_clause(clause, checkers)
+}
+
+fn assess_clause_with(prover: &Prover<'_>, clause: &Clause, checkers: &[Checker]) -> Vec<Defect> {
+    let mut defects = Vec::new();
+    for (field, symbol) in [
+        ("checker_entrypoint", &clause.checker_entrypoint),
+        ("negative_test_entrypoint", &clause.negative_test_entrypoint),
+    ] {
+        // An unresolved symbol is `validate`'s `missing_checker`, reported there
+        // against every clause whatever its status. Reporting it again here
+        // would say the row is two different kinds of broken.
+        let Some(row) = checkers.iter().find(|row| &row.symbol == symbol) else {
+            continue;
+        };
+        if row.status != "live" {
+            defects.push(Defect::new(
+                DefectKind::ClauseCheckerNotLive,
+                format!(
+                    "{field} {symbol:?} is a checker_index row with status {:?}; a clause is \
+                     enforced only in the change that lands its checker",
+                    row.status
+                ),
+            ));
+            continue;
+        }
+        // THE DELEGATION. What `live` proves about a checker row is this
+        // module's own question, answered once.
+        let row_defects = prover.assess(row);
+        if !row_defects.is_empty() {
+            defects.push(Defect::new(
+                DefectKind::ClauseCheckerNotLive,
+                format!(
+                    "{field} {symbol:?} claims `status = \"live\"` without being live: {}",
+                    row_defects
+                        .iter()
+                        .map(|defect| defect.detail.clone())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            ));
+        }
+    }
+    // A clause may legitimately put its checker and its negative test in the
+    // same ARTIFACT — all twenty shipped clauses do, and `claims.rs` holds both
+    // a checker and a negative test — so requiring distinct artifacts would
+    // reject the shipped shape. Distinct SYMBOLS is the real rule: one symbol
+    // cannot be both the proof and the proof that the proof can fail.
+    if clause.checker_entrypoint == clause.negative_test_entrypoint {
+        defects.push(Defect::new(
+            DefectKind::ClauseNegativeTestIsItsOwnChecker,
+            format!(
+                "negative_test_entrypoint is the checker_entrypoint ({:?}); a checker cannot \
+                 be the evidence that it can go red",
+                clause.checker_entrypoint
+            ),
+        ));
     }
     defects
 }

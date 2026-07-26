@@ -94,6 +94,31 @@ allowed_claim_classes = ["invariant", "proof", "bounded_model"]
 waiver_policy = "forbidden"
 twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 
+# THE ENFORCEMENT LEDGER (fgdb-fginv-spine-zero-live-checkers-v05b).
+#
+# AGENTS.md: "CI cross-checks that every ID has a live checker", and under it the
+# hard rule "no subsystem ships against an unenforced invariant". Every clause
+# below is stub and every entrypoint resolves to a stub checker_index row, so
+# that cross-check quantified over an EMPTY SET and passed — an exit code
+# indistinguishable from a fully enforced spine.
+#
+# These two numbers are what make the zero mean "deliberately zero" instead of
+# "nothing was examined", in the same shape sample_capability_manifest.toml's
+# `expected_reachable_clauses` already uses. registry-check recomputes both by
+# asking liveness.rs whether each clause's apparatus is live, and fails when
+# either differs in EITHER direction: too few means a clause silently regressed
+# to stub, too many means one was promoted without the gate review the doctrine
+# requires. It also fails if the ledger accounted for fewer than the twenty ids,
+# or if the spine holds no clauses at all — a law cannot pass by having nothing
+# to check.
+#
+# A clause counts as enforced only when its status enforces AND both its
+# entrypoints are live checker rows in the full liveness.rs sense. An ID counts
+# only when every clause under it does. Raising either number is a G-gate event:
+# land the checker, then bump the declaration in the same change.
+expected_enforced_clauses = 0
+expected_enforced_invariants = 0
+
 # The CLOSED vocabulary of capability atoms an activation_predicate or a
 # capability manifest may name (bead fgdb-regcheck-closure-vacuous-no-control-hp0f).
 #

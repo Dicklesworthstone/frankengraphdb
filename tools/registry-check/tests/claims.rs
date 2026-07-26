@@ -45,6 +45,8 @@ fn invariants_text_with(clause_snippet: &str) -> String {
          allowed_claim_classes = [\"invariant\", \"proof\", \"bounded_model\"]\n\
          waiver_policy = \"forbidden\"\n\
          twenty_id_hash = \"fnv1a64:204a4b17c8ecc57f\"\n\
+         expected_enforced_clauses = 0\n\
+         expected_enforced_invariants = 0\n\
          capability_atoms = [\"feature-x\", \"feature-y\"]\n",
     );
     for i in 1..=20 {
@@ -891,5 +893,172 @@ fn claims_clause_status_vocabulary_has_one_reader() {
     assert!(
         observed.contains(&"bad_field".to_string()),
         "an unregistered clause status must be reported: {observed:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The enforcement ledger (`fgdb-fginv-spine-zero-live-checkers-v05b`).
+// ---------------------------------------------------------------------------
+//
+// AGENTS.md: "CI cross-checks that every ID has a live checker." All 20 clauses
+// are stub and all 40 entrypoints resolve to stub rows (measured under nllh), so
+// that cross-check quantified over an EMPTY SET and passed — the purest form of
+// the family this suite has been closing, and an exit code indistinguishable
+// from a fully enforced spine.
+//
+// The pre-fix predicate is not a function to keep verbatim here: there WAS no
+// predicate. That is the whole finding, and [`claims_enforcement_ledger_control`]
+// states it by asserting the shipped tree really does enforce nothing, so every
+// number below is read against a known-empty base.
+//
+// WHAT THE PIN IS WORTH, MEASURED (2026-07-26), on a depth-matched scratch copy:
+// removing the ledger's call from `validate_all` turns TWO tests red —
+// claims_enforcement_ledger_control and claims_neg_enforcement_coverage_drift
+// (claims 20/22; metamorphic 43/43 and spine 8/8 stay fully green, so the reds
+// are the missing law and not a broken harness).
+//
+// claims_enforcement_ledger_delegates_to_the_liveness_reader stays GREEN under
+// that reversion, and that is stated rather than hidden: it asserts the ABSENCE
+// of drift, which is trivially true when the ledger does not run. It guards a
+// different edit — a ledger that counted `status == "live"` instead of asking
+// the liveness reader — and it fires on that one. A test that cannot distinguish
+// "correct" from "absent" is worth having and is NOT worth reporting as though
+// it had been witnessed firing; same reading as
+// claims_clause_status_vocabulary_has_one_reader above, and the population is
+// fgdb-validator-laws-never-witnessed-firing-xnxy.
+
+/// THE VACUITY CONTROL, and it fires.
+///
+/// The ledger's own conclusion is "0 enforced, 0 declared, pass". A zero result
+/// is not a result without a control, so this makes three: the accounting really
+/// examined all twenty ids, the base really is empty, and — the half that
+/// matters — a spine with nothing in it FAILS rather than passes.
+#[test]
+fn claims_enforcement_ledger_control() {
+    let r = real_registries();
+    assert_eq!(
+        r.invariants.invariants.len(),
+        20,
+        "control: the ledger must have twenty ids to account for"
+    );
+    let clauses: usize = r
+        .invariants
+        .invariants
+        .iter()
+        .map(|invariant| invariant.clauses.len())
+        .sum();
+    assert!(
+        clauses > 0,
+        "control: zero clauses would make every count below quantified over nothing"
+    );
+    assert_eq!(
+        r.invariants.expected_enforced_clauses, 0,
+        "the shipped tree enforces nothing; if this changes, the numbers below are \
+         read against a different base and this test must be re-derived, not re-pinned"
+    );
+    assert!(
+        !codes(&r).contains(&"enforcement_coverage_drift".to_string()),
+        "the shipped declaration must match the shipped tree"
+    );
+
+    // THE GUARD THIS BEAD EXISTS FOR: an empty spine must FAIL, not pass.
+    // Before this law, emptying the registry left "every ID has a live checker"
+    // trivially true and the exit code unchanged.
+    let mut emptied = real_registries();
+    emptied.invariants.invariants.clear();
+    let observed = codes(&emptied);
+    assert!(
+        observed.contains(&"enforcement_coverage_empty".to_string()),
+        "a spine with no clauses must be a violation, never a pass: {observed:?}"
+    );
+
+    // And a spine that merely SHRANK — still non-empty, so the emptiness guard
+    // does not fire — must be caught by the completeness guard.
+    let mut shrunk = real_registries();
+    shrunk.invariants.invariants.truncate(19);
+    let observed = codes(&shrunk);
+    assert!(
+        observed.contains(&"enforcement_coverage_incomplete".to_string()),
+        "a ledger that accounted for 19 of 20 ids has stopped looking, not passed: \
+         {observed:?}"
+    );
+}
+
+/// The declared count is checked in BOTH directions.
+#[test]
+fn claims_neg_enforcement_coverage_drift() {
+    // Too many: a clause promoted with a genuinely live apparatus, without the
+    // declaration bump. This is the G1 case the doctrine's gate review exists
+    // for, and nothing computed it before.
+    let (promoted, key) = promote_first_clause(
+        "live",
+        Some("claims_hash_twenty_id_pin"),
+        Some("claims_neg_waiver_present"),
+    );
+    let observed = codes(&promoted);
+    assert!(
+        !observed.contains(&"clause_promoted_without_live_checker".to_string()),
+        "control: this promotion is legal under the promotion law, so the drift below \
+         is the ledger's finding and not nllh's: {observed:?}"
+    );
+    assert!(
+        observed.contains(&"enforcement_coverage_drift".to_string()),
+        "promoting {key} with a live apparatus and no declaration bump must fail: \
+         {observed:?}"
+    );
+
+    // Too few: the declaration claims enforcement the tree does not have. This
+    // is the direction that catches a clause silently regressing to stub.
+    let mut overclaimed = real_registries();
+    overclaimed.invariants.expected_enforced_clauses = 1;
+    assert!(
+        codes(&overclaimed).contains(&"enforcement_coverage_drift".to_string()),
+        "a declaration of 1 against a measured 0 must fail: {:?}",
+        codes(&overclaimed)
+    );
+
+    // The ID count is its own fact: promoting a clause moves the clause count,
+    // and a law that only pinned ids would pass the first mutant above.
+    let mut ids_only = real_registries();
+    ids_only.invariants.expected_enforced_invariants = 3;
+    assert!(
+        codes(&ids_only).contains(&"enforcement_coverage_drift".to_string()),
+        "{:?}",
+        codes(&ids_only)
+    );
+}
+
+/// THE DELEGATION. The ledger does not re-derive "is this apparatus live"; it
+/// asks `liveness::Prover::assess_clause`, the same reader the promotion law
+/// uses.
+///
+/// A clause promoted with a checker row that is `status = "live"` over a file
+/// that exists but that `cargo test` never compiles must NOT count as enforced —
+/// so the measured count stays 0, matches the declaration, and the ledger stays
+/// quiet while the promotion law does the talking. A ledger that counted
+/// `status == "live"` alone would report 1 enforced and drift.
+#[test]
+fn claims_enforcement_ledger_delegates_to_the_liveness_reader() {
+    let (mut mutated, _) = promote_first_clause(
+        "live",
+        Some("claims_hash_twenty_id_pin"),
+        Some("claims_neg_waiver_present"),
+    );
+    for row in mutated.checker_index.iter_mut() {
+        if row.symbol == "claims_hash_twenty_id_pin" {
+            row.artifact = "README.md".to_string();
+        }
+    }
+    let observed = codes(&mutated);
+    assert!(
+        observed.contains(&"clause_promoted_without_live_checker".to_string()),
+        "control: the promotion law must reject this shape: {observed:?}"
+    );
+    assert!(
+        !observed.contains(&"enforcement_coverage_drift".to_string()),
+        "a clause whose checker is live in name only is NOT enforced, so the ledger's \
+         count must stay 0 and match the declaration. A ledger reading `status == \
+         \"live\"` instead of asking the liveness reader would report drift here: \
+         {observed:?}"
     );
 }

@@ -88,6 +88,30 @@ pub struct InvariantRegistry {
     /// verdict, and no gate can ever say so. Closing the vocabulary is what
     /// turns that permanent silence into a validation error.
     pub capability_atoms: Vec<String>,
+    /// How many clauses this registry CLAIMS are enforced at the current gate.
+    ///
+    /// A positive claim, not an absence — the same instrument
+    /// [`Manifest::expected_reachable_clauses`] already is for the activation
+    /// closure, applied to the fact AGENTS.md rests its hardest rule on: "CI
+    /// cross-checks that every ID has a live checker". Every clause is `stub`
+    /// today, so that cross-check quantifies over an EMPTY SET and passes — the
+    /// purest form of the vacuous gate, and indistinguishable at the exit code
+    /// from a spine that is fully enforced.
+    ///
+    /// Declaring the number is what makes a zero mean "deliberately zero"
+    /// instead of "nothing was examined", and what fails the day a clause is
+    /// promoted without the gate review the doctrine requires — in EITHER
+    /// direction: too few means a clause silently regressed to stub, too many
+    /// means one was promoted unreviewed
+    /// (`fgdb-fginv-spine-zero-live-checkers-v05b`).
+    pub expected_enforced_clauses: i64,
+    /// How many of the twenty FG-INV IDs this registry CLAIMS are enforced.
+    ///
+    /// An ID is enforced only when EVERY clause under it is. Separate from
+    /// [`Self::expected_enforced_clauses`] because they are separate facts:
+    /// promoting one clause of a two-clause invariant moves the clause count and
+    /// not the ID count, and AGENTS.md's rule is stated over IDs.
+    pub expected_enforced_invariants: i64,
     pub invariants: Vec<Invariant>,
 }
 
@@ -325,6 +349,16 @@ pub fn invariants_from(root: &Table) -> Result<InvariantRegistry, ReadError> {
         waiver_policy: get_str(registry, "waiver_policy", "invariants.toml.registry")?,
         twenty_id_hash: get_str(registry, "twenty_id_hash", "invariants.toml.registry")?,
         capability_atoms: get_str_array(registry, "capability_atoms", "invariants.toml.registry")?,
+        expected_enforced_clauses: get_int(
+            registry,
+            "expected_enforced_clauses",
+            "invariants.toml.registry",
+        )?,
+        expected_enforced_invariants: get_int(
+            registry,
+            "expected_enforced_invariants",
+            "invariants.toml.registry",
+        )?,
         invariants,
     })
 }
