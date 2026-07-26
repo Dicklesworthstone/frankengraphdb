@@ -60,11 +60,19 @@ mkdir -p "$WORK/bin"
 # to resolve and the gate compiles it straight from this tree with rustc into
 # $WORK — no cargo, no shared directory, no package-cache lock, ~8s. Running
 # from $ROOT makes rustup honour rust-toolchain.toml.
+#
+# The price of that hermeticity is disk: a private build cannot share the
+# swarm's artifact, so each run leaves 73MB in its workdir (a 64MB rlib the
+# `-C strip=symbols` below cannot shrink, plus an 8MB binary it takes from
+# 18MB). Measured 2026-07-26 on a filesystem at 95% with 9594 stale
+# `/data/tmp/tmp.*` directories from every gate that mktemps. Reaping those is
+# swarm hygiene, not this gate's business — and this script deletes nothing.
 log "building registry-check from this tree into $WORK/bin"
 if ! (cd "$ROOT" \
       && rustc --edition 2024 --crate-type rlib --crate-name registry_check \
+           -C strip=symbols \
            tools/registry-check/src/lib.rs -o "$WORK/bin/libregistry_check.rlib" \
-      && rustc --edition 2024 tools/registry-check/src/main.rs \
+      && rustc --edition 2024 -C strip=symbols tools/registry-check/src/main.rs \
            --extern "registry_check=$WORK/bin/libregistry_check.rlib" \
            -o "$BIN") >"$WORK/build.log" 2>&1; then
   log "FATAL: building registry-check from this tree failed (see $WORK/build.log)"
