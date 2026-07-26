@@ -767,6 +767,148 @@ fn is_generic_angle_open(text: &str, index: usize) -> bool {
         && (is_identifier_start(next) || matches!(next, b'?' | b'[' | b'{'))
 }
 
+/// The four delimiters the Appendix A source grammar nests, and their closers
+/// at the same index. Spelled ONCE: a second copy of this set is how the two
+/// readers below drifted apart in the first place.
+const OPENING_DELIMITERS: [u8; 4] = *b"{[(<";
+const CLOSING_DELIMITERS: [u8; 4] = *b"}])>";
+
+fn opening_delimiter_for(closer: u8) -> Option<u8> {
+    CLOSING_DELIMITERS
+        .iter()
+        .position(|candidate| *candidate == closer)
+        .map(|at| OPENING_DELIMITERS[at])
+}
+
+/// What one byte was, structurally, to [`DelimiterScan`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DelimiterStep {
+    /// Consumed by the quote machine, or an angle that is not generic syntax,
+    /// or a `>` that closes nothing. NEVER a candidate separator — this is the
+    /// distinction a caller cannot re-derive from the byte alone, and the one
+    /// a second reader gets wrong.
+    Skipped,
+    /// An opening delimiter; the depth grew.
+    Opened,
+    /// A closing delimiter that matched its opener; the depth shrank.
+    Closed,
+    /// Structurally inert at the current depth. The only kind of byte a caller
+    /// may treat as a separator.
+    Plain,
+}
+
+/// THE delimiter reader for Appendix A source text: one stack, one quote
+/// machine, one generic-angle rule.
+///
+/// There used to be TWO. `matching_delimiter` and `split_top_level` each
+/// carried a private stack, private quote/escape handling, a private
+/// `is_generic_angle_open` special case, and a private copy of the push/close
+/// sets — the same balance test written out twice. That is the defect
+/// fgdb-8kzt actually names, and it is why three separate repairs to
+/// `matching_delimiter` alone (V1/V2/V3 on that bead) recovered NOTHING: the
+/// twin still rejected the text. Where two pieces of code answer one question
+/// they drift, and the weaker one wins by being the one that happens to run.
+///
+/// Both entry points below are now thin drivers over this scanner. They differ
+/// only in where they start and what they do with the events — never in what
+/// counts as balanced. A future grammar change (the half-open interval
+/// `(a,b]` of fgdb-8kzt, say) is therefore ONE edit, and it cannot land in
+/// half the readers.
+///
+/// The structural guard that keeps it that way is
+/// `exactly_one_delimiter_reader_exists` in this file's test module: behaviour
+/// tests can only exercise a reader they know the name of, so a third stack
+/// would be invisible to every other test here.
+struct DelimiterScan {
+    stack: Vec<u8>,
+    quote: Option<u8>,
+    escaped: bool,
+}
+
+impl DelimiterScan {
+    /// A scan that starts outside every delimiter.
+    fn new() -> Self {
+        Self {
+            stack: Vec::new(),
+            quote: None,
+            escaped: false,
+        }
+    }
+
+    /// A scan that starts having already consumed `opener`.
+    fn inside(opener: u8) -> Self {
+        Self {
+            stack: vec![opener],
+            quote: None,
+            escaped: false,
+        }
+    }
+
+    fn depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    fn in_quote(&self) -> bool {
+        self.quote.is_some()
+    }
+
+    /// Feed the byte at `index`. `text` is needed whole because the
+    /// generic-angle rule looks both ways around a `<`.
+    fn step(
+        &mut self,
+        text: &str,
+        index: usize,
+        byte: u8,
+    ) -> Result<DelimiterStep, DelimiterIssue> {
+        if let Some(active_quote) = self.quote {
+            if self.escaped {
+                self.escaped = false;
+            } else if byte == b'\\' {
+                self.escaped = true;
+            } else if byte == active_quote {
+                self.quote = None;
+            }
+            return Ok(DelimiterStep::Skipped);
+        }
+        if matches!(byte, b'\'' | b'"') {
+            self.quote = Some(byte);
+            return Ok(DelimiterStep::Skipped);
+        }
+        if byte == b'<' && !is_generic_angle_open(text, index) {
+            return Ok(DelimiterStep::Skipped);
+        }
+        if OPENING_DELIMITERS.contains(&byte) {
+            self.stack.push(byte);
+            return Ok(DelimiterStep::Opened);
+        }
+        if byte == b'>' && self.stack.last() != Some(&b'<') {
+            return Ok(DelimiterStep::Skipped);
+        }
+        // Pop-and-compare, not peek-and-compare, and the lookup IS the
+        // membership test — a byte with no opener is simply not a closer. Both
+        // old readers instead tested membership and then re-derived the pair,
+        // which needed an `unreachable!()` arm to convince the compiler the two
+        // agreed. There is no unreachable arm here: this is total.
+        //
+        // The peek form the old `matching_delimiter` used is genuinely PARTIAL —
+        // it reaches `unreachable!()` on an empty stack, and only its own
+        // driver's invariant kept that safe. `split_top_level` reaches depth 0
+        // routinely, and an unmatched closer there IS the mismatch. The two
+        // forms agree wherever both were defined: `closer_of(top) != byte` and
+        // `top != opener_of(byte)` are one test over a four-element bijection.
+        let Some(expected_opener) = opening_delimiter_for(byte) else {
+            return Ok(DelimiterStep::Plain);
+        };
+        if self.stack.pop() != Some(expected_opener) {
+            return Err(DelimiterIssue {
+                offset: index,
+                mismatched: true,
+            });
+        }
+        Ok(DelimiterStep::Closed)
+    }
+}
+
 fn matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterIssue> {
     let bytes = text.as_bytes();
     let Some(opener) = bytes.get(open_index).copied() else {
@@ -775,58 +917,15 @@ fn matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterI
             mismatched: false,
         });
     };
-    if !matches!(opener, b'{' | b'[' | b'(' | b'<') {
+    if !OPENING_DELIMITERS.contains(&opener) {
         return Err(DelimiterIssue {
             offset: open_index,
             mismatched: true,
         });
     }
-    let mut stack = vec![opener];
-    let mut quote = None;
-    let mut escaped = false;
+    let mut scan = DelimiterScan::inside(opener);
     for (index, byte) in bytes.iter().copied().enumerate().skip(open_index + 1) {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"') {
-            quote = Some(byte);
-            continue;
-        }
-        if byte == b'<' && !is_generic_angle_open(text, index) {
-            continue;
-        }
-        if matches!(byte, b'{' | b'[' | b'(' | b'<') {
-            stack.push(byte);
-            continue;
-        }
-        if !matches!(byte, b'}' | b']' | b')' | b'>') {
-            continue;
-        }
-        if byte == b'>' && stack.last() != Some(&b'<') {
-            continue;
-        }
-        let expected = match stack.last().copied() {
-            Some(b'{') => b'}',
-            Some(b'[') => b']',
-            Some(b'(') => b')',
-            Some(b'<') => b'>',
-            _ => unreachable!("the delimiter stack only contains opening delimiters"),
-        };
-        if byte != expected {
-            return Err(DelimiterIssue {
-                offset: index,
-                mismatched: true,
-            });
-        }
-        stack.pop();
-        if stack.is_empty() {
+        if scan.step(text, index, byte)? == DelimiterStep::Closed && scan.depth() == 0 {
             return Ok(index);
         }
     }
@@ -837,59 +936,22 @@ fn matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterI
 }
 
 fn split_top_level(text: &str, delimiters: &[u8]) -> Result<Vec<SplitSpan>, DelimiterIssue> {
-    let bytes = text.as_bytes();
     let mut spans = Vec::new();
-    let mut stack = Vec::new();
-    let mut quote = None;
-    let mut escaped = false;
+    let mut scan = DelimiterScan::new();
     let mut start = 0;
-    for (index, byte) in bytes.iter().copied().enumerate() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"') {
-            quote = Some(byte);
-            continue;
-        }
-        if byte == b'<' && !is_generic_angle_open(text, index) {
-            continue;
-        }
-        if matches!(byte, b'{' | b'[' | b'(' | b'<') {
-            stack.push(byte);
-            continue;
-        }
-        if matches!(byte, b'}' | b']' | b')' | b'>') {
-            if byte == b'>' && stack.last() != Some(&b'<') {
-                continue;
-            }
-            let expected_opener = match byte {
-                b'}' => b'{',
-                b']' => b'[',
-                b')' => b'(',
-                b'>' => b'<',
-                _ => unreachable!(),
-            };
-            if stack.pop() != Some(expected_opener) {
-                return Err(DelimiterIssue {
-                    offset: index,
-                    mismatched: true,
-                });
-            }
-            continue;
-        }
-        if stack.is_empty() && delimiters.contains(&byte) {
+    for (index, byte) in text.as_bytes().iter().copied().enumerate() {
+        // Only a Plain byte may separate: a quoted comma, a nested comma, and
+        // a closing delimiter must all fail this test, and only the scanner
+        // knows which is which.
+        if scan.step(text, index, byte)? == DelimiterStep::Plain
+            && scan.depth() == 0
+            && delimiters.contains(&byte)
+        {
             spans.push(SplitSpan { start, end: index });
             start = index + 1;
         }
     }
-    if !stack.is_empty() || quote.is_some() {
+    if scan.depth() != 0 || scan.in_quote() {
         return Err(DelimiterIssue {
             offset: text.len(),
             mismatched: false,
@@ -3529,11 +3591,528 @@ pub fn census_appendix_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        AmbiguityCandidate, AmbiguityKind, AmbiguityOccurrence, CensusErrorKind, FieldCandidateKey,
-        SchemaCandidateKey, SourceMap, SourceSliceSpec, StructuralCandidateKey,
-        affected_source_key, canonical_ambiguities, census_appendix_source, matching_delimiter,
-        normalize_whitespace, sha256_hex, source_key_transcript, split_top_level,
+        AmbiguityCandidate, AmbiguityKind, AmbiguityOccurrence, CensusErrorKind, DelimiterIssue,
+        FieldCandidateKey, SchemaCandidateKey, SourceMap, SourceSliceSpec, SplitSpan,
+        StructuralCandidateKey, affected_source_key, canonical_ambiguities, census_appendix_source,
+        is_generic_angle_open, matching_delimiter, normalize_whitespace, sha256_hex,
+        source_key_transcript, split_top_level, top_level_arrow,
     };
+
+    // ===================================================================
+    // fgdb-8kzt — the one-reader collapse, mutation-proved.
+    //
+    // `matching_delimiter` and `split_top_level` used to carry one delimiter
+    // stack each. The two bodies below are those PRE-COLLAPSE bodies, copied
+    // VERBATIM and frozen. They are the oracle: the collapse is a refactor
+    // only if the surviving reader answers exactly as they did, on every input
+    // either of them could see.
+    //
+    // DO NOT "FIX" THESE COPIES. If a grammar change (the half-open interval
+    // `(a,b]` this bead reports, say) is ever ruled in, it goes into
+    // `DelimiterScan` and these copies are RETIRED with the tests that use
+    // them — not edited to agree. An edited oracle proves nothing.
+    // ===================================================================
+
+    /// `matching_delimiter` exactly as it stood at b7bfd44, before the collapse.
+    fn legacy_matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterIssue> {
+        let bytes = text.as_bytes();
+        let Some(opener) = bytes.get(open_index).copied() else {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: false,
+            });
+        };
+        if !matches!(opener, b'{' | b'[' | b'(' | b'<') {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: true,
+            });
+        }
+        let mut stack = vec![opener];
+        let mut quote = None;
+        let mut escaped = false;
+        for (index, byte) in bytes.iter().copied().enumerate().skip(open_index + 1) {
+            if let Some(active_quote) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                continue;
+            }
+            if byte == b'<' && !is_generic_angle_open(text, index) {
+                continue;
+            }
+            if matches!(byte, b'{' | b'[' | b'(' | b'<') {
+                stack.push(byte);
+                continue;
+            }
+            if !matches!(byte, b'}' | b']' | b')' | b'>') {
+                continue;
+            }
+            if byte == b'>' && stack.last() != Some(&b'<') {
+                continue;
+            }
+            let expected = match stack.last().copied() {
+                Some(b'{') => b'}',
+                Some(b'[') => b']',
+                Some(b'(') => b')',
+                Some(b'<') => b'>',
+                _ => unreachable!("the delimiter stack only contains opening delimiters"),
+            };
+            if byte != expected {
+                return Err(DelimiterIssue {
+                    offset: index,
+                    mismatched: true,
+                });
+            }
+            stack.pop();
+            if stack.is_empty() {
+                return Ok(index);
+            }
+        }
+        Err(DelimiterIssue {
+            offset: text.len(),
+            mismatched: false,
+        })
+    }
+
+    /// `split_top_level` exactly as it stood at b7bfd44 — the twin, with its
+    /// own stack, its own quote machine, and its own copy of the push/close
+    /// sets.
+    fn legacy_split_top_level(
+        text: &str,
+        delimiters: &[u8],
+    ) -> Result<Vec<SplitSpan>, DelimiterIssue> {
+        let bytes = text.as_bytes();
+        let mut spans = Vec::new();
+        let mut stack = Vec::new();
+        let mut quote = None;
+        let mut escaped = false;
+        let mut start = 0;
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            if let Some(active_quote) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                continue;
+            }
+            if byte == b'<' && !is_generic_angle_open(text, index) {
+                continue;
+            }
+            if matches!(byte, b'{' | b'[' | b'(' | b'<') {
+                stack.push(byte);
+                continue;
+            }
+            if matches!(byte, b'}' | b']' | b')' | b'>') {
+                if byte == b'>' && stack.last() != Some(&b'<') {
+                    continue;
+                }
+                let expected_opener = match byte {
+                    b'}' => b'{',
+                    b']' => b'[',
+                    b')' => b'(',
+                    b'>' => b'<',
+                    _ => unreachable!(),
+                };
+                if stack.pop() != Some(expected_opener) {
+                    return Err(DelimiterIssue {
+                        offset: index,
+                        mismatched: true,
+                    });
+                }
+                continue;
+            }
+            if stack.is_empty() && delimiters.contains(&byte) {
+                spans.push(SplitSpan { start, end: index });
+                start = index + 1;
+            }
+        }
+        if !stack.is_empty() || quote.is_some() {
+            return Err(DelimiterIssue {
+                offset: text.len(),
+                mismatched: false,
+            });
+        }
+        spans.push(SplitSpan {
+            start,
+            end: text.len(),
+        });
+        Ok(spans)
+    }
+
+    /// Seeds shaped like real Appendix A bodies, including the exact a10:1928
+    /// interval that fgdb-8kzt is about and the sibling on the same line that
+    /// parses fine — the control that proves the `Name {...}` form is not the
+    /// cause.
+    const DELIMITER_SEEDS: &[&str] = &[
+        "{a:u8,b:u16}",
+        "{left:Vec<A,B>,literal:\"}])>\",arrow:A->B,compare:x>=y}",
+        "Outer<Inner<A|B>,[C,D]>",
+        "{value:[u8;4)}",
+        "entries[every commit_seq in (after,frontier] -> StrongRef<T>]",
+        "{fragments[shard_id -> StrongRef<Frag>],count:u32}",
+        "Left{x:u8}|Middle<Vec<A|B>>|Right{y:u16}",
+        "{s:'a\\'b',t:\"c\\\"d\"}",
+        "{unterminated:\"abc}",
+        "{nested:{deep:{deeper:[1,2,(3)]}}}",
+        "a<b,c>d",
+        "{}",
+        "",
+        ")",
+        "{a}}",
+    ];
+
+    /// The alphabet a mutant may substitute or insert. Every delimiter, both
+    /// quotes, the escape, and the three separator bytes the real callers pass.
+    const MUTATION_ALPHABET: &[u8] = b"{}[]()<>\"'\\,|=; aA";
+
+    /// The separator sets `split_top_level` is actually called with, plus one
+    /// it is not, so the differential is not accidentally scoped to the
+    /// separators that happen to appear in the seeds.
+    const SEPARATOR_SETS: &[&[u8]] = &[b",", b"|", b"=", b";", b">"];
+
+    /// Every mutant: each seed, each position, each substitution, plus each
+    /// insertion and each deletion. Order is deterministic.
+    fn delimiter_mutants() -> Vec<String> {
+        let mut mutants: Vec<String> = DELIMITER_SEEDS.iter().map(|s| (*s).to_owned()).collect();
+        for seed in DELIMITER_SEEDS {
+            let bytes = seed.as_bytes();
+            for position in 0..=bytes.len() {
+                for replacement in MUTATION_ALPHABET {
+                    let mut inserted = bytes.to_vec();
+                    inserted.insert(position, *replacement);
+                    mutants.push(String::from_utf8(inserted).expect("ascii"));
+                    if position < bytes.len() {
+                        let mut substituted = bytes.to_vec();
+                        substituted[position] = *replacement;
+                        mutants.push(String::from_utf8(substituted).expect("ascii"));
+                    }
+                }
+                if position < bytes.len() {
+                    let mut deleted = bytes.to_vec();
+                    deleted.remove(position);
+                    mutants.push(String::from_utf8(deleted).expect("ascii"));
+                }
+            }
+        }
+        mutants.sort();
+        mutants.dedup();
+        mutants
+    }
+
+    /// THE MUTATION PROOF. For every mutant and every entry point, the one
+    /// reader answers exactly what the two frozen pre-collapse readers
+    /// answered. Stated the other way, which is the point: on this corpus the
+    /// old readers could not tell any case apart from the new one, so nothing
+    /// downstream can either.
+    ///
+    /// The vacuity controls are not decoration. "Every mutant agrees" is
+    /// worthless if the corpus never produces disagreement-capable inputs, so
+    /// this test first proves its corpus reaches all three outcome classes and
+    /// then proves a deliberately wrong reader IS caught by it.
+    #[test]
+    fn one_delimiter_reader_answers_exactly_as_the_two_it_replaced() {
+        let mutants = delimiter_mutants();
+        assert!(
+            mutants.len() > 2_000,
+            "corpus collapsed to {} mutants; the differential below would be \
+             a weak claim on a small corpus",
+            mutants.len()
+        );
+
+        let mut balanced = 0usize;
+        let mut mismatched = 0usize;
+        let mut unclosed = 0usize;
+        let mut split_ok = 0usize;
+        let mut split_err = 0usize;
+        let mut multi_span = 0usize;
+
+        for mutant in &mutants {
+            for open_index in 0..=mutant.len() {
+                let expected = legacy_matching_delimiter(mutant, open_index);
+                let actual = matching_delimiter(mutant, open_index);
+                assert_eq!(
+                    actual, expected,
+                    "matching_delimiter drifted from its pre-collapse oracle at \
+                     open_index {open_index} of {mutant:?}"
+                );
+                match expected {
+                    Ok(_) => balanced += 1,
+                    Err(issue) if issue.mismatched => mismatched += 1,
+                    Err(_) => unclosed += 1,
+                }
+            }
+            for separators in SEPARATOR_SETS {
+                let expected = legacy_split_top_level(mutant, separators);
+                let actual = split_top_level(mutant, separators);
+                assert_eq!(
+                    actual, expected,
+                    "split_top_level drifted from its pre-collapse oracle on \
+                     separators {separators:?} of {mutant:?}"
+                );
+                match &expected {
+                    Ok(spans) => {
+                        split_ok += 1;
+                        if spans.len() > 1 {
+                            multi_span += 1;
+                        }
+                    }
+                    Err(_) => split_err += 1,
+                }
+            }
+        }
+
+        // VACUITY CONTROL 1 — the corpus reaches every outcome class. A run
+        // that never produced a mismatch, or never produced a successful
+        // split, would report "no drift" without having asked the question.
+        assert!(
+            balanced > 0 && mismatched > 0 && unclosed > 0,
+            "corpus did not reach all three matching outcomes: \
+             balanced={balanced} mismatched={mismatched} unclosed={unclosed}"
+        );
+        assert!(
+            split_ok > 0 && split_err > 0 && multi_span > 0,
+            "corpus did not reach all three split outcomes: \
+             ok={split_ok} err={split_err} multi_span={multi_span}"
+        );
+
+        // VACUITY CONTROL 2 — the corpus can SEE a wrong reader. Drop the
+        // generic-angle rule, which is the subtlest thing the two old readers
+        // shared, and the corpus must catch it. If this control ever stops
+        // firing, the differential above has stopped proving anything.
+        let mut caught = 0usize;
+        for mutant in &mutants {
+            for open_index in 0..=mutant.len() {
+                if broken_matching_delimiter(mutant, open_index)
+                    != legacy_matching_delimiter(mutant, open_index)
+                {
+                    caught += 1;
+                }
+            }
+        }
+        assert!(
+            caught > 0,
+            "the wrong-reader control was not caught by any of {} mutants; \
+             the differential above is vacuous",
+            mutants.len()
+        );
+
+        // Printed so `--nocapture` reports the size of the claim rather than
+        // just its verdict: "no drift" over 9 inputs and over 9000 are very
+        // different sentences.
+        println!(
+            "one-reader differential: {} mutants; matching balanced={balanced} \
+             mismatched={mismatched} unclosed={unclosed}; split ok={split_ok} \
+             err={split_err} multi_span={multi_span}; wrong-reader control \
+             caught on {caught} probes",
+            mutants.len()
+        );
+    }
+
+    /// A deliberately WRONG reader: identical to the real one except that it
+    /// treats every `<` as an opening delimiter. Exists only so
+    /// `one_delimiter_reader_answers_exactly_as_the_two_it_replaced` can prove
+    /// its corpus is capable of catching a difference.
+    fn broken_matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterIssue> {
+        let bytes = text.as_bytes();
+        let Some(opener) = bytes.get(open_index).copied() else {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: false,
+            });
+        };
+        if !matches!(opener, b'{' | b'[' | b'(' | b'<') {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: true,
+            });
+        }
+        let mut stack = vec![opener];
+        let mut quote = None;
+        let mut escaped = false;
+        for (index, byte) in bytes.iter().copied().enumerate().skip(open_index + 1) {
+            if let Some(active_quote) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                continue;
+            }
+            // THE INJECTED FAULT: no is_generic_angle_open test.
+            if matches!(byte, b'{' | b'[' | b'(' | b'<') {
+                stack.push(byte);
+                continue;
+            }
+            if !matches!(byte, b'}' | b']' | b')' | b'>') {
+                continue;
+            }
+            if byte == b'>' && stack.last() != Some(&b'<') {
+                continue;
+            }
+            let expected = match stack.last().copied() {
+                Some(b'{') => b'}',
+                Some(b'[') => b']',
+                Some(b'(') => b')',
+                Some(b'<') => b'>',
+                _ => unreachable!(),
+            };
+            if byte != expected {
+                return Err(DelimiterIssue {
+                    offset: index,
+                    mismatched: true,
+                });
+            }
+            stack.pop();
+            if stack.is_empty() {
+                return Ok(index);
+            }
+        }
+        Err(DelimiterIssue {
+            offset: text.len(),
+            mismatched: false,
+        })
+    }
+
+    /// COMPLETENESS GUARD for the collapse.
+    ///
+    /// Every other test in this file can only exercise a reader it knows the
+    /// name of, so a THIRD delimiter stack would be invisible to all of them —
+    /// the law would fail open in exactly the way fgdb-8kzt describes, where a
+    /// fix lands in whichever reader the fixer happens to open. This guard is
+    /// therefore over the SOURCE: one stack, one push, one pop, one copy of
+    /// each delimiter set.
+    ///
+    /// It reads only the production half of the file. The frozen pre-collapse
+    /// oracles above are second and third stacks BY DESIGN, and must not count.
+    #[test]
+    fn exactly_one_delimiter_reader_exists() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/appendix_source.rs"
+        ));
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        assert_eq!(
+            source.matches(marker).count(),
+            1,
+            "the production/test split marker must occur exactly once, or this \
+             guard is reading the wrong half of the file"
+        );
+        let production = &source[..source.find(marker).expect("split marker")];
+
+        // Controls: the extractor must see something real and must not see
+        // something fabricated. Without these a typo'd needle reports 0 and
+        // every assertion below passes for the wrong reason.
+        assert!(
+            production.contains("struct DelimiterScan"),
+            "known-present control missing: the extractor is not reading the \
+             production source"
+        );
+        assert!(
+            !production.contains("struct DefinitelyFabricatedScanner"),
+            "fabricated control found: the extractor matches anything"
+        );
+
+        for (needle, expected, why) in [
+            (
+                "stack: Vec<u8>",
+                1usize,
+                "exactly one type carries a delimiter stack",
+            ),
+            (
+                "self.stack.push(",
+                1,
+                "exactly one site decides that a byte opens a nesting level",
+            ),
+            (
+                "self.stack.pop(",
+                1,
+                "exactly one site decides that a byte closes one",
+            ),
+            (
+                "let mut stack",
+                0,
+                "a local delimiter stack is how the twin was spelled; there \
+                 must be none left outside DelimiterScan",
+            ),
+            (
+                "const OPENING_DELIMITERS",
+                1,
+                "the opening set is spelled once",
+            ),
+            (
+                "const CLOSING_DELIMITERS",
+                1,
+                "the closing set is spelled once",
+            ),
+        ] {
+            assert_eq!(
+                production.matches(needle).count(),
+                expected,
+                "{needle:?} appears {} times in the production source, expected \
+                 {expected} — {why}",
+                production.matches(needle).count()
+            );
+        }
+
+        // The residual, pinned rather than hidden. `top_level_arrow` and
+        // `outermost_record_ranges` each still run their own quote/escape
+        // machine before delegating the nesting to `matching_delimiter`. They
+        // are NOT foldable into DelimiterScan: both deliberately tolerate a
+        // stray top-level closer that the strict reader rejects — see
+        // `partial_scanners_tolerate_a_stray_closer_the_one_reader_rejects`.
+        // Pinning the count is what stops a third one appearing unnoticed.
+        assert_eq!(
+            production.matches("escaped = true").count(),
+            4,
+            "expected exactly four escape machines in production: \
+             DelimiterScan (the one reader), normalize_whitespace (a text \
+             emitter, not a structural reader), and the two partial scanners \
+             top_level_arrow and outermost_record_ranges. A fifth is a new \
+             duplicate and needs its own justification."
+        );
+    }
+
+    /// Why the two partial scanners were left alone, stated as a test rather
+    /// than a claim: folding them into the one reader would CHANGE BEHAVIOUR,
+    /// because they ignore a stray top-level closer that `DelimiterScan`
+    /// treats as a mismatch. Recording the divergence keeps a future collapse
+    /// honest about what it would be changing.
+    #[test]
+    fn partial_scanners_tolerate_a_stray_closer_the_one_reader_rejects() {
+        let stray = "a}b->c";
+        assert_eq!(
+            top_level_arrow(stray),
+            Some(3),
+            "top_level_arrow walks past a stray top-level closer"
+        );
+        let strict = split_top_level(stray, b",").expect_err("the one reader rejects it");
+        assert!(
+            strict.mismatched,
+            "the one reader must call a stray top-level closer a mismatch"
+        );
+    }
 
     fn assert_ambiguity_relation_digest(candidate: &AmbiguityCandidate) {
         let expected =
