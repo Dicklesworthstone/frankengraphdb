@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3159
+target_count = 3165
 projection_fallback_count = 108
-target_source_assignment_sha256 = "0f3bc2d8ec6e7b05a6227bac06301c8933fff7496a39d5af455cc320bd20c22e"
+target_source_assignment_sha256 = "56a102f4551c6cfb2a9c39a56ca21716795ab6978335d42bf6670dcc5d3c41ff"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 37
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 59
+registry_epoch = 60
 
 [[logical_kind]]
 slice_id = "a03"
@@ -100280,4 +100280,148 @@ target_row_id = "a16:union-arm:time-authority-registry-profile-state-retired-d4a
 slice_id = "a16"
 source_key = "arm|TimeAuthorityRegistry<Role:AuthorityOwningRole>|TimeAuthorityRegistry<Role:AuthorityOwningRole>.profiles|Retired"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:authenticated-client-result-ack-receipt-role-authority-owning-role-authority-bound-header"
+containing_schema = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in the authenticated ACK receipt; retained with the receipt and creates no reachability edge (a03:1506)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:authenticated-client-result-release-receipt-role-authority-owning-role-authority-bound-header"
+containing_schema = "AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 26
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in the authenticated release receipt; retained with the receipt and creates no reachability edge (a03:1502)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:local-attempt-registration-authority-bound-header"
+containing_schema = "LocalAttemptRegistration"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the attempt registration; retained with the registration and creates no reachability edge (a03:1484)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:local-begin-reservation-spec-authority-bound-header"
+containing_schema = "LocalBeginReservationSpec"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the begin reservation specification; retained with the specification and creates no reachability edge (a03:1482)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:local-txn-workspace-generation-authority-bound-header"
+containing_schema = "LocalTxnWorkspaceGeneration"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the workspace generation; retained with the generation and creates no reachability edge (a03:1486)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:txn-outcome-record-authority-bound-header"
+containing_schema = "TxnOutcomeRecord"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 18
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the transaction outcome; retained with the outcome and creates no reachability edge (a03:1524)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[target]]
+row_id = "a03:target:field-authenticated-client-result-ack-receipt-role-authority-owning-role-authority-bound-header"
+target_row_id = "a03:field:authenticated-client-result-ack-receipt-role-authority-owning-role-authority-bound-header"
+slice_id = "a03"
+source_key = "field|AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>|AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-authenticated-client-result-release-receipt-role-authority-owning-role-authority-bound-header"
+target_row_id = "a03:field:authenticated-client-result-release-receipt-role-authority-owning-role-authority-bound-header"
+slice_id = "a03"
+source_key = "field|AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>|AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-local-attempt-registration-authority-bound-header"
+target_row_id = "a03:field:local-attempt-registration-authority-bound-header"
+slice_id = "a03"
+source_key = "field|LocalAttemptRegistration|LocalAttemptRegistration.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-local-begin-reservation-spec-authority-bound-header"
+target_row_id = "a03:field:local-begin-reservation-spec-authority-bound-header"
+slice_id = "a03"
+source_key = "field|LocalBeginReservationSpec|LocalBeginReservationSpec.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-local-txn-workspace-generation-authority-bound-header"
+target_row_id = "a03:field:local-txn-workspace-generation-authority-bound-header"
+slice_id = "a03"
+source_key = "field|LocalTxnWorkspaceGeneration|LocalTxnWorkspaceGeneration.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-txn-outcome-record-authority-bound-header"
+target_row_id = "a03:field:txn-outcome-record-authority-bound-header"
+slice_id = "a03"
+source_key = "field|TxnOutcomeRecord|TxnOutcomeRecord.authority_bound_header|authority_bound_header"
+target_kind = "field"
 definition_status = "declared"

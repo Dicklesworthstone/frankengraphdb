@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 59
+registry_epoch = 60
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 59);
+    assert_eq!(epoch, 60);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -6621,6 +6621,22 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "TimeAuthorityEpochTransitionRecord<Role:AuthorityOwningRole>"
             )
     };
+    // l6xd's A03 closeout adds the six top-level AuthorityBoundHeader members
+    // whose four remaining source occurrences already live inside committed
+    // LocalStatementIndex arm payloads. These rows postdate the A10 namespace
+    // erratum and must not contaminate its historical assignment witness.
+    let post_erratum_a03_inline_authority_headers = |schema: &str, name: &str| {
+        name == "authority_bound_header"
+            && matches!(
+                schema,
+                "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
+                    | "AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>"
+                    | "LocalAttemptRegistration"
+                    | "LocalBeginReservationSpec"
+                    | "LocalTxnWorkspaceGeneration"
+                    | "TxnOutcomeRecord"
+            )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_a21_field(&field.containing_schema)
             && !post_erratum_union(&field.exact_wire_type)
@@ -6659,6 +6675,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 &field.containing_schema,
                 &field.stable_name,
             )
+            && !post_erratum_a03_inline_authority_headers(
+                &field.containing_schema,
+                &field.stable_name,
+            )
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 362,
@@ -6666,9 +6686,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 480,
+        pre_erratum.fields.len() + 486,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A18 logical-union consumer tranche"
+        "the historical witness must remove every post-erratum field cohort through the A03 l6xd closeout"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
@@ -10185,5 +10205,77 @@ fn idr_declared_reference_strengths_are_field_spellable() {
     assert!(
         checked >= 5,
         "non-vacuity: at least the five wrappers with landed rows are checked, got {checked}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Field identity classes are a field-domain law, not a wire-shape convention
+// (fgdb-identity-class-record-wire-convention-l6xd).
+//
+// This is intentionally a controlled probe.  The subject differs from the
+// known-boring u64 control only in exact_wire_type/max_size_bytes, and both
+// carry the construction order of their registered host.  An earlier
+// subject-only probe used a malformed order and incorrectly reported that no
+// class was accepted; the control makes that failure mode visible.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn idr_field_identity_class_domain_is_wire_shape_independent() {
+    let base = real_identity();
+    let host = base
+        .logical
+        .iter()
+        .find(|kind| kind.name == "LocalBeginReservationSpec")
+        .expect("the A03 field host is registered")
+        .clone();
+    let vocabulary = ["logical", "physical", "inline", "wire", "prebootstrap"];
+
+    let accepted = |exact_wire_type: &str, max_size_bytes: i64| -> Vec<&str> {
+        vocabulary
+            .iter()
+            .copied()
+            .filter(|class| {
+                let mut probe = base.clone();
+                probe.fields.retain(|field| {
+                    field.containing_schema != host.name
+                        || field.stable_name != "authority_bound_header"
+                });
+                probe.fields.push(FieldRow {
+                    containing_schema: host.name.clone(),
+                    field_tag: 0x0001,
+                    stable_name: "authority_bound_header".into(),
+                    exact_wire_type: exact_wire_type.into(),
+                    cardinality: "one".into(),
+                    identity_class: (*class).into(),
+                    reference_semantics: "none".into(),
+                    target_schema_id: None,
+                    construction_order: host.construction_order,
+                    role_predicate: "true".into(),
+                    retention_and_cut_rule: "controlled l6xd probe".into(),
+                    version_status: "reserved".into(),
+                    max_size_bytes,
+                    digest_class: None,
+                    transcript_recipe: None,
+                    bd_domain_separator: None,
+                    bd_schema_major: None,
+                    bd_included_field_tags: None,
+                    bd_excluded_field_tags: None,
+                    recipe_pin: None,
+                });
+                codes_without_assignment_drift(&probe).is_empty()
+            })
+            .collect()
+    };
+
+    let subject = accepted("AuthorityBoundHeader", 256);
+    let control = accepted("u64", 8);
+    assert_eq!(
+        subject, control,
+        "record-shaped exact wire types and plain scalars must traverse the same field-class law"
+    );
+    assert_eq!(
+        subject,
+        vec!["logical", "physical", "inline"],
+        "among top-level durable identity classes, fields admit logical, physical, and inline while rejecting wire and prebootstrap"
     );
 }

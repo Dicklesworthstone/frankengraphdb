@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 59
+registry_epoch = 60
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -450,6 +450,34 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the GlobalControlCommand this AuditTicketClaimRecord names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a07:1706)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuthenticatedClientResultAckReceipt<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 27
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in the authenticated ACK receipt; retained with the receipt and creates no reachability edge (a03:1506)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "AuthenticatedClientResultReleaseReceipt<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 26
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in the authenticated release receipt; retained with the receipt and creates no reachability edge (a03:1502)"
+version_status = "reserved"
+max_size_bytes = 256
 
 [[field]]
 containing_schema = "AuthorityBindingRecord"
@@ -3392,6 +3420,34 @@ version_status = "reserved"
 max_size_bytes = 93
 
 [[field]]
+containing_schema = "LocalAttemptRegistration"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the attempt registration; retained with the registration and creates no reachability edge (a03:1484)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "LocalBeginReservationSpec"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the begin reservation specification; retained with the specification and creates no reachability edge (a03:1482)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
 containing_schema = "LocalFinalCertificationReservation"
 field_tag = 0x0001
 stable_name = "authority_bound_header"
@@ -3579,6 +3635,20 @@ role_predicate = "true"
 retention_and_cut_rule = "inline target shard domain of the one-way Local-to-shard projection; retained with the projection and carries no reachability edge (a05:1622)"
 version_status = "reserved"
 max_size_bytes = 93
+
+[[field]]
+containing_schema = "LocalTxnWorkspaceGeneration"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the workspace generation; retained with the generation and creates no reachability edge (a03:1486)"
+version_status = "reserved"
+max_size_bytes = 256
 
 [[field]]
 containing_schema = "LogicalCommandRecord"
@@ -9944,6 +10014,20 @@ version_status = "reserved"
 max_size_bytes = 32
 digest_class = "transcript"
 transcript_recipe = "domain-separated root transcript over the canonically-ordered TxnAllocationSlotKey -> EscapingAllocationBinding leaf set together with generation, attempt_identity, through_statement_seq and sorted_spent_commitments, excluding exactly root_digest (a09:1900)"
+
+[[field]]
+containing_schema = "TxnOutcomeRecord"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 18
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the transaction outcome; retained with the outcome and creates no reachability edge (a03:1524)"
+version_status = "reserved"
+max_size_bytes = 256
 
 [[field]]
 containing_schema = "TxnOutcomeRecord"
