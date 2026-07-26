@@ -141,6 +141,12 @@ We are in early development with **no users**. Do things the **RIGHT** way with 
 ## Mandatory Checks After Substantive Changes
 
 ```bash
+bash scripts/check.sh                   # the whole chain, including the non-Rust gates
+```
+
+or, run piecemeal:
+
+```bash
 cargo fmt --check
 cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
@@ -149,6 +155,25 @@ ubs $(git diff --name-only)
 ```
 
 If any check fails, fix root causes before handing off.
+
+**The piecemeal list above does not cover a change that is not Rust.** Every
+`cargo` step is a no-op on anything but `.rs`, and `ubs` is worse than a no-op:
+on a `.sh`, `.jsonl`, `.toml` or `.md` file it prints `no supported languages
+detected ... UBS did not run any scanner: nothing was checked (this is NOT a
+pass)` and then **exits 0**. A shell script or a `.beads/` export that no tool
+has ever opened therefore reports exactly like one that passed everything.
+
+`scripts/check.sh` is the gate that closes this. It runs, before any cargo step:
+
+- **file-coverage closure** — every tracked file must be claimed by one of its
+  gates or declared exempt with a stated reason, and an unclaimed file fails the
+  run. The tracked set comes from `git ls-files` at run time, so a newly added
+  file of an unhandled type cannot slip through by not being listed.
+- **shell lint** — `bash -n` plus `shellcheck --severity=warning` over every
+  tracked shell deliverable.
+
+So: if you touched anything that is not `.rs`, run `scripts/check.sh` rather
+than the piecemeal list.
 
 ### The `cargo test` gate (green-bar requirement)
 
