@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 45
+registry_epoch = 46
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -5889,6 +5889,17 @@ version_status = "reserved"
 max_size_bytes = 65537
 
 [[union]]
+union_name = "RemoteConfigurationTrustRoot"
+containing_schema = "RemoteConfigurationTrustRoot"
+union_path = "RemoteConfigurationTrustRoot"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RemoteConfigurationTrustRoot"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RemoteGrantRetirementPlanSortedEntriesRecordDisposition"
 containing_schema = "RemoteGrantRetirementPlan"
 union_path = "RemoteGrantRetirementPlan.sorted_entries.record.disposition"
@@ -5900,12 +5911,34 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RemoteRetentionConsumerRoot"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RemoteRetentionControlSpec"
 containing_schema = "RemoteRetentionControlSpec"
 union_path = "RemoteRetentionControlSpec"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RemoteRetentionControlSpec"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RemoteRetentionObligationRoot"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -13655,6 +13688,32 @@ version_status = "reserved"
 max_size_bytes = 65536
 
 [[union_arm]]
+union_name = "RemoteConfigurationTrustRoot"
+containing_schema = "RemoteConfigurationTrustRoot"
+union_path = "RemoteConfigurationTrustRoot"
+arm_tag = 0x0001
+source_arm_name = "CurrentEvidence"
+stable_name = "current_evidence"
+payload_kind = "inline-record"
+payload_sha256 = "66ad588338d144c80b60c35d577e1851696f8369ea92b0ef3f8cdbab64569857"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteConfigurationTrustRoot"
+containing_schema = "RemoteConfigurationTrustRoot"
+union_path = "RemoteConfigurationTrustRoot"
+arm_tag = 0x0002
+source_arm_name = "ValidatedAnchor"
+stable_name = "validated_anchor"
+payload_kind = "inline-record"
+payload_sha256 = "f48b0f148c6138bcc9f897331ea9af569d97ad7b7a63bcbf9f37a601246c5c45"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "RemoteGrantRetirementPlanSortedEntriesRecordDisposition"
 containing_schema = "RemoteGrantRetirementPlan"
 union_path = "RemoteGrantRetirementPlan.sorted_entries.record.disposition"
@@ -13676,6 +13735,84 @@ source_arm_name = "Release"
 stable_name = "release"
 payload_kind = "inline-record"
 payload_sha256 = "9a02ec10ab4085a2f24d5edba340b629bb24260404c9163e0363ab9f805b644f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0001
+source_arm_name = "Acquired"
+stable_name = "acquired"
+payload_kind = "inline-record"
+payload_sha256 = "789ab073fb7e5162f82c9152b2620a6cabbeae0638c34409921d0602514c356f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0002
+source_arm_name = "AuthorityTransferPending"
+stable_name = "authority_transfer_pending"
+payload_kind = "inline-record"
+payload_sha256 = "30fc880fa0f1c21f9e258644d8ce8f99e7961fe26686a05611157a3a3252d726"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0003
+source_arm_name = "AuthorityTransferAdopted"
+stable_name = "authority_transfer_adopted"
+payload_kind = "inline-record"
+payload_sha256 = "25ee91ab9c781a58634d64a72375928d5b11a6a0a299744cc4b61b700f34f5ac"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0004
+source_arm_name = "ReleaseRequested"
+stable_name = "release_requested"
+payload_kind = "inline-record"
+payload_sha256 = "e18243053c1b45ccb0c07899e24487f3e4a325dee0999873b7e370550144d528"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0005
+source_arm_name = "ReleaseCertified"
+stable_name = "release_certified"
+payload_kind = "inline-record"
+payload_sha256 = "09553d4236207b556eea0edbacb22092a750778fede9642a61e38758212b7a7c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0006
+source_arm_name = "Acknowledged"
+stable_name = "acknowledged"
+payload_kind = "inline-record"
+payload_sha256 = "cc0cf0dbe7c5cc6d99ca277f5d8cc55b65ac3a8d42559b844d0078160ab2fdf1"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -13780,6 +13917,84 @@ source_arm_name = "AdoptLegacyAuthorityTransfer"
 stable_name = "adopt_legacy_authority_transfer"
 payload_kind = "inline-record"
 payload_sha256 = "4c46a602c0e8e0b7d889479e1e1653fd8100270a9d673acc3fde6ba13924664a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "inline-record"
+payload_sha256 = "1d5440b0043f04d2b086dea3e811a765a8c03366e314d9155d93eb8ae6db0eea"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0002
+source_arm_name = "TransferredOut"
+stable_name = "transferred_out"
+payload_kind = "inline-record"
+payload_sha256 = "aeee98929e281c5c35eb596f6f380142957f7c1b2248f964199370fdfe985c3e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0003
+source_arm_name = "TransferredInPending"
+stable_name = "transferred_in_pending"
+payload_kind = "inline-record"
+payload_sha256 = "b4c2d4d67cd6e8380d5ef1ba9f46d82e44eb69bc856d49e7aebdc6501b9a342d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0004
+source_arm_name = "TransferredIn"
+stable_name = "transferred_in"
+payload_kind = "inline-record"
+payload_sha256 = "b874d2d049bb0475063f358dd5de7ade198573739df63eb09c4407b936b60d52"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0005
+source_arm_name = "ReleaseApplied"
+stable_name = "release_applied"
+payload_kind = "inline-record"
+payload_sha256 = "29db41bc0ec57c48cff0415f91115247aa0adba1e505710eee86d62b21130001"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0006
+source_arm_name = "AckPublished"
+stable_name = "ack_published"
+payload_kind = "inline-record"
+payload_sha256 = "b5d323871f332a24d4c3a7532ec505b5a300c0eb51a4e25463eaccd8a99bef60"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

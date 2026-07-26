@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "71a48b67304f94568590f79c5b1c1ee4731819aee022c57fece78a7e72bce7f1";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2205;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2222;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "441b3d3c5886a51d152ef1aea4b9cd5fa1edd80c624536db901e26fe69cbee09";
+    "5e388944e640a975db8fe0d9b9bceecee7934a8054d5bcc7b0191baf4a9c00bb";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 90;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "38ef2db5a7f790d6e3a2f454eda7e8353489d47841bf013bf7e9f1f4fe6eac9d";
+    "9468ede540cfd5f8fdb593a0b602c01790892351e2537f1c7f888e87fd6f3d53";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -16315,6 +16315,117 @@ stable_name = "Ready"
                 assert!(catalog.projection_rows.iter().any(|row| {
                     row.row_id == targets[0].target_row_id && row.row_kind == "union-arm"
                 }));
+            }
+        }
+    }
+
+    #[test]
+    fn a04_source_ordered_logical_map_unions_are_exact() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let expected = [
+            (
+                "RemoteConfigurationTrustRoot",
+                &[("CurrentEvidence", 0x0001), ("ValidatedAnchor", 0x0002)][..],
+            ),
+            (
+                "RemoteRetentionConsumerRoot",
+                &[
+                    ("Acquired", 0x0001),
+                    ("AuthorityTransferPending", 0x0002),
+                    ("AuthorityTransferAdopted", 0x0003),
+                    ("ReleaseRequested", 0x0004),
+                    ("ReleaseCertified", 0x0005),
+                    ("Acknowledged", 0x0006),
+                ][..],
+            ),
+            (
+                "RemoteRetentionObligationRoot",
+                &[
+                    ("Active", 0x0001),
+                    ("TransferredOut", 0x0002),
+                    ("TransferredInPending", 0x0003),
+                    ("TransferredIn", 0x0004),
+                    ("ReleaseApplied", 0x0005),
+                    ("AckPublished", 0x0006),
+                ][..],
+            ),
+        ];
+
+        for (name, expected_arms) in expected {
+            let matches = catalog
+                .identity
+                .ordinary_unions
+                .iter()
+                .filter(|union| union.union_name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1, "{name} union must be unique");
+            let union = matches[0];
+            assert_eq!(union.containing_schema, name);
+            assert_eq!(union.union_path, name);
+            assert_eq!(union.field_tag, None);
+            assert_eq!(union.tag_wire_type, "u8");
+            assert_eq!(union.encoding_context, "closed-tagged");
+            assert!(
+                identity::ordinary_union_has_top_level_shape(union),
+                "{name} is a whole-schema logical union"
+            );
+            assert!(
+                catalog
+                    .identity
+                    .logical
+                    .iter()
+                    .any(|logical| logical.name == name),
+                "{name} resolves through its exact logical parent"
+            );
+            assert!(
+                !identity::BUILTIN_WIRE_TYPES.contains(&name)
+                    && !catalog.identity.wire.iter().any(|wire| wire.name == name),
+                "{name} must be logical-backed rather than claiming the wire collision exception"
+            );
+            assert!(
+                catalog
+                    .identity
+                    .fields
+                    .iter()
+                    .all(|field| field.exact_wire_type != name),
+                "{name} has no manufactured anchoring field row"
+            );
+
+            let actual_arms = union
+                .arms
+                .iter()
+                .map(|arm| (arm.source_arm_name.as_str(), arm.arm_tag))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual_arms, expected_arms,
+                "{name} tags must follow Appendix A source spelling order"
+            );
+
+            let union_source_key = format!("union|{name}|{name}");
+            let union_targets = catalog
+                .targets
+                .iter()
+                .filter(|target| target.source_key == union_source_key)
+                .collect::<Vec<_>>();
+            assert_eq!(union_targets.len(), 1, "{name} union target must be unique");
+            assert_eq!(union_targets[0].target_kind, "union");
+            assert_eq!(union_targets[0].definition_status, "declared");
+
+            for (source_arm_name, _) in expected_arms {
+                let source_key = format!("arm|{name}|{name}|{source_arm_name}");
+                let targets = catalog
+                    .targets
+                    .iter()
+                    .filter(|target| target.source_key == source_key)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    targets.len(),
+                    1,
+                    "{name}.{source_arm_name} target must be unique"
+                );
+                assert_eq!(targets[0].target_kind, "union-arm");
+                assert_eq!(targets[0].definition_status, "declared");
             }
         }
     }

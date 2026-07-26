@@ -448,6 +448,7 @@ struct SchemaOccurrence {
     display_name: String,
     owner_status: SchemaOwnerStatus,
     definition_kind: DefinitionKind,
+    complete_top_level_map_definition: bool,
     declaration_range: Range<usize>,
     expression: Option<MappedText>,
     expression_sha256: String,
@@ -957,6 +958,17 @@ fn indexed_map_value(mapped: &MappedText) -> Option<MappedText> {
     Some(mapped.subrange(value))
 }
 
+fn top_level_map_value(mapped: &MappedText) -> Option<MappedText> {
+    let trimmed = trim_range(&mapped.text, 0..mapped.text.len());
+    let arrow = trimmed.start + top_level_arrow(&mapped.text[trimmed.clone()])?;
+    let key = trim_range(&mapped.text, trimmed.start..arrow);
+    let value = trim_range(&mapped.text, arrow + 2..trimmed.end);
+    if key.is_empty() || value.is_empty() {
+        return None;
+    }
+    Some(mapped.subrange(value))
+}
+
 fn parse_type_display(text: &str) -> Option<(String, usize)> {
     let bytes = text.as_bytes();
     let start = skip_ascii_whitespace(bytes, 0);
@@ -1409,6 +1421,10 @@ fn make_schema_occurrence(
         display_name,
         owner_status,
         definition_kind,
+        complete_top_level_map_definition: matches!(
+            definition_kind,
+            DefinitionKind::InlineAlias | DefinitionKind::BoldOwnerStructural
+        ),
         declaration_range,
         expression,
         expression_sha256,
@@ -1823,13 +1839,15 @@ fn extract_schema_occurrences(
             .map(|index| fragments[*index].source_range.clone())
             .collect();
         let expression = MappedText::joined(source_map.source, &ranges);
-        if let Some(occurrence) = make_schema_occurrence(
+        if let Some(mut occurrence) = make_schema_occurrence(
             link.display_name,
             SchemaOwnerStatus::ConfirmedTopLevel,
             DefinitionKind::ProseLinkedStructural,
             owner.source_range.clone(),
             Some(expression),
         ) {
+            occurrence.complete_top_level_map_definition =
+                starts_with_word(&link.cue, "is") || starts_with_word(&link.cue, "are");
             occurrences.push(occurrence);
             claimed_ranges.extend(ranges);
         }
@@ -2562,6 +2580,20 @@ fn extract_fields_and_arms(
             });
         }
         if shape == ExpressionShape::Alias {
+            if schema.complete_top_level_map_definition
+                && let Some(value_mapped) = top_level_map_value(&mapped)
+                && parse_union(
+                    schema,
+                    &value_mapped,
+                    &schema.display_name,
+                    &structural_schema_key,
+                    &mut rows,
+                    0,
+                    false,
+                )
+            {
+                continue;
+            }
             if parse_union(
                 schema,
                 &mapped,
@@ -3708,6 +3740,57 @@ mod tests {
         assert_eq!(census.counts.field_candidates, 5);
         assert_eq!(census.counts.union_candidates, 2);
         assert_eq!(census.counts.arm_candidates, 5);
+        assert_eq!(census.counts.ambiguities, 0);
+    }
+
+    #[test]
+    fn top_level_map_value_unions_exclude_the_map_key_from_the_arm_census() {
+        let source = concat!(
+            "`TrustRoot` is the trust map `authority_domain:ConsensusDomain -> ",
+            "CurrentEvidence{evidence_ref:StrongRef<Evidence>}|",
+            "ValidatedAnchor{anchor_ref:StrongRef<Anchor>}`.\n",
+            "`RetentionRoot` is the retention map `(authority_domain,grant_id) -> ",
+            "Active{record_ref:StrongRef<Record>}|",
+            "ReleaseApplied{tombstone_ref:StrongRef<Tombstone>}`.\n",
+        );
+        let slices = [SourceSliceSpec {
+            id: "top-level-map",
+            start_line: 70,
+            end_line: 71,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 70, &slices)
+            .expect("top-level map-value unions must census");
+
+        for (union_path, expected_arms) in [
+            (
+                "TrustRoot",
+                ["CurrentEvidence", "ValidatedAnchor"].as_slice(),
+            ),
+            ("RetentionRoot", ["Active", "ReleaseApplied"].as_slice()),
+        ] {
+            let union = census
+                .unions
+                .iter()
+                .find(|union| union.key.union_path == union_path)
+                .expect("map value is a first-class union");
+            assert_eq!(
+                union.arm_names,
+                expected_arms
+                    .iter()
+                    .map(|arm| (*arm).to_owned())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(union.unparsed_arm_count, 0);
+        }
+        assert!(
+            census
+                .arms
+                .iter()
+                .all(|arm| arm.key.arm_name != "authority_domain"),
+            "the typed map key must never be substituted for the first value arm"
+        );
+        assert_eq!(census.counts.union_candidates, 2);
+        assert_eq!(census.counts.arm_candidates, 4);
         assert_eq!(census.counts.ambiguities, 0);
     }
 

@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2205
+target_count = 2222
 projection_fallback_count = 90
-target_source_assignment_sha256 = "38ef2db5a7f790d6e3a2f454eda7e8353489d47841bf013bf7e9f1f4fe6eac9d"
+target_source_assignment_sha256 = "9468ede540cfd5f8fdb593a0b602c01790892351e2537f1c7f888e87fd6f3d53"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -189,14 +189,14 @@ expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fi
 definition_status = "declared"
 top_level_candidate_count = 27
 top_level_candidate_ids_sha256 = "3e49b908821efaf475c0dcbe57fb973f7b3aec0ff8ef5e883ad04a71b3fa7f93"
-field_candidate_count = 258
-field_candidate_ids_sha256 = "6dd921daa7d38c6fdd36279dd62393547d5411be521f592462d95fcf4b650c59"
+field_candidate_count = 264
+field_candidate_ids_sha256 = "d0595426951d9e2a059deac28094346fa262933fa02072eb81168b856052d55f"
 union_candidate_count = 14
 union_candidate_ids_sha256 = "2a98b59e5fdde61d2551ce3ab35fbfbac5066f590aa5026011e7c7c6239226dd"
-arm_candidate_count = 46
-arm_candidate_ids_sha256 = "c9aed9e79bc64fb35d651deff2d072570b45937f100e84bd5f37fbcd4c818e2e"
+arm_candidate_count = 48
+arm_candidate_ids_sha256 = "977c725fde3710ac8aa048c573b003275e0ca47c66586fbfedca7a10aecf812d"
 ambiguity_count = 205
-ambiguity_ids_sha256 = "fdbc302558a32e9acc1ded41e0639f80972c26de0ce225b2438afa1609ff993c"
+ambiguity_ids_sha256 = "fc4f7646d2bdaa84f0bdda2cf480b93a7473201ea2e41b7e94225ee4dc347039"
 
 [[slice]]
 ordinal = 5
@@ -645,7 +645,7 @@ registry_epoch = 33
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 45
+registry_epoch = 46
 
 [[logical_kind]]
 slice_id = "a03"
@@ -30972,6 +30972,255 @@ source_arm_name = "Shard"
 stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:remote-configuration-trust-root-5881afd8ba2ff42d"
+union_name = "RemoteConfigurationTrustRoot"
+containing_schema = "RemoteConfigurationTrustRoot"
+union_path = "RemoteConfigurationTrustRoot"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RemoteConfigurationTrustRoot"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-configuration-trust-root-current-evidence-7cf08f32cf4b2d42"
+union_name = "RemoteConfigurationTrustRoot"
+containing_schema = "RemoteConfigurationTrustRoot"
+union_path = "RemoteConfigurationTrustRoot"
+arm_tag = 0x0001
+source_arm_name = "CurrentEvidence"
+stable_name = "current_evidence"
+payload_kind = "inline-record"
+payload_sha256 = "66ad588338d144c80b60c35d577e1851696f8369ea92b0ef3f8cdbab64569857"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-configuration-trust-root-validated-anchor-0cd69f99b0adc713"
+union_name = "RemoteConfigurationTrustRoot"
+containing_schema = "RemoteConfigurationTrustRoot"
+union_path = "RemoteConfigurationTrustRoot"
+arm_tag = 0x0002
+source_arm_name = "ValidatedAnchor"
+stable_name = "validated_anchor"
+payload_kind = "inline-record"
+payload_sha256 = "f48b0f148c6138bcc9f897331ea9af569d97ad7b7a63bcbf9f37a601246c5c45"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:remote-retention-consumer-root-709a312d96f7a64a"
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RemoteRetentionConsumerRoot"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-consumer-root-acquired-664bbe4784b6cb79"
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0001
+source_arm_name = "Acquired"
+stable_name = "acquired"
+payload_kind = "inline-record"
+payload_sha256 = "789ab073fb7e5162f82c9152b2620a6cabbeae0638c34409921d0602514c356f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-consumer-root-authority-transfer-pending-3bb9b4bfaa9d4ce7"
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0002
+source_arm_name = "AuthorityTransferPending"
+stable_name = "authority_transfer_pending"
+payload_kind = "inline-record"
+payload_sha256 = "30fc880fa0f1c21f9e258644d8ce8f99e7961fe26686a05611157a3a3252d726"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-consumer-root-authority-transfer-adopted-cdeeab675d85f07a"
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0003
+source_arm_name = "AuthorityTransferAdopted"
+stable_name = "authority_transfer_adopted"
+payload_kind = "inline-record"
+payload_sha256 = "25ee91ab9c781a58634d64a72375928d5b11a6a0a299744cc4b61b700f34f5ac"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-consumer-root-release-requested-a7c490f4b9b8ec9a"
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0004
+source_arm_name = "ReleaseRequested"
+stable_name = "release_requested"
+payload_kind = "inline-record"
+payload_sha256 = "e18243053c1b45ccb0c07899e24487f3e4a325dee0999873b7e370550144d528"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-consumer-root-release-certified-6bb88985286d3f9c"
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0005
+source_arm_name = "ReleaseCertified"
+stable_name = "release_certified"
+payload_kind = "inline-record"
+payload_sha256 = "09553d4236207b556eea0edbacb22092a750778fede9642a61e38758212b7a7c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-consumer-root-acknowledged-6b1d0218e7820104"
+union_name = "RemoteRetentionConsumerRoot"
+containing_schema = "RemoteRetentionConsumerRoot"
+union_path = "RemoteRetentionConsumerRoot"
+arm_tag = 0x0006
+source_arm_name = "Acknowledged"
+stable_name = "acknowledged"
+payload_kind = "inline-record"
+payload_sha256 = "cc0cf0dbe7c5cc6d99ca277f5d8cc55b65ac3a8d42559b844d0078160ab2fdf1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a04"
+row_id = "a04:union:remote-retention-obligation-root-e581ad7c6883335a"
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RemoteRetentionObligationRoot"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-obligation-root-active-42b14cab51439a50"
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "inline-record"
+payload_sha256 = "1d5440b0043f04d2b086dea3e811a765a8c03366e314d9155d93eb8ae6db0eea"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-obligation-root-transferred-out-01631d23785e1675"
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0002
+source_arm_name = "TransferredOut"
+stable_name = "transferred_out"
+payload_kind = "inline-record"
+payload_sha256 = "aeee98929e281c5c35eb596f6f380142957f7c1b2248f964199370fdfe985c3e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-obligation-root-transferred-in-pending-dc1218f95f495b94"
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0003
+source_arm_name = "TransferredInPending"
+stable_name = "transferred_in_pending"
+payload_kind = "inline-record"
+payload_sha256 = "b4c2d4d67cd6e8380d5ef1ba9f46d82e44eb69bc856d49e7aebdc6501b9a342d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-obligation-root-transferred-in-d317b642fa894955"
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0004
+source_arm_name = "TransferredIn"
+stable_name = "transferred_in"
+payload_kind = "inline-record"
+payload_sha256 = "b874d2d049bb0475063f358dd5de7ade198573739df63eb09c4407b936b60d52"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-obligation-root-release-applied-fce86394958bd901"
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0005
+source_arm_name = "ReleaseApplied"
+stable_name = "release_applied"
+payload_kind = "inline-record"
+payload_sha256 = "29db41bc0ec57c48cff0415f91115247aa0adba1e505710eee86d62b21130001"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a04"
+row_id = "a04:union-arm:remote-retention-obligation-root-ack-published-bee3181681858c6e"
+union_name = "RemoteRetentionObligationRoot"
+containing_schema = "RemoteRetentionObligationRoot"
+union_path = "RemoteRetentionObligationRoot"
+arm_tag = 0x0006
+source_arm_name = "AckPublished"
+stable_name = "ack_published"
+payload_kind = "inline-record"
+payload_sha256 = "b5d323871f332a24d4c3a7532ec505b5a300c0eb51a4e25463eaccd8a99bef60"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -68472,6 +68721,142 @@ row_id = "a08:target:union-arm-global-authorization-decision-record-operation-au
 target_row_id = "a08:union-arm:global-authorization-decision-record-operation-audit-admission-not-required-d9267d7f30c4ba9e"
 slice_id = "a08"
 source_key = "arm|GlobalAuthorizationDecisionRecord|GlobalAuthorizationDecisionRecord.operation_audit_admission|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-remote-configuration-trust-root-5881afd8ba2ff42d"
+target_row_id = "a04:union:remote-configuration-trust-root-5881afd8ba2ff42d"
+slice_id = "a04"
+source_key = "union|RemoteConfigurationTrustRoot|RemoteConfigurationTrustRoot"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-configuration-trust-root-current-evidence-7cf08f32cf4b2d42"
+target_row_id = "a04:union-arm:remote-configuration-trust-root-current-evidence-7cf08f32cf4b2d42"
+slice_id = "a04"
+source_key = "arm|RemoteConfigurationTrustRoot|RemoteConfigurationTrustRoot|CurrentEvidence"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-configuration-trust-root-validated-anchor-0cd69f99b0adc713"
+target_row_id = "a04:union-arm:remote-configuration-trust-root-validated-anchor-0cd69f99b0adc713"
+slice_id = "a04"
+source_key = "arm|RemoteConfigurationTrustRoot|RemoteConfigurationTrustRoot|ValidatedAnchor"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-remote-retention-consumer-root-709a312d96f7a64a"
+target_row_id = "a04:union:remote-retention-consumer-root-709a312d96f7a64a"
+slice_id = "a04"
+source_key = "union|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-consumer-root-acquired-664bbe4784b6cb79"
+target_row_id = "a04:union-arm:remote-retention-consumer-root-acquired-664bbe4784b6cb79"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot|Acquired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-consumer-root-authority-transfer-pending-3bb9b4bfaa9d4ce7"
+target_row_id = "a04:union-arm:remote-retention-consumer-root-authority-transfer-pending-3bb9b4bfaa9d4ce7"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot|AuthorityTransferPending"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-consumer-root-authority-transfer-adopted-cdeeab675d85f07a"
+target_row_id = "a04:union-arm:remote-retention-consumer-root-authority-transfer-adopted-cdeeab675d85f07a"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot|AuthorityTransferAdopted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-consumer-root-release-requested-a7c490f4b9b8ec9a"
+target_row_id = "a04:union-arm:remote-retention-consumer-root-release-requested-a7c490f4b9b8ec9a"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot|ReleaseRequested"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-consumer-root-release-certified-6bb88985286d3f9c"
+target_row_id = "a04:union-arm:remote-retention-consumer-root-release-certified-6bb88985286d3f9c"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot|ReleaseCertified"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-consumer-root-acknowledged-6b1d0218e7820104"
+target_row_id = "a04:union-arm:remote-retention-consumer-root-acknowledged-6b1d0218e7820104"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot|Acknowledged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-remote-retention-obligation-root-e581ad7c6883335a"
+target_row_id = "a04:union:remote-retention-obligation-root-e581ad7c6883335a"
+slice_id = "a04"
+source_key = "union|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-obligation-root-active-42b14cab51439a50"
+target_row_id = "a04:union-arm:remote-retention-obligation-root-active-42b14cab51439a50"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot|Active"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-obligation-root-transferred-out-01631d23785e1675"
+target_row_id = "a04:union-arm:remote-retention-obligation-root-transferred-out-01631d23785e1675"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot|TransferredOut"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-obligation-root-transferred-in-pending-dc1218f95f495b94"
+target_row_id = "a04:union-arm:remote-retention-obligation-root-transferred-in-pending-dc1218f95f495b94"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot|TransferredInPending"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-obligation-root-transferred-in-d317b642fa894955"
+target_row_id = "a04:union-arm:remote-retention-obligation-root-transferred-in-d317b642fa894955"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot|TransferredIn"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-obligation-root-release-applied-fce86394958bd901"
+target_row_id = "a04:union-arm:remote-retention-obligation-root-release-applied-fce86394958bd901"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot|ReleaseApplied"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:union-arm-remote-retention-obligation-root-ack-published-bee3181681858c6e"
+target_row_id = "a04:union-arm:remote-retention-obligation-root-ack-published-bee3181681858c6e"
+slice_id = "a04"
+source_key = "arm|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot|AckPublished"
 target_kind = "union-arm"
 definition_status = "declared"
 
