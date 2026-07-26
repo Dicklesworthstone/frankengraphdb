@@ -167,12 +167,12 @@ count = 138
 source_path = ".beads/issues.jsonl"
 resolution_precedence = ["direct_owner", "bet_label", "exact_override", "family_rule"]
 allowed_bet_labels = ["b1", "b2", "b3", "b4", "b5", "b6"]
-bead_count = 323
+bead_count = 324
 direct_owner_count = 98
 bet_label_count = 179
-exact_override_count = 12
+exact_override_count = 13
 family_rule_count = 34
-binding_hash = "fnv1a64:a551778b93fcc071"
+binding_hash = "fnv1a64:43a4c6ad4a8fdf60"
 
 [[bead_family]]
 id = "appendix-a-catalog"
@@ -285,6 +285,11 @@ decision_ids = ["FG-ADR-CON-06", "FG-ADR-CON-11"]
 [[bead_override]]
 id = "g0-document-self-containment"
 bead_id = "fgdb-g0-doc-sync-usq"
+decision_ids = ["FG-ADR-BET-B5", "FG-ADR-CON-11"]
+
+[[bead_override]]
+id = "shell-lint-silent-no-op"
+bead_id = "fgdb-shell-lint-silent-no-op-xi8p"
 decision_ids = ["FG-ADR-BET-B5", "FG-ADR-CON-11"]
 
 [[bead_override]]
