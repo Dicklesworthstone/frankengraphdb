@@ -6734,6 +6734,190 @@ fn idr_restore_source_acquisition_plan_import_follows_the_sealed_import() {
 }
 
 #[test]
+fn idr_restore_source_acquisition_bundle_closes_the_bidirectional_order_interval() {
+    let identity = real_identity();
+    let logical = |name: &str| {
+        identity
+            .logical
+            .iter()
+            .find(|logical| logical.name == name)
+            .expect("named logical row exists")
+    };
+    let bundle = logical("RestoreSourceAcquisitionBundle");
+    assert_eq!(bundle.object_kind, 0x03ef);
+    assert_eq!(bundle.status, "reserved");
+    assert_eq!(bundle.construction_order, 46);
+    assert_eq!(bundle.role_predicate, "true");
+    assert_eq!(bundle.max_size_bytes, 16_777_216);
+    assert_eq!(
+        bundle.golden_corpus,
+        "corpus/logical/restore_source_acquisition_bundle/"
+    );
+
+    for predecessor in [
+        "RestoreSourceAcquisitionPlanImportRecord",
+        "RestoreCanonicalAcquisitionWorkingSet",
+        "RestoreSourceAcquisitionSourceGate",
+        "PortableRestoreArchiveAcquisitionReceipt",
+        "RestoreSourceLeaseRecord",
+    ] {
+        assert!(
+            logical(predecessor).construction_order < bundle.construction_order,
+            "{predecessor} must precede the bundle that strongly retains it"
+        );
+    }
+    assert_eq!(
+        bundle.construction_order,
+        logical("RestoreSourceLeaseRecord").construction_order + 1,
+        "the latest outbound strong-reference target fixes the bundle at order 46"
+    );
+
+    let bridge_authority = logical("RecoveryBridgeAuthority");
+    assert_eq!(
+        bridge_authority.construction_order, 51,
+        "the Local/Meta and Shard authority arms must follow all of their targets"
+    );
+    for predecessor in [
+        "RestoreDirectCreationAuthorityRecord",
+        "RestoreSourceAcquisitionBundle",
+        "RestoreSourceLeaseRecord",
+        "RestoreShardBootstrapProjectionCertificate",
+        "ShardRestoreSourceLeaseProjection",
+    ] {
+        assert!(
+            logical(predecessor).construction_order < bridge_authority.construction_order,
+            "{predecessor} must precede RecoveryBridgeAuthority"
+        );
+    }
+    assert_eq!(
+        bridge_authority.construction_order,
+        logical("RestoreDirectCreationAuthorityRecord")
+            .construction_order
+            .max(logical("ShardRestoreSourceLeaseProjection").construction_order)
+            + 1,
+        "the two order-50 authority inputs fix RecoveryBridgeAuthority at order 51"
+    );
+    let bridge_union = identity
+        .ordinary_unions
+        .iter()
+        .find(|union| union.union_name == "RecoveryBridgeAuthority<Role>")
+        .expect("RecoveryBridgeAuthority generic whole-schema union exists");
+    assert_eq!(
+        bridge_union.union_name, bridge_union.containing_schema,
+        "a generic whole-schema union must not substitute its generic-free family"
+    );
+    assert_eq!(
+        bridge_union.union_name, bridge_union.union_path,
+        "a generic whole-schema union must preserve the exact source spelling in every shape field"
+    );
+    assert_eq!(bridge_union.field_tag, None);
+
+    let catalog = real_appendix_catalog();
+    let source_key = "top|RestoreSourceAcquisitionBundle<Role:AuthorityOwningRole>";
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|row| row.symbol == "RestoreSourceAcquisitionBundle")
+        .expect("RestoreSourceAcquisitionBundle permanent reservation exists");
+    assert_eq!(
+        reservation.row_id,
+        "a17:reservation:restore-source-acquisition-bundle"
+    );
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x03ef");
+    assert_eq!(reservation.disposition, "existing");
+
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|row| row.source_key == source_key)
+        .expect("RestoreSourceAcquisitionBundle confirmed source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|row| row.source_key == source_key)
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "source candidate must map exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a17:target:logical-kind-restore-source-acquisition-bundle"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a17:logical-kind:restore-source-acquisition-bundle"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+    assert_eq!(targets[0].definition_status, "declared");
+
+    assert!(
+        !identity.fields.iter().any(|field| {
+            field.containing_schema == "RestoreSourceAcquisitionBundle"
+                || field
+                    .containing_schema
+                    .starts_with("RestoreSourceAcquisitionBundle<")
+        }),
+        "the shell increment must not preempt the shorthand field census"
+    );
+    assert!(
+        !identity.ordinary_unions.iter().any(|union| {
+            union.containing_schema == "RestoreSourceAcquisitionBundle"
+                || union.union_name == "RestoreSourceAcquisitionBundle"
+                || union
+                    .containing_schema
+                    .starts_with("RestoreSourceAcquisitionBundle<")
+                || union
+                    .union_name
+                    .starts_with("RestoreSourceAcquisitionBundle<")
+        }) && !identity.unions.iter().any(|union| {
+            union.containing_schema == "RestoreSourceAcquisitionBundle"
+                || union.union_name == "RestoreSourceAcquisitionBundle"
+                || union
+                    .containing_schema
+                    .starts_with("RestoreSourceAcquisitionBundle<")
+                || union
+                    .union_name
+                    .starts_with("RestoreSourceAcquisitionBundle<")
+        }),
+        "the record shell must not manufacture a generic whole-schema union"
+    );
+    assert!(
+        !catalog.ambiguity_adjudications.iter().any(|row| {
+            row.ambiguity_source_key
+                .contains("|RestoreSourceAcquisitionBundle|")
+                || row
+                    .resolved_source_keys
+                    .iter()
+                    .any(|resolved| resolved.contains("|RestoreSourceAcquisitionBundle|"))
+        }),
+        "shorthand ambiguities must remain open until exact field types are settled"
+    );
+    let target_row_id = "a17:logical-kind:restore-source-acquisition-bundle";
+    assert!(
+        !catalog
+            .annotations
+            .iter()
+            .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .semantic_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .expansion_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .evidence
+                .iter()
+                .any(|row| row.target_row_id == target_row_id),
+        "a declared shell must not skip coverage-first sequencing"
+    );
+}
+
+#[test]
 fn idr_restore_canonical_acquisition_working_set_reserves_pre_freeze_stratum() {
     let identity = real_identity();
     let logical = identity

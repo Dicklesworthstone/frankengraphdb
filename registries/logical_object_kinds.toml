@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 49
+registry_epoch = 50
 
 [[kind]]
 object_kind = 0x0001
@@ -2394,6 +2394,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_source_access_revocation_operation_record/"
 
 [[kind]]
+object_kind = 0x03ef
+name = "RestoreSourceAcquisitionBundle"
+status = "reserved"
+construction_order = 46
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_acquisition_bundle/"
+
+[[kind]]
 object_kind = 0x03f0
 name = "RestoreSourceAcquisitionPlanImportRecord"
 status = "reserved"
@@ -3855,7 +3864,7 @@ golden_corpus = "corpus/logical/recovery_allocation_epoch_authority/"
 object_kind = 0x0547
 name = "RecoveryBridgeAuthority"
 status = "reserved"
-construction_order = 30
+construction_order = 51
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/recovery_bridge_authority/"

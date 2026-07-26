@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2426
+target_count = 2427
 projection_fallback_count = 105
-target_source_assignment_sha256 = "e8062ab4f29237f7f09b071d6b9acbe97d1ecc8c1f9f7ee6295514072b5f597c"
+target_source_assignment_sha256 = "bb21e39cfb89a10003cf0c613b115cf3e17b62936b154a4a7d0d912c84eb0e25"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 49
+registry_epoch = 50
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -2075,6 +2075,17 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_canonical_acquisition_working_set/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:restore-source-acquisition-bundle"
+object_kind = 0x03ef
+name = "RestoreSourceAcquisitionBundle"
+status = "reserved"
+construction_order = 46
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_acquisition_bundle/"
 
 [[logical_kind]]
 slice_id = "a03"
@@ -5259,7 +5270,7 @@ row_id = "a19:logical-kind:recovery-bridge-authority"
 object_kind = 0x0547
 name = "RecoveryBridgeAuthority"
 status = "reserved"
-construction_order = 30
+construction_order = 51
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/recovery_bridge_authority/"
@@ -39349,7 +39360,7 @@ symbol = "RestoreSourceAcquisitionBundle"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03ef"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a17:reservation:restore-source-acquisition-plan-import-record"
@@ -50456,7 +50467,7 @@ symbol = "RestoreSourceAcquisitionBundle"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|RestoreSourceAcquisitionBundle<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2315"]
 
 [[top_level_candidate]]
@@ -54982,6 +54993,14 @@ row_id = "a17:target:logical-kind-sealed-pre-bootstrap-dispatch-journal-import"
 target_row_id = "a17:logical-kind:sealed-pre-bootstrap-dispatch-journal-import"
 slice_id = "a17"
 source_key = "top|SealedPreBootstrapDispatchJournalImport<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-restore-source-acquisition-bundle"
+target_row_id = "a17:logical-kind:restore-source-acquisition-bundle"
+slice_id = "a17"
+source_key = "top|RestoreSourceAcquisitionBundle<Role:AuthorityOwningRole>"
 target_kind = "logical-kind"
 definition_status = "declared"
 

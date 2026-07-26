@@ -178,8 +178,8 @@ EXPECT_TARGET_COUNT="$(catalog_manifest_value target_count)"
 EXPECT_FALLBACK_COUNT="$(catalog_manifest_value projection_fallback_count)"
 EXPECT_TARGET_ASSIGNMENT_SHA="$(catalog_manifest_value target_source_assignment_sha256)"
 EXPECT_RESERVATION_COUNT=813
-EXPECT_EXISTING_RESERVATION_COUNT=373
-EXPECT_RESERVED_RESERVATION_COUNT=440
+EXPECT_EXISTING_RESERVATION_COUNT=374
+EXPECT_RESERVED_RESERVATION_COUNT=439
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
     '"target_count":'"$EXPECT_TARGET_COUNT" \
