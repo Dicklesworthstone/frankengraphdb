@@ -9943,6 +9943,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "AuthorityPermitRef<Role:AuthorityOwningRole>"
+containing_schema = "AuthorityPermitRef<Role:AuthorityOwningRole>"
+union_path = "AuthorityPermitRef<Role:AuthorityOwningRole>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuthorityPermitRef<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "AuthorizationAuditGate"
 containing_schema = "AuthorizationAuditGate"
 union_path = "AuthorizationAuditGate"
@@ -11101,6 +11112,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "LifecycleAuthoritySource<Role>"
+containing_schema = "LifecycleAuthoritySource<Role>"
+union_path = "LifecycleAuthoritySource<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LifecycleAuthoritySource<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "LifecycleOperation"
 containing_schema = "LifecycleOperation"
 union_path = "LifecycleOperation"
@@ -12052,6 +12074,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ReadCapablePermitRef<Role:AuthorityOwningRole>"
+containing_schema = "ReadCapablePermitRef<Role:AuthorityOwningRole>"
+union_path = "ReadCapablePermitRef<Role:AuthorityOwningRole>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReadCapablePermitRef<Role:AuthorityOwningRole>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "ReadExecutionScope"
 containing_schema = "ReadExecutionScope"
 union_path = "ReadExecutionScope"
@@ -12069,6 +12102,17 @@ union_path = "ReadParticipantRoutingCertificate.execution_scope"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["ReadParticipantRoutingCertificate"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReadYourWritesCapabilityLineageState<Role>"
+containing_schema = "ReadYourWritesCapabilityLineageState<Role>"
+union_path = "ReadYourWritesCapabilityLineageState<Role>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReadYourWritesCapabilityLineageState<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -12207,12 +12251,34 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ReplayEvidenceRef<T>"
+containing_schema = "ReplayEvidenceRef<T>"
+union_path = "ReplayEvidenceRef<T>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReplayEvidenceRef<T>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "ReplayLogicalStateEvidence"
 containing_schema = "ReplayLogicalStateEvidence"
 union_path = "ReplayLogicalStateEvidence"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["ReplayLogicalStateEvidence", "ReplayManifest"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReplayObjectRef<T>"
+containing_schema = "ReplayObjectRef<T>"
+union_path = "ReplayObjectRef<T>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReplayObjectRef<T>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -14388,6 +14454,32 @@ source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
 stable_name = "directory_bound_embedded_no_catalog"
 payload_kind = "inline-record"
 payload_sha256 = "a1966600103926f245b7dc9250f98e11b8fb3983b75da31bf0ea2904eb10aea1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuthorityPermitRef<Role:AuthorityOwningRole>"
+containing_schema = "AuthorityPermitRef<Role:AuthorityOwningRole>"
+union_path = "AuthorityPermitRef<Role:AuthorityOwningRole>"
+arm_tag = 0x0001
+source_arm_name = "ReadOnly"
+stable_name = "read_only"
+payload_kind = "inline-record"
+payload_sha256 = "f41e51093cc14bc1a0b4ca6bbacd60e46a677f8af6b2d86a39d815abfe804356"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuthorityPermitRef<Role:AuthorityOwningRole>"
+containing_schema = "AuthorityPermitRef<Role:AuthorityOwningRole>"
+union_path = "AuthorityPermitRef<Role:AuthorityOwningRole>"
+arm_tag = 0x0002
+source_arm_name = "ReadWrite"
+stable_name = "read_write"
+payload_kind = "inline-record"
+payload_sha256 = "2095038801bb01eec9ade4629d7dd7bbf9e7edd6ffb94831314a41b347da0259"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -18424,6 +18516,58 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "LifecycleAuthoritySource<Role>"
+containing_schema = "LifecycleAuthoritySource<Role>"
+union_path = "LifecycleAuthoritySource<Role>"
+arm_tag = 0x0001
+source_arm_name = "PresentedPermit"
+stable_name = "presented_permit"
+payload_kind = "inline-record"
+payload_sha256 = "2c7f807c38bf75d7163c8af8770c05f189f8d5ee4b25f695726f7f16302c0165"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "LifecycleAuthoritySource<Role>"
+containing_schema = "LifecycleAuthoritySource<Role>"
+union_path = "LifecycleAuthoritySource<Role>"
+arm_tag = 0x0002
+source_arm_name = "RegisteredAuthority"
+stable_name = "registered_authority"
+payload_kind = "inline-record"
+payload_sha256 = "7e82b5f027f1c0db39877cf9aade110a514c2f17040aa5f46f058bf2622e8bf4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "LifecycleAuthoritySource<Role>"
+containing_schema = "LifecycleAuthoritySource<Role>"
+union_path = "LifecycleAuthoritySource<Role>"
+arm_tag = 0x0003
+source_arm_name = "PresentedDurableCapabilityStatus"
+stable_name = "presented_durable_capability_status"
+payload_kind = "inline-record"
+payload_sha256 = "ab0aceb738cbde6050e8edb9e44fe8bdc87b15b83975300e83209b49a05503b3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "LifecycleAuthoritySource<Role>"
+containing_schema = "LifecycleAuthoritySource<Role>"
+union_path = "LifecycleAuthoritySource<Role>"
+arm_tag = 0x0004
+source_arm_name = "AuthenticatedSession"
+stable_name = "authenticated_session"
+payload_kind = "inline-record"
+payload_sha256 = "1d8107d9daccf547f2327176b2471fd6fc932635fe7cf5ef7bf85056f4b17ce3"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "LifecycleOperation"
 containing_schema = "LifecycleOperation"
 union_path = "LifecycleOperation"
@@ -21329,6 +21473,32 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "ReadCapablePermitRef<Role:AuthorityOwningRole>"
+containing_schema = "ReadCapablePermitRef<Role:AuthorityOwningRole>"
+union_path = "ReadCapablePermitRef<Role:AuthorityOwningRole>"
+arm_tag = 0x0001
+source_arm_name = "DedicatedRead"
+stable_name = "dedicated_read"
+payload_kind = "inline-record"
+payload_sha256 = "f41e51093cc14bc1a0b4ca6bbacd60e46a677f8af6b2d86a39d815abfe804356"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReadCapablePermitRef<Role:AuthorityOwningRole>"
+containing_schema = "ReadCapablePermitRef<Role:AuthorityOwningRole>"
+union_path = "ReadCapablePermitRef<Role:AuthorityOwningRole>"
+arm_tag = 0x0002
+source_arm_name = "MutationReadProjection"
+stable_name = "mutation_read_projection"
+payload_kind = "inline-record"
+payload_sha256 = "a4ecb75fe67e39206561e3e9aaf37264c35e69146dac1fd6bc6eee408d571809"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "ReadExecutionScope"
 containing_schema = "ReadExecutionScope"
 union_path = "ReadExecutionScope"
@@ -21429,6 +21599,45 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReadYourWritesCapabilityLineageState<Role>"
+containing_schema = "ReadYourWritesCapabilityLineageState<Role>"
+union_path = "ReadYourWritesCapabilityLineageState<Role>"
+arm_tag = 0x0001
+source_arm_name = "0x0001 Current"
+stable_name = "0x0001_current"
+payload_kind = "inline-record"
+payload_sha256 = "e1c9741421030813bbc545a639662fed1d16eadf16d57dbeb2571c1acd237689"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReadYourWritesCapabilityLineageState<Role>"
+containing_schema = "ReadYourWritesCapabilityLineageState<Role>"
+union_path = "ReadYourWritesCapabilityLineageState<Role>"
+arm_tag = 0x0002
+source_arm_name = "0x0002 CurrentWithConsumedPredecessor"
+stable_name = "0x0002_current_with_consumed_predecessor"
+payload_kind = "inline-record"
+payload_sha256 = "039174ad5e9eb318f52584cfa22ed19c3ef8689054e4db39a873950a3d27a525"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReadYourWritesCapabilityLineageState<Role>"
+containing_schema = "ReadYourWritesCapabilityLineageState<Role>"
+union_path = "ReadYourWritesCapabilityLineageState<Role>"
+arm_tag = 0x0003
+source_arm_name = "0x0003 ExpiredTombstone"
+stable_name = "0x0003_expired_tombstone"
+payload_kind = "inline-record"
+payload_sha256 = "583eac6a80724d091820ef3c07546e8ce125f35fbc1d29a1f65fb5b4fcc85345"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "RecoveryAllocationEpochAuthority<Role>"
@@ -21986,6 +22195,45 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "ReplayEvidenceRef<T>"
+containing_schema = "ReplayEvidenceRef<T>"
+union_path = "ReplayEvidenceRef<T>"
+arm_tag = 0x0001
+source_arm_name = "Present"
+stable_name = "present"
+payload_kind = "inline-record"
+payload_sha256 = "27ca622300ad724c221ccf7a6a8ca004e1424a63b7c5c914b0788f9d3c6aff63"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReplayEvidenceRef<T>"
+containing_schema = "ReplayEvidenceRef<T>"
+union_path = "ReplayEvidenceRef<T>"
+arm_tag = 0x0002
+source_arm_name = "Unavailable"
+stable_name = "unavailable"
+payload_kind = "inline-record"
+payload_sha256 = "d94a377f7fd9e476415169e8c58c5875f29478a701635d6bddd523acbc2e16c5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReplayEvidenceRef<T>"
+containing_schema = "ReplayEvidenceRef<T>"
+union_path = "ReplayEvidenceRef<T>"
+arm_tag = 0x0003
+source_arm_name = "Redacted"
+stable_name = "redacted"
+payload_kind = "inline-record"
+payload_sha256 = "65d3117916a1fff802d4b438a77b06b0ca0ed347fea4ec4ced711aac4867e929"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "ReplayLogicalStateEvidence"
 containing_schema = "ReplayLogicalStateEvidence"
 union_path = "ReplayLogicalStateEvidence"
@@ -22007,6 +22255,45 @@ source_arm_name = "Sharded"
 stable_name = "sharded"
 payload_kind = "inline-record"
 payload_sha256 = "892ff67dc30794ac5718ebc4034c1f5c1d354418f8ad33b23eeffe787eb1ee5f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReplayObjectRef<T>"
+containing_schema = "ReplayObjectRef<T>"
+union_path = "ReplayObjectRef<T>"
+arm_tag = 0x0001
+source_arm_name = "LocalStrong"
+stable_name = "local_strong"
+payload_kind = "inline-record"
+payload_sha256 = "b54b2ef8e543dd285cb56cf45d4bf1185bc810f51f3c1e14860c8133e3b6b40c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReplayObjectRef<T>"
+containing_schema = "ReplayObjectRef<T>"
+union_path = "ReplayObjectRef<T>"
+arm_tag = 0x0002
+source_arm_name = "CertifiedRemote"
+stable_name = "certified_remote"
+payload_kind = "inline-record"
+payload_sha256 = "bc70c4d79c21b7ed7f3171e93bc17fa341eda5aeb45ea4fa8c24d9edb3328eed"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReplayObjectRef<T>"
+containing_schema = "ReplayObjectRef<T>"
+union_path = "ReplayObjectRef<T>"
+arm_tag = 0x0003
+source_arm_name = "Archived"
+stable_name = "archived"
+payload_kind = "inline-record"
+payload_sha256 = "72f2e6ef361182921ebcb9fdf7a1f695fc6db9d0ee8cf7374d3c63ba98c6f842"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

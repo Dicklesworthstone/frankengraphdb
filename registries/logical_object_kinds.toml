@@ -4489,3 +4489,57 @@ construction_order = 80
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/branch_grant_spec/"
+
+[[kind]]
+object_kind = 0x0558
+name = "ReplayObjectRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/replay_object_ref/"
+
+[[kind]]
+object_kind = 0x0559
+name = "ReplayEvidenceRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/replay_evidence_ref/"
+
+[[kind]]
+object_kind = 0x055a
+name = "AuthorityPermitRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/authority_permit_ref/"
+
+[[kind]]
+object_kind = 0x055b
+name = "ReadCapablePermitRef"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_capable_permit_ref/"
+
+[[kind]]
+object_kind = 0x055c
+name = "ReadYourWritesCapabilityLineageState"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/read_your_writes_capability_lineage_state/"
+
+[[kind]]
+object_kind = 0x055d
+name = "LifecycleAuthoritySource"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/lifecycle_authority_source/"

@@ -4957,6 +4957,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         matches!(
             name,
             "KeyDestroyExternalAckRef"
+                | "AuthorityPermitRef<Role:AuthorityOwningRole>"
+                | "LifecycleAuthoritySource<Role>"
+                | "ReadCapablePermitRef<Role:AuthorityOwningRole>"
+                | "ReadYourWritesCapabilityLineageState<Role>"
+                | "ReplayEvidenceRef<T>"
+                | "ReplayObjectRef<T>"
                 | "AuditCoverageClaimRef"
                 | "AuthenticatedDurableCapabilityStatusBasis"
                 | "AuthorizationAuditGate"
@@ -6311,7 +6317,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             )
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 355,
+        pre_erratum.ordinary_unions.len() + 361,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
