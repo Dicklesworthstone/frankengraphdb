@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2427
+target_count = 2444
 projection_fallback_count = 105
-target_source_assignment_sha256 = "bb21e39cfb89a10003cf0c613b115cf3e17b62936b154a4a7d0d912c84eb0e25"
+target_source_assignment_sha256 = "52806629a176d48a3075aa37f297ed2b2fd403f9b95de67eb363be535711acea"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 34
+registry_epoch = 35
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 50
+registry_epoch = 51
 
 [[logical_kind]]
 slice_id = "a03"
@@ -10415,6 +10415,56 @@ encoding_context = "arm ShardRemote of closed union WorkspaceReleaseEvidenceRef"
 allowed_containing_schemas = ["WorkspaceReleaseEvidenceRef"]
 max_size_bytes = 16777216
 
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:restore-promotion-authority-profile"
+wire_type_id = 0x017f
+name = "RestorePromotionAuthorityProfile"
+kind = "union"
+status = "reserved"
+encoding_context = "portable closed u8-tagged union in source order ExternalCasCataloged | DirectoryBoundCataloged | DirectoryBoundEmbeddedNoCatalog (a20:2575)"
+allowed_containing_schemas = ["RestoreServicePromotionManifest"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:restore-promotion-authority-profile-external-cas-cataloged"
+wire_type_id = 0x0180
+name = "RestorePromotionAuthorityProfile.ExternalCasCataloged"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RestorePromotionAuthorityProfile"
+wire_tag = 0x0001
+encoding_context = "ExternalCasCataloged payload arm of RestorePromotionAuthorityProfile"
+allowed_containing_schemas = ["RestorePromotionAuthorityProfile"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:restore-promotion-authority-profile-directory-bound-cataloged"
+wire_type_id = 0x0181
+name = "RestorePromotionAuthorityProfile.DirectoryBoundCataloged"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RestorePromotionAuthorityProfile"
+wire_tag = 0x0002
+encoding_context = "DirectoryBoundCataloged payload arm of RestorePromotionAuthorityProfile; Local-only"
+allowed_containing_schemas = ["RestorePromotionAuthorityProfile"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:restore-promotion-authority-profile-directory-bound-embedded-no-catalog"
+wire_type_id = 0x0182
+name = "RestorePromotionAuthorityProfile.DirectoryBoundEmbeddedNoCatalog"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RestorePromotionAuthorityProfile"
+wire_tag = 0x0003
+encoding_context = "DirectoryBoundEmbeddedNoCatalog payload arm of RestorePromotionAuthorityProfile; Local-only"
+allowed_containing_schemas = ["RestorePromotionAuthorityProfile"]
+max_size_bytes = 16777216
+
 [[field]]
 slice_id = "a03"
 row_id = "a03:field:logical-state-payload-applied-logical-command-seq"
@@ -15558,6 +15608,38 @@ retention_and_cut_rule = "lives/dies with the validation evidence object"
 version_status = "active"
 max_size_bytes = 128
 
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-service-promotion-manifest-target-posture"
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0005
+stable_name = "target_posture"
+exact_wire_type = "RestoreServicePromotionManifestTargetPosture"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "portable closed posture discriminant retained and cut with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-service-promotion-manifest-authority-profile"
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0007
+stable_name = "authority_profile"
+exact_wire_type = "RestorePromotionAuthorityProfile"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "portable inline authority profile retained and cut with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union]]
 slice_id = "a01"
 row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
@@ -16093,6 +16175,46 @@ version_status = "active"
 max_size_bytes = 1
 
 [[union]]
+slice_id = "a20"
+row_id = "a20:union:restore-promotion-authority-profile-1a0763037ed0ac18"
+union_name = "RestorePromotionAuthorityProfile"
+containing_schema = "RestorePromotionAuthorityProfile"
+union_path = "RestorePromotionAuthorityProfile"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreServicePromotionManifest"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a20"
+row_id = "a20:union:restore-service-promotion-receipt-eb9930ccadbf9488"
+union_name = "RestoreServicePromotionReceipt"
+containing_schema = "RestoreServicePromotionReceipt"
+union_path = "RestoreServicePromotionReceipt"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreServicePromotionReceipt"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a20"
+row_id = "a20:union:restore-service-promotion-manifest-target-posture-40b0bb28f1b790a9"
+union_name = "RestoreServicePromotionManifestTargetPosture"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest.target_posture"
+field_tag = 0x0005
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreServicePromotionManifest"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
 slice_id = "a16"
 row_id = "a16:union:lease-window-successor-proof-8ede6b99eb826526"
 union_name = "LeaseWindowSuccessorProof"
@@ -16468,6 +16590,124 @@ stable_name = "ContinuityFinalizeOperational"
 payload_kind = "unit"
 role_predicate = "role-local || role-meta"
 version_status = "active"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:restore-promotion-authority-profile-external-cas-cataloged-77249edb300f5d0f"
+union_name = "RestorePromotionAuthorityProfile"
+containing_schema = "RestorePromotionAuthorityProfile"
+union_path = "RestorePromotionAuthorityProfile"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "ExternalCasCataloged"
+payload_kind = "inline-record"
+payload_sha256 = "d120d7641f6e2f3e4900b4e54f30512de3c6aab16f6f1405892b98f57851a541"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:restore-promotion-authority-profile-directory-bound-cataloged-1102c8845eb9592d"
+union_name = "RestorePromotionAuthorityProfile"
+containing_schema = "RestorePromotionAuthorityProfile"
+union_path = "RestorePromotionAuthorityProfile"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "DirectoryBoundCataloged"
+payload_kind = "inline-record"
+payload_sha256 = "56dd94b51d96ec0e83b6b68dd35bfd81ab332a912bf41073e8460d64afdb4a08"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:restore-promotion-authority-profile-directory-bound-embedded-no-catalog-96d1adb928bf6107"
+union_name = "RestorePromotionAuthorityProfile"
+containing_schema = "RestorePromotionAuthorityProfile"
+union_path = "RestorePromotionAuthorityProfile"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "DirectoryBoundEmbeddedNoCatalog"
+payload_kind = "inline-record"
+payload_sha256 = "f9dbdf80ef2898a78ac54e4405a197e0ef8eedf2b6f154df4d9fb098963cb1a5"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:restore-service-promotion-receipt-external-cas-cataloged-e15fc3df3dc4fdbd"
+union_name = "RestoreServicePromotionReceipt"
+containing_schema = "RestoreServicePromotionReceipt"
+union_path = "RestoreServicePromotionReceipt"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "ExternalCasCataloged"
+payload_kind = "inline-record"
+payload_sha256 = "5b52c905402eebd4c7702126dd5267756ca032b1d3ef71e3ccfb51a70c8fade4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:restore-service-promotion-receipt-directory-bound-cataloged-ed564f12dd3392cd"
+union_name = "RestoreServicePromotionReceipt"
+containing_schema = "RestoreServicePromotionReceipt"
+union_path = "RestoreServicePromotionReceipt"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "DirectoryBoundCataloged"
+payload_kind = "inline-record"
+payload_sha256 = "631c7901a5a4df1af14f965224c170f7a50a635e4bafa454902731620891bd65"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:restore-service-promotion-receipt-directory-bound-embedded-no-catalog-d39f984752814807"
+union_name = "RestoreServicePromotionReceipt"
+containing_schema = "RestoreServicePromotionReceipt"
+union_path = "RestoreServicePromotionReceipt"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "DirectoryBoundEmbeddedNoCatalog"
+payload_kind = "inline-record"
+payload_sha256 = "7837f65d444ed702550d3bf2507145a6c494ea704b6a6dad66e2c789750fdd89"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:restore-service-promotion-manifest-target-posture-local-46cda0824f79c22b"
+union_name = "RestoreServicePromotionManifestTargetPosture"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest.target_posture"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "Local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:restore-service-promotion-manifest-target-posture-sharded-8a91924fa78ee052"
+union_name = "RestoreServicePromotionManifestTargetPosture"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest.target_posture"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "Sharded"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
 max_size_bytes = 1
 
 [[union_arm]]
@@ -50207,7 +50447,7 @@ symbol = "RestorePromotionAuthorityProfile"
 generic_signature = ""
 source_key = "top|RestorePromotionAuthorityProfile"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a20:2575"]
 
 [[top_level_candidate]]
@@ -73661,6 +73901,142 @@ row_id = "a21:target:field-durable-capability-validation-evidence-compatibility-
 target_row_id = "a21:field:durable-capability-validation-evidence-compatibility-row-id"
 slice_id = "a21"
 source_key = "projection|durable_fields|DurableCapabilityValidationEvidence.compatibility_row_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-restore-promotion-authority-profile"
+target_row_id = "a20:wire-type:restore-promotion-authority-profile"
+slice_id = "a20"
+source_key = "top|RestorePromotionAuthorityProfile"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-restore-promotion-authority-profile-external-cas-cataloged"
+target_row_id = "a20:wire-type:restore-promotion-authority-profile-external-cas-cataloged"
+slice_id = "a20"
+source_key = "arm|RestorePromotionAuthorityProfile|RestorePromotionAuthorityProfile|ExternalCasCataloged"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-restore-promotion-authority-profile-directory-bound-cataloged"
+target_row_id = "a20:wire-type:restore-promotion-authority-profile-directory-bound-cataloged"
+slice_id = "a20"
+source_key = "arm|RestorePromotionAuthorityProfile|RestorePromotionAuthorityProfile|DirectoryBoundCataloged"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-restore-promotion-authority-profile-directory-bound-embedded-no-catalog"
+target_row_id = "a20:wire-type:restore-promotion-authority-profile-directory-bound-embedded-no-catalog"
+slice_id = "a20"
+source_key = "arm|RestorePromotionAuthorityProfile|RestorePromotionAuthorityProfile|DirectoryBoundEmbeddedNoCatalog"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-restore-promotion-authority-profile-1a0763037ed0ac18"
+target_row_id = "a20:union:restore-promotion-authority-profile-1a0763037ed0ac18"
+slice_id = "a20"
+source_key = "union|RestorePromotionAuthorityProfile|RestorePromotionAuthorityProfile"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-restore-promotion-authority-profile-external-cas-cataloged-77249edb300f5d0f"
+target_row_id = "a20:union-arm:restore-promotion-authority-profile-external-cas-cataloged-77249edb300f5d0f"
+slice_id = "a20"
+source_key = "arm|RestorePromotionAuthorityProfile|RestorePromotionAuthorityProfile|ExternalCasCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-restore-promotion-authority-profile-directory-bound-cataloged-1102c8845eb9592d"
+target_row_id = "a20:union-arm:restore-promotion-authority-profile-directory-bound-cataloged-1102c8845eb9592d"
+slice_id = "a20"
+source_key = "arm|RestorePromotionAuthorityProfile|RestorePromotionAuthorityProfile|DirectoryBoundCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-restore-promotion-authority-profile-directory-bound-embedded-no-catalog-96d1adb928bf6107"
+target_row_id = "a20:union-arm:restore-promotion-authority-profile-directory-bound-embedded-no-catalog-96d1adb928bf6107"
+slice_id = "a20"
+source_key = "arm|RestorePromotionAuthorityProfile|RestorePromotionAuthorityProfile|DirectoryBoundEmbeddedNoCatalog"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-restore-service-promotion-receipt-eb9930ccadbf9488"
+target_row_id = "a20:union:restore-service-promotion-receipt-eb9930ccadbf9488"
+slice_id = "a20"
+source_key = "union|RestoreServicePromotionReceipt|RestoreServicePromotionReceipt"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-restore-service-promotion-receipt-external-cas-cataloged-e15fc3df3dc4fdbd"
+target_row_id = "a20:union-arm:restore-service-promotion-receipt-external-cas-cataloged-e15fc3df3dc4fdbd"
+slice_id = "a20"
+source_key = "arm|RestoreServicePromotionReceipt|RestoreServicePromotionReceipt|ExternalCasCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-restore-service-promotion-receipt-directory-bound-cataloged-ed564f12dd3392cd"
+target_row_id = "a20:union-arm:restore-service-promotion-receipt-directory-bound-cataloged-ed564f12dd3392cd"
+slice_id = "a20"
+source_key = "arm|RestoreServicePromotionReceipt|RestoreServicePromotionReceipt|DirectoryBoundCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-restore-service-promotion-receipt-directory-bound-embedded-no-catalog-d39f984752814807"
+target_row_id = "a20:union-arm:restore-service-promotion-receipt-directory-bound-embedded-no-catalog-d39f984752814807"
+slice_id = "a20"
+source_key = "arm|RestoreServicePromotionReceipt|RestoreServicePromotionReceipt|DirectoryBoundEmbeddedNoCatalog"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-restore-service-promotion-manifest-target-posture-40b0bb28f1b790a9"
+target_row_id = "a20:union:restore-service-promotion-manifest-target-posture-40b0bb28f1b790a9"
+slice_id = "a20"
+source_key = "union|RestoreServicePromotionManifest|RestoreServicePromotionManifest.target_posture"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-restore-service-promotion-manifest-target-posture-local-46cda0824f79c22b"
+target_row_id = "a20:union-arm:restore-service-promotion-manifest-target-posture-local-46cda0824f79c22b"
+slice_id = "a20"
+source_key = "arm|RestoreServicePromotionManifest|RestoreServicePromotionManifest.target_posture|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-restore-service-promotion-manifest-target-posture-sharded-8a91924fa78ee052"
+target_row_id = "a20:union-arm:restore-service-promotion-manifest-target-posture-sharded-8a91924fa78ee052"
+slice_id = "a20"
+source_key = "arm|RestoreServicePromotionManifest|RestoreServicePromotionManifest.target_posture|Sharded"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-service-promotion-manifest-target-posture"
+target_row_id = "a20:field:restore-service-promotion-manifest-target-posture"
+slice_id = "a20"
+source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.target_posture|target_posture"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-service-promotion-manifest-authority-profile"
+target_row_id = "a20:field:restore-service-promotion-manifest-authority-profile"
+slice_id = "a20"
+source_key = "field|RestoreServicePromotionManifest|RestoreServicePromotionManifest.authority_profile|authority_profile"
 target_kind = "field"
 definition_status = "declared"
 

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 34
+registry_epoch = 35
 
 [[type]]
 wire_type_id = 0x0001
@@ -3870,4 +3870,46 @@ containing_union = "WorkspaceReleaseEvidenceRef"
 wire_tag = 0x0002
 encoding_context = "arm ShardRemote of closed union WorkspaceReleaseEvidenceRef"
 allowed_containing_schemas = ["WorkspaceReleaseEvidenceRef"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x017f
+name = "RestorePromotionAuthorityProfile"
+kind = "union"
+status = "reserved"
+encoding_context = "portable closed u8-tagged union in source order ExternalCasCataloged | DirectoryBoundCataloged | DirectoryBoundEmbeddedNoCatalog (a20:2575)"
+allowed_containing_schemas = ["RestoreServicePromotionManifest"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0180
+name = "RestorePromotionAuthorityProfile.ExternalCasCataloged"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RestorePromotionAuthorityProfile"
+wire_tag = 0x0001
+encoding_context = "ExternalCasCataloged payload arm of RestorePromotionAuthorityProfile"
+allowed_containing_schemas = ["RestorePromotionAuthorityProfile"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0181
+name = "RestorePromotionAuthorityProfile.DirectoryBoundCataloged"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RestorePromotionAuthorityProfile"
+wire_tag = 0x0002
+encoding_context = "DirectoryBoundCataloged payload arm of RestorePromotionAuthorityProfile; Local-only"
+allowed_containing_schemas = ["RestorePromotionAuthorityProfile"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0182
+name = "RestorePromotionAuthorityProfile.DirectoryBoundEmbeddedNoCatalog"
+kind = "union_variant"
+status = "reserved"
+containing_union = "RestorePromotionAuthorityProfile"
+wire_tag = 0x0003
+encoding_context = "DirectoryBoundEmbeddedNoCatalog payload arm of RestorePromotionAuthorityProfile; Local-only"
+allowed_containing_schemas = ["RestorePromotionAuthorityProfile"]
 max_size_bytes = 16777216

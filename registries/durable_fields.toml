@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 50
+registry_epoch = 51
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -3186,6 +3186,34 @@ role_predicate = "true"
 retention_and_cut_rule = "authority-assigned apply order of the release; identity/provenance scalar, cites assigned order without retaining the command (a01:1394, a01:1404)"
 version_status = "reserved"
 max_size_bytes = 8
+
+[[field]]
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0005
+stable_name = "target_posture"
+exact_wire_type = "RestoreServicePromotionManifestTargetPosture"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "portable closed posture discriminant retained and cut with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
+containing_schema = "RestoreServicePromotionManifest"
+field_tag = 0x0007
+stable_name = "authority_profile"
+exact_wire_type = "RestorePromotionAuthorityProfile"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "portable inline authority profile retained and cut with the signed promotion manifest (a20:2575)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "RestoreSourceLeaseRecord<Role:AuthorityOwningRole>"
@@ -7150,6 +7178,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RestorePromotionAuthorityProfile"
+containing_schema = "RestorePromotionAuthorityProfile"
+union_path = "RestorePromotionAuthorityProfile"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreServicePromotionManifest"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RestoreReconciliationRoot<Role>"
 containing_schema = "RestoreReconciliationRoot<Role>"
 union_path = "RestoreReconciliationRoot<Role>"
@@ -7244,6 +7283,29 @@ union_path = "RestoreRetentionAnchor<Role>"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RestoreRetentionAnchor<Role>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RestoreServicePromotionManifestTargetPosture"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest.target_posture"
+field_tag = 0x0005
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreServicePromotionManifest"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+union_name = "RestoreServicePromotionReceipt"
+containing_schema = "RestoreServicePromotionReceipt"
+union_path = "RestoreServicePromotionReceipt"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreServicePromotionReceipt"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -16598,6 +16660,45 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "RestorePromotionAuthorityProfile"
+containing_schema = "RestorePromotionAuthorityProfile"
+union_path = "RestorePromotionAuthorityProfile"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "ExternalCasCataloged"
+payload_kind = "inline-record"
+payload_sha256 = "d120d7641f6e2f3e4900b4e54f30512de3c6aab16f6f1405892b98f57851a541"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestorePromotionAuthorityProfile"
+containing_schema = "RestorePromotionAuthorityProfile"
+union_path = "RestorePromotionAuthorityProfile"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "DirectoryBoundCataloged"
+payload_kind = "inline-record"
+payload_sha256 = "56dd94b51d96ec0e83b6b68dd35bfd81ab332a912bf41073e8460d64afdb4a08"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestorePromotionAuthorityProfile"
+containing_schema = "RestorePromotionAuthorityProfile"
+union_path = "RestorePromotionAuthorityProfile"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "DirectoryBoundEmbeddedNoCatalog"
+payload_kind = "inline-record"
+payload_sha256 = "f9dbdf80ef2898a78ac54e4405a197e0ef8eedf2b6f154df4d9fb098963cb1a5"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
 union_name = "RestoreReconciliationRoot<Role>"
 containing_schema = "RestoreReconciliationRoot<Role>"
 union_path = "RestoreReconciliationRoot<Role>"
@@ -16885,6 +16986,69 @@ stable_name = "terminal_pin_basis"
 payload_kind = "inline-record"
 payload_sha256 = "d827318676abe5160760d64ad207dfbee120919c46abb59c8bd130d8a5ca412d"
 role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreServicePromotionManifestTargetPosture"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest.target_posture"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "Local"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreServicePromotionManifestTargetPosture"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest.target_posture"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "Sharded"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RestoreServicePromotionReceipt"
+containing_schema = "RestoreServicePromotionReceipt"
+union_path = "RestoreServicePromotionReceipt"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "ExternalCasCataloged"
+payload_kind = "inline-record"
+payload_sha256 = "5b52c905402eebd4c7702126dd5267756ca032b1d3ef71e3ccfb51a70c8fade4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreServicePromotionReceipt"
+containing_schema = "RestoreServicePromotionReceipt"
+union_path = "RestoreServicePromotionReceipt"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "DirectoryBoundCataloged"
+payload_kind = "inline-record"
+payload_sha256 = "631c7901a5a4df1af14f965224c170f7a50a635e4bafa454902731620891bd65"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreServicePromotionReceipt"
+containing_schema = "RestoreServicePromotionReceipt"
+union_path = "RestoreServicePromotionReceipt"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "DirectoryBoundEmbeddedNoCatalog"
+payload_kind = "inline-record"
+payload_sha256 = "7837f65d444ed702550d3bf2507145a6c494ea704b6a6dad66e2c789750fdd89"
+role_predicate = "role-local"
 version_status = "reserved"
 max_size_bytes = 16777216
 
