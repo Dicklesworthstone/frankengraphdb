@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2702
+target_count = 2712
 projection_fallback_count = 108
-target_source_assignment_sha256 = "0d33cf96b8d18525a1719d2b20e4b7c597c823e2b966ddc8eeaba7cab1f434d7"
+target_source_assignment_sha256 = "3ce17dd6a4324bb3a95f56b6dcfb1e3375d3cfb112a092d02acce6f1dc61e010"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 36
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 52
+registry_epoch = 53
 
 [[logical_kind]]
 slice_id = "a03"
@@ -11297,6 +11297,22 @@ version_status = "active"
 max_size_bytes = 40
 
 [[field]]
+slice_id = "a11"
+row_id = "a11:field:commit-marker-effect-source"
+containing_schema = "CommitMarker"
+field_tag = 0x0003
+stable_name = "effect_source"
+exact_wire_type = "CommitMarkerEffectSource"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "closed Local|Global source posture carried inline by the marker; Local retains the already-built CommittedEffectCapsule and Global carries only the conditional transaction input plus exact commitments (a11:1943-1949)"
+version_status = "active"
+max_size_bytes = 4096
+
+[[field]]
 slice_id = "g0"
 row_id = "g0:field:commit-capsule-command-inputs"
 containing_schema = "CommitCapsule"
@@ -15352,6 +15368,76 @@ max_size_bytes = 93
 
 [[field]]
 slice_id = "a11"
+row_id = "a11:field:delivered-baseline-payload-internal-baseline-digest"
+containing_schema = "DeliveredBaselinePayload"
+field_tag = 0x000c
+stable_name = "internal_baseline_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "server-side baseline transcript commitment retained with the delivered baseline payload; it is never a separately addressable schema or reachability edge (a11:1932)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:internal-baseline:v1\" || canonical(format,baseline_id,derived_identity_digest,source_coverage,baseline_frontier,authorized_cursor_position,output_schema,result_answer_contract,canonical_encoding_version,canonical_payload_len,exact_concatenated_canonical_result_bytes)); excludes storage-only canonical_row_segment_refs plus internal_baseline_digest and public_baseline_digest (a11:1932)"
+
+[[field]]
+slice_id = "a11"
+row_id = "a11:field:delivered-baseline-payload-public-baseline-digest"
+containing_schema = "DeliveredBaselinePayload"
+field_tag = 0x000d
+stable_name = "public_baseline_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "public baseline transcript commitment retained with the delivered baseline payload; it is a digest value, not an independently addressable schema (a11:1932)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:public-baseline:v1\" || canonical(format,baseline_id,authorized_cursor_position,output_schema,result_answer_contract,canonical_encoding_version,canonical_payload_len,exact_concatenated_canonical_result_bytes)); excludes canonical_row_segment_refs, internal_baseline_digest, public_baseline_digest, derived_identity_digest, source_coverage, and baseline_frontier (a11:1932)"
+
+[[field]]
+slice_id = "a11"
+row_id = "a11:field:delivered-delta-payload-output-payload-digest"
+containing_schema = "DeliveredDeltaPayload"
+field_tag = 0x0007
+stable_name = "output_payload_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "exact delivered Z-set transcript commitment retained with the payload; storage-only segment references do not enter the public transcript (a11:1932)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:delivered-zset:v1\" || canonical(format,output_schema,result_answer_contract,canonical_encoding_version,canonical_payload_len,exact_canonical_zset_bytes)); excludes storage-only canonical_zset_segment_refs and output_payload_digest (a11:1932)"
+
+[[field]]
+slice_id = "a11"
+row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-authority-bound-header"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "inline authority, service-epoch, policy, and revocation binding retained byte-exactly with the delivery envelope; it creates no independent reachability edge (a11:1934)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a11"
 row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-output-payload-ref"
 containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
 field_tag = 0x000a
@@ -15369,6 +15455,24 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a11"
+row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-output-payload-digest"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "output_payload_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "byte-identical copy of the referenced DeliveredDeltaPayload transcript digest, retained with the envelope and never treated as a reachability edge (a11:1934)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "copy exactly DeliveredDeltaPayload.output_payload_digest = BLAKE3(\"fgdb:delivered-zset:v1\" || canonical(format,output_schema,result_answer_contract,canonical_encoding_version,canonical_payload_len,exact_canonical_zset_bytes)); the envelope never recomputes a different projection (a11:1932-1934)"
+
+[[field]]
+slice_id = "a11"
 row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-provenance"
 containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
 field_tag = 0x000c
@@ -15382,6 +15486,24 @@ role_predicate = "true"
 retention_and_cut_rule = "closed union Atomic|Coalesced; the delta's committed source provenance, retained with the envelope so coalescing stays provable and W12 emits only Meta-published Global sources (a11:1934)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a11"
+row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-internal-delivery-digest"
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+field_tag = 0x000d
+stable_name = "internal_delivery_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "internal envelope transcript commitment retained with the envelope; it authenticates authority, role, output, and full provenance without creating a reference edge (a11:1934)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(canonical every DeltaDeliveryEnvelope field except internal_delivery_digest); commits the full authority-bound header, service epoch, role, payload contract, and Atomic|Coalesced provenance (a11:1934)"
 
 [[field]]
 slice_id = "a04"
@@ -23639,6 +23761,50 @@ allowed_containing_schemas = ["LocalPreparedRootEntry"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a11"
+row_id = "a11:union:commit-marker-effect-source-6750d789f01f1394"
+union_name = "CommitMarkerEffectSource"
+containing_schema = "CommitMarker"
+union_path = "CommitMarker.effect_source"
+field_tag = 0x0003
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CommitMarker"]
+role_predicate = "true"
+version_status = "active"
+max_size_bytes = 4096
+
+[[union_arm]]
+slice_id = "a11"
+row_id = "a11:union-arm:commit-marker-effect-source-local-bfefd4b0459321ce"
+union_name = "CommitMarkerEffectSource"
+containing_schema = "CommitMarker"
+union_path = "CommitMarker.effect_source"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "9a91654c7169a5fafe5c796da51ae710600b5e21a4e79b10b32f318fe417a130"
+role_predicate = "true"
+version_status = "active"
+max_size_bytes = 4096
+
+[[union_arm]]
+slice_id = "a11"
+row_id = "a11:union-arm:commit-marker-effect-source-global-1373830f7ee9548a"
+union_name = "CommitMarkerEffectSource"
+containing_schema = "CommitMarker"
+union_path = "CommitMarker.effect_source"
+arm_tag = 0x0002
+source_arm_name = "Global"
+stable_name = "global"
+payload_kind = "inline-record"
+payload_sha256 = "44a8e21d2806516e8d1fe1095f5a6375262835d503439d75563403305b031053"
+role_predicate = "true"
+version_status = "active"
+max_size_bytes = 4096
 
 [[union]]
 slice_id = "a11"
@@ -87378,6 +87544,33 @@ resolution = "maps-to-source"
 resolved_source_keys = ["field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|nonretaining_predecessor_digest"]
 rationale = "a16:2191: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge."
 
+[[ambiguity_adjudication]]
+row_id = "a11:ambiguity-adjudication:98bfc2c6ef27ede75714946eaa38ebe9b92541fbd58e123d1e2f8a793ce2d21a"
+slice_id = "a11"
+ambiguity_source_key = "ambiguity|definition-without-structural-body|InternalBaselineDigest||21b9e5bdccf75bbd741eda28d5e4c69babc291f8f7d533e512d3216292eb06b0|1|8a71fbb3663c36e570707db375a602127d9c3671f00da205559672fa509a1509|definitional prose names a type but supplies no adjacent structural expression"
+source_locations = ["a11:1932"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["top|InternalBaselineDigest"]
+rationale = "a11:1932 defines InternalBaselineDigest as the domain-separated BLAKE3 transcript carried by DeliveredBaselinePayload.internal_baseline_digest. The durable field is digest256 with digest_class=transcript; the capitalized prose name is not a separately encoded schema."
+
+[[ambiguity_adjudication]]
+row_id = "a11:ambiguity-adjudication:d93a7697a2040a94c9e91b9234c0c9ddf0f411dd9a4f6b67e3273e9205b2be4e"
+slice_id = "a11"
+ambiguity_source_key = "ambiguity|definition-without-structural-body|PublicBaselineDigest||ac08a2a7a1e50ffe2d45b6abff8c0b4bb35099bdc438fe571d407cbe293be21c|1|efc0be4d6f6365de0c0a71d876c26c4adea64aa3a68f493fcff00a947d59569c|definitional prose names a type but supplies no adjacent structural expression"
+source_locations = ["a11:1932"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["top|PublicBaselineDigest"]
+rationale = "a11:1932 defines PublicBaselineDigest as the domain-separated BLAKE3 transcript carried by DeliveredBaselinePayload.public_baseline_digest. Wire visibility does not create a distinct wire schema: the carrier is digest256 with digest_class=transcript."
+
+[[ambiguity_adjudication]]
+row_id = "a11:ambiguity-adjudication:4a22f9a9db5d5ed1f2f62f6512dc1e2bcbeee6d916c46c48d39ef610cf35c613"
+slice_id = "a11"
+ambiguity_source_key = "ambiguity|definition-without-structural-body|PublicDeliveryDigest||4b2a0fd8c888f8b43037adfe7ab086514605976366b8ce5f83d6327dcd6b163f|1|104811d277549ada29c1e06badd494e9224bc66cd8ea652e31a76112bff0a832|definitional prose names a type but supplies no adjacent structural expression"
+source_locations = ["a11:1934"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["top|PublicDeliveryDigest"]
+rationale = "a11:1934 says PublicDeliveryDigest is separately constructed under the exact section 9.5 and Appendix D declassification contract and supplies no structural body here. It names a digest transcript value, not an independently encoded durable schema."
+
 [[field]]
 slice_id = "a18"
 row_id = "a18:field:authority-owning-restore-abandonment-tombstone-role-authority-owning-role-abandon-operation-record-ref"
@@ -89626,5 +89819,85 @@ row_id = "a12:target:field-resource-ledger-transition-role-authority-owning-role
 target_row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-authorization-decision-ref"
 slice_id = "a12"
 source_key = "field|ResourceLedgerTransition<Role:AuthorityOwningRole>|ResourceLedgerTransition<Role:AuthorityOwningRole>.authorization_decision_ref|authorization_decision_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:field-commit-marker-effect-source"
+target_row_id = "a11:field:commit-marker-effect-source"
+slice_id = "a11"
+source_key = "field|CommitMarker|CommitMarker.effect_source|effect_source"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-commit-marker-effect-source-6750d789f01f1394"
+target_row_id = "a11:union:commit-marker-effect-source-6750d789f01f1394"
+slice_id = "a11"
+source_key = "union|CommitMarker|CommitMarker.effect_source"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-arm-commit-marker-effect-source-local-bfefd4b0459321ce"
+target_row_id = "a11:union-arm:commit-marker-effect-source-local-bfefd4b0459321ce"
+slice_id = "a11"
+source_key = "arm|CommitMarker|CommitMarker.effect_source|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:union-arm-commit-marker-effect-source-global-1373830f7ee9548a"
+target_row_id = "a11:union-arm:commit-marker-effect-source-global-1373830f7ee9548a"
+slice_id = "a11"
+source_key = "arm|CommitMarker|CommitMarker.effect_source|Global"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:field-delivered-baseline-payload-internal-baseline-digest"
+target_row_id = "a11:field:delivered-baseline-payload-internal-baseline-digest"
+slice_id = "a11"
+source_key = "field|DeliveredBaselinePayload|DeliveredBaselinePayload.internal_baseline_digest|internal_baseline_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:field-delivered-baseline-payload-public-baseline-digest"
+target_row_id = "a11:field:delivered-baseline-payload-public-baseline-digest"
+slice_id = "a11"
+source_key = "field|DeliveredBaselinePayload|DeliveredBaselinePayload.public_baseline_digest|public_baseline_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:field-delivered-delta-payload-output-payload-digest"
+target_row_id = "a11:field:delivered-delta-payload-output-payload-digest"
+slice_id = "a11"
+source_key = "field|DeliveredDeltaPayload|DeliveredDeltaPayload.output_payload_digest|output_payload_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:field-delta-delivery-envelope-role-authority-owning-role-authority-bound-header"
+target_row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-authority-bound-header"
+slice_id = "a11"
+source_key = "field|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:field-delta-delivery-envelope-role-authority-owning-role-output-payload-digest"
+target_row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-output-payload-digest"
+slice_id = "a11"
+source_key = "field|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.output_payload_digest|output_payload_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a11:target:field-delta-delivery-envelope-role-authority-owning-role-internal-delivery-digest"
+target_row_id = "a11:field:delta-delivery-envelope-role-authority-owning-role-internal-delivery-digest"
+slice_id = "a11"
+source_key = "field|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>|DeltaDeliveryEnvelope<Role:AuthorityOwningRole>.internal_delivery_digest|internal_delivery_digest"
 target_kind = "field"
 definition_status = "declared"

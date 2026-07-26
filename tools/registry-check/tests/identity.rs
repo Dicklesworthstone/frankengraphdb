@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 52
+registry_epoch = 53
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 52);
+    assert_eq!(epoch, 53);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3845,6 +3845,137 @@ fn idr_delta_delivery_output_payload_ref_is_exact() {
 }
 
 #[test]
+fn idr_a11_digest_header_and_marker_source_rows_are_exact() {
+    let identity = real_identity();
+    let field = |schema: &str, name: &str| {
+        identity
+            .fields
+            .iter()
+            .find(|field| field.containing_schema == schema && field.stable_name == name)
+            .unwrap_or_else(|| panic!("missing A11 field {schema}.{name}"))
+    };
+
+    let internal_baseline = field("DeliveredBaselinePayload", "internal_baseline_digest");
+    assert_eq!(internal_baseline.field_tag, 0x000c);
+    assert_eq!(internal_baseline.exact_wire_type, "digest256");
+    assert_eq!(internal_baseline.identity_class, "inline");
+    assert_eq!(internal_baseline.reference_semantics, "none");
+    assert_eq!(internal_baseline.construction_order, 30);
+    assert_eq!(
+        internal_baseline.digest_class.as_deref(),
+        Some("transcript")
+    );
+    let internal_recipe = internal_baseline
+        .transcript_recipe
+        .as_deref()
+        .expect("internal baseline transcript recipe");
+    assert!(internal_recipe.contains("fgdb:internal-baseline:v1"));
+    assert!(internal_recipe.contains("canonical_row_segment_refs"));
+
+    let public_baseline = field("DeliveredBaselinePayload", "public_baseline_digest");
+    assert_eq!(public_baseline.field_tag, 0x000d);
+    assert_eq!(public_baseline.exact_wire_type, "digest256");
+    assert_eq!(public_baseline.identity_class, "inline");
+    assert_eq!(public_baseline.construction_order, 30);
+    assert_eq!(public_baseline.digest_class.as_deref(), Some("transcript"));
+    let public_recipe = public_baseline
+        .transcript_recipe
+        .as_deref()
+        .expect("public baseline transcript recipe");
+    assert!(public_recipe.contains("fgdb:public-baseline:v1"));
+    assert!(public_recipe.contains("derived_identity_digest"));
+    assert!(public_recipe.contains("source_coverage"));
+    assert!(public_recipe.contains("baseline_frontier"));
+
+    let delivered_delta = field("DeliveredDeltaPayload", "output_payload_digest");
+    assert_eq!(delivered_delta.field_tag, 0x0007);
+    assert_eq!(delivered_delta.identity_class, "inline");
+    assert_eq!(delivered_delta.construction_order, 30);
+    assert_eq!(delivered_delta.digest_class.as_deref(), Some("transcript"));
+    assert!(
+        delivered_delta
+            .transcript_recipe
+            .as_deref()
+            .is_some_and(|recipe| recipe.contains("fgdb:delivered-zset:v1"))
+    );
+
+    let envelope = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>";
+    let header = field(envelope, "authority_bound_header");
+    assert_eq!(header.field_tag, 0x0001);
+    assert_eq!(header.exact_wire_type, "AuthorityBoundHeader");
+    assert_eq!(header.identity_class, "inline");
+    assert_eq!(header.reference_semantics, "none");
+    assert_eq!(header.construction_order, 35);
+
+    for (name, tag) in [
+        ("output_payload_digest", 0x000b),
+        ("internal_delivery_digest", 0x000d),
+    ] {
+        let digest = field(envelope, name);
+        assert_eq!(digest.field_tag, tag);
+        assert_eq!(digest.exact_wire_type, "digest256");
+        assert_eq!(digest.identity_class, "inline");
+        assert_eq!(digest.reference_semantics, "none");
+        assert_eq!(digest.construction_order, 35);
+        assert_eq!(digest.digest_class.as_deref(), Some("transcript"));
+        assert!(
+            digest
+                .transcript_recipe
+                .as_ref()
+                .is_some_and(|recipe| !recipe.trim().is_empty())
+        );
+    }
+
+    let marker_source = field("CommitMarker", "effect_source");
+    assert_eq!(marker_source.field_tag, 0x0003);
+    assert_eq!(marker_source.exact_wire_type, "CommitMarkerEffectSource");
+    assert_eq!(marker_source.identity_class, "inline");
+    assert_eq!(marker_source.construction_order, 15);
+    let marker_union = identity
+        .ordinary_unions
+        .iter()
+        .find(|union| union.union_name == "CommitMarkerEffectSource")
+        .expect("CommitMarker effect-source union");
+    assert_eq!(marker_union.containing_schema, "CommitMarker");
+    assert_eq!(marker_union.union_path, "CommitMarker.effect_source");
+    assert_eq!(marker_union.field_tag, Some(0x0003));
+    assert_eq!(marker_union.arms.len(), 2);
+    assert_eq!(marker_union.arms[0].source_arm_name, "Local");
+    assert_eq!(marker_union.arms[0].arm_tag, 0x0001);
+    assert_eq!(
+        marker_union.arms[0].payload_sha256.as_deref(),
+        Some("9a91654c7169a5fafe5c796da51ae710600b5e21a4e79b10b32f318fe417a130")
+    );
+    assert_eq!(marker_union.arms[1].source_arm_name, "Global");
+    assert_eq!(marker_union.arms[1].arm_tag, 0x0002);
+    assert_eq!(
+        marker_union.arms[1].payload_sha256.as_deref(),
+        Some("44a8e21d2806516e8d1fe1095f5a6375262835d503439d75563403305b031053")
+    );
+
+    let capsule = field("CommitMarker", "capsule_ref");
+    assert_eq!(
+        capsule.target_schema_id.as_deref(),
+        Some("CommittedEffectCapsule")
+    );
+
+    let catalog = real_appendix_catalog();
+    for symbol in [
+        "top|InternalBaselineDigest",
+        "top|PublicBaselineDigest",
+        "top|PublicDeliveryDigest",
+    ] {
+        let adjudication = catalog
+            .ambiguity_adjudications
+            .iter()
+            .find(|row| row.resolved_source_keys.iter().any(|key| key == symbol))
+            .unwrap_or_else(|| panic!("missing A11 adjudication for {symbol}"));
+        assert_eq!(adjudication.slice_id, "a11");
+        assert_eq!(adjudication.resolution, "not-a-durable-schema");
+    }
+}
+
+#[test]
 fn idr_key_reference_quarantine_reserved_logical_shell_is_exact() {
     let identity = real_identity();
     let logical = identity
@@ -4632,6 +4763,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "TimeBoundOnlineMacaroonRootProjection"
                 | "DeliveryFrontier"
                 | "CommittedDeltaSourceRef"
+                | "CommitMarkerEffectSource"
                 | "DeltaDeliveryEnvelopeProvenance"
                 | "DeltaDeliveryEnvelopeSourceRole"
                 | "RaftMaintenanceCommand"
@@ -5048,14 +5180,34 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "sorted_destruction_operation_plans"
             )
     };
-    // A11's first ruling-free non-union field has no union name for the
-    // historical reconstruction to match, so remove it by exact owner/member.
+    // A11's source-forced non-union fields have no union name for the
+    // historical reconstruction to match, so remove them by exact owner/member.
+    // The effect_source anchor is also listed here for clarity; the union
+    // cohort removes it first through its exact wire type.
     let post_erratum_a11_field = |schema: &str, name: &str| {
-        (schema, name)
-            == (
-                "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>",
-                "output_payload_ref",
-            )
+        matches!(
+            (schema, name),
+            ("CommitMarker", "effect_source")
+                | ("DeliveredBaselinePayload", "internal_baseline_digest")
+                | ("DeliveredBaselinePayload", "public_baseline_digest")
+                | ("DeliveredDeltaPayload", "output_payload_digest")
+                | (
+                    "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>",
+                    "authority_bound_header"
+                )
+                | (
+                    "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>",
+                    "output_payload_ref"
+                )
+                | (
+                    "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>",
+                    "output_payload_digest"
+                )
+                | (
+                    "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>",
+                    "internal_delivery_digest"
+                )
+        )
     };
     // a05's single post-erratum field row (fgdb-a05-w12-role-transition-wjj2).
     let post_erratum_a05_field = |schema: &str, name: &str| {
@@ -5569,12 +5721,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a07_weak_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 330,
+        pre_erratum.ordinary_unions.len() + 331,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 307,
+        pre_erratum.fields.len() + 314,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the a07 W12 tranches"
     );

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 52
+registry_epoch = 53
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -611,6 +611,20 @@ version_status = "active"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "CommitMarker"
+field_tag = 0x0003
+stable_name = "effect_source"
+exact_wire_type = "CommitMarkerEffectSource"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "closed Local|Global source posture carried inline by the marker; Local retains the already-built CommittedEffectCapsule and Global carries only the conditional transaction input plus exact commitments (a11:1943-1949)"
+version_status = "active"
+max_size_bytes = 4096
+
+[[field]]
 containing_schema = "ConstraintStateRoot"
 field_tag = 0x0004
 stable_name = "coordinate"
@@ -684,6 +698,68 @@ version_status = "active"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "DeliveredBaselinePayload"
+field_tag = 0x000c
+stable_name = "internal_baseline_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "server-side baseline transcript commitment retained with the delivered baseline payload; it is never a separately addressable schema or reachability edge (a11:1932)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:internal-baseline:v1\" || canonical(format,baseline_id,derived_identity_digest,source_coverage,baseline_frontier,authorized_cursor_position,output_schema,result_answer_contract,canonical_encoding_version,canonical_payload_len,exact_concatenated_canonical_result_bytes)); excludes storage-only canonical_row_segment_refs plus internal_baseline_digest and public_baseline_digest (a11:1932)"
+
+[[field]]
+containing_schema = "DeliveredBaselinePayload"
+field_tag = 0x000d
+stable_name = "public_baseline_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "public baseline transcript commitment retained with the delivered baseline payload; it is a digest value, not an independently addressable schema (a11:1932)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:public-baseline:v1\" || canonical(format,baseline_id,authorized_cursor_position,output_schema,result_answer_contract,canonical_encoding_version,canonical_payload_len,exact_concatenated_canonical_result_bytes)); excludes canonical_row_segment_refs, internal_baseline_digest, public_baseline_digest, derived_identity_digest, source_coverage, and baseline_frontier (a11:1932)"
+
+[[field]]
+containing_schema = "DeliveredDeltaPayload"
+field_tag = 0x0007
+stable_name = "output_payload_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "exact delivered Z-set transcript commitment retained with the payload; storage-only segment references do not enter the public transcript (a11:1932)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:delivered-zset:v1\" || canonical(format,output_schema,result_answer_contract,canonical_encoding_version,canonical_payload_len,exact_canonical_zset_bytes)); excludes storage-only canonical_zset_segment_refs and output_payload_digest (a11:1932)"
+
+[[field]]
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "inline authority, service-epoch, policy, and revocation binding retained byte-exactly with the delivery envelope; it creates no independent reachability edge (a11:1934)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
 containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
 field_tag = 0x000a
 stable_name = "output_payload_ref"
@@ -700,6 +776,22 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "output_payload_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "byte-identical copy of the referenced DeliveredDeltaPayload transcript digest, retained with the envelope and never treated as a reachability edge (a11:1934)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "copy exactly DeliveredDeltaPayload.output_payload_digest = BLAKE3(\"fgdb:delivered-zset:v1\" || canonical(format,output_schema,result_answer_contract,canonical_encoding_version,canonical_payload_len,exact_canonical_zset_bytes)); the envelope never recomputes a different projection (a11:1932-1934)"
+
+[[field]]
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
 field_tag = 0x000c
 stable_name = "provenance"
 exact_wire_type = "DeltaDeliveryEnvelopeProvenance"
@@ -711,6 +803,22 @@ role_predicate = "true"
 retention_and_cut_rule = "closed union Atomic|Coalesced; the delta's committed source provenance, retained with the envelope so coalescing stays provable and W12 emits only Meta-published Global sources (a11:1934)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "DeltaDeliveryEnvelope<Role:AuthorityOwningRole>"
+field_tag = 0x000d
+stable_name = "internal_delivery_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "internal envelope transcript commitment retained with the envelope; it authenticates authority, role, output, and full provenance without creating a reference edge (a11:1934)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(canonical every DeltaDeliveryEnvelope field except internal_delivery_digest); commits the full authority-bound header, service epoch, role, payload contract, and Atomic|Coalesced provenance (a11:1934)"
 
 [[field]]
 containing_schema = "DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>"
@@ -7822,6 +7930,18 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "CommitMarkerEffectSource"
+containing_schema = "CommitMarker"
+union_path = "CommitMarker.effect_source"
+field_tag = 0x0003
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CommitMarker"]
+role_predicate = "true"
+version_status = "active"
+max_size_bytes = 4096
+
+[[union]]
 union_name = "CommittedDeltaSourceRef"
 containing_schema = "CommittedDeltaSourceRef"
 union_path = "CommittedDeltaSourceRef"
@@ -12459,6 +12579,32 @@ payload_sha256 = "38026412768370214be6fbcecebf74b7d61543af8f648d347ab968939bc7c9
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CommitMarkerEffectSource"
+containing_schema = "CommitMarker"
+union_path = "CommitMarker.effect_source"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "local"
+payload_kind = "inline-record"
+payload_sha256 = "9a91654c7169a5fafe5c796da51ae710600b5e21a4e79b10b32f318fe417a130"
+role_predicate = "true"
+version_status = "active"
+max_size_bytes = 4096
+
+[[union_arm]]
+union_name = "CommitMarkerEffectSource"
+containing_schema = "CommitMarker"
+union_path = "CommitMarker.effect_source"
+arm_tag = 0x0002
+source_arm_name = "Global"
+stable_name = "global"
+payload_kind = "inline-record"
+payload_sha256 = "44a8e21d2806516e8d1fe1095f5a6375262835d503439d75563403305b031053"
+role_predicate = "true"
+version_status = "active"
+max_size_bytes = 4096
 
 [[union_arm]]
 union_name = "CommittedDeltaSourceRef"

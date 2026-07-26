@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "5ff06d712eb7f125d0c92db54cc9d485eb334f5dde805ad83d3d3fa32e573e4a";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2702;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2712;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "5e554c6c1750eb030699f243b1558fcc4f55f93f36b5d969b87434cbd7df9a32";
+    "2656b1c9c2875fedb4abb8bb1371d0725e2bf50dc572cb9c538b5199ca801062";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 108;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "0d33cf96b8d18525a1719d2b20e4b7c597c823e2b966ddc8eeaba7cab1f434d7";
+    "3ce17dd6a4324bb3a95f56b6dcfb1e3375d3cfb112a092d02acce6f1dc61e010";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -60,9 +60,9 @@ pub const COMPLETION_LAYER_SCHEMA_VERSION: i64 = 1;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT: usize = 4;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 396;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 399;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "2e525b9ec6e823bd918db91004c78c91144a0f58603b891f4808e4e7abebe2f2";
+    "706a18c27983850e92fc7b7259a2e02c188968f666dc8649745e17efccbd18b3";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 409;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 404;
@@ -347,7 +347,7 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 0] = [];
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
-static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 396] = [
+static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 399] = [
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459",
         slice_id: "a01",
@@ -4567,6 +4567,33 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 396] 
             "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
         rationale: "a16:2191: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a11:ambiguity-adjudication:98bfc2c6ef27ede75714946eaa38ebe9b92541fbd58e123d1e2f8a793ce2d21a",
+        slice_id: "a11",
+        ambiguity_source_key: "ambiguity|definition-without-structural-body|InternalBaselineDigest||21b9e5bdccf75bbd741eda28d5e4c69babc291f8f7d533e512d3216292eb06b0|1|8a71fbb3663c36e570707db375a602127d9c3671f00da205559672fa509a1509|definitional prose names a type but supplies no adjacent structural expression",
+        source_locations: &["a11:1932"],
+        resolution: "not-a-durable-schema",
+        resolved_source_keys: &["top|InternalBaselineDigest"],
+        rationale: "a11:1932 defines InternalBaselineDigest as the domain-separated BLAKE3 transcript carried by DeliveredBaselinePayload.internal_baseline_digest. The durable field is digest256 with digest_class=transcript; the capitalized prose name is not a separately encoded schema.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a11:ambiguity-adjudication:d93a7697a2040a94c9e91b9234c0c9ddf0f411dd9a4f6b67e3273e9205b2be4e",
+        slice_id: "a11",
+        ambiguity_source_key: "ambiguity|definition-without-structural-body|PublicBaselineDigest||ac08a2a7a1e50ffe2d45b6abff8c0b4bb35099bdc438fe571d407cbe293be21c|1|efc0be4d6f6365de0c0a71d876c26c4adea64aa3a68f493fcff00a947d59569c|definitional prose names a type but supplies no adjacent structural expression",
+        source_locations: &["a11:1932"],
+        resolution: "not-a-durable-schema",
+        resolved_source_keys: &["top|PublicBaselineDigest"],
+        rationale: "a11:1932 defines PublicBaselineDigest as the domain-separated BLAKE3 transcript carried by DeliveredBaselinePayload.public_baseline_digest. Wire visibility does not create a distinct wire schema: the carrier is digest256 with digest_class=transcript.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a11:ambiguity-adjudication:4a22f9a9db5d5ed1f2f62f6512dc1e2bcbeee6d916c46c48d39ef610cf35c613",
+        slice_id: "a11",
+        ambiguity_source_key: "ambiguity|definition-without-structural-body|PublicDeliveryDigest||4b2a0fd8c888f8b43037adfe7ab086514605976366b8ce5f83d6327dcd6b163f|1|104811d277549ada29c1e06badd494e9224bc66cd8ea652e31a76112bff0a832|definitional prose names a type but supplies no adjacent structural expression",
+        source_locations: &["a11:1934"],
+        resolution: "not-a-durable-schema",
+        resolved_source_keys: &["top|PublicDeliveryDigest"],
+        rationale: "a11:1934 says PublicDeliveryDigest is separately constructed under the exact section 9.5 and Appendix D declassification contract and supplies no structural body here. It names a digest transcript value, not an independently encoded durable schema.",
     },
 ];
 
