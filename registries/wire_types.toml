@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 35
+registry_epoch = 36
 
 [[type]]
 wire_type_id = 0x0001
@@ -680,7 +680,7 @@ name = "ResultActivationAppliedRef"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: InlineSemantic | ProtocolActivation"
-allowed_containing_schemas = ["ResultActivationAppliedRef"]
+allowed_containing_schemas = ["ResultActivationAppliedRef", "ResultDeliveryLease"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -3266,7 +3266,7 @@ name = "BufferedResultOwner"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union BufferedResultOwner (a07)"
-allowed_containing_schemas = ["BufferedResultOwner"]
+allowed_containing_schemas = ["BufferedResultOwner", "BufferedResultManifest"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -3284,7 +3284,7 @@ name = "LocalOrderSubject"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union LocalOrderSubject (a07)"
-allowed_containing_schemas = ["LocalOrderSubject"]
+allowed_containing_schemas = ["LocalOrderSubject", "LocalOrderAttemptInput"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -3293,7 +3293,7 @@ name = "MetaOrderSubject"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union MetaOrderSubject (a07)"
-allowed_containing_schemas = ["MetaOrderSubject"]
+allowed_containing_schemas = ["MetaOrderSubject", "MetaOrderAttemptInput"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -3365,7 +3365,7 @@ name = "TxnCompletionState"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union TxnCompletionState (a07)"
-allowed_containing_schemas = ["TxnCompletionState"]
+allowed_containing_schemas = ["TxnCompletionState", "GlobalTxnOutcomeRecord"]
 max_size_bytes = 16777216
 
 [[type]]

@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 51
+registry_epoch = 52
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 51);
+    assert_eq!(epoch, 52);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -5391,6 +5391,136 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "TimeSubjectIssuanceReservation<Role>"
             )
     };
+    // The a07 W12 inline tranche postdates the erratum and must not leak into
+    // its historical assignment witness.
+    let post_erratum_a07_inline_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            (
+                "AdministrativeAbortAuthorizationRecord<Role:AuthorityOwningRole>",
+                "authority_bound_header"
+            ) | ("BufferedResultManifest", "owner")
+                | ("GlobalAttemptRegistration", "authority_bound_header")
+                | ("GlobalBeginReservationRecord", "authority_bound_header")
+                | ("GlobalBeginReservationRecord", "applied_control_ref")
+                | ("GlobalBeginReservationSpec", "authority_bound_header")
+                | ("GlobalControlCommand", "authority_bound_header")
+                | (
+                    "GlobalFinalCertificationReservation",
+                    "authority_bound_header"
+                )
+                | ("GlobalFinalCertificationReservation", "applied_control_ref")
+                | ("GlobalFinalCertificationReservation", "cancel_applied_ref")
+                | (
+                    "GlobalFinalCertificationReserveSpec",
+                    "authority_bound_header"
+                )
+                | (
+                    "GlobalTxnOutcomePreparationRecord",
+                    "authority_bound_header"
+                )
+                | ("GlobalTxnOutcomeRecord", "authority_bound_header")
+                | ("GlobalTxnOutcomeRecord", "applied_control_ref")
+                | ("GlobalTxnOutcomeRecord", "applied_abort_ref")
+                | ("GlobalTxnOutcomeRecord", "completion_state")
+                | ("GlobalTxnWorkspaceGeneration", "authority_bound_header")
+                | (
+                    "LocalFinalCertificationReservation",
+                    "authority_bound_header"
+                )
+                | ("LocalFinalCertificationReservation", "applied_control_ref")
+                | ("LocalFinalCertificationReservation", "cancel_applied_ref")
+                | (
+                    "LocalFinalCertificationReserveSpec",
+                    "authority_bound_header"
+                )
+                | ("LocalOrderAttemptInput", "subject")
+                | ("MetaOrderAttemptInput", "subject")
+                | ("ResultDeliveryLease", "authority_bound_header")
+                | ("ResultDeliveryLease", "activation_applied_ref")
+                | (
+                    "TerminalAbortAuthority<Role:AuthorityOwningRole>",
+                    "authority_bound_header"
+                )
+        )
+    };
+    // The checker-clean registered-target StrongRef rows form the second a07
+    // W12 field tranche and are likewise outside the historical namespace.
+    let post_erratum_a07_strong_field = |schema: &str, name: &str| match schema {
+        "AttemptFamilyState" => matches!(name, "registration_ref" | "outcome_ref"),
+        "AuditTicketClaimRecord" => matches!(name, "ticket_ref" | "claiming_control_ref"),
+        "BufferedResultManifest" => name == "canonical_schema_ref",
+        "GlobalBeginIdempotencyIndex" => {
+            matches!(name, "reservation_ref" | "registration_ref" | "terminal_record_ref")
+        }
+        "GlobalBeginReservationRecord" => name == "source_spec_ref",
+        "GlobalControlCommand" => matches!(
+            name,
+            "typed_payload_ref" | "order_attempt_input_ref" | "authorization_decision_ref"
+        ),
+        "GlobalFinalCertificationReservation" => {
+            matches!(name, "source_spec_ref" | "registration_ref")
+        }
+        "GlobalFinalCertificationReserveSpec" => name == "registration_ref",
+        "GlobalPrepareAdmissionSpec" => matches!(
+            name,
+            "registration_ref"
+                | "expected_workspace_generation_ref"
+                | "routing_certificate_ref"
+                | "global_authorization_decision_ref"
+                | "expected_topology_state_ref"
+        ),
+        "GlobalReadCloseSpec" => matches!(
+            name,
+            "registration_ref"
+                | "read_routing_certificate_ref"
+                | "global_read_authorization_decision_ref"
+                | "buffered_result_manifest_ref"
+                | "workspace_generation_ref"
+                | "distributed_serialization_certificate_ref"
+        ),
+        "GlobalTxnOutcomePreparationRecord" => matches!(
+            name,
+            "registration_ref"
+                | "routing_certificate_ref"
+                | "global_authorization_decision_ref"
+                | "preparation_ref"
+        ),
+        "GlobalTxnOutcomeRecord" => matches!(
+            name,
+            "registration_ref"
+                | "latest_workspace_generation_ref"
+                | "workspace_generation_ref"
+                | "global_delta_publish_command_ref"
+                | "read_close_spec_ref"
+        ),
+        "GlobalTxnWorkspaceGeneration" => matches!(
+            name,
+            "registration_ref" | "statement_registration_ref" | "topology_state_ref"
+        ),
+        "LocalFinalCertificationReservation" => {
+            matches!(name, "source_spec_ref" | "registration_ref")
+        }
+        "LocalFinalCertificationReserveSpec" => name == "registration_ref",
+        "LocalOrderAttemptInput" | "MetaOrderAttemptInput" => name == "configuration_ref",
+        "ReadParticipantRoutingCertificate" => matches!(
+            name,
+            "topology_state_ref"
+                | "workspace_generation_ref"
+                | "partition_derivation_proof_ref"
+                | "one_digest_signer_lock_ref"
+        ),
+        "ResultReleaseEvidence<Meta>" => matches!(name, "receipt_ref" | "expiry_evidence_ref"),
+        "ShardReadWitnessBasis" => name == "shard_configuration_ref",
+        "TerminalAbortAuthority<Role:AuthorityOwningRole>" => matches!(
+            name,
+            "administrative_abort_authorization_ref" | "original_operation_authorization_ref"
+        ),
+        _ => false,
+    };
+    let post_erratum_a07_weak_field = |schema: &str, name: &str| {
+        schema == "NeverRegisteredTerminalRecord" && name == "reservation_identity"
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_a21_field(&field.containing_schema)
             && !post_erratum_union(&field.exact_wire_type)
@@ -5410,6 +5540,15 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a04_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_j00a_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a07_inline_field(
+                &field.containing_schema,
+                &field.stable_name,
+            )
+            && !post_erratum_a07_strong_field(
+                &field.containing_schema,
+                &field.stable_name,
+            )
+            && !post_erratum_a07_weak_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 329,
@@ -5417,9 +5556,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 223,
+        pre_erratum.fields.len() + 302,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through j00a"
+        "the historical witness must remove every post-erratum field cohort through the a07 W12 tranches"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

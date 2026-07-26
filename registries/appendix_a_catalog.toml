@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2597
+target_count = 2676
 projection_fallback_count = 108
-target_source_assignment_sha256 = "42f1b039cad8667cf9266f94f7aeb9f98171c968cb756931a9c271e596557486"
+target_source_assignment_sha256 = "79c3ea73d98110a8ff6ea80cdfceeeba0a724039909ed52e4b84cf4a3317a97b"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 35
+registry_epoch = 36
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 51
+registry_epoch = 52
 
 [[logical_kind]]
 slice_id = "a03"
@@ -6908,7 +6908,7 @@ name = "ResultActivationAppliedRef"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: InlineSemantic | ProtocolActivation"
-allowed_containing_schemas = ["ResultActivationAppliedRef"]
+allowed_containing_schemas = ["ResultActivationAppliedRef", "ResultDeliveryLease"]
 max_size_bytes = 16777216
 
 
@@ -10091,7 +10091,7 @@ name = "BufferedResultOwner"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union BufferedResultOwner (a07)"
-allowed_containing_schemas = ["BufferedResultOwner"]
+allowed_containing_schemas = ["BufferedResultOwner", "BufferedResultManifest"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -10113,7 +10113,7 @@ name = "LocalOrderSubject"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union LocalOrderSubject (a07)"
-allowed_containing_schemas = ["LocalOrderSubject"]
+allowed_containing_schemas = ["LocalOrderSubject", "LocalOrderAttemptInput"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -10124,7 +10124,7 @@ name = "MetaOrderSubject"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union MetaOrderSubject (a07)"
-allowed_containing_schemas = ["MetaOrderSubject"]
+allowed_containing_schemas = ["MetaOrderSubject", "MetaOrderAttemptInput"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -10212,7 +10212,7 @@ name = "TxnCompletionState"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union TxnCompletionState (a07)"
-allowed_containing_schemas = ["TxnCompletionState"]
+allowed_containing_schemas = ["TxnCompletionState", "GlobalTxnOutcomeRecord"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -19151,7 +19151,7 @@ containing_schema = "ResultActivationAppliedRef"
 union_path = "ResultActivationAppliedRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ResultActivationAppliedRef"]
+allowed_containing_schemas = ["ResultActivationAppliedRef", "ResultDeliveryLease"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -34869,7 +34869,7 @@ containing_schema = "BufferedResultOwner"
 union_path = "BufferedResultOwner"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["BufferedResultOwner"]
+allowed_containing_schemas = ["BufferedResultOwner", "BufferedResultManifest"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -35084,7 +35084,7 @@ containing_schema = "LocalOrderSubject"
 union_path = "LocalOrderSubject"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["LocalOrderSubject"]
+allowed_containing_schemas = ["LocalOrderSubject", "LocalOrderAttemptInput"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -35127,7 +35127,7 @@ containing_schema = "MetaOrderSubject"
 union_path = "MetaOrderSubject"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["MetaOrderSubject"]
+allowed_containing_schemas = ["MetaOrderSubject", "MetaOrderAttemptInput"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -35676,7 +35676,7 @@ containing_schema = "TxnCompletionState"
 union_path = "TxnCompletionState"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["TxnCompletionState"]
+allowed_containing_schemas = ["TxnCompletionState", "GlobalTxnOutcomeRecord"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -55444,6 +55444,1324 @@ source_key = "top|WorkspaceReleaseEvidenceRef"
 source_kind = "confirmed"
 identity_class = "wire"
 source_locations = ["a07:1762"]
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:administrative-abort-authorization-record-role-authority-owning-role-authority-bound-header"
+containing_schema = "AdministrativeAbortAuthorizationRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in AdministrativeAbortAuthorizationRecord; retained with the containing object and creates no reachability edge (a07:1744)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:buffered-result-manifest-owner"
+containing_schema = "BufferedResultManifest"
+field_tag = 0x0001
+stable_name = "owner"
+exact_wire_type = "BufferedResultOwner"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline BufferedResultOwner embedded by value in BufferedResultManifest; retained with the containing object and creates no reachability edge (a07:1728)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-attempt-registration-authority-bound-header"
+containing_schema = "GlobalAttemptRegistration"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalAttemptRegistration; retained with the containing object and creates no reachability edge (a07:1718)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-begin-reservation-record-authority-bound-header"
+containing_schema = "GlobalBeginReservationRecord"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalBeginReservationRecord; retained with the containing object and creates no reachability edge (a07:1710)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-begin-reservation-record-applied-control-ref"
+containing_schema = "GlobalBeginReservationRecord"
+field_tag = 0x0003
+stable_name = "applied_control_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in GlobalBeginReservationRecord; retained with the containing object and creates no reachability edge (a07:1710)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-begin-reservation-spec-authority-bound-header"
+containing_schema = "GlobalBeginReservationSpec"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalBeginReservationSpec; retained with the containing object and creates no reachability edge (a07:1710)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-control-command-authority-bound-header"
+containing_schema = "GlobalControlCommand"
+field_tag = 0x0002
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalControlCommand; retained with the containing object and creates no reachability edge (a07:1766)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-final-certification-reservation-authority-bound-header"
+containing_schema = "GlobalFinalCertificationReservation"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalFinalCertificationReservation; retained with the containing object and creates no reachability edge (a07:1750)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-final-certification-reservation-applied-control-ref"
+containing_schema = "GlobalFinalCertificationReservation"
+field_tag = 0x000e
+stable_name = "applied_control_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in GlobalFinalCertificationReservation; retained with the containing object and creates no reachability edge (a07:1750)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-final-certification-reservation-cancel-applied-ref"
+containing_schema = "GlobalFinalCertificationReservation"
+field_tag = 0x0010
+stable_name = "cancel_applied_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in GlobalFinalCertificationReservation; retained with the containing object and creates no reachability edge (a07:1750)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-final-certification-reserve-spec-authority-bound-header"
+containing_schema = "GlobalFinalCertificationReserveSpec"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalFinalCertificationReserveSpec; retained with the containing object and creates no reachability edge (a07:1748)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-preparation-record-authority-bound-header"
+containing_schema = "GlobalTxnOutcomePreparationRecord"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalTxnOutcomePreparationRecord; retained with the containing object and creates no reachability edge (a07:1780)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-record-authority-bound-header"
+containing_schema = "GlobalTxnOutcomeRecord"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalTxnOutcomeRecord; retained with the containing object and creates no reachability edge (a07:1782)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-record-applied-control-ref"
+containing_schema = "GlobalTxnOutcomeRecord"
+field_tag = 0x0008
+stable_name = "applied_control_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in GlobalTxnOutcomeRecord; retained with the containing object and creates no reachability edge (a07:1782)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-record-applied-abort-ref"
+containing_schema = "GlobalTxnOutcomeRecord"
+field_tag = 0x0028
+stable_name = "applied_abort_ref"
+exact_wire_type = "AppliedAbortRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedAbortRef embedded by value in GlobalTxnOutcomeRecord; retained with the containing object and creates no reachability edge (a07:1782)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-record-completion-state"
+containing_schema = "GlobalTxnOutcomeRecord"
+field_tag = 0x0036
+stable_name = "completion_state"
+exact_wire_type = "TxnCompletionState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline TxnCompletionState embedded by value in GlobalTxnOutcomeRecord; retained with the containing object and creates no reachability edge (a07:1782)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-workspace-generation-authority-bound-header"
+containing_schema = "GlobalTxnWorkspaceGeneration"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalTxnWorkspaceGeneration; retained with the containing object and creates no reachability edge (a07:1720)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:local-final-certification-reservation-authority-bound-header"
+containing_schema = "LocalFinalCertificationReservation"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in LocalFinalCertificationReservation; retained with the containing object and creates no reachability edge (a07:1750)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:local-final-certification-reservation-applied-control-ref"
+containing_schema = "LocalFinalCertificationReservation"
+field_tag = 0x000e
+stable_name = "applied_control_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in LocalFinalCertificationReservation; retained with the containing object and creates no reachability edge (a07:1750)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:local-final-certification-reservation-cancel-applied-ref"
+containing_schema = "LocalFinalCertificationReservation"
+field_tag = 0x0010
+stable_name = "cancel_applied_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in LocalFinalCertificationReservation; retained with the containing object and creates no reachability edge (a07:1750)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:local-final-certification-reserve-spec-authority-bound-header"
+containing_schema = "LocalFinalCertificationReserveSpec"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in LocalFinalCertificationReserveSpec; retained with the containing object and creates no reachability edge (a07:1748)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:local-order-attempt-input-subject"
+containing_schema = "LocalOrderAttemptInput"
+field_tag = 0x0002
+stable_name = "subject"
+exact_wire_type = "LocalOrderSubject"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline LocalOrderSubject embedded by value in LocalOrderAttemptInput; retained with the containing object and creates no reachability edge (a07:1758)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:meta-order-attempt-input-subject"
+containing_schema = "MetaOrderAttemptInput"
+field_tag = 0x0002
+stable_name = "subject"
+exact_wire_type = "MetaOrderSubject"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline MetaOrderSubject embedded by value in MetaOrderAttemptInput; retained with the containing object and creates no reachability edge (a07:1758)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:result-delivery-lease-authority-bound-header"
+containing_schema = "ResultDeliveryLease"
+field_tag = 0x0008
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in ResultDeliveryLease; retained with the containing object and creates no reachability edge (a07:1730)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:result-delivery-lease-activation-applied-ref"
+containing_schema = "ResultDeliveryLease"
+field_tag = 0x0010
+stable_name = "activation_applied_ref"
+exact_wire_type = "ResultActivationAppliedRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline ResultActivationAppliedRef embedded by value in ResultDeliveryLease; retained with the containing object and creates no reachability edge (a07:1730)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:terminal-abort-authority-role-authority-owning-role-authority-bound-header"
+containing_schema = "TerminalAbortAuthority<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in TerminalAbortAuthority; retained with the containing object and creates no reachability edge (a07:1744)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:attempt-family-state-registration-ref"
+containing_schema = "AttemptFamilyState"
+field_tag = 0x0004
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this AttemptFamilyState names; retained while the referrer is retained, and the acyclic order 20 <= 60 keeps the reference backward-only (a07:1716)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:attempt-family-state-outcome-ref"
+containing_schema = "AttemptFamilyState"
+field_tag = 0x0005
+stable_name = "outcome_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnOutcomeRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnOutcomeRecord this AttemptFamilyState names; retained while the referrer is retained, and the acyclic order 60 <= 60 keeps the reference backward-only (a07:1716)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:audit-ticket-claim-record-ticket-ref"
+containing_schema = "AuditTicketClaimRecord"
+field_tag = 0x0001
+stable_name = "ticket_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTicket"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTicket this AuditTicketClaimRecord names; retained while the referrer is retained, and the acyclic order 40 <= 40 keeps the reference backward-only (a07:1706)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:audit-ticket-claim-record-claiming-control-ref"
+containing_schema = "AuditTicketClaimRecord"
+field_tag = 0x0004
+stable_name = "claiming_control_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlCommand"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlCommand this AuditTicketClaimRecord names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a07:1706)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:buffered-result-manifest-canonical-schema-ref"
+containing_schema = "BufferedResultManifest"
+field_tag = 0x0002
+stable_name = "canonical_schema_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ResultSchema"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ResultSchema this BufferedResultManifest names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1728)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-begin-idempotency-index-reservation-ref"
+containing_schema = "GlobalBeginIdempotencyIndex"
+field_tag = 0x0001
+stable_name = "reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalBeginReservationRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalBeginReservationRecord this GlobalBeginIdempotencyIndex names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a07:1710)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-begin-idempotency-index-registration-ref"
+containing_schema = "GlobalBeginIdempotencyIndex"
+field_tag = 0x0003
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalBeginIdempotencyIndex names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a07:1710)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-begin-idempotency-index-terminal-record-ref"
+containing_schema = "GlobalBeginIdempotencyIndex"
+field_tag = 0x0009
+stable_name = "terminal_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NeverRegisteredTerminalRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the NeverRegisteredTerminalRecord this GlobalBeginIdempotencyIndex names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a07:1710)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-begin-reservation-record-source-spec-ref"
+containing_schema = "GlobalBeginReservationRecord"
+field_tag = 0x0002
+stable_name = "source_spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalBeginReservationSpec"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalBeginReservationSpec this GlobalBeginReservationRecord names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1710)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-control-command-typed-payload-ref"
+containing_schema = "GlobalControlCommand"
+field_tag = 0x0004
+stable_name = "typed_payload_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalSequenceNeutralSpec"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalSequenceNeutralSpec this GlobalControlCommand names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1766)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-control-command-order-attempt-input-ref"
+containing_schema = "GlobalControlCommand"
+field_tag = 0x0006
+stable_name = "order_attempt_input_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "MetaOrderAttemptInput"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the MetaOrderAttemptInput this GlobalControlCommand names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1766)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-control-command-authorization-decision-ref"
+containing_schema = "GlobalControlCommand"
+field_tag = 0x0008
+stable_name = "authorization_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuthorizationDecisionRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuthorizationDecisionRecord<Meta> this GlobalControlCommand names; retained while the referrer is retained, and the acyclic order 10 <= 30 keeps the reference backward-only (a07:1766)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-final-certification-reservation-source-spec-ref"
+containing_schema = "GlobalFinalCertificationReservation"
+field_tag = 0x0002
+stable_name = "source_spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalFinalCertificationReserveSpec"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalFinalCertificationReserveSpec this GlobalFinalCertificationReservation names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a07:1750)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-final-certification-reservation-registration-ref"
+containing_schema = "GlobalFinalCertificationReservation"
+field_tag = 0x0003
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalFinalCertificationReservation names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1750)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-final-certification-reserve-spec-registration-ref"
+containing_schema = "GlobalFinalCertificationReserveSpec"
+field_tag = 0x0002
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalFinalCertificationReserveSpec names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1748)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-prepare-admission-spec-registration-ref"
+containing_schema = "GlobalPrepareAdmissionSpec"
+field_tag = 0x0001
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalPrepareAdmissionSpec names; retained while the referrer is retained, and the acyclic order 20 <= 60 keeps the reference backward-only (a07:1740)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-prepare-admission-spec-expected-workspace-generation-ref"
+containing_schema = "GlobalPrepareAdmissionSpec"
+field_tag = 0x0007
+stable_name = "expected_workspace_generation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnWorkspaceGeneration"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnWorkspaceGeneration this GlobalPrepareAdmissionSpec names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a07:1740)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-prepare-admission-spec-routing-certificate-ref"
+containing_schema = "GlobalPrepareAdmissionSpec"
+field_tag = 0x000a
+stable_name = "routing_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this GlobalPrepareAdmissionSpec names; retained while the referrer is retained, and the acyclic order 40 <= 60 keeps the reference backward-only (a07:1740)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-prepare-admission-spec-global-authorization-decision-ref"
+containing_schema = "GlobalPrepareAdmissionSpec"
+field_tag = 0x000f
+stable_name = "global_authorization_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAuthorizationDecisionRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAuthorizationDecisionRecord this GlobalPrepareAdmissionSpec names; retained while the referrer is retained, and the acyclic order 40 <= 60 keeps the reference backward-only (a07:1740)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-prepare-admission-spec-expected-topology-state-ref"
+containing_schema = "GlobalPrepareAdmissionSpec"
+field_tag = 0x0017
+stable_name = "expected_topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this GlobalPrepareAdmissionSpec names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a07:1740)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-read-close-spec-registration-ref"
+containing_schema = "GlobalReadCloseSpec"
+field_tag = 0x0001
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalReadCloseSpec names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a07:1766)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-read-close-spec-read-routing-certificate-ref"
+containing_schema = "GlobalReadCloseSpec"
+field_tag = 0x0004
+stable_name = "read_routing_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReadParticipantRoutingCertificate"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReadParticipantRoutingCertificate this GlobalReadCloseSpec names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a07:1766)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-read-close-spec-global-read-authorization-decision-ref"
+containing_schema = "GlobalReadCloseSpec"
+field_tag = 0x0005
+stable_name = "global_read_authorization_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalReadAuthorizationDecisionRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalReadAuthorizationDecisionRecord this GlobalReadCloseSpec names; retained while the referrer is retained, and the acyclic order 20 <= 50 keeps the reference backward-only (a07:1766)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-read-close-spec-buffered-result-manifest-ref"
+containing_schema = "GlobalReadCloseSpec"
+field_tag = 0x0006
+stable_name = "buffered_result_manifest_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BufferedResultManifest"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BufferedResultManifest this GlobalReadCloseSpec names; retained while the referrer is retained, and the acyclic order 30 <= 50 keeps the reference backward-only (a07:1766)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-read-close-spec-workspace-generation-ref"
+containing_schema = "GlobalReadCloseSpec"
+field_tag = 0x000e
+stable_name = "workspace_generation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnWorkspaceGeneration"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnWorkspaceGeneration this GlobalReadCloseSpec names; retained while the referrer is retained, and the acyclic order 30 <= 50 keeps the reference backward-only (a07:1766)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-read-close-spec-distributed-serialization-certificate-ref"
+containing_schema = "GlobalReadCloseSpec"
+field_tag = 0x0013
+stable_name = "distributed_serialization_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DistributedSerializationCertificate"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the DistributedSerializationCertificate this GlobalReadCloseSpec names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a07:1766)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-preparation-record-registration-ref"
+containing_schema = "GlobalTxnOutcomePreparationRecord"
+field_tag = 0x0006
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalTxnOutcomePreparationRecord names; retained while the referrer is retained, and the acyclic order 20 <= 60 keeps the reference backward-only (a07:1780)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-preparation-record-routing-certificate-ref"
+containing_schema = "GlobalTxnOutcomePreparationRecord"
+field_tag = 0x0009
+stable_name = "routing_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this GlobalTxnOutcomePreparationRecord names; retained while the referrer is retained, and the acyclic order 40 <= 60 keeps the reference backward-only (a07:1780)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-preparation-record-global-authorization-decision-ref"
+containing_schema = "GlobalTxnOutcomePreparationRecord"
+field_tag = 0x000a
+stable_name = "global_authorization_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAuthorizationDecisionRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAuthorizationDecisionRecord this GlobalTxnOutcomePreparationRecord names; retained while the referrer is retained, and the acyclic order 40 <= 60 keeps the reference backward-only (a07:1780)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-preparation-record-preparation-ref"
+containing_schema = "GlobalTxnOutcomePreparationRecord"
+field_tag = 0x0013
+stable_name = "preparation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalWriteResultPreparation"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalWriteResultPreparation this GlobalTxnOutcomePreparationRecord names; retained while the referrer is retained, and the acyclic order 25 <= 60 keeps the reference backward-only (a07:1780)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-record-registration-ref"
+containing_schema = "GlobalTxnOutcomeRecord"
+field_tag = 0x0007
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalTxnOutcomeRecord names; retained while the referrer is retained, and the acyclic order 20 <= 60 keeps the reference backward-only (a07:1782)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-record-latest-workspace-generation-ref"
+containing_schema = "GlobalTxnOutcomeRecord"
+field_tag = 0x000b
+stable_name = "latest_workspace_generation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnWorkspaceGeneration"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnWorkspaceGeneration this GlobalTxnOutcomeRecord names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a07:1782)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-record-workspace-generation-ref"
+containing_schema = "GlobalTxnOutcomeRecord"
+field_tag = 0x0014
+stable_name = "workspace_generation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnWorkspaceGeneration"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnWorkspaceGeneration this GlobalTxnOutcomeRecord names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a07:1782)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-record-global-delta-publish-command-ref"
+containing_schema = "GlobalTxnOutcomeRecord"
+field_tag = 0x0023
+stable_name = "global_delta_publish_command_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlCommand"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlCommand this GlobalTxnOutcomeRecord names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a07:1782)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-record-read-close-spec-ref"
+containing_schema = "GlobalTxnOutcomeRecord"
+field_tag = 0x002a
+stable_name = "read_close_spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalReadCloseSpec"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalReadCloseSpec this GlobalTxnOutcomeRecord names; retained while the referrer is retained, and the acyclic order 50 <= 60 keeps the reference backward-only (a07:1782)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-workspace-generation-registration-ref"
+containing_schema = "GlobalTxnWorkspaceGeneration"
+field_tag = 0x0002
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalTxnWorkspaceGeneration names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1720)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-workspace-generation-statement-registration-ref"
+containing_schema = "GlobalTxnWorkspaceGeneration"
+field_tag = 0x0008
+stable_name = "statement_registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStatementRegistration"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalStatementRegistration this GlobalTxnWorkspaceGeneration names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1720)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-workspace-generation-topology-state-ref"
+containing_schema = "GlobalTxnWorkspaceGeneration"
+field_tag = 0x000f
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this GlobalTxnWorkspaceGeneration names; retained while the referrer is retained, and the acyclic order 30 <= 30 keeps the reference backward-only (a07:1720)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:local-final-certification-reservation-source-spec-ref"
+containing_schema = "LocalFinalCertificationReservation"
+field_tag = 0x0002
+stable_name = "source_spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalFinalCertificationReserveSpec"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the LocalFinalCertificationReserveSpec this LocalFinalCertificationReservation names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1750)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:local-final-certification-reservation-registration-ref"
+containing_schema = "LocalFinalCertificationReservation"
+field_tag = 0x0003
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalAttemptRegistration"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the LocalAttemptRegistration this LocalFinalCertificationReservation names; retained while the referrer is retained, and the acyclic order 15 <= 30 keeps the reference backward-only (a07:1750)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:local-final-certification-reserve-spec-registration-ref"
+containing_schema = "LocalFinalCertificationReserveSpec"
+field_tag = 0x0002
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalAttemptRegistration"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the LocalAttemptRegistration this LocalFinalCertificationReserveSpec names; retained while the referrer is retained, and the acyclic order 15 <= 20 keeps the reference backward-only (a07:1748)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:local-order-attempt-input-configuration-ref"
+containing_schema = "LocalOrderAttemptInput"
+field_tag = 0x0008
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this LocalOrderAttemptInput names; retained while the referrer is retained, and the acyclic order 5 <= 20 keeps the reference backward-only (a07:1758)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:meta-order-attempt-input-configuration-ref"
+containing_schema = "MetaOrderAttemptInput"
+field_tag = 0x0008
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this MetaOrderAttemptInput names; retained while the referrer is retained, and the acyclic order 5 <= 20 keeps the reference backward-only (a07:1758)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:read-participant-routing-certificate-topology-state-ref"
+containing_schema = "ReadParticipantRoutingCertificate"
+field_tag = 0x0002
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this ReadParticipantRoutingCertificate names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a07:1724)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:read-participant-routing-certificate-workspace-generation-ref"
+containing_schema = "ReadParticipantRoutingCertificate"
+field_tag = 0x0003
+stable_name = "workspace_generation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnWorkspaceGeneration"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnWorkspaceGeneration this ReadParticipantRoutingCertificate names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a07:1724)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:read-participant-routing-certificate-partition-derivation-proof-ref"
+containing_schema = "ReadParticipantRoutingCertificate"
+field_tag = 0x0007
+stable_name = "partition_derivation_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingDerivationProof"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingDerivationProof this ReadParticipantRoutingCertificate names; retained while the referrer is retained, and the acyclic order 40 <= 40 keeps the reference backward-only (a07:1724)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:read-participant-routing-certificate-one-digest-signer-lock-ref"
+containing_schema = "ReadParticipantRoutingCertificate"
+field_tag = 0x0010
+stable_name = "one_digest_signer_lock_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateSignerLock"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the CertificateSignerLock this ReadParticipantRoutingCertificate names; retained while the referrer is retained, and the acyclic order 12 <= 40 keeps the reference backward-only (a07:1724)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:result-release-evidence-meta-receipt-ref"
+containing_schema = "ResultReleaseEvidence<Meta>"
+field_tag = 0x0001
+stable_name = "receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuthenticatedClientResultReleaseReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuthenticatedClientResultReleaseReceipt<Meta> this ResultReleaseEvidence names; retained while the referrer is retained, and the acyclic order 26 <= 30 keeps the reference backward-only (a07:1734)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:result-release-evidence-meta-expiry-evidence-ref"
+containing_schema = "ResultReleaseEvidence<Meta>"
+field_tag = 0x0002
+stable_name = "expiry_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DeliveryLeaseExpiryEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the DeliveryLeaseExpiryEvidence this ResultReleaseEvidence names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a07:1734)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:shard-read-witness-basis-shard-configuration-ref"
+containing_schema = "ShardReadWitnessBasis"
+field_tag = 0x0004
+stable_name = "shard_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this ShardReadWitnessBasis names; retained while the referrer is retained, and the acyclic order 5 <= 20 keeps the reference backward-only (a07:1722)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:terminal-abort-authority-role-authority-owning-role-original-operation-authorization-ref"
+containing_schema = "TerminalAbortAuthority<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "original_operation_authorization_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuthorizationDecisionRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuthorizationDecisionRecord<Role> this TerminalAbortAuthority names; retained while the referrer is retained, and the acyclic order 10 <= 30 keeps the reference backward-only (a07:1744)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:terminal-abort-authority-role-authority-owning-role-administrative-abort-authorization-ref"
+containing_schema = "TerminalAbortAuthority<Role:AuthorityOwningRole>"
+field_tag = 0x0010
+stable_name = "administrative_abort_authorization_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AdministrativeAbortAuthorizationRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AdministrativeAbortAuthorizationRecord<Role> this TerminalAbortAuthority names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1744)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:never-registered-terminal-record-reservation-identity"
+containing_schema = "NeverRegisteredTerminalRecord"
+field_tag = 0x0001
+stable_name = "reservation_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "weak identity of the originating reservation; comparison-only and never a reachability edge (a07:1714)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
 
 [[target]]
 row_id = "a01:target:bootstrap-frame-root-slot"
@@ -87101,4 +88419,636 @@ target_row_id = "a12:wire-type:resource-ledger-basis"
 slice_id = "a12"
 source_key = "top|ResourceLedgerBasis"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-administrative-abort-authorization-record-role-authority-owning-role-authority-bound-header"
+target_row_id = "a07:field:administrative-abort-authorization-record-role-authority-owning-role-authority-bound-header"
+slice_id = "a07"
+source_key = "field|AdministrativeAbortAuthorizationRecord<Role:AuthorityOwningRole>|AdministrativeAbortAuthorizationRecord<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-buffered-result-manifest-owner"
+target_row_id = "a07:field:buffered-result-manifest-owner"
+slice_id = "a07"
+source_key = "field|BufferedResultManifest|BufferedResultManifest.owner|owner"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-attempt-registration-authority-bound-header"
+target_row_id = "a07:field:global-attempt-registration-authority-bound-header"
+slice_id = "a07"
+source_key = "field|GlobalAttemptRegistration|GlobalAttemptRegistration.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-begin-reservation-record-authority-bound-header"
+target_row_id = "a07:field:global-begin-reservation-record-authority-bound-header"
+slice_id = "a07"
+source_key = "field|GlobalBeginReservationRecord|GlobalBeginReservationRecord.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-begin-reservation-record-applied-control-ref"
+target_row_id = "a07:field:global-begin-reservation-record-applied-control-ref"
+slice_id = "a07"
+source_key = "field|GlobalBeginReservationRecord|GlobalBeginReservationRecord.applied_control_ref|applied_control_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-begin-reservation-spec-authority-bound-header"
+target_row_id = "a07:field:global-begin-reservation-spec-authority-bound-header"
+slice_id = "a07"
+source_key = "field|GlobalBeginReservationSpec|GlobalBeginReservationSpec.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-control-command-authority-bound-header"
+target_row_id = "a07:field:global-control-command-authority-bound-header"
+slice_id = "a07"
+source_key = "field|GlobalControlCommand|GlobalControlCommand.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-final-certification-reservation-authority-bound-header"
+target_row_id = "a07:field:global-final-certification-reservation-authority-bound-header"
+slice_id = "a07"
+source_key = "field|GlobalFinalCertificationReservation|GlobalFinalCertificationReservation.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-final-certification-reservation-applied-control-ref"
+target_row_id = "a07:field:global-final-certification-reservation-applied-control-ref"
+slice_id = "a07"
+source_key = "field|GlobalFinalCertificationReservation|GlobalFinalCertificationReservation.applied_control_ref|applied_control_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-final-certification-reservation-cancel-applied-ref"
+target_row_id = "a07:field:global-final-certification-reservation-cancel-applied-ref"
+slice_id = "a07"
+source_key = "field|GlobalFinalCertificationReservation|GlobalFinalCertificationReservation.state.CancelledBeforeSignature.cancel_applied_ref|cancel_applied_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-final-certification-reserve-spec-authority-bound-header"
+target_row_id = "a07:field:global-final-certification-reserve-spec-authority-bound-header"
+slice_id = "a07"
+source_key = "field|GlobalFinalCertificationReserveSpec|GlobalFinalCertificationReserveSpec.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-preparation-record-authority-bound-header"
+target_row_id = "a07:field:global-txn-outcome-preparation-record-authority-bound-header"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-record-authority-bound-header"
+target_row_id = "a07:field:global-txn-outcome-record-authority-bound-header"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomeRecord|GlobalTxnOutcomeRecord.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-record-applied-control-ref"
+target_row_id = "a07:field:global-txn-outcome-record-applied-control-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomeRecord|GlobalTxnOutcomeRecord.state.Registered.applied_control_ref|applied_control_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-record-applied-abort-ref"
+target_row_id = "a07:field:global-txn-outcome-record-applied-abort-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomeRecord|GlobalTxnOutcomeRecord.state.Aborted.applied_abort_ref|applied_abort_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-record-completion-state"
+target_row_id = "a07:field:global-txn-outcome-record-completion-state"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomeRecord|GlobalTxnOutcomeRecord.completion_state|completion_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-workspace-generation-authority-bound-header"
+target_row_id = "a07:field:global-txn-workspace-generation-authority-bound-header"
+slice_id = "a07"
+source_key = "field|GlobalTxnWorkspaceGeneration|GlobalTxnWorkspaceGeneration.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-local-final-certification-reservation-authority-bound-header"
+target_row_id = "a07:field:local-final-certification-reservation-authority-bound-header"
+slice_id = "a07"
+source_key = "field|LocalFinalCertificationReservation|LocalFinalCertificationReservation.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-local-final-certification-reservation-applied-control-ref"
+target_row_id = "a07:field:local-final-certification-reservation-applied-control-ref"
+slice_id = "a07"
+source_key = "field|LocalFinalCertificationReservation|LocalFinalCertificationReservation.applied_control_ref|applied_control_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-local-final-certification-reservation-cancel-applied-ref"
+target_row_id = "a07:field:local-final-certification-reservation-cancel-applied-ref"
+slice_id = "a07"
+source_key = "field|LocalFinalCertificationReservation|LocalFinalCertificationReservation.state.CancelledBeforeSignature.cancel_applied_ref|cancel_applied_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-local-final-certification-reserve-spec-authority-bound-header"
+target_row_id = "a07:field:local-final-certification-reserve-spec-authority-bound-header"
+slice_id = "a07"
+source_key = "field|LocalFinalCertificationReserveSpec|LocalFinalCertificationReserveSpec.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-local-order-attempt-input-subject"
+target_row_id = "a07:field:local-order-attempt-input-subject"
+slice_id = "a07"
+source_key = "field|LocalOrderAttemptInput|LocalOrderAttemptInput.subject|subject"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-meta-order-attempt-input-subject"
+target_row_id = "a07:field:meta-order-attempt-input-subject"
+slice_id = "a07"
+source_key = "field|MetaOrderAttemptInput|MetaOrderAttemptInput.subject|subject"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-result-delivery-lease-authority-bound-header"
+target_row_id = "a07:field:result-delivery-lease-authority-bound-header"
+slice_id = "a07"
+source_key = "field|ResultDeliveryLease|ResultDeliveryLease.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-result-delivery-lease-activation-applied-ref"
+target_row_id = "a07:field:result-delivery-lease-activation-applied-ref"
+slice_id = "a07"
+source_key = "field|ResultDeliveryLease|ResultDeliveryLease.activation_applied_ref|activation_applied_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-terminal-abort-authority-role-authority-owning-role-authority-bound-header"
+target_row_id = "a07:field:terminal-abort-authority-role-authority-owning-role-authority-bound-header"
+slice_id = "a07"
+source_key = "field|TerminalAbortAuthority<Role:AuthorityOwningRole>|TerminalAbortAuthority<Role:AuthorityOwningRole>.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-attempt-family-state-registration-ref"
+target_row_id = "a07:field:attempt-family-state-registration-ref"
+slice_id = "a07"
+source_key = "field|AttemptFamilyState|AttemptFamilyState.latest_state.Active.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-attempt-family-state-outcome-ref"
+target_row_id = "a07:field:attempt-family-state-outcome-ref"
+slice_id = "a07"
+source_key = "field|AttemptFamilyState|AttemptFamilyState.latest_state.PrepareAdmitted.outcome_ref|outcome_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-audit-ticket-claim-record-ticket-ref"
+target_row_id = "a07:field:audit-ticket-claim-record-ticket-ref"
+slice_id = "a07"
+source_key = "field|AuditTicketClaimRecord|AuditTicketClaimRecord.ticket_ref|ticket_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-audit-ticket-claim-record-claiming-control-ref"
+target_row_id = "a07:field:audit-ticket-claim-record-claiming-control-ref"
+slice_id = "a07"
+source_key = "field|AuditTicketClaimRecord|AuditTicketClaimRecord.claiming_control_ref|claiming_control_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-buffered-result-manifest-canonical-schema-ref"
+target_row_id = "a07:field:buffered-result-manifest-canonical-schema-ref"
+slice_id = "a07"
+source_key = "field|BufferedResultManifest|BufferedResultManifest.canonical_schema_ref|canonical_schema_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-begin-idempotency-index-reservation-ref"
+target_row_id = "a07:field:global-begin-idempotency-index-reservation-ref"
+slice_id = "a07"
+source_key = "field|GlobalBeginIdempotencyIndex|GlobalBeginIdempotencyIndex.Reserved.reservation_ref|reservation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-begin-idempotency-index-registration-ref"
+target_row_id = "a07:field:global-begin-idempotency-index-registration-ref"
+slice_id = "a07"
+source_key = "field|GlobalBeginIdempotencyIndex|GlobalBeginIdempotencyIndex.BoundDetailed.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-begin-idempotency-index-terminal-record-ref"
+target_row_id = "a07:field:global-begin-idempotency-index-terminal-record-ref"
+slice_id = "a07"
+source_key = "field|GlobalBeginIdempotencyIndex|GlobalBeginIdempotencyIndex.NeverRegisteredDetailed.terminal_record_ref|terminal_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-begin-reservation-record-source-spec-ref"
+target_row_id = "a07:field:global-begin-reservation-record-source-spec-ref"
+slice_id = "a07"
+source_key = "field|GlobalBeginReservationRecord|GlobalBeginReservationRecord.source_spec_ref|source_spec_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-control-command-typed-payload-ref"
+target_row_id = "a07:field:global-control-command-typed-payload-ref"
+slice_id = "a07"
+source_key = "field|GlobalControlCommand|GlobalControlCommand.typed_payload_ref|typed_payload_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-control-command-order-attempt-input-ref"
+target_row_id = "a07:field:global-control-command-order-attempt-input-ref"
+slice_id = "a07"
+source_key = "field|GlobalControlCommand|GlobalControlCommand.order_attempt_input_ref|order_attempt_input_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-control-command-authorization-decision-ref"
+target_row_id = "a07:field:global-control-command-authorization-decision-ref"
+slice_id = "a07"
+source_key = "field|GlobalControlCommand|GlobalControlCommand.authorization_decision_ref|authorization_decision_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-final-certification-reservation-source-spec-ref"
+target_row_id = "a07:field:global-final-certification-reservation-source-spec-ref"
+slice_id = "a07"
+source_key = "field|GlobalFinalCertificationReservation|GlobalFinalCertificationReservation.source_spec_ref|source_spec_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-final-certification-reservation-registration-ref"
+target_row_id = "a07:field:global-final-certification-reservation-registration-ref"
+slice_id = "a07"
+source_key = "field|GlobalFinalCertificationReservation|GlobalFinalCertificationReservation.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-final-certification-reserve-spec-registration-ref"
+target_row_id = "a07:field:global-final-certification-reserve-spec-registration-ref"
+slice_id = "a07"
+source_key = "field|GlobalFinalCertificationReserveSpec|GlobalFinalCertificationReserveSpec.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-prepare-admission-spec-registration-ref"
+target_row_id = "a07:field:global-prepare-admission-spec-registration-ref"
+slice_id = "a07"
+source_key = "field|GlobalPrepareAdmissionSpec|GlobalPrepareAdmissionSpec.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-prepare-admission-spec-expected-workspace-generation-ref"
+target_row_id = "a07:field:global-prepare-admission-spec-expected-workspace-generation-ref"
+slice_id = "a07"
+source_key = "field|GlobalPrepareAdmissionSpec|GlobalPrepareAdmissionSpec.expected_workspace_generation_ref|expected_workspace_generation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-prepare-admission-spec-routing-certificate-ref"
+target_row_id = "a07:field:global-prepare-admission-spec-routing-certificate-ref"
+slice_id = "a07"
+source_key = "field|GlobalPrepareAdmissionSpec|GlobalPrepareAdmissionSpec.routing_certificate_ref|routing_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-prepare-admission-spec-global-authorization-decision-ref"
+target_row_id = "a07:field:global-prepare-admission-spec-global-authorization-decision-ref"
+slice_id = "a07"
+source_key = "field|GlobalPrepareAdmissionSpec|GlobalPrepareAdmissionSpec.global_authorization_decision_ref|global_authorization_decision_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-prepare-admission-spec-expected-topology-state-ref"
+target_row_id = "a07:field:global-prepare-admission-spec-expected-topology-state-ref"
+slice_id = "a07"
+source_key = "field|GlobalPrepareAdmissionSpec|GlobalPrepareAdmissionSpec.expected_topology_state_ref|expected_topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-read-close-spec-registration-ref"
+target_row_id = "a07:field:global-read-close-spec-registration-ref"
+slice_id = "a07"
+source_key = "field|GlobalReadCloseSpec|GlobalReadCloseSpec.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-read-close-spec-read-routing-certificate-ref"
+target_row_id = "a07:field:global-read-close-spec-read-routing-certificate-ref"
+slice_id = "a07"
+source_key = "field|GlobalReadCloseSpec|GlobalReadCloseSpec.mode.AutocommitResult.read_routing_certificate_ref|read_routing_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-read-close-spec-global-read-authorization-decision-ref"
+target_row_id = "a07:field:global-read-close-spec-global-read-authorization-decision-ref"
+slice_id = "a07"
+source_key = "field|GlobalReadCloseSpec|GlobalReadCloseSpec.mode.AutocommitResult.global_read_authorization_decision_ref|global_read_authorization_decision_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-read-close-spec-buffered-result-manifest-ref"
+target_row_id = "a07:field:global-read-close-spec-buffered-result-manifest-ref"
+slice_id = "a07"
+source_key = "field|GlobalReadCloseSpec|GlobalReadCloseSpec.mode.AutocommitResult.buffered_result_manifest_ref|buffered_result_manifest_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-read-close-spec-workspace-generation-ref"
+target_row_id = "a07:field:global-read-close-spec-workspace-generation-ref"
+slice_id = "a07"
+source_key = "field|GlobalReadCloseSpec|GlobalReadCloseSpec.mode.ExplicitClose.workspace_generation_ref|workspace_generation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-read-close-spec-distributed-serialization-certificate-ref"
+target_row_id = "a07:field:global-read-close-spec-distributed-serialization-certificate-ref"
+slice_id = "a07"
+source_key = "field|GlobalReadCloseSpec|GlobalReadCloseSpec.distributed_serialization_certificate_ref|distributed_serialization_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-preparation-record-registration-ref"
+target_row_id = "a07:field:global-txn-outcome-preparation-record-registration-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-preparation-record-routing-certificate-ref"
+target_row_id = "a07:field:global-txn-outcome-preparation-record-routing-certificate-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.routing_certificate_ref|routing_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-preparation-record-global-authorization-decision-ref"
+target_row_id = "a07:field:global-txn-outcome-preparation-record-global-authorization-decision-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.global_authorization_decision_ref|global_authorization_decision_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-preparation-record-preparation-ref"
+target_row_id = "a07:field:global-txn-outcome-preparation-record-preparation-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.terminal_write_result.Prepared.preparation_ref|preparation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-record-registration-ref"
+target_row_id = "a07:field:global-txn-outcome-record-registration-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomeRecord|GlobalTxnOutcomeRecord.state.Registered.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-record-latest-workspace-generation-ref"
+target_row_id = "a07:field:global-txn-outcome-record-latest-workspace-generation-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomeRecord|GlobalTxnOutcomeRecord.state.Registered.latest_workspace_generation_ref|latest_workspace_generation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-record-workspace-generation-ref"
+target_row_id = "a07:field:global-txn-outcome-record-workspace-generation-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomeRecord|GlobalTxnOutcomeRecord.state.PrepareAdmitted.workspace_generation_ref|workspace_generation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-record-global-delta-publish-command-ref"
+target_row_id = "a07:field:global-txn-outcome-record-global-delta-publish-command-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomeRecord|GlobalTxnOutcomeRecord.state.Committed.global_delta_publish_command_ref|global_delta_publish_command_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-record-read-close-spec-ref"
+target_row_id = "a07:field:global-txn-outcome-record-read-close-spec-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomeRecord|GlobalTxnOutcomeRecord.state.ReadClosed.read_close_spec_ref|read_close_spec_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-workspace-generation-registration-ref"
+target_row_id = "a07:field:global-txn-workspace-generation-registration-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnWorkspaceGeneration|GlobalTxnWorkspaceGeneration.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-workspace-generation-statement-registration-ref"
+target_row_id = "a07:field:global-txn-workspace-generation-statement-registration-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnWorkspaceGeneration|GlobalTxnWorkspaceGeneration.statement_registration_ref|statement_registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-global-txn-workspace-generation-topology-state-ref"
+target_row_id = "a07:field:global-txn-workspace-generation-topology-state-ref"
+slice_id = "a07"
+source_key = "field|GlobalTxnWorkspaceGeneration|GlobalTxnWorkspaceGeneration.topology_state_ref|topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-local-final-certification-reservation-source-spec-ref"
+target_row_id = "a07:field:local-final-certification-reservation-source-spec-ref"
+slice_id = "a07"
+source_key = "field|LocalFinalCertificationReservation|LocalFinalCertificationReservation.source_spec_ref|source_spec_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-local-final-certification-reservation-registration-ref"
+target_row_id = "a07:field:local-final-certification-reservation-registration-ref"
+slice_id = "a07"
+source_key = "field|LocalFinalCertificationReservation|LocalFinalCertificationReservation.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-local-final-certification-reserve-spec-registration-ref"
+target_row_id = "a07:field:local-final-certification-reserve-spec-registration-ref"
+slice_id = "a07"
+source_key = "field|LocalFinalCertificationReserveSpec|LocalFinalCertificationReserveSpec.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-local-order-attempt-input-configuration-ref"
+target_row_id = "a07:field:local-order-attempt-input-configuration-ref"
+slice_id = "a07"
+source_key = "field|LocalOrderAttemptInput|LocalOrderAttemptInput.configuration_ref|configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-meta-order-attempt-input-configuration-ref"
+target_row_id = "a07:field:meta-order-attempt-input-configuration-ref"
+slice_id = "a07"
+source_key = "field|MetaOrderAttemptInput|MetaOrderAttemptInput.configuration_ref|configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-read-participant-routing-certificate-topology-state-ref"
+target_row_id = "a07:field:read-participant-routing-certificate-topology-state-ref"
+slice_id = "a07"
+source_key = "field|ReadParticipantRoutingCertificate|ReadParticipantRoutingCertificate.topology_state_ref|topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-read-participant-routing-certificate-workspace-generation-ref"
+target_row_id = "a07:field:read-participant-routing-certificate-workspace-generation-ref"
+slice_id = "a07"
+source_key = "field|ReadParticipantRoutingCertificate|ReadParticipantRoutingCertificate.workspace_generation_ref|workspace_generation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-read-participant-routing-certificate-partition-derivation-proof-ref"
+target_row_id = "a07:field:read-participant-routing-certificate-partition-derivation-proof-ref"
+slice_id = "a07"
+source_key = "field|ReadParticipantRoutingCertificate|ReadParticipantRoutingCertificate.partition_derivation_proof_ref|partition_derivation_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-read-participant-routing-certificate-one-digest-signer-lock-ref"
+target_row_id = "a07:field:read-participant-routing-certificate-one-digest-signer-lock-ref"
+slice_id = "a07"
+source_key = "field|ReadParticipantRoutingCertificate|ReadParticipantRoutingCertificate.one_digest_signer_lock_ref|one_digest_signer_lock_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-result-release-evidence-meta-receipt-ref"
+target_row_id = "a07:field:result-release-evidence-meta-receipt-ref"
+slice_id = "a07"
+source_key = "field|ResultReleaseEvidence<Meta>|ResultReleaseEvidence<Meta>.ClientRelease.receipt_ref|receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-result-release-evidence-meta-expiry-evidence-ref"
+target_row_id = "a07:field:result-release-evidence-meta-expiry-evidence-ref"
+slice_id = "a07"
+source_key = "field|ResultReleaseEvidence<Meta>|ResultReleaseEvidence<Meta>.LeaseExpired.expiry_evidence_ref|expiry_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-shard-read-witness-basis-shard-configuration-ref"
+target_row_id = "a07:field:shard-read-witness-basis-shard-configuration-ref"
+slice_id = "a07"
+source_key = "field|ShardReadWitnessBasis|ShardReadWitnessBasis.shard_configuration_ref|shard_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-terminal-abort-authority-role-authority-owning-role-original-operation-authorization-ref"
+target_row_id = "a07:field:terminal-abort-authority-role-authority-owning-role-original-operation-authorization-ref"
+slice_id = "a07"
+source_key = "field|TerminalAbortAuthority<Role:AuthorityOwningRole>|TerminalAbortAuthority<Role:AuthorityOwningRole>.source.CorrectnessRequired.original_operation_authorization_ref|original_operation_authorization_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-terminal-abort-authority-role-authority-owning-role-administrative-abort-authorization-ref"
+target_row_id = "a07:field:terminal-abort-authority-role-authority-owning-role-administrative-abort-authorization-ref"
+slice_id = "a07"
+source_key = "field|TerminalAbortAuthority<Role:AuthorityOwningRole>|TerminalAbortAuthority<Role:AuthorityOwningRole>.source.Administrative.administrative_abort_authorization_ref|administrative_abort_authorization_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a07:target:field-never-registered-terminal-record-reservation-identity"
+target_row_id = "a07:field:never-registered-terminal-record-reservation-identity"
+slice_id = "a07"
+source_key = "field|NeverRegisteredTerminalRecord|NeverRegisteredTerminalRecord.reservation_identity|reservation_identity"
+target_kind = "field"
 definition_status = "declared"
