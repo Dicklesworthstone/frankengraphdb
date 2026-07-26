@@ -66,6 +66,80 @@ version_status = "reserved"
 max_size_bytes = 256
 
 [[field]]
+containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x0002
+stable_name = "floor_record_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by AttemptCompactionAttestation; never a reachability edge and retained only with its containing object (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x0003
+stable_name = "build_control_identity"
+exact_wire_type = "WeakGlobalCommandIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakGlobalCommandIdentity embedded by value in AttemptCompactionAttestation; retained with the containing object and creates no reachability edge (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x0004
+stable_name = "build_resulting_root_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by AttemptCompactionAttestation; never a reachability edge and retained only with its containing object (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x0006
+stable_name = "summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this AttemptCompactionAttestation names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x000c
+stable_name = "one_digest_signer_lock_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateSignerLock"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the CertificateSignerLock this AttemptCompactionAttestation names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "AttemptFamilyState"
 field_tag = 0x0004
 stable_name = "registration_ref"
@@ -92,6 +166,258 @@ target_schema_id = "GlobalTxnOutcomeRecord"
 construction_order = 60
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the GlobalTxnOutcomeRecord this AttemptFamilyState names; retained while the referrer is retained, and the acyclic order 60 <= 60 keeps the reference backward-only (a07:1716)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditEventSignerLock"
+field_tag = 0x0001
+stable_name = "attempt_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditEventSigningAttemptPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditEventSigningAttemptPlan this AuditEventSignerLock names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1844)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditEventSignerLock"
+field_tag = 0x0002
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this AuditEventSignerLock names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1844)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditEventSigningAttemptPlan"
+field_tag = 0x0002
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this AuditEventSigningAttemptPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1844)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditEventSigningAttemptPlan"
+field_tag = 0x0004
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this AuditEventSigningAttemptPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1844)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditResolutionSignerLock"
+field_tag = 0x0001
+stable_name = "attempt_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditResolutionSigningAttemptPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditResolutionSigningAttemptPlan this AuditResolutionSignerLock names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditResolutionSignerLock"
+field_tag = 0x0002
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this AuditResolutionSignerLock names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditResolutionSigningAttemptPlan"
+field_tag = 0x0002
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this AuditResolutionSigningAttemptPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditResolutionSigningAttemptPlan"
+field_tag = 0x0005
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this AuditResolutionSigningAttemptPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditTerminalAttemptRecord"
+field_tag = 0x0002
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this AuditTerminalAttemptRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1850)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditTerminalAttemptRecord"
+field_tag = 0x0004
+stable_name = "attempt_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditEventSigningAttemptPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditEventSigningAttemptPlan this AuditTerminalAttemptRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1850)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditTerminalAttemptRecord"
+field_tag = 0x000d
+stable_name = "resolution_attempt_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditResolutionSigningAttemptPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditResolutionSigningAttemptPlan this AuditTerminalAttemptRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1850)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditTerminalFreezeRecord"
+field_tag = 0x000e
+stable_name = "control_terminal_basis_hold_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ControlTerminalBasisHoldRoot"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ControlTerminalBasisHoldRoot this AuditTerminalFreezeRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1832)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditTerminalFreezeRecord"
+field_tag = 0x000f
+stable_name = "scaffolding_applied_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in AuditTerminalFreezeRecord; retained with the containing object and creates no reachability edge (a08:1832)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+containing_schema = "AuditTerminalFreezeRecord"
+field_tag = 0x001c
+stable_name = "begin_release_applied_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in AuditTerminalFreezeRecord; retained with the containing object and creates no reachability edge (a08:1832)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+containing_schema = "AuditTerminalFreezeRecord"
+field_tag = 0x001f
+stable_name = "release_applied_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in AuditTerminalFreezeRecord; retained with the containing object and creates no reachability edge (a08:1832)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+containing_schema = "AuditTerminalSigningPlan"
+field_tag = 0x0009
+stable_name = "event_body_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SequenceNeutralAuditEventBody"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the SequenceNeutralAuditEventBody this AuditTerminalSigningPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1842)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditTerminalSigningPlan"
+field_tag = 0x000b
+stable_name = "resolution_body_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SequenceNeutralAuditResolutionBody"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the SequenceNeutralAuditResolutionBody this AuditTerminalSigningPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1842)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -554,6 +880,96 @@ version_status = "reserved"
 max_size_bytes = 268435456
 
 [[field]]
+containing_schema = "ClosedAttemptCompactionFloorRecord"
+field_tag = 0x0003
+stable_name = "source_command_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by ClosedAttemptCompactionFloorRecord; never a reachability edge and retained only with its containing object (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "ClosedAttemptCompactionFloorRecord"
+field_tag = 0x0005
+stable_name = "terminal_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this ClosedAttemptCompactionFloorRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ClosedAttemptCompactionFloorRecord"
+field_tag = 0x000a
+stable_name = "meta_checkpoint_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by ClosedAttemptCompactionFloorRecord; never a reachability edge and retained only with its containing object (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "ClosedAttemptCompactionSpec"
+field_tag = 0x000b
+stable_name = "evidence_bundle_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ClosedAttemptEvidenceBundle"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ClosedAttemptEvidenceBundle this ClosedAttemptCompactionSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ClosedAttemptCompactionSpec"
+field_tag = 0x000c
+stable_name = "expected_prior_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this ClosedAttemptCompactionSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ClosedAttemptCompactionSpec"
+field_tag = 0x000d
+stable_name = "candidate_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this ClosedAttemptCompactionSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "CommitCapsule"
 field_tag = 0x0001
 stable_name = "command_inputs"
@@ -668,6 +1084,51 @@ retention_and_cut_rule = "repeated weak-identity digest that cross-checks the ty
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "ConstraintReservationRecord"
+field_tag = 0x0007
+stable_name = "registration_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this ConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1856)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+containing_schema = "ConstraintReservationRecord"
+field_tag = 0x0008
+stable_name = "prepare_admission_record_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this ConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1856)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+containing_schema = "ConstraintReservationRecord"
+field_tag = 0x0009
+stable_name = "routing_certificate_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this ConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1856)"
+version_status = "reserved"
+max_size_bytes = 537
 
 [[field]]
 containing_schema = "ConstraintStateRoot"
@@ -938,6 +1399,66 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,AllocationEpoch> this DirectoryBoundCreationEvidence names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2531)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "DistributedSerializationCertificate"
+field_tag = 0x0005
+stable_name = "read_routing_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReadParticipantRoutingCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReadParticipantRoutingCertificate this DistributedSerializationCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1860)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "DistributedSerializationCertificate"
+field_tag = 0x0006
+stable_name = "prepare_admission_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this DistributedSerializationCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1860)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "DistributedSerializationCertificate"
+field_tag = 0x0008
+stable_name = "routing_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this DistributedSerializationCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1860)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "DistributedSerializationCertificate"
+field_tag = 0x000b
+stable_name = "conflict_index_basis_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by DistributedSerializationCertificate; never a reachability edge and retained only with its containing object (a08:1860)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "DurableCapabilityValidationEvidence"
@@ -1258,6 +1779,51 @@ version_status = "reserved"
 max_size_bytes = 93
 
 [[field]]
+containing_schema = "GlobalAttemptCompactionFloor"
+field_tag = 0x0001
+stable_name = "summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this GlobalAttemptCompactionFloor names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalAttemptCompactionFloor"
+field_tag = 0x0007
+stable_name = "record_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by GlobalAttemptCompactionFloor; never a reachability edge and retained only with its containing object (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "GlobalAttemptCompactionFloor"
+field_tag = 0x0008
+stable_name = "attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AttemptCompactionAttestation"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AttemptCompactionAttestation this GlobalAttemptCompactionFloor names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "GlobalAttemptRegistration"
 field_tag = 0x0001
 stable_name = "authority_bound_header"
@@ -1270,6 +1836,65 @@ role_predicate = "true"
 retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalAttemptRegistration; retained with the containing object and creates no reachability edge (a07:1718)"
 version_status = "reserved"
 max_size_bytes = 256
+
+[[field]]
+containing_schema = "GlobalAuthorizationDecisionRecord"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalAuthorizationDecisionRecord; retained with the containing object and creates no reachability edge (a08:1826)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "GlobalAuthorizationDecisionRecord"
+field_tag = 0x0002
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalAuthorizationDecisionRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1826)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalAuthorizationDecisionRecord"
+field_tag = 0x0004
+stable_name = "mutation_permit_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "MutationPermitRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the MutationPermitRecord<Meta> this GlobalAuthorizationDecisionRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1826)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalAuthorizationDecisionRecord"
+field_tag = 0x0006
+stable_name = "routing_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this GlobalAuthorizationDecisionRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1826)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "GlobalBeginIdempotencyIndex"
@@ -1372,6 +1997,81 @@ role_predicate = "true"
 retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalBeginReservationSpec; retained with the containing object and creates no reachability edge (a07:1710)"
 version_status = "reserved"
 max_size_bytes = 256
+
+[[field]]
+containing_schema = "GlobalClosedAttemptFloorPublishSpec"
+field_tag = 0x0001
+stable_name = "floor_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ClosedAttemptCompactionFloorRecord"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ClosedAttemptCompactionFloorRecord this GlobalClosedAttemptFloorPublishSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalClosedAttemptFloorPublishSpec"
+field_tag = 0x0002
+stable_name = "attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AttemptCompactionAttestation"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AttemptCompactionAttestation this GlobalClosedAttemptFloorPublishSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalClosedAttemptFloorPublishSpec"
+field_tag = 0x0004
+stable_name = "expected_prior_authoritative_floor"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by GlobalClosedAttemptFloorPublishSpec; never a reachability edge and retained only with its containing object (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "GlobalClosedAttemptFloorPublishSpec"
+field_tag = 0x0005
+stable_name = "expected_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this GlobalClosedAttemptFloorPublishSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalConstraintReservationCertificate"
+field_tag = 0x0001
+stable_name = "reservation_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConstraintReservationRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConstraintReservationRecord this GlobalConstraintReservationCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1856)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "GlobalControlCommand"
@@ -1569,6 +2269,35 @@ bd_excluded_field_tags = [1]
 recipe_pin = "fnv1a64:55336bfa5c150521"
 
 [[field]]
+containing_schema = "GlobalLogicalDeltaBatch"
+field_tag = 0x0001
+stable_name = "global_txn_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnRecord this GlobalLogicalDeltaBatch names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1870)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalLogicalDeltaBatch"
+field_tag = 0x0002
+stable_name = "marker_identity"
+exact_wire_type = "WeakMarkerIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakMarkerIdentity embedded by value in GlobalLogicalDeltaBatch; retained with the containing object and creates no reachability edge (a08:1870)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "GlobalPrepareAdmissionSpec"
 field_tag = 0x0001
 stable_name = "registration_ref"
@@ -1760,6 +2489,95 @@ target_schema_id = "GlobalStateRoot"
 construction_order = 50
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the GlobalStateRoot this GlobalRestoreParticipantPinReleaseCompletionCertificate names; retained while the referrer is retained, and the acyclic order 31 <= 50 keeps the reference backward-only (a18:2419)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x0002
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalTxnCommand; retained with the containing object and creates no reachability edge (a08:1862)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x0003
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalTxnCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1862)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x0004
+stable_name = "prepare_admission_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this GlobalTxnCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1862)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x0007
+stable_name = "final_certification_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalFinalCertificationReservation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalFinalCertificationReservation this GlobalTxnCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1862)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x000b
+stable_name = "order_attempt_input_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "MetaOrderAttemptInput"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the MetaOrderAttemptInput this GlobalTxnCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1862)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x000d
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this GlobalTxnCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1862)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -2957,6 +3775,110 @@ version_status = "reserved"
 max_size_bytes = 268435456
 
 [[field]]
+containing_schema = "MetaConstraintReservationRecord"
+field_tag = 0x0004
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this MetaConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1858)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "MetaConstraintReservationRecord"
+field_tag = 0x0005
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this MetaConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1858)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "MetaConstraintReservationRecord"
+field_tag = 0x0006
+stable_name = "admission_spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalPrepareAdmissionSpec"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalPrepareAdmissionSpec this MetaConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1858)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "MetaConstraintReservationRecord"
+field_tag = 0x000d
+stable_name = "global_txn_command_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnCommand"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnCommand this MetaConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1858)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "MetaConstraintReservationRecord"
+field_tag = 0x000f
+stable_name = "applied_abort_ref"
+exact_wire_type = "AppliedAbortRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedAbortRef embedded by value in MetaConstraintReservationRecord; retained with the containing object and creates no reachability edge (a08:1858)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+containing_schema = "MetaControlProjectionCertificate"
+field_tag = 0x0001
+stable_name = "source_global_control_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this MetaControlProjectionCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1878)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "MetaControlProjectionCertificate"
+field_tag = 0x0007
+stable_name = "typed_payload_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TypedCertifiedMetaProjectionPayload"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TypedCertifiedMetaProjectionPayload this MetaControlProjectionCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1878)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "MetaOrderAttemptInput"
 field_tag = 0x0002
 stable_name = "subject"
@@ -3046,6 +3968,81 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "NeverRegisteredEvidence"
+field_tag = 0x0001
+stable_name = "begin_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalBeginReservationRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalBeginReservationRecord this NeverRegisteredEvidence names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "NeverRegisteredEvidence"
+field_tag = 0x0002
+stable_name = "terminal_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NeverRegisteredTerminalRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the NeverRegisteredTerminalRecord this NeverRegisteredEvidence names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "NeverRegisteredEvidence"
+field_tag = 0x0009
+stable_name = "no_reservation_binding_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NoReservationBindingProof"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the NoReservationBindingProof this NeverRegisteredEvidence names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "NeverRegisteredFloorSpec"
+field_tag = 0x0009
+stable_name = "expected_prior_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this NeverRegisteredFloorSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "NeverRegisteredFloorSpec"
+field_tag = 0x000a
+stable_name = "candidate_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this NeverRegisteredFloorSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "NeverRegisteredTerminalRecord"
 field_tag = 0x0001
 stable_name = "reservation_identity"
@@ -3061,6 +4058,51 @@ max_size_bytes = 32
 digest_class = "weak_identity"
 
 [[field]]
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x0009
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this NoTerminalSignatureOrOrderProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1838)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x000a
+stable_name = "abandonment_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalPlanAbandonment"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalPlanAbandonment this NoTerminalSignatureOrOrderProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1838)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x0015
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this NoTerminalSignatureOrOrderProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1838)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "OfflineMacaroonIssuerEpochFenceReceipt"
 field_tag = 0x0009
 stable_name = "issuer_epoch_state"
@@ -3073,6 +4115,66 @@ role_predicate = "true"
 retention_and_cut_rule = "closed union VerifyOnly|Disabled; the fenced issuer-epoch posture this receipt attests, lives/dies with the fence receipt (a16:2175)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ParticipantRoutingCertificate"
+field_tag = 0x0001
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this ParticipantRoutingCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ParticipantRoutingCertificate"
+field_tag = 0x0002
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this ParticipantRoutingCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ParticipantRoutingCertificate"
+field_tag = 0x0007
+stable_name = "partition_derivation_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingDerivationProof"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingDerivationProof this ParticipantRoutingCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ParticipantRoutingDerivationProof"
+field_tag = 0x0001
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this ParticipantRoutingDerivationProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "PortableRestoreSourceLeaseLineageProof"
@@ -3837,6 +4939,51 @@ target_schema_id = "ValidatedRemoteConfigurationAnchor"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the ValidatedRemoteConfigurationAnchor this RemoteConfigurationTrustRoot names; retained while the referrer is retained, and the acyclic order 40 <= 40 keeps the reference backward-only (a04:1584)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RemoteGrantRetirementPlan"
+field_tag = 0x0002
+stable_name = "basis_topology_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this RemoteGrantRetirementPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1808)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RemoteGrantRetirementPlan"
+field_tag = 0x0006
+stable_name = "successor_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteAuthorityConfigurationEvidence"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteAuthorityConfigurationEvidence this RemoteGrantRetirementPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1808)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RemoteGrantRetirementPlan"
+field_tag = 0x0009
+stable_name = "old_grant_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantEvidence"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteRetentionGrantEvidence this RemoteGrantRetirementPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1808)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -7510,6 +8657,171 @@ version_status = "active"
 max_size_bytes = 32
 
 [[field]]
+containing_schema = "ShardAppliedAck"
+field_tag = 0x0008
+stable_name = "resulting_post_visibility_shard_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardLogicalStateRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardLogicalStateRoot this ShardAppliedAck names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1868)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardDecisionApplyCommand"
+field_tag = 0x0003
+stable_name = "decision_publish_record_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this ShardDecisionApplyCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1866)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+containing_schema = "ShardEffectBasis"
+field_tag = 0x0006
+stable_name = "active_meta_projection_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ActiveMetaProjectionRoot"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ActiveMetaProjectionRoot this ShardEffectBasis names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardEffectFragment"
+field_tag = 0x0002
+stable_name = "basis_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardEffectBasis"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardEffectBasis this ShardEffectFragment names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1828)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardEffectFragment"
+field_tag = 0x0003
+stable_name = "prepare_admission_record_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this ShardEffectFragment names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1828)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+containing_schema = "ShardEffectFragment"
+field_tag = 0x0005
+stable_name = "routing_certificate_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this ShardEffectFragment names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1828)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+containing_schema = "ShardEffectFragment"
+field_tag = 0x0006
+stable_name = "global_authorization_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAuthorizationDecisionRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAuthorizationDecisionRecord this ShardEffectFragment names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1828)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+containing_schema = "ShardEffectFragment"
+field_tag = 0x0008
+stable_name = "global_outcome_preparation_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnOutcomePreparationRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnOutcomePreparationRecord this ShardEffectFragment names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1828)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+containing_schema = "ShardGcPreflightEvidence"
+field_tag = 0x0001
+stable_name = "preflight_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardGcPreflightRecord"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardGcPreflightRecord this ShardGcPreflightEvidence names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1810)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardGcPreflightRecord"
+field_tag = 0x0001
+stable_name = "source_spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardGcPreflightSpec"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardGcPreflightSpec this ShardGcPreflightRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1810)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardGcPreflightSpec"
+field_tag = 0x0004
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this ShardGcPreflightSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1810)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "ShardHistoryInventory"
 field_tag = 0x0001
 stable_name = "body_digest"
@@ -7528,6 +8840,156 @@ bd_schema_major = 1
 bd_included_field_tags = []
 bd_excluded_field_tags = [1]
 recipe_pin = "fnv1a64:7f652e0dd29a56aa"
+
+[[field]]
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x0003
+stable_name = "registration_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x0004
+stable_name = "prepare_admission_record_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x0009
+stable_name = "routing_certificate_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x000a
+stable_name = "basis_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardEffectBasis"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardEffectBasis this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x000b
+stable_name = "fragment_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardEffectFragment"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardEffectFragment this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x000c
+stable_name = "active_meta_projection_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ActiveMetaProjectionRoot"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ActiveMetaProjectionRoot this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x000e
+stable_name = "expected_shard_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardPrepareRecord"
+field_tag = 0x0004
+stable_name = "shard_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this ShardPrepareRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardPrepareRecord"
+field_tag = 0x0009
+stable_name = "basis_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardEffectBasis"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardEffectBasis this ShardPrepareRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardPrepareRecord"
+field_tag = 0x000a
+stable_name = "fragment_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardEffectFragment"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardEffectFragment this ShardPrepareRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ShardPreparedPayloadRecord"
@@ -7930,6 +9392,81 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "TopologyAttemptClosureProof"
+field_tag = 0x0005
+stable_name = "outcome_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnOutcomeRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnOutcomeRecord this TopologyAttemptClosureProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TopologyAttemptClosureProof"
+field_tag = 0x0006
+stable_name = "published_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this TopologyAttemptClosureProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TopologyAttemptClosureProof"
+field_tag = 0x0008
+stable_name = "abort_outcome_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnOutcomeRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnOutcomeRecord this TopologyAttemptClosureProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TopologyAttemptClosureProof"
+field_tag = 0x0009
+stable_name = "published_abort_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this TopologyAttemptClosureProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TopologyRetirementFloor"
+field_tag = 0x0001
+stable_name = "cutover_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyTransitionRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyTransitionRecord this TopologyRetirementFloor names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "TopologyState"
 field_tag = 0x000b
 stable_name = "meta_configuration_ref"
@@ -7972,6 +9509,51 @@ retention_and_cut_rule = "weak-identity digest only; it names no retained object
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "TopologyTransferAck"
+field_tag = 0x0001
+stable_name = "plan_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyTransferPlan"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyTransferPlan this TopologyTransferAck names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+containing_schema = "TopologyTransferAck"
+field_tag = 0x0005
+stable_name = "destination_checkpoint_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardCheckpointCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardCheckpointCertificate this TopologyTransferAck names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "TopologyTransitionRecord"
+field_tag = 0x0003
+stable_name = "command_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlCommand"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlCommand this TopologyTransitionRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1888)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "TxnAllocationBindingRoot"
@@ -8061,6 +9643,21 @@ retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-o
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "TypedCertifiedMetaProjectionPayload"
+field_tag = 0x0001
+stable_name = "source_global_control_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this TypedCertifiedMetaProjectionPayload names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1876)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ValidatedRemoteConfigurationAnchor"
@@ -8915,6 +10512,17 @@ union_path = "GlobalBranchKeyDistributionPlan.operation"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["GlobalBranchKeyDistributionPlan"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GlobalConflictIndex"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -11318,6 +12926,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["SequenceNeutralAuditEventBody"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "ServicePromotionExternalOperationKind"
 containing_schema = "ServicePromotionExternalOperationKind"
 union_path = "ServicePromotionExternalOperationKind"
@@ -11646,6 +13265,17 @@ union_path = "TopologyAttemptClosureProof.sorted_attempt_evidence"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["TopologyAttemptClosureProof"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "TopologyRetirementAckFloorRef"
+containing_schema = "TopologyRetirementAck"
+union_path = "TopologyRetirementAck.floor_ref"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TopologyRetirementAck"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -14501,6 +16131,66 @@ union_path = "GlobalBranchKeyDistributionPlan.operation"
 arm_tag = 0x0003
 source_arm_name = "Rotate"
 stable_name = "rotate"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+arm_tag = 0x0002
+source_arm_name = "PrepareAdmitted"
+stable_name = "prepare_admitted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+arm_tag = 0x0003
+source_arm_name = "Committed"
+stable_name = "committed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+arm_tag = 0x0004
+source_arm_name = "Aborted"
+stable_name = "aborted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+arm_tag = 0x0005
+source_arm_name = "ReadClosed"
+stable_name = "read_closed"
 payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
@@ -22219,6 +23909,78 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0001
+source_arm_name = "TransactionMutation"
+stable_name = "transaction_mutation"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0002
+source_arm_name = "ControlMutation"
+stable_name = "control_mutation"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0003
+source_arm_name = "ReadResult"
+stable_name = "read_result"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0004
+source_arm_name = "Denied"
+stable_name = "denied"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0005
+source_arm_name = "Failed"
+stable_name = "failed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0006
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
 union_name = "ServicePromotionExternalOperationKind"
 containing_schema = "ServicePromotionExternalOperationKind"
 union_path = "ServicePromotionExternalOperationKind"
@@ -23438,6 +25200,32 @@ source_arm_name = "AbortForPostCutoverRetry"
 stable_name = "abort_for_post_cutover_retry"
 payload_kind = "inline-record"
 payload_sha256 = "9014dac0ca75b7ca0fb49a31176fd244678c4841ec6fede891223a652a504dd2"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TopologyRetirementAckFloorRef"
+containing_schema = "TopologyRetirementAck"
+union_path = "TopologyRetirementAck.floor_ref"
+arm_tag = 0x0001
+source_arm_name = "LocalMeta"
+stable_name = "local_meta"
+payload_kind = "inline-record"
+payload_sha256 = "6e55cad56cb63bea92f623c84abee5ff3d44805628233ed653f88bf5a2a4cb4f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TopologyRetirementAckFloorRef"
+containing_schema = "TopologyRetirementAck"
+union_path = "TopologyRetirementAck.floor_ref"
+arm_tag = 0x0002
+source_arm_name = "RemoteMeta"
+stable_name = "remote_meta"
+payload_kind = "inline-record"
+payload_sha256 = "0cd767c4baeaecdfc61067c55445e43c933f757bcfeb1776ef11b8fe6021e507"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

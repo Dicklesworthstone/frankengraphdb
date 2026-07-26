@@ -5285,6 +5285,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "TxnCompletionState"
                 | "TxnCompletionStateInProgressPhase"
                 | "WorkspaceReleaseEvidenceRef"
+                | "GlobalConflictIndexEntriesRecordState"
+                | "SequenceNeutralAuditEventBodyOutcome"
+                | "TopologyRetirementAckFloorRef"
         )
     };
     pre_erratum
@@ -6064,6 +6067,171 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     let post_erratum_a07_weak_field = |schema: &str, name: &str| {
         schema == "NeverRegisteredTerminalRecord" && name == "reservation_identity"
     };
+    // A08's lifecycle tranche adds every checker-clean field whose source
+    // spelling, containing kind, reference semantics, and construction edge
+    // are forced. The gated future/self/cyclic edges are deliberately absent.
+    let post_erratum_a08_field = |schema: &str, name: &str| match schema {
+        "AttemptCompactionAttestation" => matches!(
+            name,
+            "build_control_identity"
+                | "build_resulting_root_identity"
+                | "floor_record_identity"
+                | "one_digest_signer_lock_ref"
+                | "summary_root_ref"
+        ),
+        "AuditEventSignerLock" => matches!(name, "attempt_plan_ref" | "terminal_plan_ref"),
+        "AuditEventSigningAttemptPlan" => {
+            matches!(name, "configuration_ref" | "terminal_plan_ref")
+        }
+        "AuditResolutionSignerLock" => {
+            matches!(name, "attempt_plan_ref" | "terminal_plan_ref")
+        }
+        "AuditResolutionSigningAttemptPlan" => {
+            matches!(name, "configuration_ref" | "terminal_plan_ref")
+        }
+        "AuditTerminalAttemptRecord" => matches!(
+            name,
+            "attempt_plan_ref" | "resolution_attempt_plan_ref" | "terminal_plan_ref"
+        ),
+        "AuditTerminalFreezeRecord" => matches!(
+            name,
+            "begin_release_applied_ref"
+                | "control_terminal_basis_hold_root_ref"
+                | "release_applied_ref"
+                | "scaffolding_applied_ref"
+        ),
+        "AuditTerminalSigningPlan" => matches!(name, "event_body_ref" | "resolution_body_ref"),
+        "ClosedAttemptCompactionFloorRecord" => matches!(
+            name,
+            "meta_checkpoint_identity" | "source_command_digest" | "terminal_summary_root_ref"
+        ),
+        "ClosedAttemptCompactionSpec" => matches!(
+            name,
+            "candidate_summary_root_ref"
+                | "evidence_bundle_ref"
+                | "expected_prior_summary_root_ref"
+        ),
+        "ConstraintReservationRecord" => matches!(
+            name,
+            "prepare_admission_record_ref" | "registration_ref" | "routing_certificate_ref"
+        ),
+        "DistributedSerializationCertificate" => matches!(
+            name,
+            "conflict_index_basis_digest"
+                | "prepare_admission_record_ref"
+                | "read_routing_certificate_ref"
+                | "routing_certificate_ref"
+        ),
+        "GlobalAttemptCompactionFloor" => {
+            matches!(
+                name,
+                "attestation_ref" | "record_identity" | "summary_root_ref"
+            )
+        }
+        "GlobalAuthorizationDecisionRecord" => matches!(
+            name,
+            "authority_bound_header"
+                | "mutation_permit_ref"
+                | "registration_ref"
+                | "routing_certificate_ref"
+        ),
+        "GlobalClosedAttemptFloorPublishSpec" => matches!(
+            name,
+            "attestation_ref"
+                | "expected_prior_authoritative_floor"
+                | "expected_summary_root_ref"
+                | "floor_record_ref"
+        ),
+        "GlobalConstraintReservationCertificate" => matches!(name, "reservation_record_ref"),
+        "GlobalLogicalDeltaBatch" => matches!(name, "global_txn_record_ref" | "marker_identity"),
+        "GlobalTxnCommand" => matches!(
+            name,
+            "authority_bound_header"
+                | "final_certification_reservation_ref"
+                | "order_attempt_input_ref"
+                | "prepare_admission_record_ref"
+                | "registration_ref"
+                | "topology_state_ref"
+        ),
+        "MetaConstraintReservationRecord" => matches!(
+            name,
+            "admission_spec_ref"
+                | "applied_abort_ref"
+                | "global_txn_command_ref"
+                | "registration_ref"
+                | "topology_state_ref"
+        ),
+        "MetaControlProjectionCertificate" => {
+            matches!(
+                name,
+                "source_global_control_record_ref" | "typed_payload_ref"
+            )
+        }
+        "NeverRegisteredEvidence" => matches!(
+            name,
+            "begin_reservation_ref" | "no_reservation_binding_proof_ref" | "terminal_record_ref"
+        ),
+        "NeverRegisteredFloorSpec" => {
+            matches!(
+                name,
+                "candidate_summary_root_ref" | "expected_prior_summary_root_ref"
+            )
+        }
+        "NoTerminalSignatureOrOrderProof" => {
+            matches!(
+                name,
+                "abandonment_ref" | "configuration_ref" | "terminal_plan_ref"
+            )
+        }
+        "ParticipantRoutingCertificate" => matches!(
+            name,
+            "partition_derivation_proof_ref" | "registration_ref" | "topology_state_ref"
+        ),
+        "ParticipantRoutingDerivationProof" => matches!(name, "topology_state_ref"),
+        "RemoteGrantRetirementPlan" => matches!(
+            name,
+            "basis_topology_ref" | "old_grant_evidence_ref" | "successor_configuration_ref"
+        ),
+        "ShardAppliedAck" => matches!(name, "resulting_post_visibility_shard_state_root_ref"),
+        "ShardDecisionApplyCommand" => matches!(name, "decision_publish_record_ref"),
+        "ShardEffectBasis" => matches!(name, "active_meta_projection_root_ref"),
+        "ShardEffectFragment" => matches!(
+            name,
+            "basis_ref"
+                | "global_authorization_ref"
+                | "global_outcome_preparation_ref"
+                | "prepare_admission_record_ref"
+                | "routing_certificate_ref"
+        ),
+        "ShardGcPreflightEvidence" => matches!(name, "preflight_record_ref"),
+        "ShardGcPreflightRecord" => matches!(name, "source_spec_ref"),
+        "ShardGcPreflightSpec" => matches!(name, "configuration_ref"),
+        "ShardPrepareCommand" => matches!(
+            name,
+            "active_meta_projection_root_ref"
+                | "basis_ref"
+                | "expected_shard_configuration_ref"
+                | "fragment_ref"
+                | "prepare_admission_record_ref"
+                | "registration_ref"
+                | "routing_certificate_ref"
+        ),
+        "ShardPrepareRecord" => matches!(
+            name,
+            "basis_ref" | "fragment_ref" | "shard_configuration_ref"
+        ),
+        "TopologyAttemptClosureProof" => matches!(
+            name,
+            "abort_outcome_ref" | "outcome_ref" | "published_abort_ref" | "published_decision_ref"
+        ),
+        "TopologyRetirementFloor" => matches!(name, "cutover_record_ref"),
+        "TopologyTransferAck" => matches!(name, "destination_checkpoint_ref" | "plan_ref"),
+        "TopologyTransitionRecord" => matches!(name, "command_ref"),
+        "TypedCertifiedMetaProjectionPayload" => {
+            matches!(name, "source_global_control_record_ref")
+        }
+        _ => false,
+    };
     // The a09 storage-identity field cohort: IdentityContinuityRecord,
     // IdRangeLease<Role:AuthorityOwningRole>, and TxnAllocationBindingRoot each
     // had ZERO field rows before this landing, so the whole schema is a
@@ -6099,17 +6267,18 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a07_inline_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_strong_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_weak_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a08_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a09_field(&field.containing_schema)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 333,
+        pre_erratum.ordinary_unions.len() + 336,
         current_union_count,
-        "the historical witness must remove every post-erratum union through the A04 target tranche"
+        "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 351,
+        pre_erratum.fields.len() + 458,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the a09 storage-identity tranche"
+        "the historical witness must remove every post-erratum field cohort through the A08 lifecycle tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

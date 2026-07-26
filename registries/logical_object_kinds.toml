@@ -450,6 +450,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/audit_terminal_attempt_record/"
 
 [[kind]]
+object_kind = 0x022a
+name = "AuditTerminalFreezeIndex"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_freeze_index/"
+
+[[kind]]
 object_kind = 0x022b
 name = "AuditTerminalFreezeRecord"
 status = "reserved"
@@ -457,6 +466,24 @@ construction_order = 6
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/audit_terminal_freeze_record/"
+
+[[kind]]
+object_kind = 0x022c
+name = "AuditTerminalPlanAbandonment"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_plan_abandonment/"
+
+[[kind]]
+object_kind = 0x022d
+name = "AuditTerminalSigningPlan"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_signing_plan/"
 
 [[kind]]
 object_kind = 0x022e
@@ -747,6 +774,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/claim_to_applied_use_identity_derivation_proof/"
 
 [[kind]]
+object_kind = 0x0270
+name = "ClosedAttemptCompactionFloorRecord"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/closed_attempt_compaction_floor_record/"
+
+[[kind]]
 object_kind = 0x0271
 name = "ClosedAttemptCompactionSpec"
 status = "reserved"
@@ -826,6 +862,15 @@ construction_order = 56
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/continuity_authority_observation_import/"
+
+[[kind]]
+object_kind = 0x0281
+name = "ControlTerminalBasisHoldRoot"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/control_terminal_basis_hold_root/"
 
 [[kind]]
 object_kind = 0x0282
@@ -1017,6 +1062,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_closed_attempt_floor_publish_spec/"
 
 [[kind]]
+object_kind = 0x02af
+name = "GlobalConflictIndex"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_conflict_index/"
+
+[[kind]]
 object_kind = 0x02b0
 name = "GlobalConstraintReservationCertificate"
 status = "reserved"
@@ -1195,6 +1249,15 @@ construction_order = 20
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_statement_registration/"
+
+[[kind]]
+object_kind = 0x02cd
+name = "GlobalTxnCommand"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_command/"
 
 [[kind]]
 object_kind = 0x02ce
@@ -1764,6 +1827,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/new_database_identity_reservation/"
 
 [[kind]]
+object_kind = 0x0371
+name = "NoReservationBindingProof"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_reservation_binding_proof/"
+
+[[kind]]
 object_kind = 0x0373
 name = "NoTerminalSignatureOrOrderProof"
 status = "reserved"
@@ -1845,6 +1917,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/payload_receipt_proposal_freshness_basis/"
 
 [[kind]]
+object_kind = 0x037e
+name = "PendingAttemptCompactionRoot"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/pending_attempt_compaction_root/"
+
+[[kind]]
 object_kind = 0x0382
 name = "PortableArchiveGrantLineageProof"
 status = "reserved"
@@ -1861,6 +1942,15 @@ construction_order = 27
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/portable_continuity_authority_observation/"
+
+[[kind]]
+object_kind = 0x0388
+name = "PortableRemoteReleaseAckEvidence"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_remote_release_ack_evidence/"
 
 [[kind]]
 object_kind = 0x0389
@@ -3024,6 +3114,24 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/sealed_pre_bootstrap_dispatch_journal_import/"
 
 [[kind]]
+object_kind = 0x0430
+name = "SequenceNeutralAuditEventBody"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sequence_neutral_audit_event_body/"
+
+[[kind]]
+object_kind = 0x0431
+name = "SequenceNeutralAuditResolutionBody"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sequence_neutral_audit_resolution_body/"
+
+[[kind]]
 object_kind = 0x0432
 name = "SequenceNeutralSpec"
 status = "reserved"
@@ -3087,6 +3195,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_config_payload_floor/"
 
 [[kind]]
+object_kind = 0x0443
+name = "ShardConfigurationAdoptionEvidence"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_configuration_adoption_evidence/"
+
+[[kind]]
 object_kind = 0x0445
 name = "ShardContinuityAuthorityProjection"
 status = "reserved"
@@ -3094,6 +3211,15 @@ construction_order = 50
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_continuity_authority_projection/"
+
+[[kind]]
+object_kind = 0x0447
+name = "ShardControlCommand"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_control_command/"
 
 [[kind]]
 object_kind = 0x0448
@@ -3438,6 +3564,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/terminal_abort_authority/"
 
 [[kind]]
+object_kind = 0x0490
+name = "TerminalAttemptSummaryRoot"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/terminal_attempt_summary_root/"
+
+[[kind]]
 object_kind = 0x0491
 name = "TerminalCertificationReservationRoot"
 status = "reserved"
@@ -3609,6 +3744,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/topology_attempt_closure_proof/"
 
 [[kind]]
+object_kind = 0x04a8
+name = "TopologyRetirementAck"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_retirement_ack/"
+
+[[kind]]
 object_kind = 0x04a9
 name = "TopologyRetirementFloor"
 status = "reserved"
@@ -3634,6 +3778,15 @@ construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/topology_transfer_ack/"
+
+[[kind]]
+object_kind = 0x04ac
+name = "TopologyTransferPlan"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_transfer_plan/"
 
 [[kind]]
 object_kind = 0x04ad

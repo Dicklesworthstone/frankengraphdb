@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2769
+target_count = 2909
 projection_fallback_count = 108
-target_source_assignment_sha256 = "e034622aa17bc0717a7729914ff4693c17fefbebe2a60e4a0c960df9d0a3ce55"
+target_source_assignment_sha256 = "3bbf52bdb91cf15d0ced13d007b6d7a659ba1ca4177c8dc804faeb10ca203e67"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -4856,6 +4856,193 @@ construction_order = 24
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/typed_certified_meta_projection_payload/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:audit-terminal-freeze-index"
+object_kind = 0x022a
+name = "AuditTerminalFreezeIndex"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_freeze_index/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:audit-terminal-plan-abandonment"
+object_kind = 0x022c
+name = "AuditTerminalPlanAbandonment"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_plan_abandonment/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:audit-terminal-signing-plan"
+object_kind = 0x022d
+name = "AuditTerminalSigningPlan"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_terminal_signing_plan/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:closed-attempt-compaction-floor-record"
+object_kind = 0x0270
+name = "ClosedAttemptCompactionFloorRecord"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/closed_attempt_compaction_floor_record/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:control-terminal-basis-hold-root"
+object_kind = 0x0281
+name = "ControlTerminalBasisHoldRoot"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/control_terminal_basis_hold_root/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:global-conflict-index"
+object_kind = 0x02af
+name = "GlobalConflictIndex"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_conflict_index/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:global-txn-command"
+object_kind = 0x02cd
+name = "GlobalTxnCommand"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_txn_command/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:no-reservation-binding-proof"
+object_kind = 0x0371
+name = "NoReservationBindingProof"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_reservation_binding_proof/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:pending-attempt-compaction-root"
+object_kind = 0x037e
+name = "PendingAttemptCompactionRoot"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/pending_attempt_compaction_root/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:portable-remote-release-ack-evidence"
+object_kind = 0x0388
+name = "PortableRemoteReleaseAckEvidence"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/portable_remote_release_ack_evidence/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:sequence-neutral-audit-event-body"
+object_kind = 0x0430
+name = "SequenceNeutralAuditEventBody"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sequence_neutral_audit_event_body/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:sequence-neutral-audit-resolution-body"
+object_kind = 0x0431
+name = "SequenceNeutralAuditResolutionBody"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sequence_neutral_audit_resolution_body/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-configuration-adoption-evidence"
+object_kind = 0x0443
+name = "ShardConfigurationAdoptionEvidence"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_configuration_adoption_evidence/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:shard-control-command"
+object_kind = 0x0447
+name = "ShardControlCommand"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_control_command/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:terminal-attempt-summary-root"
+object_kind = 0x0490
+name = "TerminalAttemptSummaryRoot"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/terminal_attempt_summary_root/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:topology-retirement-ack"
+object_kind = 0x04a8
+name = "TopologyRetirementAck"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_retirement_ack/"
+
+[[logical_kind]]
+slice_id = "a08"
+row_id = "a08:logical-kind:topology-transfer-plan"
+object_kind = 0x04ac
+name = "TopologyTransferPlan"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/topology_transfer_plan/"
 
 [[logical_kind]]
 slice_id = "a18"
@@ -36309,6 +36496,45 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a08"
+row_id = "a08:union:global-conflict-index-entries-record-state-0d2f1a9005ef7e4f"
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["GlobalConflictIndex"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a08"
+row_id = "a08:union:sequence-neutral-audit-event-body-outcome-50a354d5119cb945"
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["SequenceNeutralAuditEventBody"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a08"
+row_id = "a08:union:topology-retirement-ack-floor-ref-aabe0703dac7de4f"
+union_name = "TopologyRetirementAckFloorRef"
+containing_schema = "TopologyRetirementAck"
+union_path = "TopologyRetirementAck.floor_ref"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["TopologyRetirementAck"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a07"
 row_id = "a07:union-arm:workspace-release-evidence-ref-meta-local-e0504f697521dc63"
@@ -36601,6 +36827,190 @@ source_arm_name = "Required"
 stable_name = "required"
 payload_kind = "inline-record"
 payload_sha256 = "d6bf34c187c66a2091c7655f9874144be1a581ef32d08124b86f9866d7daadb9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:global-conflict-index-entries-record-state-active-1ce5fafc216f391d"
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+arm_tag = 0x0001
+source_arm_name = "Active"
+stable_name = "active"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:global-conflict-index-entries-record-state-prepare-admitted-445da57f4e073113"
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+arm_tag = 0x0002
+source_arm_name = "PrepareAdmitted"
+stable_name = "prepare_admitted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:global-conflict-index-entries-record-state-committed-bfd0e5b48d5f25a7"
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+arm_tag = 0x0003
+source_arm_name = "Committed"
+stable_name = "committed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:global-conflict-index-entries-record-state-aborted-b314d8711ba793b2"
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+arm_tag = 0x0004
+source_arm_name = "Aborted"
+stable_name = "aborted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:global-conflict-index-entries-record-state-read-closed-ed7e81f669bc0ffd"
+union_name = "GlobalConflictIndexEntriesRecordState"
+containing_schema = "GlobalConflictIndex"
+union_path = "GlobalConflictIndex.entries.record.state"
+arm_tag = 0x0005
+source_arm_name = "ReadClosed"
+stable_name = "read_closed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-transaction-mutation-be61b2f4faa44b00"
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0001
+source_arm_name = "TransactionMutation"
+stable_name = "transaction_mutation"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-control-mutation-03e67d2656f68cff"
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0002
+source_arm_name = "ControlMutation"
+stable_name = "control_mutation"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-read-result-752eea4980a274a0"
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0003
+source_arm_name = "ReadResult"
+stable_name = "read_result"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-denied-ff59d4ad11ae6916"
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0004
+source_arm_name = "Denied"
+stable_name = "denied"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-failed-3ac6f74eb4289a9a"
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0005
+source_arm_name = "Failed"
+stable_name = "failed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-abandoned-e8e0d37a1348abc8"
+union_name = "SequenceNeutralAuditEventBodyOutcome"
+containing_schema = "SequenceNeutralAuditEventBody"
+union_path = "SequenceNeutralAuditEventBody.outcome"
+arm_tag = 0x0006
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:topology-retirement-ack-floor-ref-local-meta-57783fe2b65b5c87"
+union_name = "TopologyRetirementAckFloorRef"
+containing_schema = "TopologyRetirementAck"
+union_path = "TopologyRetirementAck.floor_ref"
+arm_tag = 0x0001
+source_arm_name = "LocalMeta"
+stable_name = "local_meta"
+payload_kind = "inline-record"
+payload_sha256 = "6e55cad56cb63bea92f623c84abee5ff3d44805628233ed653f88bf5a2a4cb4f"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a08"
+row_id = "a08:union-arm:topology-retirement-ack-floor-ref-remote-meta-9155f42653b73060"
+union_name = "TopologyRetirementAckFloorRef"
+containing_schema = "TopologyRetirementAck"
+union_path = "TopologyRetirementAck.floor_ref"
+arm_tag = 0x0002
+source_arm_name = "RemoteMeta"
+stable_name = "remote_meta"
+payload_kind = "inline-record"
+payload_sha256 = "0cd767c4baeaecdfc61067c55445e43c933f757bcfeb1776ef11b8fe6021e507"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -37062,7 +37472,7 @@ symbol = "AuditTerminalFreezeIndex"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x022a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:audit-terminal-freeze-record"
@@ -37080,7 +37490,7 @@ symbol = "AuditTerminalPlanAbandonment"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x022c"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:audit-terminal-signing-plan"
@@ -37089,7 +37499,7 @@ symbol = "AuditTerminalSigningPlan"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x022d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a21:reservation:audit-ticket"
@@ -37809,7 +38219,7 @@ symbol = "ClosedAttemptCompactionFloorRecord"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0270"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:closed-attempt-compaction-spec"
@@ -37980,7 +38390,7 @@ symbol = "ControlTerminalBasisHoldRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0281"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a16:reservation:cross-log-transparency-freshness"
@@ -38628,7 +39038,7 @@ symbol = "GlobalConflictIndex"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02af"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:global-constraint-reservation-certificate"
@@ -38907,7 +39317,7 @@ symbol = "GlobalTxnCommand"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x02cd"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:global-txn-outcome-preparation-record"
@@ -40437,7 +40847,7 @@ symbol = "NoReservationBindingProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0371"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a03:reservation:no-result-proof"
@@ -40554,7 +40964,7 @@ symbol = "PendingAttemptCompactionRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x037e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:pending-cursor-output-index"
@@ -40680,7 +41090,7 @@ symbol = "PortableRemoteReleaseAckEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0388"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:portable-reservation-authority-observation"
@@ -42489,7 +42899,7 @@ symbol = "SequenceNeutralAuditEventBody"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0430"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:sequence-neutral-audit-resolution-body"
@@ -42498,7 +42908,7 @@ symbol = "SequenceNeutralAuditResolutionBody"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0431"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a10:reservation:sequence-neutral-spec"
@@ -42660,7 +43070,7 @@ symbol = "ShardConfigurationAdoptionEvidence"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0443"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:shard-constraint-release-ack"
@@ -42696,7 +43106,7 @@ symbol = "ShardControlCommand"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0447"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:shard-decision-apply-command"
@@ -43461,7 +43871,7 @@ symbol = "TerminalAttemptSummaryRoot"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0490"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:terminal-certification-reservation-root"
@@ -43677,7 +44087,7 @@ symbol = "TopologyRetirementAck"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04a8"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:topology-retirement-floor"
@@ -43713,7 +44123,7 @@ symbol = "TopologyTransferPlan"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x04ac"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:topology-transition-record"
@@ -44659,7 +45069,7 @@ symbol = "AuditTerminalFreezeIndex"
 generic_signature = ""
 source_key = "top|AuditTerminalFreezeIndex"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1832"]
 
 [[top_level_candidate]]
@@ -44709,7 +45119,7 @@ symbol = "AuditTerminalPlanAbandonment"
 generic_signature = ""
 source_key = "top|AuditTerminalPlanAbandonment"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1840"]
 
 [[top_level_candidate]]
@@ -44719,7 +45129,7 @@ symbol = "AuditTerminalSigningPlan"
 generic_signature = ""
 source_key = "top|AuditTerminalSigningPlan"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1842"]
 
 [[top_level_candidate]]
@@ -45989,7 +46399,7 @@ symbol = "ClosedAttemptCompactionFloorRecord"
 generic_signature = ""
 source_key = "top|ClosedAttemptCompactionFloorRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1800"]
 
 [[top_level_candidate]]
@@ -46429,7 +46839,7 @@ symbol = "ControlTerminalBasisHoldRoot"
 generic_signature = ""
 source_key = "top|ControlTerminalBasisHoldRoot"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1830"]
 
 [[top_level_candidate]]
@@ -47449,7 +47859,7 @@ symbol = "GlobalConflictIndex"
 generic_signature = ""
 source_key = "top|GlobalConflictIndex"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1860"]
 
 [[top_level_candidate]]
@@ -47969,7 +48379,7 @@ symbol = "GlobalTxnCommand"
 generic_signature = ""
 source_key = "top|GlobalTxnCommand"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1862", "a21:2699"]
 
 [[top_level_candidate]]
@@ -49889,7 +50299,7 @@ symbol = "NoReservationBindingProof"
 generic_signature = ""
 source_key = "top|NoReservationBindingProof"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1796"]
 
 [[top_level_candidate]]
@@ -50089,7 +50499,7 @@ symbol = "PendingAttemptCompactionRoot"
 generic_signature = ""
 source_key = "top|PendingAttemptCompactionRoot"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1800"]
 
 [[top_level_candidate]]
@@ -50299,7 +50709,7 @@ symbol = "PortableRemoteReleaseAckEvidence"
 generic_signature = ""
 source_key = "top|PortableRemoteReleaseAckEvidence"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1810"]
 
 [[top_level_candidate]]
@@ -54039,7 +54449,7 @@ symbol = "SequenceNeutralAuditEventBody"
 generic_signature = ""
 source_key = "top|SequenceNeutralAuditEventBody"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1842"]
 
 [[top_level_candidate]]
@@ -54049,7 +54459,7 @@ symbol = "SequenceNeutralAuditResolutionBody"
 generic_signature = ""
 source_key = "top|SequenceNeutralAuditResolutionBody"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1842"]
 
 [[top_level_candidate]]
@@ -54259,7 +54669,7 @@ symbol = "ShardConfigurationAdoptionEvidence"
 generic_signature = ""
 source_key = "top|ShardConfigurationAdoptionEvidence"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1806"]
 
 [[top_level_candidate]]
@@ -54319,7 +54729,7 @@ symbol = "ShardControlCommand"
 generic_signature = ""
 source_key = "top|ShardControlCommand"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1882"]
 
 [[top_level_candidate]]
@@ -55389,7 +55799,7 @@ symbol = "TerminalAttemptSummaryRoot"
 generic_signature = ""
 source_key = "top|TerminalAttemptSummaryRoot"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1794"]
 
 [[top_level_candidate]]
@@ -55809,7 +56219,7 @@ symbol = "TopologyRetirementAck"
 generic_signature = ""
 source_key = "top|TopologyRetirementAck"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1886"]
 
 [[top_level_candidate]]
@@ -55849,7 +56259,7 @@ symbol = "TopologyTransferPlan"
 generic_signature = ""
 source_key = "top|TopologyTransferPlan"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a08:1886"]
 
 [[top_level_candidate]]
@@ -73193,6 +73603,142 @@ target_kind = "logical-kind"
 definition_status = "declared"
 
 [[target]]
+row_id = "a08:target:logical-kind-audit-terminal-freeze-index"
+target_row_id = "a08:logical-kind:audit-terminal-freeze-index"
+slice_id = "a08"
+source_key = "top|AuditTerminalFreezeIndex"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-audit-terminal-plan-abandonment"
+target_row_id = "a08:logical-kind:audit-terminal-plan-abandonment"
+slice_id = "a08"
+source_key = "top|AuditTerminalPlanAbandonment"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-audit-terminal-signing-plan"
+target_row_id = "a08:logical-kind:audit-terminal-signing-plan"
+slice_id = "a08"
+source_key = "top|AuditTerminalSigningPlan"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-closed-attempt-compaction-floor-record"
+target_row_id = "a08:logical-kind:closed-attempt-compaction-floor-record"
+slice_id = "a08"
+source_key = "top|ClosedAttemptCompactionFloorRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-control-terminal-basis-hold-root"
+target_row_id = "a08:logical-kind:control-terminal-basis-hold-root"
+slice_id = "a08"
+source_key = "top|ControlTerminalBasisHoldRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-global-conflict-index"
+target_row_id = "a08:logical-kind:global-conflict-index"
+slice_id = "a08"
+source_key = "top|GlobalConflictIndex"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-global-txn-command"
+target_row_id = "a08:logical-kind:global-txn-command"
+slice_id = "a08"
+source_key = "top|GlobalTxnCommand"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-no-reservation-binding-proof"
+target_row_id = "a08:logical-kind:no-reservation-binding-proof"
+slice_id = "a08"
+source_key = "top|NoReservationBindingProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-pending-attempt-compaction-root"
+target_row_id = "a08:logical-kind:pending-attempt-compaction-root"
+slice_id = "a08"
+source_key = "top|PendingAttemptCompactionRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-portable-remote-release-ack-evidence"
+target_row_id = "a08:logical-kind:portable-remote-release-ack-evidence"
+slice_id = "a08"
+source_key = "top|PortableRemoteReleaseAckEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-sequence-neutral-audit-event-body"
+target_row_id = "a08:logical-kind:sequence-neutral-audit-event-body"
+slice_id = "a08"
+source_key = "top|SequenceNeutralAuditEventBody"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-sequence-neutral-audit-resolution-body"
+target_row_id = "a08:logical-kind:sequence-neutral-audit-resolution-body"
+slice_id = "a08"
+source_key = "top|SequenceNeutralAuditResolutionBody"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-configuration-adoption-evidence"
+target_row_id = "a08:logical-kind:shard-configuration-adoption-evidence"
+slice_id = "a08"
+source_key = "top|ShardConfigurationAdoptionEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-shard-control-command"
+target_row_id = "a08:logical-kind:shard-control-command"
+slice_id = "a08"
+source_key = "top|ShardControlCommand"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-terminal-attempt-summary-root"
+target_row_id = "a08:logical-kind:terminal-attempt-summary-root"
+slice_id = "a08"
+source_key = "top|TerminalAttemptSummaryRoot"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-topology-retirement-ack"
+target_row_id = "a08:logical-kind:topology-retirement-ack"
+slice_id = "a08"
+source_key = "top|TopologyRetirementAck"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:logical-kind-topology-transfer-plan"
+target_row_id = "a08:logical-kind:topology-transfer-plan"
+slice_id = "a08"
+source_key = "top|TopologyTransferPlan"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
 row_id = "a18:target:logical-kind-canonical-catalog-restore-target-terminal-disposition"
 target_row_id = "a18:logical-kind:canonical-catalog-restore-target-terminal-disposition"
 slice_id = "a18"
@@ -89186,6 +89732,1817 @@ retention_and_cut_rule = "strong reference to the exact role-parameterized autho
 version_status = "reserved"
 max_size_bytes = 40
 
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:attempt-compaction-attestation-build-control-identity"
+containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x0003
+stable_name = "build_control_identity"
+exact_wire_type = "WeakGlobalCommandIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakGlobalCommandIdentity embedded by value in AttemptCompactionAttestation; retained with the containing object and creates no reachability edge (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-terminal-freeze-record-scaffolding-applied-ref"
+containing_schema = "AuditTerminalFreezeRecord"
+field_tag = 0x000f
+stable_name = "scaffolding_applied_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in AuditTerminalFreezeRecord; retained with the containing object and creates no reachability edge (a08:1832)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-terminal-freeze-record-begin-release-applied-ref"
+containing_schema = "AuditTerminalFreezeRecord"
+field_tag = 0x001c
+stable_name = "begin_release_applied_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in AuditTerminalFreezeRecord; retained with the containing object and creates no reachability edge (a08:1832)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-terminal-freeze-record-release-applied-ref"
+containing_schema = "AuditTerminalFreezeRecord"
+field_tag = 0x001f
+stable_name = "release_applied_ref"
+exact_wire_type = "AppliedControlRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedControlRef embedded by value in AuditTerminalFreezeRecord; retained with the containing object and creates no reachability edge (a08:1832)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-authorization-decision-record-authority-bound-header"
+containing_schema = "GlobalAuthorizationDecisionRecord"
+field_tag = 0x0001
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalAuthorizationDecisionRecord; retained with the containing object and creates no reachability edge (a08:1826)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-logical-delta-batch-marker-identity"
+containing_schema = "GlobalLogicalDeltaBatch"
+field_tag = 0x0002
+stable_name = "marker_identity"
+exact_wire_type = "WeakMarkerIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakMarkerIdentity embedded by value in GlobalLogicalDeltaBatch; retained with the containing object and creates no reachability edge (a08:1870)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-txn-command-authority-bound-header"
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x0002
+stable_name = "authority_bound_header"
+exact_wire_type = "AuthorityBoundHeader"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline AuthorityBoundHeader<Meta> embedded by value in GlobalTxnCommand; retained with the containing object and creates no reachability edge (a08:1862)"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:meta-constraint-reservation-record-applied-abort-ref"
+containing_schema = "MetaConstraintReservationRecord"
+field_tag = 0x000f
+stable_name = "applied_abort_ref"
+exact_wire_type = "AppliedAbortRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline AppliedAbortRef embedded by value in MetaConstraintReservationRecord; retained with the containing object and creates no reachability edge (a08:1858)"
+version_status = "reserved"
+max_size_bytes = 49
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:attempt-compaction-attestation-floor-record-identity"
+containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x0002
+stable_name = "floor_record_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by AttemptCompactionAttestation; never a reachability edge and retained only with its containing object (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:attempt-compaction-attestation-build-resulting-root-identity"
+containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x0004
+stable_name = "build_resulting_root_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by AttemptCompactionAttestation; never a reachability edge and retained only with its containing object (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:closed-attempt-compaction-floor-record-source-command-digest"
+containing_schema = "ClosedAttemptCompactionFloorRecord"
+field_tag = 0x0003
+stable_name = "source_command_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by ClosedAttemptCompactionFloorRecord; never a reachability edge and retained only with its containing object (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:closed-attempt-compaction-floor-record-meta-checkpoint-identity"
+containing_schema = "ClosedAttemptCompactionFloorRecord"
+field_tag = 0x000a
+stable_name = "meta_checkpoint_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by ClosedAttemptCompactionFloorRecord; never a reachability edge and retained only with its containing object (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:distributed-serialization-certificate-conflict-index-basis-digest"
+containing_schema = "DistributedSerializationCertificate"
+field_tag = 0x000b
+stable_name = "conflict_index_basis_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by DistributedSerializationCertificate; never a reachability edge and retained only with its containing object (a08:1860)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-attempt-compaction-floor-record-identity"
+containing_schema = "GlobalAttemptCompactionFloor"
+field_tag = 0x0007
+stable_name = "record_identity"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by GlobalAttemptCompactionFloor; never a reachability edge and retained only with its containing object (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-closed-attempt-floor-publish-spec-expected-prior-authoritative-floor"
+containing_schema = "GlobalClosedAttemptFloorPublishSpec"
+field_tag = 0x0004
+stable_name = "expected_prior_authoritative_floor"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only weak identity carried by GlobalClosedAttemptFloorPublishSpec; never a reachability edge and retained only with its containing object (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:attempt-compaction-attestation-summary-root-ref"
+containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x0006
+stable_name = "summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this AttemptCompactionAttestation names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:attempt-compaction-attestation-one-digest-signer-lock-ref"
+containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x000c
+stable_name = "one_digest_signer_lock_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateSignerLock"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the CertificateSignerLock this AttemptCompactionAttestation names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-event-signer-lock-attempt-plan-ref"
+containing_schema = "AuditEventSignerLock"
+field_tag = 0x0001
+stable_name = "attempt_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditEventSigningAttemptPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditEventSigningAttemptPlan this AuditEventSignerLock names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1844)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-event-signer-lock-terminal-plan-ref"
+containing_schema = "AuditEventSignerLock"
+field_tag = 0x0002
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this AuditEventSignerLock names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1844)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-event-signing-attempt-plan-terminal-plan-ref"
+containing_schema = "AuditEventSigningAttemptPlan"
+field_tag = 0x0002
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this AuditEventSigningAttemptPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1844)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-event-signing-attempt-plan-configuration-ref"
+containing_schema = "AuditEventSigningAttemptPlan"
+field_tag = 0x0004
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this AuditEventSigningAttemptPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1844)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-resolution-signer-lock-attempt-plan-ref"
+containing_schema = "AuditResolutionSignerLock"
+field_tag = 0x0001
+stable_name = "attempt_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditResolutionSigningAttemptPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditResolutionSigningAttemptPlan this AuditResolutionSignerLock names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-resolution-signer-lock-terminal-plan-ref"
+containing_schema = "AuditResolutionSignerLock"
+field_tag = 0x0002
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this AuditResolutionSignerLock names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-resolution-signing-attempt-plan-terminal-plan-ref"
+containing_schema = "AuditResolutionSigningAttemptPlan"
+field_tag = 0x0002
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this AuditResolutionSigningAttemptPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-resolution-signing-attempt-plan-configuration-ref"
+containing_schema = "AuditResolutionSigningAttemptPlan"
+field_tag = 0x0005
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this AuditResolutionSigningAttemptPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-terminal-attempt-record-terminal-plan-ref"
+containing_schema = "AuditTerminalAttemptRecord"
+field_tag = 0x0002
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this AuditTerminalAttemptRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1850)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-terminal-attempt-record-attempt-plan-ref"
+containing_schema = "AuditTerminalAttemptRecord"
+field_tag = 0x0004
+stable_name = "attempt_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditEventSigningAttemptPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditEventSigningAttemptPlan this AuditTerminalAttemptRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1850)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-terminal-attempt-record-resolution-attempt-plan-ref"
+containing_schema = "AuditTerminalAttemptRecord"
+field_tag = 0x000d
+stable_name = "resolution_attempt_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditResolutionSigningAttemptPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditResolutionSigningAttemptPlan this AuditTerminalAttemptRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1850)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-terminal-freeze-record-control-terminal-basis-hold-root-ref"
+containing_schema = "AuditTerminalFreezeRecord"
+field_tag = 0x000e
+stable_name = "control_terminal_basis_hold_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ControlTerminalBasisHoldRoot"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ControlTerminalBasisHoldRoot this AuditTerminalFreezeRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1832)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-terminal-signing-plan-event-body-ref"
+containing_schema = "AuditTerminalSigningPlan"
+field_tag = 0x0009
+stable_name = "event_body_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SequenceNeutralAuditEventBody"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the SequenceNeutralAuditEventBody this AuditTerminalSigningPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1842)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-terminal-signing-plan-resolution-body-ref"
+containing_schema = "AuditTerminalSigningPlan"
+field_tag = 0x000b
+stable_name = "resolution_body_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "SequenceNeutralAuditResolutionBody"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the SequenceNeutralAuditResolutionBody this AuditTerminalSigningPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1842)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:closed-attempt-compaction-floor-record-terminal-summary-root-ref"
+containing_schema = "ClosedAttemptCompactionFloorRecord"
+field_tag = 0x0005
+stable_name = "terminal_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this ClosedAttemptCompactionFloorRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:closed-attempt-compaction-spec-evidence-bundle-ref"
+containing_schema = "ClosedAttemptCompactionSpec"
+field_tag = 0x000b
+stable_name = "evidence_bundle_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ClosedAttemptEvidenceBundle"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ClosedAttemptEvidenceBundle this ClosedAttemptCompactionSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:closed-attempt-compaction-spec-expected-prior-summary-root-ref"
+containing_schema = "ClosedAttemptCompactionSpec"
+field_tag = 0x000c
+stable_name = "expected_prior_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this ClosedAttemptCompactionSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:closed-attempt-compaction-spec-candidate-summary-root-ref"
+containing_schema = "ClosedAttemptCompactionSpec"
+field_tag = 0x000d
+stable_name = "candidate_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this ClosedAttemptCompactionSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:constraint-reservation-record-registration-ref"
+containing_schema = "ConstraintReservationRecord"
+field_tag = 0x0007
+stable_name = "registration_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this ConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1856)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:constraint-reservation-record-prepare-admission-record-ref"
+containing_schema = "ConstraintReservationRecord"
+field_tag = 0x0008
+stable_name = "prepare_admission_record_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this ConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1856)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:constraint-reservation-record-routing-certificate-ref"
+containing_schema = "ConstraintReservationRecord"
+field_tag = 0x0009
+stable_name = "routing_certificate_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this ConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1856)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:distributed-serialization-certificate-read-routing-certificate-ref"
+containing_schema = "DistributedSerializationCertificate"
+field_tag = 0x0005
+stable_name = "read_routing_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ReadParticipantRoutingCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ReadParticipantRoutingCertificate this DistributedSerializationCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1860)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:distributed-serialization-certificate-prepare-admission-record-ref"
+containing_schema = "DistributedSerializationCertificate"
+field_tag = 0x0006
+stable_name = "prepare_admission_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this DistributedSerializationCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1860)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:distributed-serialization-certificate-routing-certificate-ref"
+containing_schema = "DistributedSerializationCertificate"
+field_tag = 0x0008
+stable_name = "routing_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this DistributedSerializationCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1860)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-attempt-compaction-floor-summary-root-ref"
+containing_schema = "GlobalAttemptCompactionFloor"
+field_tag = 0x0001
+stable_name = "summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this GlobalAttemptCompactionFloor names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-attempt-compaction-floor-attestation-ref"
+containing_schema = "GlobalAttemptCompactionFloor"
+field_tag = 0x0008
+stable_name = "attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AttemptCompactionAttestation"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AttemptCompactionAttestation this GlobalAttemptCompactionFloor names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-authorization-decision-record-registration-ref"
+containing_schema = "GlobalAuthorizationDecisionRecord"
+field_tag = 0x0002
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalAuthorizationDecisionRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1826)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-authorization-decision-record-mutation-permit-ref"
+containing_schema = "GlobalAuthorizationDecisionRecord"
+field_tag = 0x0004
+stable_name = "mutation_permit_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "MutationPermitRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the MutationPermitRecord<Meta> this GlobalAuthorizationDecisionRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1826)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-authorization-decision-record-routing-certificate-ref"
+containing_schema = "GlobalAuthorizationDecisionRecord"
+field_tag = 0x0006
+stable_name = "routing_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this GlobalAuthorizationDecisionRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1826)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-closed-attempt-floor-publish-spec-floor-record-ref"
+containing_schema = "GlobalClosedAttemptFloorPublishSpec"
+field_tag = 0x0001
+stable_name = "floor_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ClosedAttemptCompactionFloorRecord"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ClosedAttemptCompactionFloorRecord this GlobalClosedAttemptFloorPublishSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-closed-attempt-floor-publish-spec-attestation-ref"
+containing_schema = "GlobalClosedAttemptFloorPublishSpec"
+field_tag = 0x0002
+stable_name = "attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AttemptCompactionAttestation"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AttemptCompactionAttestation this GlobalClosedAttemptFloorPublishSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-closed-attempt-floor-publish-spec-expected-summary-root-ref"
+containing_schema = "GlobalClosedAttemptFloorPublishSpec"
+field_tag = 0x0005
+stable_name = "expected_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this GlobalClosedAttemptFloorPublishSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-constraint-reservation-certificate-reservation-record-ref"
+containing_schema = "GlobalConstraintReservationCertificate"
+field_tag = 0x0001
+stable_name = "reservation_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConstraintReservationRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConstraintReservationRecord this GlobalConstraintReservationCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1856)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-logical-delta-batch-global-txn-record-ref"
+containing_schema = "GlobalLogicalDeltaBatch"
+field_tag = 0x0001
+stable_name = "global_txn_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnRecord this GlobalLogicalDeltaBatch names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1870)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-txn-command-registration-ref"
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x0003
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalTxnCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1862)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-txn-command-prepare-admission-record-ref"
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x0004
+stable_name = "prepare_admission_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this GlobalTxnCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1862)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-txn-command-final-certification-reservation-ref"
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x0007
+stable_name = "final_certification_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalFinalCertificationReservation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalFinalCertificationReservation this GlobalTxnCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1862)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-txn-command-order-attempt-input-ref"
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x000b
+stable_name = "order_attempt_input_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "MetaOrderAttemptInput"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the MetaOrderAttemptInput this GlobalTxnCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1862)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:global-txn-command-topology-state-ref"
+containing_schema = "GlobalTxnCommand"
+field_tag = 0x000d
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this GlobalTxnCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1862)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:meta-constraint-reservation-record-topology-state-ref"
+containing_schema = "MetaConstraintReservationRecord"
+field_tag = 0x0004
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this MetaConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1858)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:meta-constraint-reservation-record-registration-ref"
+containing_schema = "MetaConstraintReservationRecord"
+field_tag = 0x0005
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this MetaConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1858)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:meta-constraint-reservation-record-admission-spec-ref"
+containing_schema = "MetaConstraintReservationRecord"
+field_tag = 0x0006
+stable_name = "admission_spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalPrepareAdmissionSpec"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalPrepareAdmissionSpec this MetaConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1858)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:meta-constraint-reservation-record-global-txn-command-ref"
+containing_schema = "MetaConstraintReservationRecord"
+field_tag = 0x000d
+stable_name = "global_txn_command_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnCommand"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnCommand this MetaConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1858)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:meta-control-projection-certificate-source-global-control-record-ref"
+containing_schema = "MetaControlProjectionCertificate"
+field_tag = 0x0001
+stable_name = "source_global_control_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this MetaControlProjectionCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1878)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:meta-control-projection-certificate-typed-payload-ref"
+containing_schema = "MetaControlProjectionCertificate"
+field_tag = 0x0007
+stable_name = "typed_payload_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TypedCertifiedMetaProjectionPayload"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TypedCertifiedMetaProjectionPayload this MetaControlProjectionCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1878)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:never-registered-evidence-begin-reservation-ref"
+containing_schema = "NeverRegisteredEvidence"
+field_tag = 0x0001
+stable_name = "begin_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalBeginReservationRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalBeginReservationRecord this NeverRegisteredEvidence names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:never-registered-evidence-terminal-record-ref"
+containing_schema = "NeverRegisteredEvidence"
+field_tag = 0x0002
+stable_name = "terminal_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NeverRegisteredTerminalRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the NeverRegisteredTerminalRecord this NeverRegisteredEvidence names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:never-registered-evidence-no-reservation-binding-proof-ref"
+containing_schema = "NeverRegisteredEvidence"
+field_tag = 0x0009
+stable_name = "no_reservation_binding_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NoReservationBindingProof"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the NoReservationBindingProof this NeverRegisteredEvidence names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:never-registered-floor-spec-expected-prior-summary-root-ref"
+containing_schema = "NeverRegisteredFloorSpec"
+field_tag = 0x0009
+stable_name = "expected_prior_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this NeverRegisteredFloorSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:never-registered-floor-spec-candidate-summary-root-ref"
+containing_schema = "NeverRegisteredFloorSpec"
+field_tag = 0x000a
+stable_name = "candidate_summary_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TerminalAttemptSummaryRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TerminalAttemptSummaryRoot this NeverRegisteredFloorSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:no-terminal-signature-or-order-proof-terminal-plan-ref"
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x0009
+stable_name = "terminal_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalSigningPlan"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalSigningPlan this NoTerminalSignatureOrOrderProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1838)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:no-terminal-signature-or-order-proof-abandonment-ref"
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x000a
+stable_name = "abandonment_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTerminalPlanAbandonment"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the AuditTerminalPlanAbandonment this NoTerminalSignatureOrOrderProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1838)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:no-terminal-signature-or-order-proof-configuration-ref"
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x0015
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this NoTerminalSignatureOrOrderProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1838)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:participant-routing-certificate-registration-ref"
+containing_schema = "ParticipantRoutingCertificate"
+field_tag = 0x0001
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this ParticipantRoutingCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:participant-routing-certificate-topology-state-ref"
+containing_schema = "ParticipantRoutingCertificate"
+field_tag = 0x0002
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this ParticipantRoutingCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:participant-routing-certificate-partition-derivation-proof-ref"
+containing_schema = "ParticipantRoutingCertificate"
+field_tag = 0x0007
+stable_name = "partition_derivation_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingDerivationProof"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingDerivationProof this ParticipantRoutingCertificate names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:participant-routing-derivation-proof-topology-state-ref"
+containing_schema = "ParticipantRoutingDerivationProof"
+field_tag = 0x0001
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this ParticipantRoutingDerivationProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:remote-grant-retirement-plan-basis-topology-ref"
+containing_schema = "RemoteGrantRetirementPlan"
+field_tag = 0x0002
+stable_name = "basis_topology_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyState this RemoteGrantRetirementPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1808)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:remote-grant-retirement-plan-successor-configuration-ref"
+containing_schema = "RemoteGrantRetirementPlan"
+field_tag = 0x0006
+stable_name = "successor_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteAuthorityConfigurationEvidence"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteAuthorityConfigurationEvidence this RemoteGrantRetirementPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1808)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:remote-grant-retirement-plan-old-grant-evidence-ref"
+containing_schema = "RemoteGrantRetirementPlan"
+field_tag = 0x0009
+stable_name = "old_grant_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantEvidence"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteRetentionGrantEvidence this RemoteGrantRetirementPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1808)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-applied-ack-resulting-post-visibility-shard-state-root-ref"
+containing_schema = "ShardAppliedAck"
+field_tag = 0x0008
+stable_name = "resulting_post_visibility_shard_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardLogicalStateRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardLogicalStateRoot this ShardAppliedAck names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1868)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-decision-apply-command-decision-publish-record-ref"
+containing_schema = "ShardDecisionApplyCommand"
+field_tag = 0x0003
+stable_name = "decision_publish_record_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this ShardDecisionApplyCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1866)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-effect-basis-active-meta-projection-root-ref"
+containing_schema = "ShardEffectBasis"
+field_tag = 0x0006
+stable_name = "active_meta_projection_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ActiveMetaProjectionRoot"
+construction_order = 35
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ActiveMetaProjectionRoot this ShardEffectBasis names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-effect-fragment-basis-ref"
+containing_schema = "ShardEffectFragment"
+field_tag = 0x0002
+stable_name = "basis_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardEffectBasis"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardEffectBasis this ShardEffectFragment names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1828)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-effect-fragment-prepare-admission-record-ref"
+containing_schema = "ShardEffectFragment"
+field_tag = 0x0003
+stable_name = "prepare_admission_record_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this ShardEffectFragment names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1828)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-effect-fragment-routing-certificate-ref"
+containing_schema = "ShardEffectFragment"
+field_tag = 0x0005
+stable_name = "routing_certificate_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this ShardEffectFragment names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1828)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-effect-fragment-global-authorization-ref"
+containing_schema = "ShardEffectFragment"
+field_tag = 0x0006
+stable_name = "global_authorization_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAuthorizationDecisionRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAuthorizationDecisionRecord this ShardEffectFragment names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1828)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-effect-fragment-global-outcome-preparation-ref"
+containing_schema = "ShardEffectFragment"
+field_tag = 0x0008
+stable_name = "global_outcome_preparation_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnOutcomePreparationRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnOutcomePreparationRecord this ShardEffectFragment names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1828)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-gc-preflight-evidence-preflight-record-ref"
+containing_schema = "ShardGcPreflightEvidence"
+field_tag = 0x0001
+stable_name = "preflight_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardGcPreflightRecord"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardGcPreflightRecord this ShardGcPreflightEvidence names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1810)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-gc-preflight-record-source-spec-ref"
+containing_schema = "ShardGcPreflightRecord"
+field_tag = 0x0001
+stable_name = "source_spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardGcPreflightSpec"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardGcPreflightSpec this ShardGcPreflightRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1810)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-gc-preflight-spec-configuration-ref"
+containing_schema = "ShardGcPreflightSpec"
+field_tag = 0x0004
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this ShardGcPreflightSpec names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1810)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-prepare-command-registration-ref"
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x0003
+stable_name = "registration_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalAttemptRegistration"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-prepare-command-prepare-admission-record-ref"
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x0004
+stable_name = "prepare_admission_record_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-prepare-command-routing-certificate-ref"
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x0009
+stable_name = "routing_certificate_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ParticipantRoutingCertificate"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-prepare-command-basis-ref"
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x000a
+stable_name = "basis_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardEffectBasis"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardEffectBasis this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-prepare-command-fragment-ref"
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x000b
+stable_name = "fragment_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardEffectFragment"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardEffectFragment this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-prepare-command-active-meta-projection-root-ref"
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x000c
+stable_name = "active_meta_projection_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ActiveMetaProjectionRoot"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ActiveMetaProjectionRoot this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-prepare-command-expected-shard-configuration-ref"
+containing_schema = "ShardPrepareCommand"
+field_tag = 0x000e
+stable_name = "expected_shard_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this ShardPrepareCommand names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-prepare-record-shard-configuration-ref"
+containing_schema = "ShardPrepareRecord"
+field_tag = 0x0004
+stable_name = "shard_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this ShardPrepareRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-prepare-record-basis-ref"
+containing_schema = "ShardPrepareRecord"
+field_tag = 0x0009
+stable_name = "basis_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardEffectBasis"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardEffectBasis this ShardPrepareRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-prepare-record-fragment-ref"
+containing_schema = "ShardPrepareRecord"
+field_tag = 0x000a
+stable_name = "fragment_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardEffectFragment"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardEffectFragment this ShardPrepareRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:topology-attempt-closure-proof-outcome-ref"
+containing_schema = "TopologyAttemptClosureProof"
+field_tag = 0x0005
+stable_name = "outcome_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnOutcomeRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnOutcomeRecord this TopologyAttemptClosureProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:topology-attempt-closure-proof-published-decision-ref"
+containing_schema = "TopologyAttemptClosureProof"
+field_tag = 0x0006
+stable_name = "published_decision_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this TopologyAttemptClosureProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:topology-attempt-closure-proof-abort-outcome-ref"
+containing_schema = "TopologyAttemptClosureProof"
+field_tag = 0x0008
+stable_name = "abort_outcome_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnOutcomeRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalTxnOutcomeRecord this TopologyAttemptClosureProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:topology-attempt-closure-proof-published-abort-ref"
+containing_schema = "TopologyAttemptClosureProof"
+field_tag = 0x0009
+stable_name = "published_abort_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this TopologyAttemptClosureProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:topology-retirement-floor-cutover-record-ref"
+containing_schema = "TopologyRetirementFloor"
+field_tag = 0x0001
+stable_name = "cutover_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyTransitionRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyTransitionRecord this TopologyRetirementFloor names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:topology-transfer-ack-plan-ref"
+containing_schema = "TopologyTransferAck"
+field_tag = 0x0001
+stable_name = "plan_ref"
+exact_wire_type = "CertifiedRemoteStrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyTransferPlan"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TopologyTransferPlan this TopologyTransferAck names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 537
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:topology-transfer-ack-destination-checkpoint-ref"
+containing_schema = "TopologyTransferAck"
+field_tag = 0x0005
+stable_name = "destination_checkpoint_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardCheckpointCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardCheckpointCertificate this TopologyTransferAck names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1886)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:topology-transition-record-command-ref"
+containing_schema = "TopologyTransitionRecord"
+field_tag = 0x0003
+stable_name = "command_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlCommand"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlCommand this TopologyTransitionRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1888)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:typed-certified-meta-projection-payload-source-global-control-record-ref"
+containing_schema = "TypedCertifiedMetaProjectionPayload"
+field_tag = 0x0001
+stable_name = "source_global_control_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the GlobalControlRecord this TypedCertifiedMetaProjectionPayload names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1876)"
+version_status = "reserved"
+max_size_bytes = 40
+
 [[target]]
 row_id = "a18:target:field-authority-owning-restore-abandonment-tombstone-role-authority-owning-role-authority-bound-header"
 target_row_id = "a18:field:authority-owning-restore-abandonment-tombstone-role-authority-owning-role-authority-bound-header"
@@ -90143,6 +92500,989 @@ row_id = "a12:target:field-resource-ledger-transition-role-authority-owning-role
 target_row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-authorization-decision-ref"
 slice_id = "a12"
 source_key = "field|ResourceLedgerTransition<Role:AuthorityOwningRole>|ResourceLedgerTransition<Role:AuthorityOwningRole>.authorization_decision_ref|authorization_decision_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-global-conflict-index-entries-record-state-0d2f1a9005ef7e4f"
+target_row_id = "a08:union:global-conflict-index-entries-record-state-0d2f1a9005ef7e4f"
+slice_id = "a08"
+source_key = "union|GlobalConflictIndex|GlobalConflictIndex.entries.record.state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-global-conflict-index-entries-record-state-active-1ce5fafc216f391d"
+target_row_id = "a08:union-arm:global-conflict-index-entries-record-state-active-1ce5fafc216f391d"
+slice_id = "a08"
+source_key = "arm|GlobalConflictIndex|GlobalConflictIndex.entries.record.state|Active"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-global-conflict-index-entries-record-state-prepare-admitted-445da57f4e073113"
+target_row_id = "a08:union-arm:global-conflict-index-entries-record-state-prepare-admitted-445da57f4e073113"
+slice_id = "a08"
+source_key = "arm|GlobalConflictIndex|GlobalConflictIndex.entries.record.state|PrepareAdmitted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-global-conflict-index-entries-record-state-committed-bfd0e5b48d5f25a7"
+target_row_id = "a08:union-arm:global-conflict-index-entries-record-state-committed-bfd0e5b48d5f25a7"
+slice_id = "a08"
+source_key = "arm|GlobalConflictIndex|GlobalConflictIndex.entries.record.state|Committed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-global-conflict-index-entries-record-state-aborted-b314d8711ba793b2"
+target_row_id = "a08:union-arm:global-conflict-index-entries-record-state-aborted-b314d8711ba793b2"
+slice_id = "a08"
+source_key = "arm|GlobalConflictIndex|GlobalConflictIndex.entries.record.state|Aborted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-global-conflict-index-entries-record-state-read-closed-ed7e81f669bc0ffd"
+target_row_id = "a08:union-arm:global-conflict-index-entries-record-state-read-closed-ed7e81f669bc0ffd"
+slice_id = "a08"
+source_key = "arm|GlobalConflictIndex|GlobalConflictIndex.entries.record.state|ReadClosed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-sequence-neutral-audit-event-body-outcome-50a354d5119cb945"
+target_row_id = "a08:union:sequence-neutral-audit-event-body-outcome-50a354d5119cb945"
+slice_id = "a08"
+source_key = "union|SequenceNeutralAuditEventBody|SequenceNeutralAuditEventBody.outcome"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-sequence-neutral-audit-event-body-outcome-transaction-mutation-be61b2f4faa44b00"
+target_row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-transaction-mutation-be61b2f4faa44b00"
+slice_id = "a08"
+source_key = "arm|SequenceNeutralAuditEventBody|SequenceNeutralAuditEventBody.outcome|TransactionMutation"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-sequence-neutral-audit-event-body-outcome-control-mutation-03e67d2656f68cff"
+target_row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-control-mutation-03e67d2656f68cff"
+slice_id = "a08"
+source_key = "arm|SequenceNeutralAuditEventBody|SequenceNeutralAuditEventBody.outcome|ControlMutation"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-sequence-neutral-audit-event-body-outcome-read-result-752eea4980a274a0"
+target_row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-read-result-752eea4980a274a0"
+slice_id = "a08"
+source_key = "arm|SequenceNeutralAuditEventBody|SequenceNeutralAuditEventBody.outcome|ReadResult"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-sequence-neutral-audit-event-body-outcome-denied-ff59d4ad11ae6916"
+target_row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-denied-ff59d4ad11ae6916"
+slice_id = "a08"
+source_key = "arm|SequenceNeutralAuditEventBody|SequenceNeutralAuditEventBody.outcome|Denied"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-sequence-neutral-audit-event-body-outcome-failed-3ac6f74eb4289a9a"
+target_row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-failed-3ac6f74eb4289a9a"
+slice_id = "a08"
+source_key = "arm|SequenceNeutralAuditEventBody|SequenceNeutralAuditEventBody.outcome|Failed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-sequence-neutral-audit-event-body-outcome-abandoned-e8e0d37a1348abc8"
+target_row_id = "a08:union-arm:sequence-neutral-audit-event-body-outcome-abandoned-e8e0d37a1348abc8"
+slice_id = "a08"
+source_key = "arm|SequenceNeutralAuditEventBody|SequenceNeutralAuditEventBody.outcome|Abandoned"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-topology-retirement-ack-floor-ref-aabe0703dac7de4f"
+target_row_id = "a08:union:topology-retirement-ack-floor-ref-aabe0703dac7de4f"
+slice_id = "a08"
+source_key = "union|TopologyRetirementAck|TopologyRetirementAck.floor_ref"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-topology-retirement-ack-floor-ref-local-meta-57783fe2b65b5c87"
+target_row_id = "a08:union-arm:topology-retirement-ack-floor-ref-local-meta-57783fe2b65b5c87"
+slice_id = "a08"
+source_key = "arm|TopologyRetirementAck|TopologyRetirementAck.floor_ref|LocalMeta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:union-arm-topology-retirement-ack-floor-ref-remote-meta-9155f42653b73060"
+target_row_id = "a08:union-arm:topology-retirement-ack-floor-ref-remote-meta-9155f42653b73060"
+slice_id = "a08"
+source_key = "arm|TopologyRetirementAck|TopologyRetirementAck.floor_ref|RemoteMeta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-attempt-compaction-attestation-build-control-identity"
+target_row_id = "a08:field:attempt-compaction-attestation-build-control-identity"
+slice_id = "a08"
+source_key = "field|AttemptCompactionAttestation|AttemptCompactionAttestation.build_control_identity|build_control_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-terminal-freeze-record-scaffolding-applied-ref"
+target_row_id = "a08:field:audit-terminal-freeze-record-scaffolding-applied-ref"
+slice_id = "a08"
+source_key = "field|AuditTerminalFreezeRecord|AuditTerminalFreezeRecord.state.Armed.scaffolding_applied_ref|scaffolding_applied_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-terminal-freeze-record-begin-release-applied-ref"
+target_row_id = "a08:field:audit-terminal-freeze-record-begin-release-applied-ref"
+slice_id = "a08"
+source_key = "field|AuditTerminalFreezeRecord|AuditTerminalFreezeRecord.state.ReleasePending.begin_release_applied_ref|begin_release_applied_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-terminal-freeze-record-release-applied-ref"
+target_row_id = "a08:field:audit-terminal-freeze-record-release-applied-ref"
+slice_id = "a08"
+source_key = "field|AuditTerminalFreezeRecord|AuditTerminalFreezeRecord.state.Released.release_applied_ref|release_applied_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-authorization-decision-record-authority-bound-header"
+target_row_id = "a08:field:global-authorization-decision-record-authority-bound-header"
+slice_id = "a08"
+source_key = "field|GlobalAuthorizationDecisionRecord|GlobalAuthorizationDecisionRecord.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-logical-delta-batch-marker-identity"
+target_row_id = "a08:field:global-logical-delta-batch-marker-identity"
+slice_id = "a08"
+source_key = "field|GlobalLogicalDeltaBatch|GlobalLogicalDeltaBatch.marker_identity|marker_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-txn-command-authority-bound-header"
+target_row_id = "a08:field:global-txn-command-authority-bound-header"
+slice_id = "a08"
+source_key = "field|GlobalTxnCommand|GlobalTxnCommand.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-meta-constraint-reservation-record-applied-abort-ref"
+target_row_id = "a08:field:meta-constraint-reservation-record-applied-abort-ref"
+slice_id = "a08"
+source_key = "field|MetaConstraintReservationRecord|MetaConstraintReservationRecord.state.Released.applied_abort_ref|applied_abort_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-attempt-compaction-attestation-floor-record-identity"
+target_row_id = "a08:field:attempt-compaction-attestation-floor-record-identity"
+slice_id = "a08"
+source_key = "field|AttemptCompactionAttestation|AttemptCompactionAttestation.floor_record_identity|floor_record_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-attempt-compaction-attestation-build-resulting-root-identity"
+target_row_id = "a08:field:attempt-compaction-attestation-build-resulting-root-identity"
+slice_id = "a08"
+source_key = "field|AttemptCompactionAttestation|AttemptCompactionAttestation.build_resulting_root_identity|build_resulting_root_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-closed-attempt-compaction-floor-record-source-command-digest"
+target_row_id = "a08:field:closed-attempt-compaction-floor-record-source-command-digest"
+slice_id = "a08"
+source_key = "field|ClosedAttemptCompactionFloorRecord|ClosedAttemptCompactionFloorRecord.source_command_digest|source_command_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-closed-attempt-compaction-floor-record-meta-checkpoint-identity"
+target_row_id = "a08:field:closed-attempt-compaction-floor-record-meta-checkpoint-identity"
+slice_id = "a08"
+source_key = "field|ClosedAttemptCompactionFloorRecord|ClosedAttemptCompactionFloorRecord.meta_checkpoint_identity|meta_checkpoint_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-distributed-serialization-certificate-conflict-index-basis-digest"
+target_row_id = "a08:field:distributed-serialization-certificate-conflict-index-basis-digest"
+slice_id = "a08"
+source_key = "field|DistributedSerializationCertificate|DistributedSerializationCertificate.conflict_index_basis_digest|conflict_index_basis_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-attempt-compaction-floor-record-identity"
+target_row_id = "a08:field:global-attempt-compaction-floor-record-identity"
+slice_id = "a08"
+source_key = "field|GlobalAttemptCompactionFloor|GlobalAttemptCompactionFloor.last_update.NeverRegistered.record_identity|record_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-closed-attempt-floor-publish-spec-expected-prior-authoritative-floor"
+target_row_id = "a08:field:global-closed-attempt-floor-publish-spec-expected-prior-authoritative-floor"
+slice_id = "a08"
+source_key = "field|GlobalClosedAttemptFloorPublishSpec|GlobalClosedAttemptFloorPublishSpec.expected_prior_authoritative_floor|expected_prior_authoritative_floor"
+target_kind = "field"
+definition_status = "declared"
+[[target]]
+row_id = "a08:target:field-attempt-compaction-attestation-summary-root-ref"
+target_row_id = "a08:field:attempt-compaction-attestation-summary-root-ref"
+slice_id = "a08"
+source_key = "field|AttemptCompactionAttestation|AttemptCompactionAttestation.summary_root_ref|summary_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-attempt-compaction-attestation-one-digest-signer-lock-ref"
+target_row_id = "a08:field:attempt-compaction-attestation-one-digest-signer-lock-ref"
+slice_id = "a08"
+source_key = "field|AttemptCompactionAttestation|AttemptCompactionAttestation.one_digest_signer_lock_ref|one_digest_signer_lock_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-event-signer-lock-attempt-plan-ref"
+target_row_id = "a08:field:audit-event-signer-lock-attempt-plan-ref"
+slice_id = "a08"
+source_key = "field|AuditEventSignerLock|AuditEventSignerLock.attempt_plan_ref|attempt_plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-event-signer-lock-terminal-plan-ref"
+target_row_id = "a08:field:audit-event-signer-lock-terminal-plan-ref"
+slice_id = "a08"
+source_key = "field|AuditEventSignerLock|AuditEventSignerLock.terminal_plan_ref|terminal_plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-event-signing-attempt-plan-terminal-plan-ref"
+target_row_id = "a08:field:audit-event-signing-attempt-plan-terminal-plan-ref"
+slice_id = "a08"
+source_key = "field|AuditEventSigningAttemptPlan|AuditEventSigningAttemptPlan.terminal_plan_ref|terminal_plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-event-signing-attempt-plan-configuration-ref"
+target_row_id = "a08:field:audit-event-signing-attempt-plan-configuration-ref"
+slice_id = "a08"
+source_key = "field|AuditEventSigningAttemptPlan|AuditEventSigningAttemptPlan.configuration_ref|configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-resolution-signer-lock-attempt-plan-ref"
+target_row_id = "a08:field:audit-resolution-signer-lock-attempt-plan-ref"
+slice_id = "a08"
+source_key = "field|AuditResolutionSignerLock|AuditResolutionSignerLock.attempt_plan_ref|attempt_plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-resolution-signer-lock-terminal-plan-ref"
+target_row_id = "a08:field:audit-resolution-signer-lock-terminal-plan-ref"
+slice_id = "a08"
+source_key = "field|AuditResolutionSignerLock|AuditResolutionSignerLock.terminal_plan_ref|terminal_plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-resolution-signing-attempt-plan-terminal-plan-ref"
+target_row_id = "a08:field:audit-resolution-signing-attempt-plan-terminal-plan-ref"
+slice_id = "a08"
+source_key = "field|AuditResolutionSigningAttemptPlan|AuditResolutionSigningAttemptPlan.terminal_plan_ref|terminal_plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-resolution-signing-attempt-plan-configuration-ref"
+target_row_id = "a08:field:audit-resolution-signing-attempt-plan-configuration-ref"
+slice_id = "a08"
+source_key = "field|AuditResolutionSigningAttemptPlan|AuditResolutionSigningAttemptPlan.configuration_ref|configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-terminal-attempt-record-terminal-plan-ref"
+target_row_id = "a08:field:audit-terminal-attempt-record-terminal-plan-ref"
+slice_id = "a08"
+source_key = "field|AuditTerminalAttemptRecord|AuditTerminalAttemptRecord.terminal_plan_ref|terminal_plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-terminal-attempt-record-attempt-plan-ref"
+target_row_id = "a08:field:audit-terminal-attempt-record-attempt-plan-ref"
+slice_id = "a08"
+source_key = "field|AuditTerminalAttemptRecord|AuditTerminalAttemptRecord.state.EventAttemptSelected.attempt_plan_ref|attempt_plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-terminal-attempt-record-resolution-attempt-plan-ref"
+target_row_id = "a08:field:audit-terminal-attempt-record-resolution-attempt-plan-ref"
+slice_id = "a08"
+source_key = "field|AuditTerminalAttemptRecord|AuditTerminalAttemptRecord.state.ResolutionAttemptSelected.resolution_attempt_plan_ref|resolution_attempt_plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-terminal-freeze-record-control-terminal-basis-hold-root-ref"
+target_row_id = "a08:field:audit-terminal-freeze-record-control-terminal-basis-hold-root-ref"
+slice_id = "a08"
+source_key = "field|AuditTerminalFreezeRecord|AuditTerminalFreezeRecord.state.Armed.control_terminal_basis_hold_root_ref|control_terminal_basis_hold_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-terminal-signing-plan-event-body-ref"
+target_row_id = "a08:field:audit-terminal-signing-plan-event-body-ref"
+slice_id = "a08"
+source_key = "field|AuditTerminalSigningPlan|AuditTerminalSigningPlan.event_body_ref|event_body_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-terminal-signing-plan-resolution-body-ref"
+target_row_id = "a08:field:audit-terminal-signing-plan-resolution-body-ref"
+slice_id = "a08"
+source_key = "field|AuditTerminalSigningPlan|AuditTerminalSigningPlan.resolution_body_ref|resolution_body_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-closed-attempt-compaction-floor-record-terminal-summary-root-ref"
+target_row_id = "a08:field:closed-attempt-compaction-floor-record-terminal-summary-root-ref"
+slice_id = "a08"
+source_key = "field|ClosedAttemptCompactionFloorRecord|ClosedAttemptCompactionFloorRecord.terminal_summary_root_ref|terminal_summary_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-closed-attempt-compaction-spec-evidence-bundle-ref"
+target_row_id = "a08:field:closed-attempt-compaction-spec-evidence-bundle-ref"
+slice_id = "a08"
+source_key = "field|ClosedAttemptCompactionSpec|ClosedAttemptCompactionSpec.evidence_bundle_ref|evidence_bundle_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-closed-attempt-compaction-spec-expected-prior-summary-root-ref"
+target_row_id = "a08:field:closed-attempt-compaction-spec-expected-prior-summary-root-ref"
+slice_id = "a08"
+source_key = "field|ClosedAttemptCompactionSpec|ClosedAttemptCompactionSpec.expected_prior_summary_root_ref|expected_prior_summary_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-closed-attempt-compaction-spec-candidate-summary-root-ref"
+target_row_id = "a08:field:closed-attempt-compaction-spec-candidate-summary-root-ref"
+slice_id = "a08"
+source_key = "field|ClosedAttemptCompactionSpec|ClosedAttemptCompactionSpec.candidate_summary_root_ref|candidate_summary_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-constraint-reservation-record-registration-ref"
+target_row_id = "a08:field:constraint-reservation-record-registration-ref"
+slice_id = "a08"
+source_key = "field|ConstraintReservationRecord|ConstraintReservationRecord.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-constraint-reservation-record-prepare-admission-record-ref"
+target_row_id = "a08:field:constraint-reservation-record-prepare-admission-record-ref"
+slice_id = "a08"
+source_key = "field|ConstraintReservationRecord|ConstraintReservationRecord.prepare_admission_record_ref|prepare_admission_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-constraint-reservation-record-routing-certificate-ref"
+target_row_id = "a08:field:constraint-reservation-record-routing-certificate-ref"
+slice_id = "a08"
+source_key = "field|ConstraintReservationRecord|ConstraintReservationRecord.routing_certificate_ref|routing_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-distributed-serialization-certificate-read-routing-certificate-ref"
+target_row_id = "a08:field:distributed-serialization-certificate-read-routing-certificate-ref"
+slice_id = "a08"
+source_key = "field|DistributedSerializationCertificate|DistributedSerializationCertificate.lifecycle_basis.ReadOnly.read_routing_certificate_ref|read_routing_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-distributed-serialization-certificate-prepare-admission-record-ref"
+target_row_id = "a08:field:distributed-serialization-certificate-prepare-admission-record-ref"
+slice_id = "a08"
+source_key = "field|DistributedSerializationCertificate|DistributedSerializationCertificate.lifecycle_basis.ReadWrite.prepare_admission_record_ref|prepare_admission_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-distributed-serialization-certificate-routing-certificate-ref"
+target_row_id = "a08:field:distributed-serialization-certificate-routing-certificate-ref"
+slice_id = "a08"
+source_key = "field|DistributedSerializationCertificate|DistributedSerializationCertificate.lifecycle_basis.ReadWrite.routing_certificate_ref|routing_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-attempt-compaction-floor-summary-root-ref"
+target_row_id = "a08:field:global-attempt-compaction-floor-summary-root-ref"
+slice_id = "a08"
+source_key = "field|GlobalAttemptCompactionFloor|GlobalAttemptCompactionFloor.summary_root_ref|summary_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-attempt-compaction-floor-attestation-ref"
+target_row_id = "a08:field:global-attempt-compaction-floor-attestation-ref"
+slice_id = "a08"
+source_key = "field|GlobalAttemptCompactionFloor|GlobalAttemptCompactionFloor.last_update.Closed.attestation_ref|attestation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-authorization-decision-record-registration-ref"
+target_row_id = "a08:field:global-authorization-decision-record-registration-ref"
+slice_id = "a08"
+source_key = "field|GlobalAuthorizationDecisionRecord|GlobalAuthorizationDecisionRecord.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-authorization-decision-record-mutation-permit-ref"
+target_row_id = "a08:field:global-authorization-decision-record-mutation-permit-ref"
+slice_id = "a08"
+source_key = "field|GlobalAuthorizationDecisionRecord|GlobalAuthorizationDecisionRecord.mutation_permit_ref|mutation_permit_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-authorization-decision-record-routing-certificate-ref"
+target_row_id = "a08:field:global-authorization-decision-record-routing-certificate-ref"
+slice_id = "a08"
+source_key = "field|GlobalAuthorizationDecisionRecord|GlobalAuthorizationDecisionRecord.routing_certificate_ref|routing_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-closed-attempt-floor-publish-spec-floor-record-ref"
+target_row_id = "a08:field:global-closed-attempt-floor-publish-spec-floor-record-ref"
+slice_id = "a08"
+source_key = "field|GlobalClosedAttemptFloorPublishSpec|GlobalClosedAttemptFloorPublishSpec.floor_record_ref|floor_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-closed-attempt-floor-publish-spec-attestation-ref"
+target_row_id = "a08:field:global-closed-attempt-floor-publish-spec-attestation-ref"
+slice_id = "a08"
+source_key = "field|GlobalClosedAttemptFloorPublishSpec|GlobalClosedAttemptFloorPublishSpec.attestation_ref|attestation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-closed-attempt-floor-publish-spec-expected-summary-root-ref"
+target_row_id = "a08:field:global-closed-attempt-floor-publish-spec-expected-summary-root-ref"
+slice_id = "a08"
+source_key = "field|GlobalClosedAttemptFloorPublishSpec|GlobalClosedAttemptFloorPublishSpec.expected_summary_root_ref|expected_summary_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-constraint-reservation-certificate-reservation-record-ref"
+target_row_id = "a08:field:global-constraint-reservation-certificate-reservation-record-ref"
+slice_id = "a08"
+source_key = "field|GlobalConstraintReservationCertificate|GlobalConstraintReservationCertificate.reservation_record_ref|reservation_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-logical-delta-batch-global-txn-record-ref"
+target_row_id = "a08:field:global-logical-delta-batch-global-txn-record-ref"
+slice_id = "a08"
+source_key = "field|GlobalLogicalDeltaBatch|GlobalLogicalDeltaBatch.global_txn_record_ref|global_txn_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-txn-command-registration-ref"
+target_row_id = "a08:field:global-txn-command-registration-ref"
+slice_id = "a08"
+source_key = "field|GlobalTxnCommand|GlobalTxnCommand.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-txn-command-prepare-admission-record-ref"
+target_row_id = "a08:field:global-txn-command-prepare-admission-record-ref"
+slice_id = "a08"
+source_key = "field|GlobalTxnCommand|GlobalTxnCommand.prepare_admission_record_ref|prepare_admission_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-txn-command-final-certification-reservation-ref"
+target_row_id = "a08:field:global-txn-command-final-certification-reservation-ref"
+slice_id = "a08"
+source_key = "field|GlobalTxnCommand|GlobalTxnCommand.final_certification_reservation_ref|final_certification_reservation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-txn-command-order-attempt-input-ref"
+target_row_id = "a08:field:global-txn-command-order-attempt-input-ref"
+slice_id = "a08"
+source_key = "field|GlobalTxnCommand|GlobalTxnCommand.order_attempt_input_ref|order_attempt_input_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-global-txn-command-topology-state-ref"
+target_row_id = "a08:field:global-txn-command-topology-state-ref"
+slice_id = "a08"
+source_key = "field|GlobalTxnCommand|GlobalTxnCommand.topology_state_ref|topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-meta-constraint-reservation-record-topology-state-ref"
+target_row_id = "a08:field:meta-constraint-reservation-record-topology-state-ref"
+slice_id = "a08"
+source_key = "field|MetaConstraintReservationRecord|MetaConstraintReservationRecord.topology_state_ref|topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-meta-constraint-reservation-record-registration-ref"
+target_row_id = "a08:field:meta-constraint-reservation-record-registration-ref"
+slice_id = "a08"
+source_key = "field|MetaConstraintReservationRecord|MetaConstraintReservationRecord.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-meta-constraint-reservation-record-admission-spec-ref"
+target_row_id = "a08:field:meta-constraint-reservation-record-admission-spec-ref"
+slice_id = "a08"
+source_key = "field|MetaConstraintReservationRecord|MetaConstraintReservationRecord.admission_spec_ref|admission_spec_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-meta-constraint-reservation-record-global-txn-command-ref"
+target_row_id = "a08:field:meta-constraint-reservation-record-global-txn-command-ref"
+slice_id = "a08"
+source_key = "field|MetaConstraintReservationRecord|MetaConstraintReservationRecord.state.Consumed.global_txn_command_ref|global_txn_command_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-meta-control-projection-certificate-source-global-control-record-ref"
+target_row_id = "a08:field:meta-control-projection-certificate-source-global-control-record-ref"
+slice_id = "a08"
+source_key = "field|MetaControlProjectionCertificate|MetaControlProjectionCertificate.source_global_control_record_ref|source_global_control_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-meta-control-projection-certificate-typed-payload-ref"
+target_row_id = "a08:field:meta-control-projection-certificate-typed-payload-ref"
+slice_id = "a08"
+source_key = "field|MetaControlProjectionCertificate|MetaControlProjectionCertificate.typed_payload_ref|typed_payload_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-never-registered-evidence-begin-reservation-ref"
+target_row_id = "a08:field:never-registered-evidence-begin-reservation-ref"
+slice_id = "a08"
+source_key = "field|NeverRegisteredEvidence|NeverRegisteredEvidence.begin_reservation_ref|begin_reservation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-never-registered-evidence-terminal-record-ref"
+target_row_id = "a08:field:never-registered-evidence-terminal-record-ref"
+slice_id = "a08"
+source_key = "field|NeverRegisteredEvidence|NeverRegisteredEvidence.terminal_record_ref|terminal_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-never-registered-evidence-no-reservation-binding-proof-ref"
+target_row_id = "a08:field:never-registered-evidence-no-reservation-binding-proof-ref"
+slice_id = "a08"
+source_key = "field|NeverRegisteredEvidence|NeverRegisteredEvidence.no_reservation_binding_proof_ref|no_reservation_binding_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-never-registered-floor-spec-expected-prior-summary-root-ref"
+target_row_id = "a08:field:never-registered-floor-spec-expected-prior-summary-root-ref"
+slice_id = "a08"
+source_key = "field|NeverRegisteredFloorSpec|NeverRegisteredFloorSpec.expected_prior_summary_root_ref|expected_prior_summary_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-never-registered-floor-spec-candidate-summary-root-ref"
+target_row_id = "a08:field:never-registered-floor-spec-candidate-summary-root-ref"
+slice_id = "a08"
+source_key = "field|NeverRegisteredFloorSpec|NeverRegisteredFloorSpec.candidate_summary_root_ref|candidate_summary_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-no-terminal-signature-or-order-proof-terminal-plan-ref"
+target_row_id = "a08:field:no-terminal-signature-or-order-proof-terminal-plan-ref"
+slice_id = "a08"
+source_key = "field|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.plan_disposition.SemanticPlanAbandoned.terminal_plan_ref|terminal_plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-no-terminal-signature-or-order-proof-abandonment-ref"
+target_row_id = "a08:field:no-terminal-signature-or-order-proof-abandonment-ref"
+slice_id = "a08"
+source_key = "field|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.plan_disposition.SemanticPlanAbandoned.abandonment_ref|abandonment_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-no-terminal-signature-or-order-proof-configuration-ref"
+target_row_id = "a08:field:no-terminal-signature-or-order-proof-configuration-ref"
+slice_id = "a08"
+source_key = "field|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.raft_nonorder_evidence.record.configuration_ref|configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-participant-routing-certificate-registration-ref"
+target_row_id = "a08:field:participant-routing-certificate-registration-ref"
+slice_id = "a08"
+source_key = "field|ParticipantRoutingCertificate|ParticipantRoutingCertificate.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-participant-routing-certificate-topology-state-ref"
+target_row_id = "a08:field:participant-routing-certificate-topology-state-ref"
+slice_id = "a08"
+source_key = "field|ParticipantRoutingCertificate|ParticipantRoutingCertificate.topology_state_ref|topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-participant-routing-certificate-partition-derivation-proof-ref"
+target_row_id = "a08:field:participant-routing-certificate-partition-derivation-proof-ref"
+slice_id = "a08"
+source_key = "field|ParticipantRoutingCertificate|ParticipantRoutingCertificate.partition_derivation_proof_ref|partition_derivation_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-participant-routing-derivation-proof-topology-state-ref"
+target_row_id = "a08:field:participant-routing-derivation-proof-topology-state-ref"
+slice_id = "a08"
+source_key = "field|ParticipantRoutingDerivationProof|ParticipantRoutingDerivationProof.topology_state_ref|topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-remote-grant-retirement-plan-basis-topology-ref"
+target_row_id = "a08:field:remote-grant-retirement-plan-basis-topology-ref"
+slice_id = "a08"
+source_key = "field|RemoteGrantRetirementPlan|RemoteGrantRetirementPlan.basis_topology_ref|basis_topology_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-remote-grant-retirement-plan-successor-configuration-ref"
+target_row_id = "a08:field:remote-grant-retirement-plan-successor-configuration-ref"
+slice_id = "a08"
+source_key = "field|RemoteGrantRetirementPlan|RemoteGrantRetirementPlan.successor_configuration_ref|successor_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-remote-grant-retirement-plan-old-grant-evidence-ref"
+target_row_id = "a08:field:remote-grant-retirement-plan-old-grant-evidence-ref"
+slice_id = "a08"
+source_key = "field|RemoteGrantRetirementPlan|RemoteGrantRetirementPlan.sorted_entries.record.old_grant_evidence_ref|old_grant_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-applied-ack-resulting-post-visibility-shard-state-root-ref"
+target_row_id = "a08:field:shard-applied-ack-resulting-post-visibility-shard-state-root-ref"
+slice_id = "a08"
+source_key = "field|ShardAppliedAck|ShardAppliedAck.resulting_post_visibility_shard_state_root_ref|resulting_post_visibility_shard_state_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-decision-apply-command-decision-publish-record-ref"
+target_row_id = "a08:field:shard-decision-apply-command-decision-publish-record-ref"
+slice_id = "a08"
+source_key = "field|ShardDecisionApplyCommand|ShardDecisionApplyCommand.decision_publish_record_ref|decision_publish_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-effect-basis-active-meta-projection-root-ref"
+target_row_id = "a08:field:shard-effect-basis-active-meta-projection-root-ref"
+slice_id = "a08"
+source_key = "field|ShardEffectBasis|ShardEffectBasis.active_meta_projection_root_ref|active_meta_projection_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-effect-fragment-basis-ref"
+target_row_id = "a08:field:shard-effect-fragment-basis-ref"
+slice_id = "a08"
+source_key = "field|ShardEffectFragment|ShardEffectFragment.basis_ref|basis_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-effect-fragment-prepare-admission-record-ref"
+target_row_id = "a08:field:shard-effect-fragment-prepare-admission-record-ref"
+slice_id = "a08"
+source_key = "field|ShardEffectFragment|ShardEffectFragment.prepare_admission_record_ref|prepare_admission_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-effect-fragment-routing-certificate-ref"
+target_row_id = "a08:field:shard-effect-fragment-routing-certificate-ref"
+slice_id = "a08"
+source_key = "field|ShardEffectFragment|ShardEffectFragment.routing_certificate_ref|routing_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-effect-fragment-global-authorization-ref"
+target_row_id = "a08:field:shard-effect-fragment-global-authorization-ref"
+slice_id = "a08"
+source_key = "field|ShardEffectFragment|ShardEffectFragment.global_authorization_ref|global_authorization_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-effect-fragment-global-outcome-preparation-ref"
+target_row_id = "a08:field:shard-effect-fragment-global-outcome-preparation-ref"
+slice_id = "a08"
+source_key = "field|ShardEffectFragment|ShardEffectFragment.global_outcome_preparation_ref|global_outcome_preparation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-gc-preflight-evidence-preflight-record-ref"
+target_row_id = "a08:field:shard-gc-preflight-evidence-preflight-record-ref"
+slice_id = "a08"
+source_key = "field|ShardGcPreflightEvidence|ShardGcPreflightEvidence.preflight_record_ref|preflight_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-gc-preflight-record-source-spec-ref"
+target_row_id = "a08:field:shard-gc-preflight-record-source-spec-ref"
+slice_id = "a08"
+source_key = "field|ShardGcPreflightRecord|ShardGcPreflightRecord.source_spec_ref|source_spec_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-gc-preflight-spec-configuration-ref"
+target_row_id = "a08:field:shard-gc-preflight-spec-configuration-ref"
+slice_id = "a08"
+source_key = "field|ShardGcPreflightSpec|ShardGcPreflightSpec.configuration_ref|configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-prepare-command-registration-ref"
+target_row_id = "a08:field:shard-prepare-command-registration-ref"
+slice_id = "a08"
+source_key = "field|ShardPrepareCommand|ShardPrepareCommand.registration_ref|registration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-prepare-command-prepare-admission-record-ref"
+target_row_id = "a08:field:shard-prepare-command-prepare-admission-record-ref"
+slice_id = "a08"
+source_key = "field|ShardPrepareCommand|ShardPrepareCommand.prepare_admission_record_ref|prepare_admission_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-prepare-command-routing-certificate-ref"
+target_row_id = "a08:field:shard-prepare-command-routing-certificate-ref"
+slice_id = "a08"
+source_key = "field|ShardPrepareCommand|ShardPrepareCommand.routing_certificate_ref|routing_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-prepare-command-basis-ref"
+target_row_id = "a08:field:shard-prepare-command-basis-ref"
+slice_id = "a08"
+source_key = "field|ShardPrepareCommand|ShardPrepareCommand.basis_ref|basis_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-prepare-command-fragment-ref"
+target_row_id = "a08:field:shard-prepare-command-fragment-ref"
+slice_id = "a08"
+source_key = "field|ShardPrepareCommand|ShardPrepareCommand.fragment_ref|fragment_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-prepare-command-active-meta-projection-root-ref"
+target_row_id = "a08:field:shard-prepare-command-active-meta-projection-root-ref"
+slice_id = "a08"
+source_key = "field|ShardPrepareCommand|ShardPrepareCommand.active_meta_projection_root_ref|active_meta_projection_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-prepare-command-expected-shard-configuration-ref"
+target_row_id = "a08:field:shard-prepare-command-expected-shard-configuration-ref"
+slice_id = "a08"
+source_key = "field|ShardPrepareCommand|ShardPrepareCommand.expected_shard_configuration_ref|expected_shard_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-prepare-record-shard-configuration-ref"
+target_row_id = "a08:field:shard-prepare-record-shard-configuration-ref"
+slice_id = "a08"
+source_key = "field|ShardPrepareRecord|ShardPrepareRecord.shard_configuration_ref|shard_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-prepare-record-basis-ref"
+target_row_id = "a08:field:shard-prepare-record-basis-ref"
+slice_id = "a08"
+source_key = "field|ShardPrepareRecord|ShardPrepareRecord.basis_ref|basis_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-prepare-record-fragment-ref"
+target_row_id = "a08:field:shard-prepare-record-fragment-ref"
+slice_id = "a08"
+source_key = "field|ShardPrepareRecord|ShardPrepareRecord.fragment_ref|fragment_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-topology-attempt-closure-proof-outcome-ref"
+target_row_id = "a08:field:topology-attempt-closure-proof-outcome-ref"
+slice_id = "a08"
+source_key = "field|TopologyAttemptClosureProof|TopologyAttemptClosureProof.sorted_attempt_evidence.Terminal.outcome_ref|outcome_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-topology-attempt-closure-proof-published-decision-ref"
+target_row_id = "a08:field:topology-attempt-closure-proof-published-decision-ref"
+slice_id = "a08"
+source_key = "field|TopologyAttemptClosureProof|TopologyAttemptClosureProof.sorted_attempt_evidence.Terminal.published_decision_ref|published_decision_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-topology-attempt-closure-proof-abort-outcome-ref"
+target_row_id = "a08:field:topology-attempt-closure-proof-abort-outcome-ref"
+slice_id = "a08"
+source_key = "field|TopologyAttemptClosureProof|TopologyAttemptClosureProof.sorted_attempt_evidence.AbortForPostCutoverRetry.abort_outcome_ref|abort_outcome_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-topology-attempt-closure-proof-published-abort-ref"
+target_row_id = "a08:field:topology-attempt-closure-proof-published-abort-ref"
+slice_id = "a08"
+source_key = "field|TopologyAttemptClosureProof|TopologyAttemptClosureProof.sorted_attempt_evidence.AbortForPostCutoverRetry.published_abort_ref|published_abort_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-topology-retirement-floor-cutover-record-ref"
+target_row_id = "a08:field:topology-retirement-floor-cutover-record-ref"
+slice_id = "a08"
+source_key = "field|TopologyRetirementFloor|TopologyRetirementFloor.cutover_record_ref|cutover_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-topology-transfer-ack-plan-ref"
+target_row_id = "a08:field:topology-transfer-ack-plan-ref"
+slice_id = "a08"
+source_key = "field|TopologyTransferAck|TopologyTransferAck.plan_ref|plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-topology-transfer-ack-destination-checkpoint-ref"
+target_row_id = "a08:field:topology-transfer-ack-destination-checkpoint-ref"
+slice_id = "a08"
+source_key = "field|TopologyTransferAck|TopologyTransferAck.destination_checkpoint_ref|destination_checkpoint_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-topology-transition-record-command-ref"
+target_row_id = "a08:field:topology-transition-record-command-ref"
+slice_id = "a08"
+source_key = "field|TopologyTransitionRecord|TopologyTransitionRecord.command_ref|command_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-typed-certified-meta-projection-payload-source-global-control-record-ref"
+target_row_id = "a08:field:typed-certified-meta-projection-payload-source-global-control-record-ref"
+slice_id = "a08"
+source_key = "field|TypedCertifiedMetaProjectionPayload|TypedCertifiedMetaProjectionPayload.source_global_control_record_ref|source_global_control_record_ref"
 target_kind = "field"
 definition_status = "declared"
 
