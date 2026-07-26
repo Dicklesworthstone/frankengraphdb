@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 55
+registry_epoch = 56
 
 [[kind]]
 object_kind = 0x0001
@@ -1224,6 +1224,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_restore_participant_pin_release_completion_certificate/"
 
 [[kind]]
+object_kind = 0x02c6
+name = "GlobalRestoreServiceFinalCertificate"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_service_final_certificate/"
+
+[[kind]]
 object_kind = 0x02c7
 name = "GlobalRestoreServicePrepareCertificate"
 status = "reserved"
@@ -1627,6 +1636,15 @@ construction_order = 30
 role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_restore_completion_evidence/"
+
+[[kind]]
+object_kind = 0x031e
+name = "LocalRestoreReadyCertificate"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_ready_certificate/"
 
 [[kind]]
 object_kind = 0x0320
@@ -2752,6 +2770,15 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_shard_bootstrap_projection_certificate/"
+
+[[kind]]
+object_kind = 0x03ea
+name = "RestoreShardOperationalAck"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_shard_operational_ack/"
 
 [[kind]]
 object_kind = 0x03eb
@@ -4588,3 +4615,66 @@ construction_order = 45
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/gc_cancellation_authority_for/"
+
+[[kind]]
+object_kind = 0x055f
+name = "GlobalRestoreServiceCompletionSpec"
+status = "reserved"
+construction_order = 50
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_service_completion_spec/"
+
+[[kind]]
+object_kind = 0x0560
+name = "GlobalRestoreServiceFinalizeSpec"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/global_restore_service_finalize_spec/"
+
+[[kind]]
+object_kind = 0x0561
+name = "LocalRestoreActivationSpec"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_activation_spec/"
+
+[[kind]]
+object_kind = 0x0562
+name = "LocalRestoreServiceCompletionSpec"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_service_completion_spec/"
+
+[[kind]]
+object_kind = 0x0563
+name = "LocalRestoreServicePromotionSpec"
+status = "reserved"
+construction_order = 35
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_service_promotion_spec/"
+
+[[kind]]
+object_kind = 0x0564
+name = "ShardRestoreReopenConfirmSpec"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_reopen_confirm_spec/"
+
+[[kind]]
+object_kind = 0x0565
+name = "ShardRestoreServiceOpenSpec"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_service_open_spec/"

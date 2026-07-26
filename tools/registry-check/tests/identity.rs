@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 63
+registry_epoch = 64
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 63);
+    assert_eq!(epoch, 64);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3893,6 +3893,536 @@ fn idr_a18_reserved_reference_targets_and_strong_fields_are_exact() {
 }
 
 #[test]
+fn idr_a20_reservation_backed_promotion_certificates_and_ready_edges_are_exact() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+
+    for (name, code, order, role, source_key) in [
+        (
+            "GlobalRestoreServiceFinalCertificate",
+            0x02c6,
+            44,
+            "role-meta",
+            "top|GlobalRestoreServiceFinalCertificate",
+        ),
+        (
+            "LocalRestoreReadyCertificate",
+            0x031e,
+            40,
+            "role-local",
+            "top|LocalRestoreReadyCertificate",
+        ),
+        (
+            "RestoreShardOperationalAck",
+            0x03ea,
+            50,
+            "role-shard",
+            "top|RestoreShardOperationalAck",
+        ),
+    ] {
+        let logical = identity
+            .logical
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("missing A20 reservation-backed kind {name}"));
+        assert_eq!(logical.object_kind, code);
+        assert_eq!(logical.status, "reserved");
+        assert_eq!(logical.construction_order, order);
+        assert_eq!(logical.role_predicate, role);
+        assert_eq!(logical.max_size_bytes, 16_777_216);
+
+        let reservation = catalog
+            .reservations
+            .iter()
+            .find(|row| row.symbol == name)
+            .unwrap_or_else(|| panic!("missing reservation for {name}"));
+        assert_eq!(reservation.identity_class, "logical");
+        assert_eq!(reservation.code_reservation, format!("0x{code:04x}"));
+        assert_eq!(reservation.disposition, "existing");
+
+        let candidate = catalog
+            .top_level_candidates
+            .iter()
+            .find(|row| row.source_key == source_key)
+            .unwrap_or_else(|| panic!("missing source candidate for {name}"));
+        assert_eq!(candidate.identity_class, "logical");
+
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{name} must have one exact target");
+        assert_eq!(targets[0].target_kind, "logical-kind");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+
+    for (owner, name, tag, target, source_key) in [
+        (
+            "GlobalRestoreServiceFinalCertificate",
+            "finalize_record_ref",
+            0x0002,
+            "GlobalControlRecord",
+            "field|GlobalRestoreServiceFinalCertificate|GlobalRestoreServiceFinalCertificate.finalize_record_ref|finalize_record_ref",
+        ),
+        (
+            "GlobalRestoreServiceFinalCertificate",
+            "post_apply_global_state_root_ref",
+            0x0005,
+            "GlobalStateRoot",
+            "field|GlobalRestoreServiceFinalCertificate|GlobalRestoreServiceFinalCertificate.post_apply_global_state_root_ref|post_apply_global_state_root_ref",
+        ),
+        (
+            "GlobalRestoreServiceFinalCertificate",
+            "visibility_certificate_ref",
+            0x0007,
+            "PortableSemanticVisibilityCertificate",
+            "field|GlobalRestoreServiceFinalCertificate|GlobalRestoreServiceFinalCertificate.visibility_certificate_ref|visibility_certificate_ref",
+        ),
+        (
+            "GlobalRestoreServiceFinalCertificate",
+            "certificate_attempt_ref",
+            0x0008,
+            "CertificateAttemptRecord",
+            "field|GlobalRestoreServiceFinalCertificate|GlobalRestoreServiceFinalCertificate.certificate_attempt_ref|certificate_attempt_ref",
+        ),
+        (
+            "LocalRestoreReadyCertificate",
+            "current_hidden_state_root_ref",
+            0x0004,
+            "LogicalStateRoot",
+            "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.current_hidden_state_root_ref|current_hidden_state_root_ref",
+        ),
+        (
+            "LocalRestoreReadyCertificate",
+            "reconciliation_completion_proof_ref",
+            0x0005,
+            "RestoreReconciliationCompletionProof",
+            "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.reconciliation_completion_proof_ref|reconciliation_completion_proof_ref",
+        ),
+        (
+            "LocalRestoreReadyCertificate",
+            "ready_closure_inventory_ref",
+            0x0006,
+            "RestoreReadyClosureInventory",
+            "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.ready_closure_inventory_ref|ready_closure_inventory_ref",
+        ),
+        (
+            "LocalRestoreReadyCertificate",
+            "current_configuration_ref",
+            0x0007,
+            "ConfigurationState",
+            "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.current_configuration_ref|current_configuration_ref",
+        ),
+        (
+            "LocalRestoreReadyCertificate",
+            "current_config_floor_ref",
+            0x0009,
+            "ConfigPayloadFloor",
+            "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.current_config_floor_ref|current_config_floor_ref",
+        ),
+        (
+            "RestoreShardOperationalAck",
+            "post_close_state_root_ref",
+            0x0006,
+            "ShardLogicalStateRoot",
+            "field|RestoreShardOperationalAck|RestoreShardOperationalAck.post_close_state_root_ref|post_close_state_root_ref",
+        ),
+        (
+            "RestoreShardOperationalAck",
+            "source_access_closure_ref",
+            0x000b,
+            "ShardRestoreSourceAccessClosure",
+            "field|RestoreShardOperationalAck|RestoreShardOperationalAck.source_access_closure_ref|source_access_closure_ref",
+        ),
+        (
+            "RestoreShardOperationalAck",
+            "certificate_attempt_ref",
+            0x0010,
+            "CertificateAttemptRecord",
+            "field|RestoreShardOperationalAck|RestoreShardOperationalAck.certificate_attempt_ref|certificate_attempt_ref",
+        ),
+    ] {
+        let fields = identity
+            .fields
+            .iter()
+            .filter(|row| row.containing_schema == owner && row.stable_name == name)
+            .collect::<Vec<_>>();
+        assert_eq!(fields.len(), 1, "{owner}.{name} must exist exactly once");
+        let field = fields[0];
+        assert_eq!(field.field_tag, tag);
+        assert_eq!(field.exact_wire_type, "StrongRef");
+        assert_eq!(field.cardinality, "one");
+        assert_eq!(field.identity_class, "logical");
+        assert_eq!(field.reference_semantics, "strong");
+        assert_eq!(field.target_schema_id.as_deref(), Some(target));
+        let owner_order = identity
+            .logical
+            .iter()
+            .find(|row| row.name == owner)
+            .expect("field owner resolves")
+            .construction_order;
+        assert_eq!(field.construction_order, owner_order);
+        assert_eq!(field.version_status, "reserved");
+        assert_eq!(field.max_size_bytes, 40);
+
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{owner}.{name} must have one target");
+        assert_eq!(targets[0].target_kind, "field");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+}
+
+#[test]
+fn idr_a20_structural_body_promotion_commands_and_activation_union_are_exact() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+
+    for (name, code, order, role) in [
+        (
+            "GlobalRestoreServiceCompletionSpec",
+            0x055f,
+            50,
+            "role-meta",
+        ),
+        ("GlobalRestoreServiceFinalizeSpec", 0x0560, 24, "role-meta"),
+        ("LocalRestoreActivationSpec", 0x0561, 40, "role-local"),
+        (
+            "LocalRestoreServiceCompletionSpec",
+            0x0562,
+            35,
+            "role-local",
+        ),
+        ("LocalRestoreServicePromotionSpec", 0x0563, 35, "role-local"),
+        ("ShardRestoreReopenConfirmSpec", 0x0564, 44, "role-shard"),
+        ("ShardRestoreServiceOpenSpec", 0x0565, 44, "role-shard"),
+    ] {
+        let logical = identity
+            .logical
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("missing A20 structural-body kind {name}"));
+        assert_eq!(logical.object_kind, code);
+        assert!(
+            logical.object_kind > i64::from(appendix_a::EXPECTED_RESERVATION_HIGH_WATER),
+            "{name} has no reservation and must use fresh post-reservation code space"
+        );
+        assert_eq!(logical.status, "reserved");
+        assert_eq!(logical.construction_order, order);
+        assert_eq!(logical.role_predicate, role);
+        assert_eq!(logical.max_size_bytes, 16_777_216);
+        assert!(
+            catalog
+                .reservations
+                .iter()
+                .all(|reservation| reservation.symbol != name),
+            "non-StrongRef family {name} must not acquire a reservation"
+        );
+
+        let source_key = format!("top|{name}");
+        let candidate = catalog
+            .top_level_candidates
+            .iter()
+            .find(|row| row.source_key == source_key)
+            .unwrap_or_else(|| panic!("missing source candidate for {name}"));
+        assert_eq!(candidate.identity_class, "logical");
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{name} must have one exact target");
+        assert_eq!(targets[0].target_kind, "logical-kind");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+
+    for (owner, name, tag, wire, cardinality, class, semantics, target, max_size) in [
+        (
+            "GlobalRestoreServiceCompletionSpec",
+            "final_certificate_ref",
+            0x0002,
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("GlobalRestoreServiceFinalCertificate"),
+            40,
+        ),
+        (
+            "GlobalRestoreServiceCompletionSpec",
+            "exact_sorted_operational_ack_refs",
+            0x0005,
+            "CertifiedRemoteStrongRef",
+            "many",
+            "logical",
+            "strong",
+            Some("RestoreShardOperationalAck"),
+            40,
+        ),
+        (
+            "GlobalRestoreServiceFinalizeSpec",
+            "prepare_certificate_ref",
+            0x0002,
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("GlobalRestoreServicePrepareCertificate"),
+            40,
+        ),
+        (
+            "GlobalRestoreServiceFinalizeSpec",
+            "exact_sorted_ready_ack_refs",
+            0x0005,
+            "CertifiedRemoteStrongRef",
+            "many",
+            "logical",
+            "strong",
+            Some("RestoreShardServiceReadyAck"),
+            40,
+        ),
+        (
+            "GlobalRestoreServiceFinalizeSpec",
+            "expected_meta_restore_state",
+            0x0006,
+            "WeakStateIdentity",
+            "one",
+            "inline",
+            "none",
+            None,
+            16_777_216,
+        ),
+        (
+            "LocalRestoreActivationSpec",
+            "ready_certificate_ref",
+            0x0002,
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("LocalRestoreReadyCertificate"),
+            40,
+        ),
+        (
+            "LocalRestoreActivationSpec",
+            "expected_local_restore_state",
+            0x0003,
+            "WeakStateIdentity",
+            "one",
+            "inline",
+            "none",
+            None,
+            16_777_216,
+        ),
+        (
+            "LocalRestoreActivationSpec",
+            "promotion_authority_basis",
+            0x0005,
+            "LocalRestoreActivationSpecPromotionAuthorityBasis",
+            "one",
+            "inline",
+            "none",
+            None,
+            16_777_216,
+        ),
+        (
+            "LocalRestoreServiceCompletionSpec",
+            "promotion_record_ref",
+            0x0002,
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("LogicalCommandRecord"),
+            40,
+        ),
+        (
+            "LocalRestoreServiceCompletionSpec",
+            "promotion_receipt_ref",
+            0x0003,
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("RestoreServicePromotionReceipt"),
+            40,
+        ),
+        (
+            "LocalRestoreServicePromotionSpec",
+            "manifest_ref",
+            0x0003,
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("RestoreServicePromotionManifest"),
+            40,
+        ),
+        (
+            "LocalRestoreServicePromotionSpec",
+            "promotion_receipt_ref",
+            0x0005,
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("RestoreServicePromotionReceipt"),
+            40,
+        ),
+        (
+            "LocalRestoreServicePromotionSpec",
+            "expected_local_restore_state",
+            0x0007,
+            "WeakStateIdentity",
+            "one",
+            "inline",
+            "none",
+            None,
+            16_777_216,
+        ),
+        (
+            "ShardRestoreReopenConfirmSpec",
+            "final_certificate_ref",
+            0x0002,
+            "CertifiedRemoteStrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("GlobalRestoreServiceFinalCertificate"),
+            40,
+        ),
+        (
+            "ShardRestoreServiceOpenSpec",
+            "final_certificate_ref",
+            0x0001,
+            "CertifiedRemoteStrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("GlobalRestoreServiceFinalCertificate"),
+            40,
+        ),
+        (
+            "ShardRestoreServiceOpenSpec",
+            "own_ready_ack_ref",
+            0x0002,
+            "StrongRef",
+            "one",
+            "logical",
+            "strong",
+            Some("RestoreShardServiceReadyAck"),
+            40,
+        ),
+        (
+            "ShardRestoreServiceOpenSpec",
+            "expected_local_restore_state",
+            0x0004,
+            "WeakStateIdentity",
+            "one",
+            "inline",
+            "none",
+            None,
+            16_777_216,
+        ),
+    ] {
+        let fields = identity
+            .fields
+            .iter()
+            .filter(|row| row.containing_schema == owner && row.stable_name == name)
+            .collect::<Vec<_>>();
+        assert_eq!(fields.len(), 1, "{owner}.{name} must exist exactly once");
+        let field = fields[0];
+        assert_eq!(field.field_tag, tag);
+        assert_eq!(field.exact_wire_type, wire);
+        assert_eq!(field.cardinality, cardinality);
+        assert_eq!(field.identity_class, class);
+        assert_eq!(field.reference_semantics, semantics);
+        assert_eq!(field.target_schema_id.as_deref(), target);
+        let owner_order = identity
+            .logical
+            .iter()
+            .find(|row| row.name == owner)
+            .expect("field owner resolves")
+            .construction_order;
+        assert_eq!(field.construction_order, owner_order);
+        assert_eq!(field.version_status, "reserved");
+        assert_eq!(field.max_size_bytes, max_size);
+
+        let source_key = format!("field|{owner}|{owner}.{name}|{name}");
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{owner}.{name} must have one target");
+        assert_eq!(targets[0].target_kind, "field");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+
+    let union = identity
+        .ordinary_unions
+        .iter()
+        .find(|row| row.union_name == "LocalRestoreActivationSpecPromotionAuthorityBasis")
+        .expect("A20 Local activation promotion authority union exists");
+    assert_eq!(union.containing_schema, "LocalRestoreActivationSpec");
+    assert_eq!(
+        union.union_path,
+        "LocalRestoreActivationSpec.promotion_authority_basis"
+    );
+    assert_eq!(union.field_tag, Some(0x0005));
+    assert_eq!(
+        union.allowed_containing_schemas,
+        vec!["LocalRestoreActivationSpec".to_owned()]
+    );
+    assert_eq!(union.role_predicate, "role-local");
+    assert_eq!(union.max_size_bytes, 16_777_216);
+    assert_eq!(
+        union
+            .arms
+            .iter()
+            .map(|arm| {
+                (
+                    arm.arm_tag,
+                    arm.source_arm_name.as_str(),
+                    arm.payload_sha256.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0x0001,
+                "ExternalCasCataloged",
+                Some("f67a8f6db7128c3f0a858239a7466ae44afbd01381e040b67e87cb956341ecc4"),
+            ),
+            (
+                0x0002,
+                "DirectoryBound",
+                Some("c4bb9639cea89e2d19ea6437e6ff78e5228736a4c01371d863309de0e8feb02b"),
+            ),
+        ],
+        "A20 activation union tags follow source order, not lexical order"
+    );
+    for source_key in [
+        "union|LocalRestoreActivationSpec|LocalRestoreActivationSpec.promotion_authority_basis",
+        "arm|LocalRestoreActivationSpec|LocalRestoreActivationSpec.promotion_authority_basis|ExternalCasCataloged",
+        "arm|LocalRestoreActivationSpec|LocalRestoreActivationSpec.promotion_authority_basis|DirectoryBound",
+    ] {
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{source_key} must have one exact target");
+        assert_ne!(targets[0].target_kind, "field");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+}
+
+#[test]
 fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     let identity = real_identity();
     let logical = identity
@@ -5589,6 +6119,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "RestorePromotionAuthorityProfile"
                 | "RestoreServicePromotionReceipt"
                 | "RestoreServicePromotionManifestTargetPosture"
+                | "LocalRestoreActivationSpecPromotionAuthorityBasis"
                 | "RestoreIdentityKeyDispositionEvidence"
                 | "TimeValidationClassification"
                 | "OfflineMacaroonIssuerEpochState"
@@ -6591,6 +7122,77 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("ShardRestoreAbandonmentTombstone", "pending_pin_owner_ref")
         )
     };
+    // The A20 promotion sweep was released after the erratum. Keep its exact
+    // source-forced members out of the historical namespace witness. The
+    // activation union anchor is removed above with its ordinary union.
+    let post_erratum_a20_promotion_field_tranche = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            (
+                "GlobalRestoreServiceFinalCertificate",
+                "finalize_record_ref"
+            ) | (
+                "GlobalRestoreServiceFinalCertificate",
+                "post_apply_global_state_root_ref"
+            ) | (
+                "GlobalRestoreServiceFinalCertificate",
+                "visibility_certificate_ref"
+            ) | (
+                "GlobalRestoreServiceFinalCertificate",
+                "certificate_attempt_ref"
+            ) | (
+                "LocalRestoreReadyCertificate",
+                "current_hidden_state_root_ref"
+            ) | (
+                "LocalRestoreReadyCertificate",
+                "reconciliation_completion_proof_ref"
+            ) | (
+                "LocalRestoreReadyCertificate",
+                "ready_closure_inventory_ref"
+            ) | ("LocalRestoreReadyCertificate", "current_configuration_ref")
+                | ("LocalRestoreReadyCertificate", "current_config_floor_ref")
+                | ("RestoreShardOperationalAck", "post_close_state_root_ref")
+                | ("RestoreShardOperationalAck", "source_access_closure_ref")
+                | ("RestoreShardOperationalAck", "certificate_attempt_ref")
+                | (
+                    "GlobalRestoreServiceCompletionSpec",
+                    "final_certificate_ref"
+                )
+                | (
+                    "GlobalRestoreServiceCompletionSpec",
+                    "exact_sorted_operational_ack_refs"
+                )
+                | (
+                    "GlobalRestoreServiceFinalizeSpec",
+                    "prepare_certificate_ref"
+                )
+                | (
+                    "GlobalRestoreServiceFinalizeSpec",
+                    "exact_sorted_ready_ack_refs"
+                )
+                | (
+                    "GlobalRestoreServiceFinalizeSpec",
+                    "expected_meta_restore_state"
+                )
+                | ("LocalRestoreActivationSpec", "ready_certificate_ref")
+                | ("LocalRestoreActivationSpec", "expected_local_restore_state")
+                | ("LocalRestoreServiceCompletionSpec", "promotion_record_ref")
+                | ("LocalRestoreServiceCompletionSpec", "promotion_receipt_ref")
+                | ("LocalRestoreServicePromotionSpec", "manifest_ref")
+                | ("LocalRestoreServicePromotionSpec", "promotion_receipt_ref")
+                | (
+                    "LocalRestoreServicePromotionSpec",
+                    "expected_local_restore_state"
+                )
+                | ("ShardRestoreReopenConfirmSpec", "final_certificate_ref")
+                | ("ShardRestoreServiceOpenSpec", "final_certificate_ref")
+                | ("ShardRestoreServiceOpenSpec", "own_ready_ack_ref")
+                | (
+                    "ShardRestoreServiceOpenSpec",
+                    "expected_local_restore_state"
+                )
+        )
+    };
     // The l6xd owner ruling makes these ten embedded AuthorityBoundHeader
     // fields inline. They landed after the erratum and are not part of the
     // historical namespace.
@@ -7017,6 +7619,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a19_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a18_field_tranche(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a20_promotion_field_tranche(
+                &field.containing_schema,
+                &field.stable_name,
+            )
             && !post_erratum_a18_inline_authority_headers(
                 &field.containing_schema,
                 &field.stable_name,
@@ -7042,14 +7648,14 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a03_inline_fields(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 363,
+        pre_erratum.ordinary_unions.len() + 364,
         current_union_count,
-        "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
+        "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 505,
+        pre_erratum.fields.len() + 534,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A03 inline authority beneficiary tranche"
+        "the historical witness must remove every post-erratum field cohort through the A20 promotion sweep after the A03 inline authority beneficiary tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

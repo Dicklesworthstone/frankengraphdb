@@ -1192,12 +1192,12 @@ pub fn generic_free_family(name: &str) -> &str {
 /// row, reassigning its code/tag, or silently changing a union arm therefore
 /// fails even when the resulting current snapshot is internally consistent.
 pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
-    const LOGICAL: &str = "fnv1a64:e30e43b2ee8cf777";
+    const LOGICAL: &str = "fnv1a64:dfb35f3325a97f11";
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
     const WIRE: &str = "fnv1a64:9956c7e8eb1d81e7";
-    const FIELDS: &str = "fnv1a64:ebeafc132bb203b5";
+    const FIELDS: &str = "fnv1a64:1b0a644f7ea81ada";
 
     let logical = rows_pin(
         r.logical
@@ -1319,7 +1319,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     vec![
         AssignmentPin {
             registry: "logical_object_kinds",
-            expected_epoch: 55,
+            expected_epoch: 56,
             actual_epoch: r.logical_epoch,
             expected_pin: LOGICAL,
             actual_pin: logical,
@@ -1354,7 +1354,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 63,
+            expected_epoch: 64,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,
