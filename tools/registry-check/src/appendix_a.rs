@@ -15481,7 +15481,7 @@ stable_name = "Ready"
                 "topology-state",
                 "top|TopologyState",
                 0x04aa,
-                40,
+                30,
                 "role-meta",
                 16_777_216,
                 true,
@@ -16187,6 +16187,7 @@ stable_name = "Ready"
                 "optional",
                 "role-meta",
                 49,
+                30,
                 "a04:field:topology-state-applied-control-ref",
                 "field|TopologyState|TopologyState.applied_control_ref|applied_control_ref",
             ),
@@ -16198,6 +16199,7 @@ stable_name = "Ready"
                 "one",
                 "true",
                 16_777_216,
+                40,
                 "a04:field:validated-remote-configuration-anchor-consumer-applied-identity",
                 "field|ValidatedRemoteConfigurationAnchor|ValidatedRemoteConfigurationAnchor.consumer_applied_identity|consumer_applied_identity",
             ),
@@ -16210,6 +16212,7 @@ stable_name = "Ready"
             cardinality,
             role_predicate,
             max_size_bytes,
+            construction_order,
             row_id,
             source_key,
         ) in expected_fields
@@ -16229,7 +16232,12 @@ stable_name = "Ready"
             assert_eq!(field.cardinality, cardinality);
             assert_eq!(field.identity_class, "inline");
             assert_eq!(field.reference_semantics, "none");
-            assert_eq!(field.construction_order, 40);
+            // Per-entry, not a shared literal: a field's order must EQUAL its
+            // containing kind's, and these two owners no longer share one.
+            assert_eq!(
+                field.construction_order, construction_order,
+                "{schema}.{stable_name} construction order"
+            );
             assert_eq!(field.role_predicate, role_predicate);
             assert_eq!(field.version_status, "reserved");
             assert_eq!(field.max_size_bytes, max_size_bytes);
