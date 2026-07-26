@@ -53,9 +53,11 @@ bead = "fgdb-w1-unsafe-ledger-icp"
 
 # -----------------------------------------------------------------------------
 # The roster. Per §18.1 these three are THE ONLY crate roots in the workspace
-# permitted not to use forbid(unsafe_code). All three are `planned`: none has
-# landed yet, and the checker fails if any of them appears without its status
-# being moved here first.
+# permitted not to use forbid(unsafe_code). `fgdb-unsafe-simd` and
+# `fgdb-unsafe-arena` have landed and are `present`; `fgdb-unsafe-vfs` is still
+# `planned`, and the checker fails if it appears without its status being moved
+# here first — or if either of the other two goes missing while still declared
+# present. Both directions, because silence is not agreement.
 # -----------------------------------------------------------------------------
 
 [[island]]
@@ -66,7 +68,7 @@ status = "present"
 [[island]]
 name = "fgdb-unsafe-arena"
 charter = "Bump/region arena internals and generational-handle plumbing, consumed by safe crates strictly through safe APIs. No public raw pointers and no public unsafe fn. Region reclamation must prove bytes_reclaimed == bytes_allocated on cancellation and region close."
-status = "planned"
+status = "present"
 
 [[island]]
 name = "fgdb-unsafe-vfs"
@@ -74,15 +76,20 @@ charter = "Raw file and memory-mapping syscall surfaces beneath the filesystem-p
 status = "planned"
 
 # -----------------------------------------------------------------------------
-# Sites. Empty today, and that emptiness is CHECKED rather than assumed: the
-# checker self-tests its site scanner against a fixture with a known site count
-# before it is willing to report zero, and it fails the whole run if that
+# Sites. Three today, and the count is CHECKED rather than assumed: the checker
+# self-tests its site scanner against a fixture with a known site count before
+# it is willing to report any total, and it fails the whole run if that
 # self-test does not reproduce exactly. See tools/registry-check/src/
-# unsafe_ledger.rs (`SCANNER_FIXTURE`).
+# unsafe_ledger.rs (`scanner_fixture`).
 #
-# When the first island lands, add its row here IN THE SAME COMMIT as the
-# `allow` site. `site_unledgered` fires otherwise, and `ledger_row_orphaned`
-# fires if a row outlives the code it describes.
+# Add a row IN THE SAME COMMIT as the `allow` site it describes.
+# `site_unledgered` fires otherwise, and `ledger_row_orphaned` fires if a row
+# outlives the code it describes. Both have been run against the real tree
+# rather than reasoned about: deleting the `simd-control-prefetch` row from this
+# file fails with `site_unledgered` on control_group.rs:202, and deleting the
+# `allow` attribute above `classify_sse2` fails with `ledger_row_orphaned` on
+# `simd-control-group-sse2`. A boundary nobody has watched reject anything is
+# decoration.
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
@@ -114,3 +121,27 @@ stated_invariant = "`controls.get(offset)` returns a live shared reference or no
 evidence = "src/control_group.rs::prefetch_is_a_no_op_in_and_out_of_range — in-range, last index, one past the end, usize::MAX, and the empty slice, asserting classification is unchanged either side. tests/control_group_dispatch_compat.rs::prefetching_a_control_array_changes_no_classification — 128 wrapping gathers classified with and without hints and compared mask for mask, which is the observable form of the physical-only rule."
 fallback = "A no-op. On every non-x86-64 target the body compiles to `let _ = (controls, offset)`, so the fallback is not a slower path but the absence of one — which is exactly what §8.7 requires of prefetch policy: physical only, never a correctness input."
 no_claim_boundary = "Claims no speedup: no benchmark is attached, and a prefetch that helped nothing would still satisfy every assertion here. Claims nothing about cache state, timing, or memory-level parallelism, none of which are part of the deterministic result contract. NOT Miri-checked. This site is the one written with a `cfg_attr`-wrapped allow, and it is only counted at all because the site scanner matches attributes structurally (commit 4f58cc3); the prefix scanner it replaced reported this file as holding one site instead of two."
+
+# -----------------------------------------------------------------------------
+# fgdb-unsafe-arena — landed by fgdb-w1-unsafe-islands-eqrq.
+#
+# ONE site, and the count is the claim. An arena is not automatically an unsafe
+# crate: chunk carving, alignment, generational handles, stale-handle refusal
+# and the byte audit are all written in safe Rust in this island, including
+# alignment, which is computed from `as_ptr().addr()` — a safe question about a
+# pointer already held — rather than by forming one. Exactly one operation
+# cannot be expressed safely, and it is the one ART needs: N simultaneous
+# exclusive views into disjoint blocks of one chunk. Opening an island and then
+# filling it with unsafe that safe Rust already expresses would have made the
+# boundary look busier and mean less.
+# -----------------------------------------------------------------------------
+
+[[site]]
+row_id = "arena-region-blocks-mut"
+island = "fgdb-unsafe-arena"
+path = "crates/fgdb-unsafe-arena/src/region.rs"
+symbol = "pub fn blocks_mut(&mut self, handles: &[Handle]) -> Result<Vec<&mut [u8]>, ArenaError> {"
+stated_invariant = "Four obligations, each discharged before the block rather than argued inside it. (1) IN BOUNDS: every base pointer comes from `Vec::as_mut_ptr` on a chunk of `self`, and `start + len <= chunk_bytes` was established when the block was allocated — `alloc_block` bump-checks the offset against the chunk it carves from, and a chunk is created at its full length with `vec![0u8; chunk_bytes]` and never resized — so `add(start)` and the `len` bytes after it stay inside one allocation. (2) INITIALIZED: chunks are zero-filled at creation and there is no `MaybeUninit` anywhere in the crate, so every byte in range is an initialized `u8`. (3) NO ALIASING: `plan_batch` proves the planned ranges pairwise disjoint and refuses the whole batch on any overlap or repeated handle, so no two views returned by the loop overlap; it also refuses every foreign, unknown, and stale handle, so no entry describes geometry that is not this region's. (4) NO OTHER LIVE BORROW: the views borrow `self` mutably for the caller-visible lifetime, `bases` holds pointers rather than references, and nothing in the block reads or writes through a pointer. The disjointness proof is deliberately NOT inside the unsafe block: it is safe, path-independent code that the safe fallback calls too, so the check that licenses the site is exercised by every test that touches either path."
+evidence = "crates/fgdb-unsafe-arena/tests/edit_path_differential.rs — 192 batch comparisons over three fixed seeds, asserting per-step equality of the whole region image AND of the run digest between the ledgered path and its safe fallback, plus `the_script_exercises_both_success_and_refusal` (the script must contain at least 8 successful and 8 refused batches, across at least three distinct refusal kinds, or it is declared vacuous) and `digests_are_licensed_by_a_one_bit_perturbation` (flipping one bit of one block must move the digest, so digest equality is licensed rather than assumed). src/region.rs unit rows — alignment 1..64 against a deliberately odd bump offset; a released handle refused after its slot is reused at the next generation; a foreign region's handle refused by both `block` and `blocks_mut`; a repeated handle refused as `AliasedBatch` rather than aliased; three disjoint blocks written simultaneously and read back; close and cancel each balancing with a live block outstanding."
+fallback = "EditPath::Sequential, the safe specification: the same batch applied one single-borrow `block_mut` call at a time, with no unsafe on the path and no `cfg` on either path, so the matrix is identical on every target the workspace compiles for. The relationship asserted is bit-identity of the whole region image and of the refusal, not agreement on a summary: both paths plan through the same `plan_batch` and neither writes anything when the batch is refused, so a batch one path would have waved through is a failure rather than an untested input."
+no_claim_boundary = "Says nothing about concurrency: a Region is owned by one holder, every mutating method takes &mut self, and no Send/Sync claim beyond what the compiler derives is made or tested. Says nothing about T-placement — this is a byte arena, there is no drop glue and no MaybeUninit, so nothing here licenses storing a typed value in a region. Says nothing about consumers: RegionAlloc is the seam ART, succinct, and hash storage are meant to be parameterized over, and NONE of them is wired to it yet — that is consumer integration on fgdb-w1-unsafe-islands-eqrq, and the trait's existence must not be read as an integration. NOT Miri-checked yet: the Miri/ASAN/TSAN lanes remain open work on the same bead, and unlike the SIMD island this crate uses no intrinsics, so it is a candidate for that lane rather than excluded from it. No performance claim of any kind: no benchmark is attached, and a batch borrow that saved nothing over N sequential calls would still satisfy every assertion made here."

@@ -762,7 +762,10 @@ fn validate_active_logical_kind_arms(root: &Path, out: &mut Vec<Violation>) {
             "active_logical_kind_source_unreadable",
             reg,
             "refs.rs",
-            format!("cannot read {}; refusing to report the arm binding as checked", refs_path.display()),
+            format!(
+                "cannot read {}; refusing to report the arm binding as checked",
+                refs_path.display()
+            ),
         ));
         return;
     };
@@ -806,7 +809,12 @@ fn validate_active_logical_kind_arms(root: &Path, out: &mut Vec<Violation>) {
         let Ok(code) = u32::from_str_radix(hex, 16) else {
             continue;
         };
-        let name = rhs.trim().trim_end_matches(',').trim().trim_matches('"').to_owned();
+        let name = rhs
+            .trim()
+            .trim_end_matches(',')
+            .trim()
+            .trim_matches('"')
+            .to_owned();
         if arms.insert(code, name).is_some() {
             out.push(Violation::new(
                 "active_logical_kind_arm_duplicate",
@@ -829,8 +837,10 @@ fn validate_active_logical_kind_arms(root: &Path, out: &mut Vec<Violation>) {
     // Active rows out of the registry.
     let mut active: BTreeMap<u32, String> = BTreeMap::new();
     let (mut code, mut name, mut status) = (None, None, None);
-    let mut flush = |code: &mut Option<u32>, name: &mut Option<String>, status: &mut Option<String>,
-                     active: &mut BTreeMap<u32, String>| {
+    let flush = |code: &mut Option<u32>,
+                 name: &mut Option<String>,
+                 status: &mut Option<String>,
+                 active: &mut BTreeMap<u32, String>| {
         if let (Some(c), Some(n), Some(s)) = (*code, name.clone(), status.clone())
             && s == "active"
         {

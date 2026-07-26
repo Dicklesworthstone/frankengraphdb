@@ -177,10 +177,8 @@ fn classify_sse2(lanes: &[u8; CONTROL_GROUP_WIDTH], tag: u8) -> GroupMasks {
             matching: _mm_movemask_epi8(_mm_cmpeq_epi8(group, _mm_set1_epi8(tag as i8))) as u16,
             empty: _mm_movemask_epi8(_mm_cmpeq_epi8(group, _mm_set1_epi8(EMPTY_CONTROL as i8)))
                 as u16,
-            deleted: _mm_movemask_epi8(_mm_cmpeq_epi8(
-                group,
-                _mm_set1_epi8(DELETED_CONTROL as i8),
-            )) as u16,
+            deleted: _mm_movemask_epi8(_mm_cmpeq_epi8(group, _mm_set1_epi8(DELETED_CONTROL as i8)))
+                as u16,
         }
     }
 }
@@ -228,13 +226,20 @@ pub fn prefetch_controls(controls: &[u8], offset: usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_GROUP_WIDTH, COMPILED_PATHS, DELETED_CONTROL, DispatchPath, EMPTY_CONTROL,
+        COMPILED_PATHS, CONTROL_GROUP_WIDTH, DELETED_CONTROL, DispatchPath, EMPTY_CONTROL,
         GroupMasks, active_path, classify, classify_scalar, classify_via, prefetch_controls,
     };
 
     /// A third implementation, written as the obvious loop, so the scalar
     /// "specification" is itself checked against something rather than
     /// asserted to be correct.
+    // The indexed loop is the point. Clippy's `needless_range_loop` would have
+    // this iterate `lanes.iter().enumerate()`, which is character for character
+    // how `classify_scalar` is written — and an "independently written naive
+    // reference" that has been reshaped into the implementation it checks is no
+    // longer independent of it. The lint is right about style and wrong about
+    // this function.
+    #[allow(clippy::needless_range_loop)]
     fn naive_reference(lanes: &[u8; CONTROL_GROUP_WIDTH], tag: u8) -> GroupMasks {
         let mut masks = GroupMasks::default();
         for lane in 0..CONTROL_GROUP_WIDTH {

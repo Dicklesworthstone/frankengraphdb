@@ -1048,18 +1048,18 @@ pub fn scan_manifest(dir: &str, text: &str) -> Result<ScannedCrate, String> {
             flush(&mut sub_dependency, &mut dependencies);
             let header = header.trim_start_matches('[').trim_end_matches(']');
             section = header.to_string();
-            if let Some((table, name)) = header.rsplit_once('.') {
-                if table.ends_with("dependencies") {
-                    sub_dependency = Some(ManifestDependency {
-                        key: name.to_string(),
-                        package: name.to_string(),
-                        table: table.rsplit('.').next().unwrap_or(table).to_string(),
-                        path: String::new(),
-                        git: String::new(),
-                        rev: String::new(),
-                        default_features_disabled: false,
-                    });
-                }
+            if let Some((table, name)) = header.rsplit_once('.')
+                && table.ends_with("dependencies")
+            {
+                sub_dependency = Some(ManifestDependency {
+                    key: name.to_string(),
+                    package: name.to_string(),
+                    table: table.rsplit('.').next().unwrap_or(table).to_string(),
+                    path: String::new(),
+                    git: String::new(),
+                    rev: String::new(),
+                    default_features_disabled: false,
+                });
             }
             continue;
         }
@@ -1680,10 +1680,10 @@ pub fn crate_graph_cycle(scan: &WorkspaceScan) -> Vec<String> {
     for entry in &scan.crates {
         let targets = edges.entry(entry.package_name.as_str()).or_default();
         for dependency in &entry.dependencies {
-            if let Some(target) = names.get(dependency.package.as_str()) {
-                if *target != entry.package_name.as_str() {
-                    targets.insert(*target);
-                }
+            if let Some(target) = names.get(dependency.package.as_str())
+                && *target != entry.package_name.as_str()
+            {
+                targets.insert(*target);
             }
         }
     }
@@ -3016,22 +3016,22 @@ fn validate_inventory(registry: &TopologyRegistry, root: &Path, violations: &mut
     }
     check_foundation_assets(registry, root, violations);
     // Ownership vocabulary: a workstream title must be verbatim in §19.
-    if let Some(block) = registry.source_block("plan-workstream-table-v1") {
-        if let Ok(text) = source_block_text(block, root) {
-            for scope in &registry.owner_scopes {
-                if scope.kind == "workstream"
-                    && !text.contains(&format!("| {} | {} |", scope.id, scope.title))
-                {
-                    violations.push(Violation::new(
-                        "workstream_title_drift",
-                        &scope.id,
-                        "§19",
-                        format!(
-                            "the frozen workstream table does not spell `| {} | {} |`",
-                            scope.id, scope.title
-                        ),
-                    ));
-                }
+    if let Some(block) = registry.source_block("plan-workstream-table-v1")
+        && let Ok(text) = source_block_text(block, root)
+    {
+        for scope in &registry.owner_scopes {
+            if scope.kind == "workstream"
+                && !text.contains(&format!("| {} | {} |", scope.id, scope.title))
+            {
+                violations.push(Violation::new(
+                    "workstream_title_drift",
+                    &scope.id,
+                    "§19",
+                    format!(
+                        "the frozen workstream table does not spell `| {} | {} |`",
+                        scope.id, scope.title
+                    ),
+                ));
             }
         }
     }
@@ -3289,15 +3289,15 @@ fn validate_live_tree(registry: &TopologyRegistry, root: &Path, violations: &mut
         if tooling.contains(member.as_str()) {
             continue;
         }
-        if let Some(scanned) = scan.by_dir(member) {
-            if registry.crate_row(&scanned.package_name).is_none() {
-                violations.push(Violation::new(
-                    "crate_undeclared",
-                    &scanned.package_name,
-                    "§18.1",
-                    "the workspace holds a crate with no registry row; the map changes with the bead that needs it, not after the fact",
-                ));
-            }
+        if let Some(scanned) = scan.by_dir(member)
+            && registry.crate_row(&scanned.package_name).is_none()
+        {
+            violations.push(Violation::new(
+                "crate_undeclared",
+                &scanned.package_name,
+                "§18.1",
+                "the workspace holds a crate with no registry row; the map changes with the bead that needs it, not after the fact",
+            ));
         }
     }
 
@@ -3477,18 +3477,18 @@ fn validate_live_tree(registry: &TopologyRegistry, root: &Path, violations: &mut
                             ),
                         ));
                     }
-                    if let Some(narrowing) = narrowings.get(row.name.as_str()) {
-                        if !narrowing.allowed_foundation_projects.contains(&project.id) {
-                            violations.push(Violation::new(
-                                "narrowing_violated",
-                                &subject,
-                                &narrowing.plan_anchor,
-                                format!(
-                                    "{} is narrowed to foundation projects {:?}",
-                                    row.name, narrowing.allowed_foundation_projects
-                                ),
-                            ));
-                        }
+                    if let Some(narrowing) = narrowings.get(row.name.as_str())
+                        && !narrowing.allowed_foundation_projects.contains(&project.id)
+                    {
+                        violations.push(Violation::new(
+                            "narrowing_violated",
+                            &subject,
+                            &narrowing.plan_anchor,
+                            format!(
+                                "{} is narrowed to foundation projects {:?}",
+                                row.name, narrowing.allowed_foundation_projects
+                            ),
+                        ));
                     }
                 }
             }
@@ -3753,7 +3753,7 @@ the closure evaluator is proved against synthetic graphs in the suite instead.\n
             if project.pinned_rev.is_empty() {
                 "—".to_string()
             } else {
-                format!("`{}`", &project.pinned_rev)
+                format!("`{}`", project.pinned_rev)
             },
             project
                 .package_prefixes
@@ -3907,7 +3907,7 @@ allowances. A capability §18.2 names and this registry drops fails as leftover 
     out.push_str("## Checked plan sources\n\n");
     out.push_str("| Block | Plan lines | Lines | Bytes | fnv1a64 | Embedded | Covers |\n|---|---|---|---|---|---|---|\n");
     let mut blocks: Vec<&SourceBlock> = registry.source_blocks.iter().collect();
-    blocks.sort_by(|a, b| a.plan_start_line.cmp(&b.plan_start_line));
+    blocks.sort_by_key(|block| block.plan_start_line);
     for block in &blocks {
         out.push_str(&format!(
             "| `{}` | {}–{} | {} | {} | `{}` | {} | {} |\n",

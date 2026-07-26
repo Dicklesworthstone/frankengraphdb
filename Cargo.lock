@@ -565,6 +565,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgdb-unsafe-arena"
+version = "0.0.1"
+
+[[package]]
 name = "fgdb-unsafe-simd"
 version = "0.0.1"
 dependencies = [
