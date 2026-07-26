@@ -156,8 +156,8 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"start_line":1388' \
     '"end_line":2728' \
     '"line_count":1341' \
-    '"byte_count":1021081' \
-    '"sha256":"5ff06d712eb7f125d0c92db54cc9d485eb334f5dde805ad83d3d3fa32e573e4a"' \
+    '"byte_count":1021428' \
+    '"sha256":"4fdc494ad32c25576b92134c92e7822e114f3d1c679afd2c8249791f4ceb1181"' \
     '"outcome":"pass"'; then
   ok "Appendix A exact source manifest is pinned"
 else
@@ -178,8 +178,8 @@ EXPECT_TARGET_COUNT="$(catalog_manifest_value target_count)"
 EXPECT_FALLBACK_COUNT="$(catalog_manifest_value projection_fallback_count)"
 EXPECT_TARGET_ASSIGNMENT_SHA="$(catalog_manifest_value target_source_assignment_sha256)"
 EXPECT_RESERVATION_COUNT=813
-EXPECT_EXISTING_RESERVATION_COUNT=427
-EXPECT_RESERVED_RESERVATION_COUNT=386
+EXPECT_EXISTING_RESERVATION_COUNT=431
+EXPECT_RESERVED_RESERVATION_COUNT=382
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
     '"target_count":'"$EXPECT_TARGET_COUNT" \
@@ -195,24 +195,28 @@ APPENDIX_SLICE_PASSES=$(awk '
   index($0, "\"outcome\":\"pass\"") { count++ }
   END { print count + 0 }
 ' "$WORK/appendix-baseline.jsonl")
-[ "$APPENDIX_SLICE_PASSES" -eq 21 ] \
-  && ok "all 21 Appendix A slices validate" \
-  || die "expected 21 passing Appendix A slices, found $APPENDIX_SLICE_PASSES"
+if [ "$APPENDIX_SLICE_PASSES" -eq 21 ]; then
+  ok "all 21 Appendix A slices validate"
+else
+  die "expected 21 passing Appendix A slices, found $APPENDIX_SLICE_PASSES"
+fi
 APPENDIX_PROJECTION_PASSES=$(awk '
   index($0, "\"event\":\"appendix_projection_checked\"") &&
   index($0, "\"outcome\":\"pass\"") { count++ }
   END { print count + 0 }
 ' "$WORK/appendix-baseline.jsonl")
-[ "$APPENDIX_PROJECTION_PASSES" -eq 6 ] \
-  && ok "all six generated projections byte-match" \
-  || die "expected six passing Appendix A projections, found $APPENDIX_PROJECTION_PASSES"
+if [ "$APPENDIX_PROJECTION_PASSES" -eq 6 ]; then
+  ok "all six generated projections byte-match"
+else
+  die "expected six passing Appendix A projections, found $APPENDIX_PROJECTION_PASSES"
+fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_closure_checked"' \
     '"reservations":'"$EXPECT_RESERVATION_COUNT" \
     '"existing_reservations":'"$EXPECT_EXISTING_RESERVATION_COUNT" \
     '"reserved_reservations":'"$EXPECT_RESERVED_RESERVATION_COUNT" \
     '"source_dispositions":848' \
-    '"top_level_candidates":1229' \
+    '"top_level_candidates":1231' \
     '"targets":'"$EXPECT_TARGET_COUNT" \
     '"completion_layer_schemas":4' \
     '"annotations":0' \
@@ -239,7 +243,7 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"projection_files":6' \
     '"reservations":'"$EXPECT_RESERVATION_COUNT" \
     '"source_dispositions":848' \
-    '"top_level_candidates":1229' \
+    '"top_level_candidates":1231' \
     '"targets":'"$EXPECT_TARGET_COUNT" \
     '"completion_layer_schemas":4' \
     '"annotations":0' \
@@ -359,7 +363,7 @@ stage_appendix_support() { # stage_appendix_support <name> -> non-registry proof
   done
   mkdir -p "$WORK/$name/scripts" "$WORK/$name/tools/registry-check/src"
   cp "$ROOT/scripts/g0_identity_e2e.sh" "$WORK/$name/scripts/"
-  cp "$ROOT/tools/registry-check/src/appendix_a.rs" \
+  cp "$ROOT"/tools/registry-check/src/*.rs \
     "$WORK/$name/tools/registry-check/src/"
 }
 

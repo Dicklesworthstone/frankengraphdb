@@ -1,12 +1,12 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=e754ed08b0d28cd9f779936c6f500aac184ccd71d89f3b67e061e64f74910058.
+# Appendix A lines 1388-2728; sha256=4fdc494ad32c25576b92134c92e7822e114f3d1c679afd2c8249791f4ceb1181.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 37
+registry_epoch = 38
 
 [[type]]
 wire_type_id = 0x0001
@@ -5204,3 +5204,34 @@ status = "reserved"
 encoding_context = "a11:1936 arm payload shape of the generated closed `client_action_authority` field of SubscriptionDeliveryTransitionSpec<Role>, carried by the AckBaselineComplete, AckDeltaComplete, AcknowledgeReset and CloseCursor tags; body is the single member receipt_ref:StrongRef<AuthenticatedClientSubscriptionDispositionReceipt<Role>>, committed byte-exactly by the covering arm payload digest and registered on the wire path with no field row under the StrongRef-only arm-payload-shape law"
 allowed_containing_schemas = ["SubscriptionDeliveryTransitionSpec"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x051e
+name = "LocationForm"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union LocationForm; source-order tags commit the placement identity at Appendix A a02:1449"
+allowed_containing_schemas = ["PlacementDescriptorWithoutId"]
+max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x051f
+name = "LocationForm.contiguous_span"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocationForm"
+wire_tag = 0x0001
+encoding_context = "arm ContiguousSpan carrying the already-registered ContiguousSpan record"
+allowed_containing_schemas = ["LocationForm"]
+max_size_bytes = 256
+
+[[type]]
+wire_type_id = 0x0520
+name = "LocationForm.explicit"
+kind = "union_variant"
+status = "reserved"
+containing_union = "LocationForm"
+wire_tag = 0x0002
+encoding_context = "arm Explicit{sorted_symbol_inventory_and_locators,failure_domains} of closed union LocationForm"
+allowed_containing_schemas = ["LocationForm"]
+max_size_bytes = 65536

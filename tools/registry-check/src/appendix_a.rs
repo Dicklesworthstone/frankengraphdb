@@ -33,17 +33,17 @@ pub const HASH_ALGORITHM: &str = "sha256";
 pub const APPENDIX_START_LINE: i64 = 1388;
 pub const APPENDIX_END_LINE: i64 = 2728;
 pub const APPENDIX_LINE_COUNT: i64 = 1341;
-pub const APPENDIX_BYTE_COUNT: i64 = 1_021_429;
+pub const APPENDIX_BYTE_COUNT: i64 = 1_021_428;
 pub const APPENDIX_SHA256: &str =
-    "e754ed08b0d28cd9f779936c6f500aac184ccd71d89f3b67e061e64f74910058";
+    "4fdc494ad32c25576b92134c92e7822e114f3d1c679afd2c8249791f4ceb1181";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3180;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3186;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "34bcef9193d51dac9ea45f34aa6d6b46ba257206bdd3372f43a7e6bacdc7bdea";
+    "e89c72a4475a237ff72637f02c7d211dfeaf012c14667e73785c1edf2a61bbb4";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 109;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "e37a8eee3b0167d49d636f3648f001f3d2d709164f0b8f7824e7a5d8b5f3ec28";
+    "6234f8d3c36c865fca769f1b4f2d72be4953fb32d47f3c025b36d31b33789fd7";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -60,9 +60,9 @@ pub const COMPLETION_LAYER_SCHEMA_VERSION: i64 = 1;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT: usize = 4;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 426;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 433;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "be6ac1c7ebadc3848ac3ddbd8ff92ab83372c0f37bf36e191a6d06de88d44d56";
+    "eec455aa5d038c8a64aee5ed6f37b80f4197edcae7562efdd36f86ee6b25514a";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 431;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 382;
@@ -347,7 +347,7 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 0] = [];
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
-static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 426] = [
+static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 433] = [
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459",
         slice_id: "a01",
@@ -4892,6 +4892,81 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 426] 
         ],
         rationale: "a15:2059 uses the compact shorthand `terminal_audit_gate`; the a10:1914 SequenceNeutralSpec law requires exactly one TerminalAuditGate even where compact Appendix prose omits its type, and a21:2699 fixes the exact source-ordered StructurallyInapplicable | NotRequired | Required union. Prose omission is not absence and does not authorize a local gate alias.",
     },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a02:ambiguity-adjudication:670d6a3c6e1369d3bc38d6f3076252157264e695e05b76984089286770501c7b",
+        slice_id: "a02",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.ContiguousSpan.encoded_len|f62cdb86eea76acd78c8a2d88de6530dc788e524a08d3bd93597a7e1d76ddb2f|1|07d2e4fc78259c76944ac73467587e576594b8a2325c96aa42d57a63728c3d6c|shorthand field has no exact type",
+        source_locations: &["a02:1449"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|LocationForm|LocationForm.ContiguousSpan.encoded_len|encoded_len",
+        ],
+        rationale: "a02:1449: the shorthand encoded_len member is committed byte-exactly by the registered LocationForm ContiguousSpan arm payload digest; the single affected census key maps to that arm-interior source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a02:ambiguity-adjudication:cecf9025af9662200ebec0ca362365459431e220b7d0b989415630838a42ce3d",
+        slice_id: "a02",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.ContiguousSpan.failure_domain_id|b848bfdde1d634386de45aa3db6e6082c98954ee49caf3c79fea79ed511b6216|1|9626e9ce8d54d89e97bd245ae8d1ca4b8d84d773ab0b52f74603133b078643bc|shorthand field has no exact type",
+        source_locations: &["a02:1449"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|LocationForm|LocationForm.ContiguousSpan.failure_domain_id|failure_domain_id",
+        ],
+        rationale: "a02:1449: the shorthand failure_domain_id member is committed byte-exactly by the registered LocationForm ContiguousSpan arm payload digest; the single affected census key maps to that arm-interior source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a02:ambiguity-adjudication:1add14f68841c209d9602d82b0d4974f1c7e0307bdc4e70a11b7805ab03369fb",
+        slice_id: "a02",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.ContiguousSpan.offset|c1d60fe5815fb5b2d8eadc7c686a2ef228818eb63d14a58be0336c2d4dc3bb65|1|b4352fe740391bb11f5e6ba734ca50b9411f912bb11d37a693ea498c154d8fce|shorthand field has no exact type",
+        source_locations: &["a02:1449"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &["field|LocationForm|LocationForm.ContiguousSpan.offset|offset"],
+        rationale: "a02:1449: the shorthand offset member is committed byte-exactly by the registered LocationForm ContiguousSpan arm payload digest; the single affected census key maps to that arm-interior source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a02:ambiguity-adjudication:cf1828242c9de970216388ce83137d5debc49b7b633a229d89e52d5409e41d76",
+        slice_id: "a02",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.ContiguousSpan.segment_id|067de3ca3742734d7c0fa30cab44ba12e439e6fdaf5a356d04eb34d144a48ad5|1|d9a60afcd14755ce9a68954b370ada06d91ca9c9f313cf3ca1c5e0009a2e4c5a|shorthand field has no exact type",
+        source_locations: &["a02:1449"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|LocationForm|LocationForm.ContiguousSpan.segment_id|segment_id",
+        ],
+        rationale: "a02:1449: the shorthand segment_id member is committed byte-exactly by the registered LocationForm ContiguousSpan arm payload digest; the single affected census key maps to that arm-interior source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a02:ambiguity-adjudication:d73d40486b24cb361fcb957a65f0ceecc6a2c33196af11ea8ce9c8ef527936a7",
+        slice_id: "a02",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.ContiguousSpan.symbol_inventory_digest|76c183900154b95828c0ade4981fa8269fdfffbad83471425f467a23d1e81416|1|6c633af6219e605d4300160abddade3be536067603c6da4e10bc4a259c1ed994|shorthand field has no exact type",
+        source_locations: &["a02:1449"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|LocationForm|LocationForm.ContiguousSpan.symbol_inventory_digest|symbol_inventory_digest",
+        ],
+        rationale: "a02:1449: the shorthand symbol_inventory_digest member is committed byte-exactly by the registered LocationForm ContiguousSpan arm payload digest; the single affected census key maps to that arm-interior source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a02:ambiguity-adjudication:f889bf772824c1a9353bbd3b25ee290a6aca8bba2a931a9fc09f3018a0ff3355",
+        slice_id: "a02",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.Explicit.failure_domains|3f3d759ddf7f238e5931f429d410022e227f5d84c9522fae6abf88088d6f1852|1|717f0fd1684324699149e55c86a7e7d2ae3c9d12be1ce93873020c0155f03b28|shorthand field has no exact type",
+        source_locations: &["a02:1449"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|LocationForm|LocationForm.Explicit.failure_domains|failure_domains",
+        ],
+        rationale: "a02:1449: the shorthand failure_domains member is committed byte-exactly by the registered LocationForm Explicit arm payload digest; the single affected census key maps to that arm-interior source form.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a02:ambiguity-adjudication:3186d0debf2fb0589fc0c814cd95c8fec9e6c4c4e3b1a3e09b8f284bee7515ae",
+        slice_id: "a02",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.Explicit.sorted_symbol_inventory_and_locators|44937ad7c4727b845192190b304679f6c4b9de05dc753b0d4ef253b65849247d|1|8778d463045738849c0d2164c71dcecfd6d72c5736c13365fe885fbe3c50e36c|shorthand field has no exact type",
+        source_locations: &["a02:1449"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|LocationForm|LocationForm.Explicit.sorted_symbol_inventory_and_locators|sorted_symbol_inventory_and_locators",
+        ],
+        rationale: "a02:1449: the shorthand sorted_symbol_inventory_and_locators member is committed byte-exactly by the registered LocationForm Explicit arm payload digest; the single affected census key maps to that arm-interior source form.",
+    },
 ];
 
 pub const PROJECTION_CLASSES: [&str; 6] = [
@@ -5405,8 +5480,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1445,
         end_line: 1463,
         line_count: 19,
-        byte_count: 5_157,
-        sha256: "f11543ab928994a39eeeee6e7154e75375e94f82a2e2b1640401d70c27a330d2",
+        byte_count: 5_156,
+        sha256: "b76c0e0fe81b096a2a647ba4d907dc9edac646e2cd3b721ec62802e5170e8c60",
     },
     SlicePin {
         ordinal: 3,

@@ -1,12 +1,12 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=e754ed08b0d28cd9f779936c6f500aac184ccd71d89f3b67e061e64f74910058.
+# Appendix A lines 1388-2728; sha256=4fdc494ad32c25576b92134c92e7822e114f3d1c679afd2c8249791f4ceb1181.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 61
+registry_epoch = 62
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -12072,6 +12072,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "LocationForm"
+containing_schema = "LocationForm"
+union_path = "LocationForm"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PlacementDescriptorWithoutId"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union]]
 union_name = "MacaroonRootIssuanceState"
 containing_schema = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>"
 union_path = "MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state"
@@ -20422,6 +20433,32 @@ payload_sha256 = "f53b50e4446adbf4a41be75d3b9ce48033ed51036e059f9b6e7be144720083
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "LocationForm"
+containing_schema = "LocationForm"
+union_path = "LocationForm"
+arm_tag = 0x0001
+source_arm_name = "ContiguousSpan"
+stable_name = "contiguous_span"
+payload_kind = "inline-record"
+payload_sha256 = "b0d4e74e2c1c2056425f412f5f267bbeb348846b8c0910fbdef8fc3c9755fa82"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[union_arm]]
+union_name = "LocationForm"
+containing_schema = "LocationForm"
+union_path = "LocationForm"
+arm_tag = 0x0002
+source_arm_name = "Explicit"
+stable_name = "explicit"
+payload_kind = "inline-record"
+payload_sha256 = "bfc317ac3870a16c28748c12d745185fe2ec3c1d2e34043528fabbcccdda3e16"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[union_arm]]
 union_name = "MacaroonRootIssuanceState"

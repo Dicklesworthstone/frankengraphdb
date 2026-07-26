@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 61
+registry_epoch = 62
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 61);
+    assert_eq!(epoch, 62);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -1892,7 +1892,7 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
         appendix_a::EXPECTED_RESERVED_TYPE_RESERVATION_COUNT
     );
     assert_eq!(baseline.source_symbol_dispositions.len(), 848);
-    assert_eq!(baseline.top_level_candidates.len(), 1_230);
+    assert_eq!(baseline.top_level_candidates.len(), 1_231);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT
@@ -3579,6 +3579,118 @@ fn idr_object_creation_boundary_is_source_ordered_and_wire_backed() {
             .iter()
             .any(|reservation| reservation.symbol == "ObjectCreationBoundary"),
         "an inline non-StrongRef family must not acquire a reservation"
+    );
+}
+
+#[test]
+fn idr_a02_location_form_is_source_ordered_and_wire_backed() {
+    let identity = real_identity();
+    let parent = identity
+        .wire
+        .iter()
+        .find(|wire| wire.name == "LocationForm")
+        .expect("LocationForm wire parent exists");
+    assert_eq!(parent.wire_type_id, 0x051e);
+    assert_eq!(parent.kind, "union");
+    assert_eq!(parent.status, "reserved");
+    assert_eq!(parent.containing_union, None);
+    assert_eq!(parent.wire_tag, None);
+    assert_eq!(
+        parent.allowed_containing_schemas,
+        vec!["PlacementDescriptorWithoutId".to_owned()],
+        "a top-level wire union must name its actual consumer"
+    );
+
+    let variants = identity
+        .wire
+        .iter()
+        .filter(|wire| wire.containing_union.as_deref() == Some("LocationForm"))
+        .map(|wire| (wire.name.as_str(), wire.wire_type_id, wire.wire_tag))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        variants,
+        vec![
+            ("LocationForm.contiguous_span", 0x051f, Some(0x0001)),
+            ("LocationForm.explicit", 0x0520, Some(0x0002)),
+        ],
+        "the source spells ContiguousSpan before Explicit; alphabetical census order is not authoritative"
+    );
+    assert!(
+        identity
+            .wire
+            .iter()
+            .filter(|wire| wire.containing_union.as_deref() == Some("LocationForm"))
+            .all(|wire| wire.allowed_containing_schemas == vec!["LocationForm".to_owned()])
+    );
+
+    let union = identity
+        .ordinary_unions
+        .iter()
+        .find(|union| union.union_name == "LocationForm")
+        .expect("LocationForm ordinary union exists");
+    assert_eq!(union.containing_schema, union.union_name);
+    assert_eq!(union.union_path, union.union_name);
+    assert_eq!(union.field_tag, None);
+    assert_eq!(
+        union.allowed_containing_schemas,
+        vec!["PlacementDescriptorWithoutId".to_owned()]
+    );
+    assert_eq!(
+        union
+            .arms
+            .iter()
+            .map(|arm| {
+                (
+                    arm.source_arm_name.as_str(),
+                    arm.arm_tag,
+                    arm.stable_name.as_str(),
+                    arm.payload_sha256.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "ContiguousSpan",
+                0x0001,
+                "contiguous_span",
+                Some("b0d4e74e2c1c2056425f412f5f267bbeb348846b8c0910fbdef8fc3c9755fa82"),
+            ),
+            (
+                "Explicit",
+                0x0002,
+                "explicit",
+                Some("bfc317ac3870a16c28748c12d745185fe2ec3c1d2e34043528fabbcccdda3e16"),
+            ),
+        ]
+    );
+
+    let catalog = real_appendix_catalog();
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == "top|LocationForm")
+        .expect("LocationForm source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "wire");
+    assert_eq!(
+        catalog
+            .targets
+            .iter()
+            .filter(|target| {
+                target.source_key == "top|LocationForm"
+                    || target.source_key == "union|LocationForm|LocationForm"
+                    || target.source_key.starts_with("arm|LocationForm|")
+            })
+            .count(),
+        6,
+        "one parent, one ordinary union, two arms, and two wire variants must be targeted"
+    );
+    assert!(
+        !catalog
+            .reservations
+            .iter()
+            .any(|reservation| reservation.symbol == "LocationForm"),
+        "a non-StrongRef wire family must not acquire a reservation"
     );
 }
 
@@ -5429,6 +5541,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             name,
             "KeyDestroyExternalAckRef"
                 | "TimeAuthorityRegistryProfileState"
+                | "LocationForm"
                 | "AuthorityPermitRef<Role:AuthorityOwningRole>"
                 | "LifecycleAuthoritySource<Role>"
                 | "ReadCapablePermitRef<Role:AuthorityOwningRole>"
@@ -6920,7 +7033,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             )
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 362,
+        pre_erratum.ordinary_unions.len() + 363,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A08 lifecycle tranche"
     );
