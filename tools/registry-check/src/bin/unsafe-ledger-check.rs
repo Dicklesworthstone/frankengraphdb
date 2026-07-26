@@ -68,6 +68,40 @@ fn main() -> ExitCode {
         ])
     );
 
+    // The API reader's control, for the same reason and read the same way: it
+    // licenses every "this island exports nothing unsafe" line below.
+    let api_licensed =
+        report.safe_facing_self_test_findings == unsafe_ledger::SAFE_FACING_FIXTURE_FINDINGS;
+    println!(
+        "{}",
+        event(&[
+            ("event", s("safe_facing_self_test")),
+            (
+                "findings_found",
+                n(report.safe_facing_self_test_findings as i64)
+            ),
+            (
+                "findings_expected",
+                n(unsafe_ledger::SAFE_FACING_FIXTURE_FINDINGS as i64)
+            ),
+            ("licensed", b(api_licensed)),
+            ("outcome", s(if api_licensed { "pass" } else { "fail" })),
+        ])
+    );
+
+    // What the safe-facing conclusion is quantified over. A zero here means the
+    // rule was enforced against nothing, and a green bar that cannot say how
+    // many islands and items it read is the failure mode this bead is about.
+    println!(
+        "{}",
+        event(&[
+            ("event", s("island_public_api_scanned")),
+            ("islands", n(report.islands_api_scanned as i64)),
+            ("files", n(report.island_api_files as i64)),
+            ("public_items", n(report.island_public_items as i64)),
+        ])
+    );
+
     for (krate, inherits) in &report.forbid_verdicts {
         println!(
             "{}",
@@ -126,6 +160,8 @@ fn main() -> ExitCode {
             ("crates_scanned", n(report.crates_scanned as i64)),
             ("sites", n(report.scanned_sites.len() as i64)),
             ("orphan_rows", n(report.orphan_rows.len() as i64)),
+            ("islands_api_scanned", n(report.islands_api_scanned as i64)),
+            ("island_public_items", n(report.island_public_items as i64)),
             ("violations", n(violations.len() as i64)),
             ("outcome", s(if failed { "fail" } else { "pass" })),
         ])

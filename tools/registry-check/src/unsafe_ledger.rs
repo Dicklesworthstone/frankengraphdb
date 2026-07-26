@@ -856,6 +856,15 @@ pub struct Report {
     pub scanned_sites: Vec<ScannedSite>,
     pub orphan_rows: Vec<String>,
     pub scanner_self_test_sites: usize,
+    /// Island crates whose safe-facing API was read.
+    pub islands_api_scanned: usize,
+    /// Source files read for the safe-facing API check.
+    pub island_api_files: usize,
+    /// Public items the API reader classified across those files. Reported
+    /// because "0 violations" over 0 items is not a pass.
+    pub island_public_items: usize,
+    /// Findings the API reader reproduced in its own fixture.
+    pub safe_facing_self_test_findings: usize,
 }
 
 /// Verify the whole unsafe boundary. Returns the report alongside violations so
@@ -880,6 +889,37 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
                  than reporting a clean boundary",
                 self_test.len(),
                 SCANNER_FIXTURE_SITES
+            ),
+        ));
+    }
+
+    // --- the second control, for the second reader. The API reader concludes
+    // --- "this island exports nothing unsafe", and that sentence is worthless
+    // --- from a parser that cannot find anything. It reproduces its own
+    // --- fixture — both halves of it: the violations it must catch AND the
+    // --- near misses it must not, since a reader that rejected every asterisk
+    // --- would pass a count-only check.
+    let api_self_test = public_api(safe_facing_fixture());
+    report.safe_facing_self_test_findings = api_self_test.findings.len();
+    let api_trustworthy = api_self_test.findings.len() == SAFE_FACING_FIXTURE_FINDINGS
+        && api_self_test.pub_tokens == SAFE_FACING_FIXTURE_PUB_TOKENS
+        && api_self_test.pub_tokens_claimed == api_self_test.pub_tokens
+        && api_self_test.parse_failures.is_empty();
+    if !api_trustworthy {
+        v.push(Violation::new(
+            "safe_facing_self_test_failed",
+            "unsafe_ledger",
+            SAFE_FACING_FIXTURE_FINDINGS.to_string(),
+            format!(
+                "the safe-facing API reader found {} findings ({} expected) and claimed {} of \
+                 {} pub tokens ({} parse failures) in its own fixture: every \"this island \
+                 exports nothing unsafe\" below would be unlicensed, so the run fails rather \
+                 than reporting a clean safe-facing boundary",
+                api_self_test.findings.len(),
+                SAFE_FACING_FIXTURE_FINDINGS,
+                api_self_test.pub_tokens_claimed,
+                api_self_test.pub_tokens,
+                api_self_test.parse_failures.len(),
             ),
         ));
     }
@@ -1172,6 +1212,20 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
 
         let src = root.join(member).join("src");
         if !src.is_dir() {
+            // For an ordinary crate this is nothing: there is no source, so
+            // there is no unsafe. For an ISLAND it is the vacuity case — the
+            // crate is on the roster, so something claims it needs unsafe, and
+            // a boundary whose source cannot be found must not be reported
+            // clean.
+            if is_island {
+                v.push(Violation::new(
+                    "island_api_unscannable",
+                    &name,
+                    src.display().to_string(),
+                    "a boundary crate with no src/ directory: its safe-facing API cannot be \
+                     read, so no claim can be made about what it exports",
+                ));
+            }
             continue;
         }
         let mut files = Vec::new();
@@ -1183,6 +1237,19 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
                 format!("cannot walk the crate source, so it cannot be reported clean: {e}"),
             ));
             continue;
+        }
+        if is_island {
+            if files.is_empty() {
+                v.push(Violation::new(
+                    "island_api_unscannable",
+                    &name,
+                    src.display().to_string(),
+                    "a boundary crate whose src/ holds no Rust source: its safe-facing API \
+                     cannot be read, so no claim can be made about what it exports",
+                ));
+            } else {
+                report.islands_api_scanned += 1;
+            }
         }
         for file in files {
             let rel = file
@@ -1212,6 +1279,71 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
                     ));
                 }
                 report.scanned_sites.push(site);
+            }
+
+            // --- the safe-facing API of an island (bead fgdb-n7mb)
+            //
+            // The site scan above answers "where is unsafe WRITTEN". This
+            // answers "what can a safe crate REACH", and nothing else in this
+            // file does: a `pub unsafe fn` or a raw pointer in a public
+            // signature adds no allow site, so the ledger stays complete, the
+            // bijection stays satisfied, and the island stops being one.
+            if !is_island {
+                continue;
+            }
+            report.island_api_files += 1;
+            let api = public_api(&text);
+            report.island_public_items += api.public_items;
+            for finding in &api.findings {
+                let anchor = format!("{rel}:{}", finding.line);
+                if finding.unsafe_fn {
+                    v.push(Violation::new(
+                        "island_public_unsafe_fn",
+                        &name,
+                        anchor.clone(),
+                        format!(
+                            "`{}` is a publicly reachable unsafe fn. An island exists so that \
+                             safe crates consume it through safe APIs; exporting an unsafe fn \
+                             moves the boundary outward without adding a ledger row, and every \
+                             other gate here stays green",
+                            finding.name
+                        ),
+                    ));
+                }
+                if finding.raw_pointer {
+                    v.push(Violation::new(
+                        "island_public_raw_pointer",
+                        &name,
+                        anchor,
+                        format!(
+                            "the public {} `{}` carries a raw pointer in its exported type. A \
+                             raw pointer in the safe-facing API hands the crate's unsafe \
+                             obligations to callers who never signed for them",
+                            finding.kind, finding.name
+                        ),
+                    ));
+                }
+            }
+            // The zero licence, per file. Every `pub` in live Rust is a
+            // visibility; one this reader did not consume is a region it walked
+            // past, and "no findings" over source nobody parsed is exactly the
+            // shape of pass this suite exists to refuse.
+            if api.pub_tokens_claimed != api.pub_tokens || !api.parse_failures.is_empty() {
+                v.push(Violation::new(
+                    "island_public_api_unparsed",
+                    &name,
+                    rel.clone(),
+                    format!(
+                        "the safe-facing API reader claimed {} of {} pub tokens and failed to \
+                         parse {} public item(s) (first at line {}): its verdict on this file \
+                         is quantified over source it did not understand, so the run fails \
+                         rather than reporting the island clean",
+                        api.pub_tokens_claimed,
+                        api.pub_tokens,
+                        api.parse_failures.len(),
+                        api.parse_failures.first().copied().unwrap_or(0),
+                    ),
+                ));
             }
         }
     }
@@ -1288,6 +1420,996 @@ fn resolve_members(root: &Path, workspace: &crate::toml::Table) -> Result<Vec<Pa
         .map_err(|e| e.to_string())?;
     let excludes = crate::appendix_a::workspace_exact_excludes(workspace)?;
     crate::appendix_a::workspace_member_paths(root, &members, &excludes)
+}
+
+// ===========================================================================
+// The safe-facing API of an island (bead `fgdb-n7mb`)
+// ===========================================================================
+//
+// The ledger below enumerates `allow(unsafe_code)` SITES. That is a complete
+// account of where unsafe code is WRITTEN and no account at all of where it is
+// REACHABLE FROM. An island exists so that safe crates consume it through safe
+// APIs; a `pub unsafe fn`, or a `*const`/`*mut` in a public signature, moves the
+// boundary outward without adding a single site, so every check above it stays
+// green while the property the islands exist for is gone. Until this reader
+// landed the rule lived in three crate-root doc comments and was checked by
+// nobody.
+//
+// It is a structural reader, and the suite header in `tests/metamorphic.rs`
+// says why in the general case: four of one session's seven "looks exactly like
+// a pass" bugs were a substring, prefix, or whole-line-equality test standing in
+// for structural parsing, inside a checker whose job is to be unfoolable. The
+// specific traps here are ordinary Rust, not exotica:
+//
+// * a doc comment or a string literal naming `*mut u8` — read through
+//   [`mask_source`], the ONE reader for which bytes of a source are live code,
+//   so a line-wise matcher's false positives cannot happen here;
+// * a signature wrapped across lines, which no line-wise matcher can see whole;
+// * a raw pointer in a fn BODY, which is ledgered unsafe code and NOT an
+//   exported signature, so the region checked stops at the opening brace;
+// * `pub struct S { pub slots: Slots<u32, *mut u8> }`, where the comma inside
+//   the angle brackets splits the field for any reader that finds field
+//   boundaries by scanning for commas at paren depth — and the half carrying the
+//   raw pointer then has no `pub` in front of it, which is a SILENT ACCEPT.
+//
+// Two over-approximations are deliberate, and both fail loudly rather than
+// quietly:
+//
+// * Module privacy is not modelled: a `pub` item is treated as safe-facing
+//   wherever it sits. Modelling it without also modelling `pub use` re-export
+//   (`mod internal; pub use internal::Thing;` — the common shape) would be
+//   fail-open, and fail-open is the direction this file exists to close.
+// * A trait impl's items are treated as public, because a foreign trait's
+//   `unsafe fn` is reachable through the island's type even though the impl
+//   cannot write `pub`.
+//
+// NO-CLAIM BOUNDARY. This says nothing about pointer-like types that are not
+// spelled `*const`/`*mut` (`NonNull`, an address passed as `usize`), nothing
+// about items generated by a macro expansion, and nothing about whether a
+// public item is *sound* — only about whether the safe-facing surface is spelled
+// safely. `macro_rules!` bodies are not parsed at all, and the unclaimed-`pub`
+// control below turns that into a violation rather than a silent gap.
+
+/// One public item that violates the safe-facing rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicApiFinding {
+    /// `fn`, `field`, `type`, `const` or `static`.
+    pub kind: &'static str,
+    /// The item's or field's name, as written.
+    pub name: String,
+    /// 1-based line of the item's defining keyword.
+    pub line: usize,
+    /// A publicly reachable `unsafe fn`.
+    pub unsafe_fn: bool,
+    /// `*const` or `*mut` inside the item's exported type region.
+    pub raw_pointer: bool,
+}
+
+/// What the API reader concluded about one source file.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PublicApi {
+    /// The violations, in source order.
+    pub findings: Vec<PublicApiFinding>,
+    /// Public items the parser classified, violating or not. Reported so a
+    /// reader can tell an island with a small API from one the parser missed.
+    pub public_items: usize,
+    /// Every `pub` keyword token in live code.
+    ///
+    /// This is NOT a second reader of "what items does this file export" — it
+    /// answers a strictly weaker question, and it exists only to license a zero.
+    /// Both counts come from the same mask and the same token stream, so they
+    /// cannot disagree about which bytes are code; they can only disagree about
+    /// whether the parser understood them.
+    pub pub_tokens: usize,
+    /// The `pub` tokens the parser consumed AS a visibility. Every `pub` in live
+    /// Rust is a visibility, so a gap here is a region the parser walked past —
+    /// which is exactly how a structural reader reports "clean" over source it
+    /// never understood.
+    pub pub_tokens_claimed: usize,
+    /// 1-based lines where a `pub` was read and the item then failed to parse.
+    pub parse_failures: Vec<usize>,
+}
+
+/// A fixture with a known set of safe-facing violations, and — just as load
+/// bearing — a known set of near misses that must NOT count.
+///
+/// Every counted case is a form that has to be caught; every ignored case is a
+/// form a plausible wrong reader catches anyway. The ignored half is what keeps
+/// the reader from being "reject anything containing an asterisk".
+///
+/// It is a string literal, so [`mask_source`] blanks it: this fixture cannot be
+/// mistaken for a real declaration in this file the way the first site scanner's
+/// fixture was.
+pub fn safe_facing_fixture() -> &'static str {
+    SAFE_FACING_FIXTURE
+}
+
+/// The exact number of findings in [`safe_facing_fixture`].
+pub const SAFE_FACING_FIXTURE_FINDINGS: usize = 13;
+
+/// The exact number of live `pub` tokens in [`safe_facing_fixture`]. Pinning it
+/// keeps the claim control itself honest: a parser that claimed nothing and a
+/// fixture that contained nothing look identical without this.
+pub const SAFE_FACING_FIXTURE_PUB_TOKENS: usize = 21;
+
+const SAFE_FACING_FIXTURE: &str = r#"
+//! A fixture island source. The *mut u8 in this module doc must not count.
+
+use core::ptr;
+
+/// COUNTED: a public unsafe fn.
+pub unsafe fn public_unsafe() {}
+
+/// COUNTED: a raw pointer parameter. This doc line names *mut u8 as well.
+pub fn takes_raw(p: *mut u8) -> usize {
+    p as usize
+}
+
+/// COUNTED: a raw pointer return, on a signature wrapped across lines.
+pub fn gives_raw(
+    len: usize,
+) -> *const u8 {
+    let _ = len;
+    ptr::null()
+}
+
+/// COUNTED: a comma inside angle brackets, ahead of the raw pointer.
+pub fn nested(map: Slots<u32, *mut u8>) -> usize {
+    map.len()
+}
+
+/// COUNTED twice: a public named field, and one whose type carries an angle
+/// bracketed comma before the raw pointer.
+pub struct Named {
+    pub block: *mut u8,
+    pub slots: Slots<u32, *mut u8>,
+    len: usize,
+}
+
+/// COUNTED: a public tuple field.
+pub struct Tuple(pub *const u8, usize);
+
+/// COUNTED: a public type alias.
+pub type Alias = *mut u8;
+
+/// COUNTED twice: two enum variant payloads, which are public with the enum.
+pub enum Carrier {
+    Empty,
+    Raw(*mut u8),
+    Named { at: *const u8 },
+}
+
+/// COUNTED twice: a trait method that is unsafe, and one taking a raw pointer.
+/// Neither says pub; both are as public as the trait.
+pub trait Boundary {
+    unsafe fn arm();
+    fn hand(p: *mut u8);
+}
+
+/// COUNTED: a public static.
+pub static ORIGIN: *const u8 = ptr::null();
+
+/// IGNORED: restricted visibility is not the safe-facing API.
+pub(crate) fn restricted(p: *mut u8) -> usize {
+    p as usize
+}
+
+/// IGNORED: no visibility at all.
+fn private_raw(p: *mut u8) -> usize {
+    p as usize
+}
+
+/// IGNORED: unsafe, but not public.
+unsafe fn private_unsafe() {}
+
+/// IGNORED: a private struct's public field is not reachable.
+struct Hidden {
+    pub block: *mut u8,
+}
+
+/// IGNORED: a private trait's unsafe method.
+trait Interior {
+    unsafe fn arm();
+}
+
+/// IGNORED: the raw pointer is in the BODY. That is ledgered unsafe code, not
+/// an exported signature, and confusing the two would make every island fail.
+pub fn body_only(v: &mut [u8]) -> usize {
+    let base: *mut u8 = v.as_mut_ptr();
+    base as usize
+}
+
+/// IGNORED: a raw pointer spelled inside a string literal.
+pub fn spells_it() -> &'static str {
+    "*mut u8"
+}
+
+/// IGNORED: the DECLARED type is `usize`. The initialiser names a raw pointer
+/// in a turbofish, which is live code and not blanked by the mask — so a reader
+/// that scanned the whole item instead of the type region would flag it.
+pub const NOWHERE: usize = core::mem::size_of::<*mut u8>();
+
+/// IGNORED: multiplication is not a raw pointer.
+pub fn arithmetic(lanes: [u8; WIDTH * 2]) -> usize {
+    lanes.len()
+}
+
+/* IGNORED: a block-commented declaration the compiler never sees.
+pub unsafe fn commented() {}
+pub fn commented_raw(p: *mut u8) {}
+*/
+
+/// IGNORED: an item inside a function body is unreachable from anywhere.
+pub fn encloses() {
+    pub fn inner(p: *mut u8) -> usize {
+        p as usize
+    }
+    let _ = inner;
+}
+"#;
+
+/// Read the safe-facing public API of one Rust source.
+pub fn public_api(text: &str) -> PublicApi {
+    let masked = mask_source(text);
+    let toks = tokenize(masked.text());
+    let mut parser = ApiParser {
+        masked: &masked,
+        out: PublicApi {
+            pub_tokens: toks.iter().filter(|t| t.ident && t.text == "pub").count(),
+            ..PublicApi::default()
+        },
+        toks,
+    };
+    let end = parser.toks.len();
+    parser.items(0, end, Scope::file());
+    parser.out
+}
+
+/// One token of masked source. Comments and literal CONTENT are already blanked,
+/// so the only tokens here are live code.
+#[derive(Debug, Clone, Copy)]
+struct Token<'a> {
+    text: &'a str,
+    ident: bool,
+    start: usize,
+}
+
+/// Split masked source into identifiers and punctuation.
+///
+/// `->`, `=>` and `::` are single tokens on purpose: the `>` of an arrow must
+/// not close a generic argument list, which is what [`ApiParser::skip_type`]
+/// balances to find a field's end.
+fn tokenize(masked: &str) -> Vec<Token<'_>> {
+    let chars: Vec<(usize, char)> = masked.char_indices().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let (at, c) = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let end_of = |j: usize| chars.get(j).map_or(masked.len(), |(o, _)| *o);
+        if c == '_' || c.is_alphabetic() {
+            let mut j = i + 1;
+            while j < chars.len() && (chars[j].1 == '_' || chars[j].1.is_alphanumeric()) {
+                j += 1;
+            }
+            out.push(Token {
+                text: &masked[at..end_of(j)],
+                ident: true,
+                start: at,
+            });
+            i = j;
+            continue;
+        }
+        if c.is_numeric() {
+            let mut j = i + 1;
+            while j < chars.len() && (chars[j].1 == '_' || chars[j].1.is_alphanumeric()) {
+                j += 1;
+            }
+            out.push(Token {
+                text: &masked[at..end_of(j)],
+                ident: false,
+                start: at,
+            });
+            i = j;
+            continue;
+        }
+        let two = &masked[at..end_of(i + 2)];
+        if matches!(two, "->" | "=>" | "::") {
+            out.push(Token {
+                text: two,
+                ident: false,
+                start: at,
+            });
+            i += 2;
+            continue;
+        }
+        out.push(Token {
+            text: &masked[at..end_of(i + 1)],
+            ident: false,
+            start: at,
+        });
+        i += 1;
+    }
+    out
+}
+
+/// What kind of item a unit's header declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Fn,
+    Struct,
+    Enum,
+    Trait,
+    Impl,
+    Mod,
+    TypeAlias,
+    Const,
+    Static,
+    Use,
+    ExternBlock,
+    MacroRules,
+    Unknown,
+}
+
+/// A unit header: everything from the visibility to the defining keyword.
+#[derive(Debug, Clone, Copy)]
+struct Head {
+    kind: Kind,
+    /// Index of the defining keyword, or of the `{` for an extern block.
+    kw: usize,
+    unsafe_mod: bool,
+    safe_mod: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Vis {
+    /// Unrestricted `pub`.
+    Public,
+    /// `pub(crate)`, `pub(super)`, `pub(self)`, `pub(in ...)`.
+    Restricted,
+    /// No visibility keyword.
+    Inherited,
+}
+
+/// Where in the item tree the parser currently is.
+#[derive(Debug, Clone, Copy)]
+struct Scope {
+    /// Items here are public without saying so: a `pub trait` body, or a trait
+    /// impl body, where `pub` is not even legal.
+    inherited_pub: bool,
+    /// Report findings, or merely claim `pub` tokens. A function body is walked
+    /// with `report` false: items declared there are unreachable, so flagging
+    /// them would be a false alarm, but their `pub` tokens must still be claimed
+    /// or the vacuity control fires on perfectly good source.
+    report: bool,
+    /// An `extern` block, where a `fn` is unsafe to call unless marked `safe`.
+    extern_block: bool,
+}
+
+impl Scope {
+    fn file() -> Self {
+        Self {
+            inherited_pub: false,
+            report: true,
+            extern_block: false,
+        }
+    }
+
+    fn inner(self, inherited_pub: bool) -> Self {
+        Self {
+            inherited_pub,
+            report: self.report,
+            extern_block: false,
+        }
+    }
+
+    /// A function body: claim tokens, report nothing.
+    fn body(self) -> Self {
+        Self {
+            inherited_pub: false,
+            report: false,
+            extern_block: false,
+        }
+    }
+}
+
+struct ApiParser<'a> {
+    toks: Vec<Token<'a>>,
+    masked: &'a Masked,
+    out: PublicApi,
+}
+
+impl ApiParser<'_> {
+    fn tt(&self, i: usize) -> &str {
+        self.toks.get(i).map_or("", |t| t.text)
+    }
+
+    fn is_kw(&self, i: usize, word: &str) -> bool {
+        self.toks.get(i).is_some_and(|t| t.ident && t.text == word)
+    }
+
+    fn line(&self, i: usize) -> usize {
+        self.toks.get(i).map_or(1, |t| self.masked.line_of(t.start))
+    }
+
+    /// Index of the bracket matching the opener at `open`, or `end`.
+    fn matching(&self, open: usize, end: usize) -> usize {
+        let (opener, closer) = match self.tt(open) {
+            "(" => ("(", ")"),
+            "[" => ("[", "]"),
+            "{" => ("{", "}"),
+            _ => return open,
+        };
+        let mut depth = 0usize;
+        for i in open..end {
+            let t = self.tt(i);
+            if t == opener {
+                depth += 1;
+            } else if t == closer {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return i;
+                }
+            }
+        }
+        end
+    }
+
+    fn skip_attrs(&self, mut i: usize, end: usize) -> usize {
+        while i < end && self.tt(i) == "#" {
+            let mut j = i + 1;
+            if j < end && self.tt(j) == "!" {
+                j += 1;
+            }
+            if j < end && self.tt(j) == "[" {
+                i = self.matching(j, end) + 1;
+            } else {
+                break;
+            }
+        }
+        i
+    }
+
+    /// Read a visibility, claiming its `pub` token.
+    ///
+    /// A `pub` followed by a parenthesis is a restriction only when the
+    /// parenthesis opens with `crate`, `super`, `self` or `in`. That is what
+    /// Rust itself accepts, and it keeps a tuple field whose type happens to be
+    /// parenthesised from reading as `pub(…)`.
+    fn read_vis(&mut self, i: &mut usize, end: usize) -> Vis {
+        if !self.is_kw(*i, "pub") {
+            return Vis::Inherited;
+        }
+        self.out.pub_tokens_claimed += 1;
+        *i += 1;
+        if *i < end && self.tt(*i) == "(" {
+            let inner = self.tt(*i + 1);
+            if matches!(inner, "crate" | "super" | "self" | "in") {
+                *i = self.matching(*i, end) + 1;
+                return Vis::Restricted;
+            }
+        }
+        Vis::Public
+    }
+
+    /// Advance past the modifier keywords to the defining keyword.
+    ///
+    /// The loop only ever CONTINUES on a modifier; everything else settles a
+    /// kind and breaks, so `kw` always names the token the caller must measure
+    /// the item from.
+    fn read_head(&self, mut i: usize, end: usize) -> Head {
+        let mut unsafe_mod = false;
+        let mut safe_mod = false;
+        let mut kind = Kind::Unknown;
+        let mut guard = 0;
+        while i < end && guard < 8 {
+            guard += 1;
+            if !self.toks[i].ident {
+                break;
+            }
+            match self.toks[i].text {
+                "unsafe" => {
+                    unsafe_mod = true;
+                    i += 1;
+                    continue;
+                }
+                "safe" => {
+                    safe_mod = true;
+                    i += 1;
+                    continue;
+                }
+                "async" | "default" | "gen" => {
+                    i += 1;
+                    continue;
+                }
+                "extern" => {
+                    // `extern "C" fn`, `unsafe extern "C" { … }`, or
+                    // `extern crate`. The abi string is masked to its quotes.
+                    i += 1;
+                    while i < end && self.tt(i) == "\"" {
+                        i += 1;
+                    }
+                    if i < end && self.tt(i) == "{" {
+                        kind = Kind::ExternBlock;
+                        break;
+                    }
+                    continue;
+                }
+                // `const` is a modifier only when a callable follows it;
+                // otherwise it is the defining keyword of a constant.
+                "const" if matches!(self.tt(i + 1), "fn" | "unsafe" | "extern" | "async") => {
+                    i += 1;
+                    continue;
+                }
+                "const" => kind = Kind::Const,
+                "fn" => kind = Kind::Fn,
+                "struct" => kind = Kind::Struct,
+                "union" if self.toks.get(i + 1).is_some_and(|t| t.ident) => kind = Kind::Struct,
+                "enum" => kind = Kind::Enum,
+                "trait" => kind = Kind::Trait,
+                "impl" => kind = Kind::Impl,
+                "mod" => kind = Kind::Mod,
+                "type" => kind = Kind::TypeAlias,
+                "static" => kind = Kind::Static,
+                "use" => kind = Kind::Use,
+                "macro_rules" => kind = Kind::MacroRules,
+                _ => {}
+            }
+            break;
+        }
+        Head {
+            kind,
+            kw: i.min(end.saturating_sub(1)),
+            unsafe_mod,
+            safe_mod,
+        }
+    }
+
+    /// Where the unit beginning at `from` ends, and its brace body if it has
+    /// one. A `;` at depth zero ends a unit without a body; a `{` at depth zero
+    /// opens one and its matching `}` ends the unit.
+    fn unit_extent(&self, from: usize, end: usize) -> (usize, Option<(usize, usize)>) {
+        let mut depth = 0usize;
+        let mut i = from;
+        while i < end {
+            match self.tt(i) {
+                "(" | "[" => depth += 1,
+                ")" | "]" => depth = depth.saturating_sub(1),
+                "{" if depth == 0 => {
+                    let close = self.matching(i, end);
+                    return ((close + 1).min(end), Some((i, close)));
+                }
+                "{" => depth += 1,
+                "}" if depth == 0 => return (i, None),
+                "}" => depth = depth.saturating_sub(1),
+                ";" if depth == 0 => return (i + 1, None),
+                _ => {}
+            }
+            i += 1;
+        }
+        (end, None)
+    }
+
+    /// Where the unit beginning at `from` ends, counting only `;` — for items
+    /// whose braces are content rather than a body (`use a::{b, c};`).
+    fn unit_end_semi(&self, from: usize, end: usize) -> usize {
+        let mut depth = 0usize;
+        let mut i = from;
+        while i < end {
+            match self.tt(i) {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth = depth.saturating_sub(1),
+                ";" if depth == 0 => return i + 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        end
+    }
+
+    /// The first parenthesis group at depth zero in `from..end`.
+    fn first_paren(&self, from: usize, end: usize) -> Option<(usize, usize)> {
+        let mut depth = 0usize;
+        for i in from..end {
+            match self.tt(i) {
+                "(" if depth == 0 => return Some((i, self.matching(i, end))),
+                "[" | "{" => depth += 1,
+                "]" | "}" => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Does a `for` appear at depth zero in `from..end` — i.e. is this
+    /// `impl Trait for Type` rather than an inherent impl? A higher-ranked
+    /// `for<'a>` inside a bound sits at angle depth and does not count.
+    fn is_trait_impl(&self, from: usize, end: usize) -> bool {
+        let (mut paren, mut brack, mut angle) = (0usize, 0usize, 0usize);
+        for i in from..end {
+            match self.tt(i) {
+                "(" => paren += 1,
+                ")" => paren = paren.saturating_sub(1),
+                "[" => brack += 1,
+                "]" => brack = brack.saturating_sub(1),
+                "<" => angle += 1,
+                ">" => angle = angle.saturating_sub(1),
+                "for" if paren == 0 && brack == 0 && angle == 0 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Where the type beginning at `from` ends: the first `,`, `;` or `=`
+    /// outside every bracket, INCLUDING angle brackets.
+    ///
+    /// The angle counter is the whole point. `pub slots: Slots<u32, *mut u8>`
+    /// has a comma that belongs to the generic argument list, and a reader that
+    /// stopped there would hand the raw pointer to a "field" with no `pub` in
+    /// front of it and report the struct clean — a SILENT ACCEPT, which is the
+    /// direction that hides longest. `->` and `=>` are single tokens, so an
+    /// arrow's `>` cannot close an argument list; a `>` with nothing open is
+    /// ignored rather than driving the count negative.
+    ///
+    /// Stopping at a flat `=` is what keeps a constant's exported type separate
+    /// from its initialiser: `const N: usize = size_of::<*mut u8>()` exports a
+    /// `usize`, and the raw pointer in the turbofish is live code the mask does
+    /// not blank.
+    fn skip_type(&self, from: usize, end: usize) -> usize {
+        let (mut paren, mut brack, mut brace, mut angle) = (0usize, 0usize, 0usize, 0usize);
+        let mut i = from;
+        while i < end {
+            let flat = paren == 0 && brack == 0 && brace == 0 && angle == 0;
+            match self.tt(i) {
+                "(" => paren += 1,
+                ")" if paren == 0 => return i,
+                ")" => paren -= 1,
+                "[" => brack += 1,
+                "]" if brack == 0 => return i,
+                "]" => brack -= 1,
+                "{" => brace += 1,
+                "}" if brace == 0 => return i,
+                "}" => brace -= 1,
+                "<" => angle += 1,
+                ">" => angle = angle.saturating_sub(1),
+                "," | ";" | "=" if flat => return i,
+                _ => {}
+            }
+            i += 1;
+        }
+        end
+    }
+
+    /// Where an EXPRESSION ends: the first `,` or `;` outside `()`, `[]` and
+    /// `{}`, with angle brackets deliberately NOT counted.
+    ///
+    /// An enum discriminant is an expression, and `Flag = 1 << 3` opens two
+    /// angle brackets that never close. Balancing them there would swallow
+    /// every remaining variant, which is how a reader reports a clean enum by
+    /// never reaching the rest of it.
+    fn skip_expr(&self, from: usize, end: usize) -> usize {
+        let (mut paren, mut brack, mut brace) = (0usize, 0usize, 0usize);
+        let mut i = from;
+        while i < end {
+            let flat = paren == 0 && brack == 0 && brace == 0;
+            match self.tt(i) {
+                "(" => paren += 1,
+                ")" if paren == 0 => return i,
+                ")" => paren -= 1,
+                "[" => brack += 1,
+                "]" if brack == 0 => return i,
+                "]" => brack -= 1,
+                "{" => brace += 1,
+                "}" if brace == 0 => return i,
+                "}" => brace -= 1,
+                "," | ";" if flat => return i,
+                _ => {}
+            }
+            i += 1;
+        }
+        end
+    }
+
+    /// Is there a raw pointer in `from..end`? A `*` is one only when the very
+    /// next token is the `const` or `mut` keyword, so multiplication by a
+    /// constant (`[u8; WIDTH * 2]`) is not mistaken for one.
+    fn raw_pointer_in(&self, from: usize, end: usize) -> bool {
+        (from..end).any(|i| {
+            self.tt(i) == "*"
+                && i + 1 < end
+                && (self.is_kw(i + 1, "const") || self.is_kw(i + 1, "mut"))
+        })
+    }
+
+    fn record(&mut self, kind: &'static str, name: String, line: usize, uf: bool, raw: bool) {
+        if uf || raw {
+            self.out.findings.push(PublicApiFinding {
+                kind,
+                name,
+                line,
+                unsafe_fn: uf,
+                raw_pointer: raw,
+            });
+        }
+    }
+
+    fn name_after(&self, kw: usize) -> String {
+        self.toks
+            .get(kw + 1)
+            .filter(|t| t.ident)
+            .map_or_else(|| "<anonymous>".to_owned(), |t| t.text.to_owned())
+    }
+
+    fn items(&mut self, mut i: usize, end: usize, scope: Scope) {
+        while i < end {
+            let stall = i;
+            i = self.skip_attrs(i, end);
+            if i >= end {
+                break;
+            }
+            if matches!(self.tt(i), ";" | ",") {
+                i += 1;
+                continue;
+            }
+            let vis = self.read_vis(&mut i, end);
+            if i >= end {
+                break;
+            }
+            let head = self.read_head(i, end);
+            let public = vis == Vis::Public || scope.inherited_pub;
+            if public && scope.report && head.kind != Kind::Unknown {
+                self.out.public_items += 1;
+            }
+            let next = match head.kind {
+                Kind::Fn => {
+                    let (unit_end, body) = self.unit_extent(head.kw, end);
+                    let sig_end = body.map_or(unit_end.saturating_sub(1), |(open, _)| open);
+                    if public && scope.report {
+                        let uf = head.unsafe_mod || (scope.extern_block && !head.safe_mod);
+                        let raw = self.raw_pointer_in(head.kw, sig_end);
+                        let name = self.name_after(head.kw);
+                        let line = self.line(head.kw);
+                        self.record("fn", name, line, uf, raw);
+                    }
+                    if let Some((open, close)) = body {
+                        self.items(open + 1, close, scope.body());
+                    }
+                    unit_end
+                }
+                Kind::Struct => {
+                    let (unit_end, body) = self.unit_extent(head.kw, end);
+                    let report = scope.report && public;
+                    match body {
+                        Some((open, close)) => self.named_fields(open + 1, close, false, report),
+                        None => {
+                            if let Some((open, close)) = self.first_paren(head.kw, unit_end) {
+                                self.tuple_fields(open + 1, close, false, report);
+                            }
+                        }
+                    }
+                    unit_end
+                }
+                Kind::Enum => {
+                    let (unit_end, body) = self.unit_extent(head.kw, end);
+                    if let Some((open, close)) = body {
+                        self.enum_body(open + 1, close, scope.report && public);
+                    }
+                    unit_end
+                }
+                Kind::Trait => {
+                    let (unit_end, body) = self.unit_extent(head.kw, end);
+                    if let Some((open, close)) = body {
+                        self.items(open + 1, close, scope.inner(public));
+                    }
+                    unit_end
+                }
+                Kind::Impl => {
+                    let (unit_end, body) = self.unit_extent(head.kw, end);
+                    if let Some((open, close)) = body {
+                        let trait_impl = self.is_trait_impl(head.kw, open);
+                        self.items(open + 1, close, scope.inner(trait_impl));
+                    }
+                    unit_end
+                }
+                Kind::Mod => {
+                    let (unit_end, body) = self.unit_extent(head.kw, end);
+                    if let Some((open, close)) = body {
+                        self.items(open + 1, close, scope.inner(false));
+                    }
+                    unit_end
+                }
+                Kind::ExternBlock => {
+                    let close = self.matching(head.kw, end);
+                    self.items(
+                        head.kw + 1,
+                        close,
+                        Scope {
+                            inherited_pub: false,
+                            report: scope.report,
+                            extern_block: true,
+                        },
+                    );
+                    (close + 1).min(end)
+                }
+                Kind::TypeAlias => {
+                    let unit_end = self.unit_end_semi(head.kw, end);
+                    if public && scope.report && self.raw_pointer_in(head.kw, unit_end) {
+                        let name = self.name_after(head.kw);
+                        let line = self.line(head.kw);
+                        self.record("type", name, line, false, true);
+                    }
+                    unit_end
+                }
+                Kind::Const | Kind::Static => {
+                    let unit_end = self.unit_end_semi(head.kw, end);
+                    if public && scope.report {
+                        // Only the DECLARED type is exported; `skip_type` stops
+                        // at the `=`, so the initialiser — an expression, where
+                        // a `*` is a dereference — is outside the region.
+                        let colon = (head.kw..unit_end).find(|i| self.tt(*i) == ":");
+                        if let Some(colon) = colon {
+                            let ty_end = self.skip_type(colon + 1, unit_end);
+                            if self.raw_pointer_in(colon + 1, ty_end) {
+                                let kind = if head.kind == Kind::Const {
+                                    "const"
+                                } else {
+                                    "static"
+                                };
+                                let name = self.name_after(head.kw);
+                                let line = self.line(head.kw);
+                                self.record(kind, name, line, false, true);
+                            }
+                        }
+                    }
+                    unit_end
+                }
+                Kind::Use => self.unit_end_semi(head.kw, end),
+                // A macro body is token soup this reader does not expand. It is
+                // skipped WITHOUT claiming the `pub` tokens inside it, so an
+                // island that grows one fails the claim control rather than
+                // being reported clean over source nobody parsed.
+                Kind::MacroRules => {
+                    let (unit_end, _) = self.unit_extent(head.kw, end);
+                    unit_end
+                }
+                Kind::Unknown => {
+                    if vis == Vis::Public && scope.report {
+                        self.out.parse_failures.push(self.line(head.kw));
+                    }
+                    let (unit_end, body) = self.unit_extent(head.kw, end);
+                    if let Some((open, close)) = body {
+                        self.items(open + 1, close, scope.body());
+                    }
+                    unit_end
+                }
+            };
+            i = next.max(head.kw + 1);
+            if i <= stall {
+                i = stall + 1;
+            }
+        }
+    }
+
+    /// The named fields of a struct, a union, or a struct-shaped enum variant.
+    /// `all_public` is set for a variant, whose fields are public with the enum
+    /// and cannot say `pub`.
+    fn named_fields(&mut self, mut i: usize, end: usize, all_public: bool, report: bool) {
+        while i < end {
+            let stall = i;
+            i = self.skip_attrs(i, end);
+            if i >= end {
+                break;
+            }
+            if self.tt(i) == "," {
+                i += 1;
+                continue;
+            }
+            let vis = self.read_vis(&mut i, end);
+            let public = all_public || vis == Vis::Public;
+            if self.toks.get(i).is_some_and(|t| t.ident) && self.tt(i + 1) == ":" {
+                let name = self.toks[i].text.to_owned();
+                let line = self.line(i);
+                let ty = i + 2;
+                let ty_end = self.skip_type(ty, end);
+                if report && public {
+                    self.out.public_items += 1;
+                    if self.raw_pointer_in(ty, ty_end) {
+                        self.record("field", name, line, false, true);
+                    }
+                }
+                i = ty_end;
+            } else {
+                if vis == Vis::Public && report {
+                    self.out.parse_failures.push(self.line(i.min(end - 1)));
+                }
+                i = self.skip_type(i, end);
+            }
+            if i < end && self.tt(i) == "," {
+                i += 1;
+            }
+            if i <= stall {
+                i = stall + 1;
+            }
+        }
+    }
+
+    /// The positional fields of a tuple struct or a tuple-shaped enum variant.
+    fn tuple_fields(&mut self, mut i: usize, end: usize, all_public: bool, report: bool) {
+        let mut ordinal = 0usize;
+        while i < end {
+            let stall = i;
+            i = self.skip_attrs(i, end);
+            if i >= end {
+                break;
+            }
+            if self.tt(i) == "," {
+                i += 1;
+                continue;
+            }
+            let line = self.line(i);
+            let vis = self.read_vis(&mut i, end);
+            let public = all_public || vis == Vis::Public;
+            let ty_end = self.skip_type(i, end);
+            if report && public {
+                self.out.public_items += 1;
+                if self.raw_pointer_in(i, ty_end) {
+                    self.record("field", ordinal.to_string(), line, false, true);
+                }
+            }
+            ordinal += 1;
+            i = ty_end;
+            if i < end && self.tt(i) == "," {
+                i += 1;
+            }
+            if i <= stall {
+                i = stall + 1;
+            }
+        }
+    }
+
+    /// The variants of an enum. Every payload is public with the enum itself.
+    fn enum_body(&mut self, mut i: usize, end: usize, report: bool) {
+        while i < end {
+            let stall = i;
+            i = self.skip_attrs(i, end);
+            if i >= end {
+                break;
+            }
+            if self.tt(i) == "," {
+                i += 1;
+                continue;
+            }
+            if !self.toks[i].ident {
+                i += 1;
+                continue;
+            }
+            i += 1;
+            match self.tt(i) {
+                "(" => {
+                    let close = self.matching(i, end);
+                    self.tuple_fields(i + 1, close, true, report);
+                    i = close + 1;
+                }
+                "{" => {
+                    let close = self.matching(i, end);
+                    self.named_fields(i + 1, close, true, report);
+                    i = close + 1;
+                }
+                "=" => i = self.skip_expr(i + 1, end),
+                _ => {}
+            }
+            if i < end && self.tt(i) == "," {
+                i += 1;
+            }
+            if i <= stall {
+                i = stall + 1;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

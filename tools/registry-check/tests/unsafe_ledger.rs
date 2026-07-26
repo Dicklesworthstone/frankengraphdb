@@ -13,7 +13,8 @@
 //! launders an unaudited tree as audited. Each of those is asserted to FAIL.
 
 use registry_check::unsafe_ledger::{
-    SCANNER_FIXTURE_SITES, check_workspace, scan_sites, scanner_fixture,
+    self, SAFE_FACING_FIXTURE_FINDINGS, SAFE_FACING_FIXTURE_PUB_TOKENS, SCANNER_FIXTURE_SITES,
+    check_workspace, public_api, safe_facing_fixture, scan_sites, scanner_fixture,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -549,4 +550,413 @@ fn the_real_workspace_passes_its_own_boundary_check() {
             .any(|name| name.starts_with("fgdb-unsafe-")),
         "the island half of the rule above is vacuous unless an island is present"
     );
+    // The safe-facing rule, on the tree it exists to protect. Both numbers are
+    // load-bearing: a run that scanned zero islands, or read zero public items
+    // out of the ones it did scan, concluded "no public unsafe fn anywhere"
+    // over nothing at all — which is indistinguishable from a pass.
+    assert_eq!(
+        report.islands_api_scanned, 3,
+        "the three landed islands must all have had their API read, got {}",
+        report.islands_api_scanned
+    );
+    assert!(
+        report.island_public_items >= 50,
+        "the islands export a real API; reading {} public items out of them means the \
+         reader walked past most of the surface it is quantified over",
+        report.island_public_items
+    );
+    assert_eq!(
+        report.safe_facing_self_test_findings,
+        unsafe_ledger::SAFE_FACING_FIXTURE_FINDINGS
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The safe-facing API of an island (bead `fgdb-n7mb`).
+//
+// The ledger enumerates where unsafe is WRITTEN. Nothing enumerated where it is
+// REACHABLE FROM, so a `pub unsafe fn` or a raw pointer in a public signature
+// moved the boundary outward while every check above stayed green — the rule
+// lived in three crate-root doc comments and was enforced by nobody.
+//
+// Every test below seeds exactly one form and asserts the specific code, and
+// each is paired with the clean control immediately above it, so neither a
+// checker that fires on everything nor one that fires on nothing survives. The
+// IGNORED cases are not padding: a reader that rejected any asterisk would pass
+// every positive test here.
+// ---------------------------------------------------------------------------
+
+/// A workspace whose one island's `src/lib.rs` is exactly `source`.
+///
+/// The island carries no `allow(unsafe_code)` site and the ledger carries no
+/// rows, so the site<->row bijection is trivially satisfied and the only thing
+/// that can fire is the safe-facing rule.
+fn workspace_with_island_source(tag: &str, source: &str) -> PathBuf {
+    let root = clean_workspace(tag);
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"3\"\nmembers = [\n    \"crates/fgdb-ordinary\",\n    \"crates/fgdb-unsafe-simd\",\n]\n\n[workspace.lints.rust]\nunsafe_code = \"forbid\"\n",
+    )
+    .unwrap();
+    let island = root.join("crates/fgdb-unsafe-simd");
+    fs::create_dir_all(island.join("src")).unwrap();
+    fs::write(
+        island.join("Cargo.toml"),
+        "[package]\nname = \"fgdb-unsafe-simd\"\n",
+    )
+    .unwrap();
+    fs::write(island.join("src/lib.rs"), source).unwrap();
+    fs::write(
+        root.join("registries/unsafe_boundary_ledger.toml"),
+        LEDGER_HEAD.replace("status = \"planned\"", "status = \"present\""),
+    )
+    .unwrap();
+    root
+}
+
+/// A clean island source: a real public API, none of it unsafe-facing.
+const CLEAN_ISLAND: &str = "\
+#![deny(unsafe_code)]
+
+/// A public struct with a public field.
+pub struct Masks {
+    pub matching: u16,
+    lanes: usize,
+}
+
+/// A public fn over safe types only.
+pub fn classify(lanes: &[u8; 16], tag: u8) -> Masks {
+    let _ = (lanes, tag);
+    Masks { matching: 0, lanes: 0 }
+}
+";
+
+fn island_codes(tag: &str, source: &str) -> Vec<String> {
+    codes(&workspace_with_island_source(tag, source))
+}
+
+/// The control every test below is measured against. A clean island must pass
+/// the whole boundary check, safe-facing rule included.
+#[test]
+fn a_clean_island_api_passes() {
+    let root = workspace_with_island_source("api-clean", CLEAN_ISLAND);
+    let (report, violations) = check_workspace(&root);
+    assert!(
+        violations.is_empty(),
+        "the clean island control must pass, got {violations:?}"
+    );
+    assert_eq!(report.islands_api_scanned, 1);
+    assert_eq!(report.island_api_files, 1);
+    assert!(
+        report.island_public_items >= 3,
+        "the control is vacuous unless the reader actually found the island's public \
+         items, got {}",
+        report.island_public_items
+    );
+}
+
+// --- what must fire ---
+
+#[test]
+fn a_public_unsafe_fn_in_an_island_fails() {
+    let found = island_codes(
+        "api-unsafe-fn",
+        "pub unsafe fn escape_hatch(len: usize) -> usize { len }\n",
+    );
+    assert!(
+        found.contains(&"island_public_unsafe_fn".to_owned()),
+        "an island that exports an unsafe fn is no longer an island, got {found:?}"
+    );
+}
+
+#[test]
+fn a_public_raw_pointer_parameter_fails() {
+    let found = island_codes(
+        "api-raw-param",
+        "pub fn adopt(base: *mut u8) -> usize { base as usize }\n",
+    );
+    assert!(
+        found.contains(&"island_public_raw_pointer".to_owned()),
+        "got {found:?}"
+    );
+}
+
+#[test]
+fn a_public_raw_pointer_return_on_a_wrapped_signature_fails() {
+    // The line break is the point: the `pub fn` and the `*const` are on
+    // different lines, which is what defeats a line-wise matcher.
+    let found = island_codes(
+        "api-raw-wrapped",
+        "pub fn origin(\n    len: usize,\n) -> *const u8 {\n    let _ = len;\n    core::ptr::null()\n}\n",
+    );
+    assert!(
+        found.contains(&"island_public_raw_pointer".to_owned()),
+        "a signature wrapped across lines must still be read whole, got {found:?}"
+    );
+}
+
+#[test]
+fn a_public_named_field_raw_pointer_fails() {
+    let found = island_codes(
+        "api-field",
+        "pub struct View {\n    pub base: *mut u8,\n    len: usize,\n}\n",
+    );
+    assert!(
+        found.contains(&"island_public_raw_pointer".to_owned()),
+        "got {found:?}"
+    );
+}
+
+/// The fail-open case, and the reason the field reader balances angle brackets.
+///
+/// `Slots<u32, *mut u8>` has a comma that belongs to the generic argument list.
+/// A reader that ended the field there hands the raw pointer to a fragment with
+/// no `pub` in front of it and reports the struct clean — a SILENT ACCEPT, and
+/// silence is the direction that hides longest.
+#[test]
+fn a_field_type_with_an_angle_bracket_comma_is_not_split() {
+    let found = island_codes(
+        "api-field-generic",
+        "pub struct Table {\n    pub slots: Slots<u32, *mut u8>,\n    len: usize,\n}\n",
+    );
+    assert!(
+        found.contains(&"island_public_raw_pointer".to_owned()),
+        "a comma inside the generic arguments must not end the field, got {found:?}"
+    );
+}
+
+#[test]
+fn a_public_tuple_field_raw_pointer_fails() {
+    let found = island_codes("api-tuple", "pub struct Base(pub *const u8, usize);\n");
+    assert!(
+        found.contains(&"island_public_raw_pointer".to_owned()),
+        "got {found:?}"
+    );
+}
+
+#[test]
+fn a_public_type_alias_to_a_raw_pointer_fails() {
+    let found = island_codes("api-alias", "pub type Cell = *mut u8;\n");
+    assert!(
+        found.contains(&"island_public_raw_pointer".to_owned()),
+        "got {found:?}"
+    );
+}
+
+#[test]
+fn an_enum_variant_payload_raw_pointer_fails() {
+    // A variant payload says no `pub` and needs none: it is public with the
+    // enum. A reader that required the keyword would miss every one of them.
+    let found = island_codes(
+        "api-enum",
+        "pub enum Carrier {\n    Empty,\n    Raw(*mut u8),\n}\n",
+    );
+    assert!(
+        found.contains(&"island_public_raw_pointer".to_owned()),
+        "got {found:?}"
+    );
+}
+
+#[test]
+fn an_unsafe_trait_method_is_public_with_the_trait() {
+    let found = island_codes(
+        "api-trait",
+        "pub trait Boundary {\n    unsafe fn arm();\n}\n",
+    );
+    assert!(
+        found.contains(&"island_public_unsafe_fn".to_owned()),
+        "a trait method says no `pub` and is exactly as public as its trait, got {found:?}"
+    );
+}
+
+#[test]
+fn a_public_static_raw_pointer_fails() {
+    let found = island_codes(
+        "api-static",
+        "pub static ORIGIN: *const u8 = core::ptr::null();\n",
+    );
+    assert!(
+        found.contains(&"island_public_raw_pointer".to_owned()),
+        "got {found:?}"
+    );
+}
+
+// --- what must NOT fire. A reader that rejected every asterisk would have
+// --- passed every test above and still be worthless.
+
+#[test]
+fn a_doc_comment_naming_a_raw_pointer_is_not_a_violation() {
+    let found = island_codes(
+        "api-doc",
+        "/// Returns the length. Callers used to pass a *mut u8 here.\npub fn len(v: &[u8]) -> usize {\n    v.len()\n}\n",
+    );
+    assert!(
+        found.is_empty(),
+        "prose is not a signature; the mask is what makes that true, got {found:?}"
+    );
+}
+
+#[test]
+fn a_raw_pointer_in_a_function_body_is_not_the_api() {
+    // This is the case that would make every real island fail: the body is
+    // where ledgered unsafe code lives, and it is not exported.
+    let found = island_codes(
+        "api-body",
+        "pub fn addr(v: &mut [u8]) -> usize {\n    let base: *mut u8 = v.as_mut_ptr();\n    base as usize\n}\n",
+    );
+    assert!(
+        found.is_empty(),
+        "a raw pointer inside a body is ledgered unsafe code, not an export, got {found:?}"
+    );
+}
+
+#[test]
+fn a_restricted_visibility_is_not_the_safe_facing_api() {
+    let found = island_codes(
+        "api-restricted",
+        "pub(crate) fn adopt(base: *mut u8) -> usize {\n    base as usize\n}\n",
+    );
+    assert!(
+        found.is_empty(),
+        "`pub(crate)` is not reachable from a safe crate, got {found:?}"
+    );
+}
+
+#[test]
+fn a_private_item_is_not_the_safe_facing_api() {
+    let found = island_codes(
+        "api-private",
+        "unsafe fn kernel() {}\n\nstruct Hidden {\n    pub base: *mut u8,\n}\n\ntrait Interior {\n    unsafe fn arm();\n}\n",
+    );
+    assert!(
+        found.is_empty(),
+        "nothing here is reachable from outside the island, got {found:?}"
+    );
+}
+
+#[test]
+fn multiplication_is_not_a_raw_pointer() {
+    let found = island_codes(
+        "api-arith",
+        "pub const WIDTH: usize = 16;\n\npub fn lanes(v: [u8; WIDTH * 2]) -> usize {\n    v.len()\n}\n",
+    );
+    assert!(
+        found.is_empty(),
+        "`*` is a raw pointer only when `const` or `mut` follows it, got {found:?}"
+    );
+}
+
+#[test]
+fn a_constant_exports_its_type_and_not_its_initialiser() {
+    // The turbofish is live code the mask does not blank, so a reader that
+    // scanned the whole item instead of the declared type would flag a `usize`.
+    let found = island_codes(
+        "api-const-init",
+        "pub const WIDE: usize = core::mem::size_of::<*mut u8>();\n",
+    );
+    assert!(
+        found.is_empty(),
+        "the exported type is `usize`, got {found:?}"
+    );
+}
+
+// --- vacuity. Every one of these must FAIL, never skip.
+
+/// The licence for every zero above. `public_api` must reproduce its own
+/// fixture exactly: the findings it has to catch, the `pub` tokens it has to
+/// account for, and no parse failures. Count alone would be satisfied by a
+/// reader that rejected everything, which is why the fixture carries as many
+/// near misses as violations.
+#[test]
+fn the_api_reader_reproduces_its_own_fixture() {
+    let api = public_api(safe_facing_fixture());
+    assert_eq!(
+        api.findings.len(),
+        SAFE_FACING_FIXTURE_FINDINGS,
+        "the reader must find exactly its fixture's violations, got {:?}",
+        api.findings
+    );
+    assert_eq!(
+        api.pub_tokens, SAFE_FACING_FIXTURE_PUB_TOKENS,
+        "the fixture itself must not drift: a shrinking fixture makes the claim \
+         control weaker without failing anything"
+    );
+    assert_eq!(
+        api.pub_tokens_claimed, api.pub_tokens,
+        "every `pub` in live Rust is a visibility; an unclaimed one is source the \
+         reader walked past"
+    );
+    assert!(api.parse_failures.is_empty(), "{:?}", api.parse_failures);
+    assert!(
+        api.findings.iter().any(|f| f.unsafe_fn),
+        "the fixture must exercise both halves of the rule"
+    );
+    assert!(api.findings.iter().any(|f| f.raw_pointer));
+    // And the control is wired into the run, not merely available to a test.
+    let clean = check_workspace(&clean_workspace("api-licensed")).0;
+    assert_eq!(
+        clean.safe_facing_self_test_findings,
+        SAFE_FACING_FIXTURE_FINDINGS
+    );
+}
+
+/// A `pub` the reader did not consume is a region it walked past. A macro body
+/// is exactly that: it is not expanded, so the tokens inside it are unaccounted
+/// for and the file's "no findings" verdict is quantified over source nobody
+/// parsed. That must fail, not pass quietly.
+#[test]
+fn an_unaccounted_pub_token_fails_rather_than_reporting_no_findings() {
+    let found = island_codes(
+        "api-macro",
+        "macro_rules! widen {\n    () => { pub unsafe fn hidden() {} };\n}\n",
+    );
+    assert!(
+        found.contains(&"island_public_api_unparsed".to_owned()),
+        "a pub token the reader never claimed must fail the run, got {found:?}"
+    );
+}
+
+#[test]
+fn an_island_with_no_source_fails_rather_than_being_reported_clean() {
+    let root = workspace_with_island_source("api-nosrc", CLEAN_ISLAND);
+    fs::remove_file(root.join("crates/fgdb-unsafe-simd/src/lib.rs")).unwrap();
+    let found = codes(&root);
+    assert!(
+        found.contains(&"island_api_unscannable".to_owned()),
+        "a rostered island whose source cannot be found must not be reported clean, \
+         got {found:?}"
+    );
+}
+
+#[test]
+fn an_unreadable_island_source_fails_rather_than_being_skipped() {
+    let root = workspace_with_island_source("api-unreadable", CLEAN_ISLAND);
+    // A directory where a source file is expected.
+    fs::create_dir_all(root.join("crates/fgdb-unsafe-simd/src/kernel.rs")).unwrap();
+    let found = codes(&root);
+    assert!(
+        found.contains(&"source_unreadable".to_owned())
+            || found.contains(&"source_tree_unreadable".to_owned()),
+        "an island source the checker cannot read must fail the run, got {found:?}"
+    );
+}
+
+/// Zero crates scanned is the outermost vacuity case, and the safe-facing rule
+/// inherits it: with no members there is no island, and "no island exports an
+/// unsafe fn" is then true of nothing.
+#[test]
+fn an_empty_roster_fails_before_any_safe_facing_conclusion() {
+    let root = clean_workspace("api-empty-roster");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"3\"\nmembers = []\n\n[workspace.lints.rust]\nunsafe_code = \"forbid\"\n",
+    )
+    .unwrap();
+    let (report, violations) = check_workspace(&root);
+    let found: Vec<String> = violations.into_iter().map(|v| v.code).collect();
+    assert!(
+        found.contains(&"workspace_has_no_members".to_owned()),
+        "got {found:?}"
+    );
+    assert_eq!(report.islands_api_scanned, 0);
 }
