@@ -6171,7 +6171,7 @@ fn workspace_package_names(repo_root: &Path) -> Result<BTreeSet<String>, String>
     Ok(packages)
 }
 
-fn workspace_exact_excludes(workspace: &Table) -> Result<BTreeSet<PathBuf>, String> {
+pub(crate) fn workspace_exact_excludes(workspace: &Table) -> Result<BTreeSet<PathBuf>, String> {
     let excludes = toml::get_opt_str_array(workspace, "exclude", "Cargo.toml.workspace")
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
@@ -6193,7 +6193,7 @@ fn workspace_exact_excludes(workspace: &Table) -> Result<BTreeSet<PathBuf>, Stri
     Ok(excluded_paths)
 }
 
-fn workspace_member_paths(
+pub(crate) fn workspace_member_paths(
     repo_root: &Path,
     members: &[String],
     excluded_paths: &BTreeSet<PathBuf>,

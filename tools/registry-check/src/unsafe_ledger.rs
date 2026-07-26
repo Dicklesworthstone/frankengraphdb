@@ -54,6 +54,31 @@
 //! `topology-check`, which had always parsed by section, failed the same tree
 //! with `lints_not_inherited`. Two checkers reading one fact must not be able to
 //! disagree, so there is now one reader.
+//!
+//! The same rule had to be applied twice more, one level up, to the WORKSPACE
+//! manifest. Two facts were being read out of it as raw text:
+//!
+//! * the workspace lint default, via `ws_text.contains("unsafe_code =
+//!   \"forbid\"")`. That was already vacuous on this repository: `Cargo.toml`
+//!   opens with a prose comment reading ``Workspace-level `unsafe_code =
+//!   "forbid"` ``, so the substring was present regardless of what the lint
+//!   table said, and deleting both live lint lines left the check passing.
+//!   Every claim this project makes about memory safety being structural
+//!   rested on it. It was wrong in the other direction too, rejecting
+//!   `unsafe_code='forbid'` and accepting the level under
+//!   `[workspace.lints.clippy]` or a package-level `[lints.rust]`.
+//! * the member roster, via a line scan taking the first double-quoted span on
+//!   each line between `members` and a line beginning `]`. A roster in TOML
+//!   literal quotes, or written on one line, or with two entries sharing a
+//!   line, came back short or EMPTY -- and an empty roster meant every
+//!   "0 sites, 0 orphans" conclusion below was quantified over nothing while
+//!   the run exited 0.
+//!
+//! Both are now read as data from a single [`crate::toml::parse`] of the
+//! manifest, the roster through the same resolver `appendix_a` uses, and an
+//! empty roster is itself a violation. That last part is doctrine #2 applied
+//! where it was missing: the scanner self-test licenses a zero-SITE result,
+//! but nothing licensed a zero-CRATE one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -706,14 +731,54 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
             return (report, v);
         }
     };
-    if !ws_text.contains("unsafe_code = \"forbid\"") {
-        v.push(Violation::new(
+    // The manifest is parsed ONCE, structurally, and both facts this checker
+    // needs from it -- the workspace lint level and the member roster -- are
+    // read off that one parse. An unparseable workspace manifest is a failure,
+    // never a skip: it is the root of every claim made below it.
+    let ws_table = match toml::parse(&ws_text) {
+        Ok(t) => t,
+        Err(e) => {
+            v.push(Violation::new(
+                "workspace_manifest_unparseable",
+                "Cargo.toml",
+                ws_path.display().to_string(),
+                format!(
+                    "cannot parse the workspace manifest, so neither the lint default nor \
+                     the member roster is known and no boundary claim can be made: {e}"
+                ),
+            ));
+            return (report, v);
+        }
+    };
+    let ws_section = match ws_table.get("workspace") {
+        Some(crate::toml::Value::Table(t)) => t,
+        _ => {
+            v.push(Violation::new(
+                "workspace_section_absent",
+                "Cargo.toml",
+                "workspace",
+                "the manifest declares no [workspace] section, so there is no workspace \
+                 lint default and no member roster to scan",
+            ));
+            return (report, v);
+        }
+    };
+
+    match workspace_unsafe_lint_level(ws_section) {
+        Some(level) if level == "forbid" => {}
+        other => v.push(Violation::new(
             "workspace_forbid_absent",
             "Cargo.toml",
             "workspace.lints.rust",
-            "the workspace default must be unsafe_code = \"forbid\"; forbid cannot be \
-             lowered, which is the whole reason islands are separate crates",
-        ));
+            format!(
+                "the workspace default must be unsafe_code = \"forbid\"; found {}. forbid \
+                 cannot be lowered, which is the whole reason islands are separate crates",
+                match &other {
+                    Some(level) => format!("{level:?}"),
+                    None => "no [workspace.lints.rust] unsafe_code entry".to_owned(),
+                }
+            ),
+        )),
     }
 
     // --- the ledger must exist. Absent ledger is the sharpest vacuity case:
@@ -823,14 +888,52 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
     }
 
     // --- scan every workspace member
-    let members = workspace_members(&ws_text);
+    //
+    // The roster is resolved by the SAME reader the appendix-A checker already
+    // uses (`crate::appendix_a::workspace_member_paths`), so globs and
+    // `[workspace] exclude` resolve identically in both places. The line scan
+    // this replaced took the first double-quoted span on each line between
+    // `members` and a line starting with `]`, which meant a members array in
+    // TOML literal quotes, or one written on a single line, or two entries
+    // sharing a physical line, silently yielded a SHORT OR EMPTY roster -- and
+    // an empty roster is a clean pass with nothing examined.
+    let members = match resolve_members(root, ws_section) {
+        Ok(m) => m,
+        Err(e) => {
+            v.push(Violation::new(
+                "workspace_members_unresolvable",
+                "Cargo.toml",
+                "workspace.members",
+                format!(
+                    "cannot resolve the workspace member roster, so no crate can be \
+                     reported clean: {e}"
+                ),
+            ));
+            return (report, v);
+        }
+    };
     report.crates_scanned = members.len();
+    // The non-vacuity control for the roster, and the reason it is not merely
+    // defensive: every "0 sites, 0 orphans" conclusion below is quantified over
+    // this list. `scanner_fixture` proves the site scanner found something it
+    // was supposed to find; nothing proved the roster was non-empty, so a
+    // manifest this reader could not understand reported a clean boundary over
+    // zero crates. An empty roster is now a failure in its own right.
+    if members.is_empty() {
+        v.push(Violation::new(
+            "workspace_has_no_members",
+            "Cargo.toml",
+            "workspace.members",
+            "the workspace resolved to zero members: every unsafe-surface conclusion in \
+             this run would be quantified over an empty set, so the run fails rather \
+             than reporting a clean boundary over nothing",
+        ));
+    }
     for member in &members {
         let name = member
-            .rsplit('/')
-            .next()
-            .unwrap_or(member.as_str())
-            .to_owned();
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let is_island = island_names.contains(name.as_str());
         let manifest = root.join(member).join("Cargo.toml");
         match fs::read_to_string(&manifest) {
@@ -863,26 +966,27 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
                 // disagreeing means one of them is wrong; this was the wrong
                 // one. Reusing [`crate::topology::scan_manifest`] is what stops
                 // them from drifting apart again.
-                let inherits = match crate::topology::scan_manifest(member, &text) {
-                    Ok(scanned) => scanned.lints_workspace,
-                    Err(e) => {
-                        // Fail closed. An unparseable manifest is not evidence
-                        // of inheritance, and guessing `true` here would be the
-                        // looks-exactly-like-a-pass failure this file exists to
-                        // prevent.
-                        v.push(Violation::new(
-                            "member_manifest_unparseable",
-                            &name,
-                            manifest.display().to_string(),
-                            format!(
-                                "cannot parse the member manifest, so its lint inheritance is \
+                let inherits =
+                    match crate::topology::scan_manifest(&member.to_string_lossy(), &text) {
+                        Ok(scanned) => scanned.lints_workspace,
+                        Err(e) => {
+                            // Fail closed. An unparseable manifest is not evidence
+                            // of inheritance, and guessing `true` here would be the
+                            // looks-exactly-like-a-pass failure this file exists to
+                            // prevent.
+                            v.push(Violation::new(
+                                "member_manifest_unparseable",
+                                &name,
+                                manifest.display().to_string(),
+                                format!(
+                                    "cannot parse the member manifest, so its lint inheritance is \
                                  unknown and no boundary claim can be made: {e}"
-                            ),
-                        ));
-                        report.forbid_verdicts.insert(name.clone(), false);
-                        continue;
-                    }
-                };
+                                ),
+                            ));
+                            report.forbid_verdicts.insert(name.clone(), false);
+                            continue;
+                        }
+                    };
                 report.forbid_verdicts.insert(name.clone(), inherits);
                 if !inherits && !is_island {
                     v.push(Violation::new(
@@ -978,27 +1082,43 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
     (report, v)
 }
 
-fn workspace_members(manifest: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut in_members = false;
-    for raw in manifest.lines() {
-        let line = raw.trim();
-        if line.starts_with("members") {
-            in_members = true;
-            continue;
-        }
-        if in_members {
-            if line.starts_with(']') {
-                break;
-            }
-            if let Some(start) = line.find('"')
-                && let Some(end) = line[start + 1..].find('"')
-            {
-                out.push(line[start + 1..start + 1 + end].to_owned());
-            }
-        }
+/// The `unsafe_code` lint level the workspace declares, read as DATA out of
+/// `[workspace.lints.rust]`.
+///
+/// This replaced `ws_text.contains("unsafe_code = \"forbid\"")`, which was
+/// vacuous on this very repository: `Cargo.toml` opens with a prose comment
+/// reading ``Workspace-level `unsafe_code = "forbid"` ``, so the substring was
+/// present no matter what the lint table said, and deleting both live lint
+/// lines left the check passing. It was also wrong in the opposite direction on
+/// every ordinary respelling -- `unsafe_code='forbid'`, or no spaces around the
+/// `=` -- and it accepted the level under `[workspace.lints.clippy]`, or under a
+/// package-level `[lints.rust]` that no member inherits.
+///
+/// Reading the parsed table answers the question actually being asked: what
+/// level does the WORKSPACE set for the `rust::unsafe_code` lint? A level Cargo
+/// writes as an inline table (`{ level = "forbid", priority = -1 }`) is outside
+/// the registry TOML subset, so the document fails to parse and the caller
+/// reports `workspace_manifest_unparseable` -- loud and closed, never silent.
+fn workspace_unsafe_lint_level(workspace: &crate::toml::Table) -> Option<String> {
+    let crate::toml::Value::Table(lints) = workspace.get("lints")? else {
+        return None;
+    };
+    let crate::toml::Value::Table(rust) = lints.get("rust")? else {
+        return None;
+    };
+    match rust.get("unsafe_code")? {
+        crate::toml::Value::Str(level) => Some(level.clone()),
+        _ => None,
     }
-    out
+}
+
+/// The workspace member roster, resolved through the one reader the appendix-A
+/// checker already uses so the two cannot drift apart.
+fn resolve_members(root: &Path, workspace: &crate::toml::Table) -> Result<Vec<PathBuf>, String> {
+    let members = crate::toml::get_str_array(workspace, "members", "Cargo.toml.workspace")
+        .map_err(|e| e.to_string())?;
+    let excludes = crate::appendix_a::workspace_exact_excludes(workspace)?;
+    crate::appendix_a::workspace_member_paths(root, &members, &excludes)
 }
 
 #[cfg(test)]
@@ -1114,9 +1234,230 @@ mod tests {
         );
     }
 
+    fn lint_level(manifest: &str) -> Option<String> {
+        let table = crate::toml::parse(manifest).expect("manifest parses");
+        let Some(crate::toml::Value::Table(workspace)) = table.get("workspace") else {
+            return None;
+        };
+        workspace_unsafe_lint_level(workspace)
+    }
+
+    /// The workspace lint default is read as data, so every respelling that
+    /// means the same thing agrees, and everything that merely CONTAINS the
+    /// words does not.
     #[test]
-    fn workspace_members_parses_the_real_shape() {
-        let manifest = "[workspace]\nresolver = \"3\"\nmembers = [\n    \"crates/a\",\n    \"tools/b\",\n]\n\n[workspace.package]\n";
-        assert_eq!(workspace_members(manifest), vec!["crates/a", "tools/b"]);
+    fn workspace_forbid_is_read_structurally_not_textually() {
+        // Semantically identical spellings: all forbid.
+        for manifest in [
+            "[workspace]\n[workspace.lints.rust]\nunsafe_code = \"forbid\"\n",
+            "[workspace]\n[workspace.lints.rust]\nunsafe_code=\"forbid\"\n",
+            "[workspace]\n[workspace.lints.rust]\nunsafe_code = 'forbid'\n",
+            "[workspace]\n[workspace.lints.rust]\n  unsafe_code   =   \"forbid\"  # pinned\n",
+        ] {
+            assert_eq!(
+                lint_level(manifest).as_deref(),
+                Some("forbid"),
+                "spelling must not change the level: {manifest:?}"
+            );
+        }
+
+        // Semantically different manifests: none of these forbid anything,
+        // and every one of them satisfied the substring test that was here.
+        for manifest in [
+            // the shape of this repository's own header comment
+            "# Workspace-level `unsafe_code = \"forbid\"` applies to all members.\n[workspace]\n",
+            // a commented-out lint table
+            "[workspace]\n[workspace.lints.rust]\n# unsafe_code = \"forbid\"\n",
+            // the right level on the wrong lint namespace
+            "[workspace]\n[workspace.lints.clippy]\nunsafe_code = \"forbid\"\n",
+            // a package-level table, which no member inherits
+            "[workspace]\n[lints.rust]\nunsafe_code = \"forbid\"\n",
+            // present, but not forbidding
+            "[workspace]\n[workspace.lints.rust]\nunsafe_code = \"deny\"\n",
+        ] {
+            assert_ne!(
+                lint_level(manifest).as_deref(),
+                Some("forbid"),
+                "this manifest does not forbid unsafe_code: {manifest:?}"
+            );
+        }
+    }
+
+    /// The mutation proof, against the REAL manifest rather than a fixture.
+    ///
+    /// Deleting the live lint table must flip the verdict. Under the substring
+    /// test it did not: the prose comment at the top of `Cargo.toml` carries
+    /// the searched text, so the check could not fail on this repository.
+    #[test]
+    fn deleting_the_real_lint_table_flips_the_verdict() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root")
+            .to_path_buf();
+        let real = fs::read_to_string(root.join("Cargo.toml")).expect("workspace manifest");
+        assert_eq!(
+            lint_level(&real).as_deref(),
+            Some("forbid"),
+            "the real workspace must forbid unsafe_code"
+        );
+        assert!(
+            real.contains("unsafe_code = \"forbid\""),
+            "the substring is present here in prose as well as in the lint table, \
+             which is exactly why a substring test could not fail"
+        );
+
+        let gutted: String = real
+            .lines()
+            .filter(|line| {
+                let t = line.trim();
+                t != "[workspace.lints.rust]" && t != "unsafe_code = \"forbid\""
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            gutted.contains("unsafe_code = \"forbid\""),
+            "the prose comment survives the deletion, so a substring test still passes"
+        );
+        assert_eq!(
+            lint_level(&gutted),
+            None,
+            "with the lint table gone the workspace forbids nothing, and the checker \
+             must say so"
+        );
+    }
+
+    /// Build a throwaway workspace and return `check_workspace`'s violation codes.
+    fn synthetic_verdict(tag: &str, members_block: &str, member_manifest: &str) -> Vec<String> {
+        let root = std::env::temp_dir().join(format!("fgdb-unsafe-ledger-{tag}"));
+        let crate_dir = root.join("crates/fgdb-probe");
+        fs::create_dir_all(crate_dir.join("src")).expect("crate dir");
+        fs::create_dir_all(root.join("registries")).expect("registries dir");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                "[workspace]\nresolver = \"3\"\n{members_block}\n[workspace.lints.rust]\nunsafe_code = \"forbid\"\n"
+            ),
+        )
+        .expect("workspace manifest");
+        fs::write(
+            root.join(LEDGER_PATH),
+            "schema_version = 1\n\n[[island]]\nname = \"fgdb-unsafe-arena\"\ncharter = \"arena internals\"\nstatus = \"planned\"\n",
+        )
+        .expect("ledger");
+        fs::write(crate_dir.join("Cargo.toml"), member_manifest).expect("member manifest");
+        // An ordinary crate holding an unledgered relaxation. Assembled from a
+        // `char` for the same reason `scanner_fixture` is.
+        let hash = '#';
+        fs::write(
+            crate_dir.join("src/lib.rs"),
+            format!("{hash}[allow(unsafe_code)]\npub unsafe fn probe() {{}}\n"),
+        )
+        .expect("member source");
+        let (_report, violations) = check_workspace(&root);
+        violations.into_iter().map(|v| v.code).collect()
+    }
+
+    /// The roster is resolved as data, so layout and quoting cannot shrink it.
+    /// Under the line scan, the literal-quote and single-line forms resolved to
+    /// ZERO members and the run reported a clean boundary with an unledgered
+    /// `unsafe fn` sitting in the tree.
+    #[test]
+    fn member_roster_is_quote_and_layout_invariant() {
+        let inherits =
+            "[package]\nname = \"fgdb-probe\"\nedition = \"2024\"\n\n[lints]\nworkspace = true\n";
+        for (tag, members_block) in [
+            ("multiline", "members = [\n    \"crates/fgdb-probe\",\n]\n"),
+            ("oneline", "members = [\"crates/fgdb-probe\"]\n"),
+            ("literal", "members = [\n    'crates/fgdb-probe',\n]\n"),
+            ("glob", "members = [\n    \"crates/*\",\n]\n"),
+        ] {
+            let codes = synthetic_verdict(tag, members_block, inherits);
+            assert!(
+                codes.contains(&"unsafe_allow_outside_island".to_string())
+                    && codes.contains(&"site_unledgered".to_string()),
+                "the unledgered site must be found however the roster is written \
+                 ({tag}): got {codes:?}"
+            );
+            assert!(
+                !codes.contains(&"workspace_has_no_members".to_string()),
+                "the roster must resolve ({tag}): got {codes:?}"
+            );
+        }
+    }
+
+    /// Both directions of the inheritance verdict, end to end.
+    #[test]
+    fn inheriting_forbid_passes_and_omitting_it_fails() {
+        let with_lints =
+            "[package]\nname = \"fgdb-probe\"\nedition = \"2024\"\n\n[lints]\nworkspace = true\n";
+        let without = "[package]\nname = \"fgdb-probe\"\nedition = \"2024\"\n";
+        let members = "members = [\n    \"crates/fgdb-probe\",\n]\n";
+
+        let inheriting = synthetic_verdict("inherits", members, with_lints);
+        assert!(
+            !inheriting.contains(&"member_does_not_inherit_forbid".to_string()),
+            "a crate carrying `[lints] workspace = true` inherits forbid: {inheriting:?}"
+        );
+        let escaping = synthetic_verdict("escapes", members, without);
+        assert!(
+            escaping.contains(&"member_does_not_inherit_forbid".to_string()),
+            "a crate omitting `[lints] workspace = true` must FAIL: {escaping:?}"
+        );
+    }
+
+    /// The non-vacuity control: a roster that resolves to nothing is a failure,
+    /// not a clean boundary over an empty set.
+    #[test]
+    fn an_empty_member_roster_is_a_violation() {
+        let root = std::env::temp_dir().join("fgdb-unsafe-ledger-empty-roster");
+        fs::create_dir_all(root.join("registries")).expect("registries dir");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"3\"\nmembers = []\n\n[workspace.lints.rust]\nunsafe_code = \"forbid\"\n",
+        )
+        .expect("workspace manifest");
+        fs::write(
+            root.join(LEDGER_PATH),
+            "schema_version = 1\n\n[[island]]\nname = \"fgdb-unsafe-arena\"\ncharter = \"arena internals\"\nstatus = \"planned\"\n",
+        )
+        .expect("ledger");
+        let (report, violations) = check_workspace(&root);
+        assert_eq!(report.crates_scanned, 0);
+        let codes: Vec<String> = violations.into_iter().map(|v| v.code).collect();
+        assert!(
+            codes.contains(&"workspace_has_no_members".to_string()),
+            "zero resolved members must fail: {codes:?}"
+        );
+    }
+
+    /// The real workspace is scanned, and the count is not zero. This is the
+    /// number the substring/line-scan pair could silently drive to nothing.
+    #[test]
+    fn the_real_workspace_resolves_every_member() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root")
+            .to_path_buf();
+        let text = fs::read_to_string(root.join("Cargo.toml")).expect("workspace manifest");
+        let table = crate::toml::parse(&text).expect("workspace manifest parses");
+        let workspace = table
+            .get("workspace")
+            .and_then(|value| match value {
+                crate::toml::Value::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("[workspace] section");
+        let members = resolve_members(&root, workspace).expect("roster resolves");
+        assert!(
+            members.len() >= 10,
+            "the real workspace has a substantial roster; got {}: {members:?}",
+            members.len()
+        );
+        assert!(
+            members.iter().any(|m| m.ends_with("tools/registry-check")),
+            "the roster must include this crate: {members:?}"
+        );
     }
 }
