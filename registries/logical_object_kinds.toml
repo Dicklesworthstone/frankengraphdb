@@ -4579,3 +4579,12 @@ construction_order = 30
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/lifecycle_authority_source/"
+
+[[kind]]
+object_kind = 0x055e
+name = "GcCancellationAuthorityFor"
+status = "reserved"
+construction_order = 45
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_cancellation_authority_for/"

@@ -5235,3 +5235,12 @@ wire_tag = 0x0002
 encoding_context = "arm Explicit{sorted_symbol_inventory_and_locators,failure_domains} of closed union LocationForm"
 allowed_containing_schemas = ["LocationForm"]
 max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x0521
+name = "MandatoryInventoryEntry"
+kind = "record"
+status = "reserved"
+encoding_context = "a14:2039 by-value element of MandatoryInventory.ordered_entries[MandatoryInventoryEntry]; the entry is embedded in the inventory body rather than referenced, so it is registered on the wire path and carries no field rows of its own"
+allowed_containing_schemas = ["MandatoryInventory"]
+max_size_bytes = 16777216

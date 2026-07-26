@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3186
+target_count = 3188
 projection_fallback_count = 109
-target_source_assignment_sha256 = "6234f8d3c36c865fca769f1b4f2d72be4953fb32d47f3c025b36d31b33789fd7"
+target_source_assignment_sha256 = "6aaad56ad3809d81b19d350198a94a12157c6a9444d370020cc205910441e3cb"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -50480,7 +50480,7 @@ symbol = "GcCancellationAuthorityFor"
 generic_signature = "<Local>"
 source_key = "top|GcCancellationAuthorityFor<Local>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a14:2055"]
 
 [[top_level_candidate]]
@@ -50490,7 +50490,7 @@ symbol = "GcCancellationAuthorityFor"
 generic_signature = "<Meta>"
 source_key = "top|GcCancellationAuthorityFor<Meta>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a14:2055"]
 
 [[top_level_candidate]]
@@ -50500,7 +50500,7 @@ symbol = "GcCancellationAuthorityFor"
 generic_signature = "<Shard>"
 source_key = "top|GcCancellationAuthorityFor<Shard>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a14:2055"]
 
 [[top_level_candidate]]
@@ -52890,7 +52890,7 @@ symbol = "MandatoryInventoryEntry"
 generic_signature = ""
 source_key = "top|MandatoryInventoryEntry"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a14:2039"]
 
 [[top_level_candidate]]
@@ -100570,6 +100570,17 @@ role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/gc_proposal/"
 
+[[logical_kind]]
+slice_id = "a14"
+row_id = "a14:logical-kind:gc-cancellation-authority-for"
+object_kind = 0x055e
+name = "GcCancellationAuthorityFor"
+status = "reserved"
+construction_order = 45
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/gc_cancellation_authority_for/"
+
 [[field]]
 slice_id = "a18"
 row_id = "a18:field:global-restore-abandon-participant-apply-certificate-visibility-certificate-ref"
@@ -100813,6 +100824,17 @@ encoding_context = "arm Explicit{sorted_symbol_inventory_and_locators,failure_do
 allowed_containing_schemas = ["LocationForm"]
 max_size_bytes = 65536
 
+[[wire_type]]
+slice_id = "a14"
+row_id = "a14:wire-type:mandatory-inventory-entry"
+wire_type_id = 0x0521
+name = "MandatoryInventoryEntry"
+kind = "record"
+status = "reserved"
+encoding_context = "a14:2039 by-value element of MandatoryInventory.ordered_entries[MandatoryInventoryEntry]; the entry is embedded in the inventory body rather than referenced, so it is registered on the wire path and carries no field rows of its own"
+allowed_containing_schemas = ["MandatoryInventory"]
+max_size_bytes = 16777216
+
 [[union]]
 slice_id = "a02"
 row_id = "a02:union:location-form-aaca262488997d87"
@@ -100911,6 +100933,22 @@ row_id = "a02:target:wire-type-location-form-explicit"
 target_row_id = "a02:wire-type:location-form-explicit"
 slice_id = "a02"
 source_key = "arm|LocationForm|LocationForm|Explicit"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:logical-kind-gc-cancellation-authority-for"
+target_row_id = "a14:logical-kind:gc-cancellation-authority-for"
+slice_id = "a14"
+source_key = "top|GcCancellationAuthorityFor<Local>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:wire-type-mandatory-inventory-entry"
+target_row_id = "a14:wire-type:mandatory-inventory-entry"
+slice_id = "a14"
+source_key = "top|MandatoryInventoryEntry"
 target_kind = "wire-type"
 definition_status = "declared"
 
