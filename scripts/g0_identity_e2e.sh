@@ -296,6 +296,7 @@ BODY_RECIPES=(
   'RaftSnapshotShard#body_digest|fnv1a64:69bb104a85eb6128'
   'ShardHistoryInventory#body_digest|fnv1a64:7f652e0dd29a56aa'
   'GlobalKeyEnvelopeManifest#body_digest|fnv1a64:55336bfa5c150521'
+  'MandatoryInventory#body_digest|fnv1a64:f7f952a57272b71d'
 )
 for recipe in "${BODY_RECIPES[@]}"; do
   row_id="${recipe%%|*}"

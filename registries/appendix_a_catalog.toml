@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2225
+target_count = 2226
 projection_fallback_count = 90
-target_source_assignment_sha256 = "e8ea0dc447330c7c9129482ab3dd9da7c76e1cac0f1922eb41c031b862f6f210"
+target_source_assignment_sha256 = "2405302600bde59f6e046659778f62592f0d656d12632a2f2f98d834d8f6f402"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 33
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 47
+registry_epoch = 48
 
 [[logical_kind]]
 slice_id = "a03"
@@ -13891,6 +13891,28 @@ role_predicate = "true"
 retention_and_cut_rule = "closed Local, Meta, or Shard role discriminator retained inline with the mandatory inventory; the Shard arm carries only its inline shard_id (a14:2039)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a14"
+row_id = "a14:field:mandatory-inventory-body-digest"
+containing_schema = "MandatoryInventory"
+field_tag = 0x0007
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "BodyDigest<MandatoryInventory>; canonical inventory transcript excludes exactly this digest field (a14:2039)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:mandatory-inventory:v1"
+bd_schema_major = 1
+bd_included_field_tags = []
+bd_excluded_field_tags = [7]
+recipe_pin = "fnv1a64:f7f952a57272b71d"
 
 [[union]]
 slice_id = "a01"
@@ -66635,6 +66657,14 @@ row_id = "a14:target:field-mandatory-inventory-role"
 target_row_id = "a14:field:mandatory-inventory-role"
 slice_id = "a14"
 source_key = "field|MandatoryInventory|MandatoryInventory.role|role"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:field-mandatory-inventory-body-digest"
+target_row_id = "a14:field:mandatory-inventory-body-digest"
+slice_id = "a14"
+source_key = "field|MandatoryInventory|MandatoryInventory.body_digest|body_digest"
 target_kind = "field"
 definition_status = "declared"
 

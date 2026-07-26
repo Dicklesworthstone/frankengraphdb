@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 47
+registry_epoch = 48
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
@@ -969,6 +969,26 @@ role_predicate = "true"
 retention_and_cut_rule = "closed Local, Meta, or Shard role discriminator retained inline with the mandatory inventory; the Shard arm carries only its inline shard_id (a14:2039)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "MandatoryInventory"
+field_tag = 0x0007
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "BodyDigest<MandatoryInventory>; canonical inventory transcript excludes exactly this digest field (a14:2039)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:mandatory-inventory:v1"
+bd_schema_major = 1
+bd_included_field_tags = []
+bd_excluded_field_tags = [7]
+recipe_pin = "fnv1a64:f7f952a57272b71d"
 
 [[field]]
 containing_schema = "MetaAppliedResult"

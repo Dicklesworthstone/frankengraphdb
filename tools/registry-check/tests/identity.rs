@@ -173,7 +173,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 47
+registry_epoch = 48
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -215,7 +215,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 47);
+    assert_eq!(epoch, 48);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -4910,6 +4910,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             (schema, name),
             ("GcDecisionRecord", "stable_configuration_ref")
                 | ("GcDecisionRecord", "applied_control_ref")
+                | ("MandatoryInventory", "body_digest")
         )
     };
     pre_erratum.fields.retain(|field| {
@@ -4928,7 +4929,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 68,
+        pre_erratum.fields.len() + 69,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A14 GC anchor tranche"
     );
@@ -5054,11 +5055,49 @@ fn idr_a14_gc_decision_and_inventory_union_anchors_are_exact() {
         );
     }
 
+    let body_digest = identity
+        .fields
+        .iter()
+        .find(|field| {
+            field.containing_schema == "MandatoryInventory" && field.stable_name == "body_digest"
+        })
+        .expect("MandatoryInventory.body_digest field exists");
+    assert_eq!(body_digest.field_tag, 0x0007);
+    assert_eq!(body_digest.exact_wire_type, "digest256");
+    assert_eq!(body_digest.cardinality, "one");
+    assert_eq!(body_digest.identity_class, "scalar");
+    assert_eq!(body_digest.reference_semantics, "none");
+    assert_eq!(body_digest.target_schema_id, None);
+    assert_eq!(body_digest.construction_order, 25);
+    assert_eq!(body_digest.role_predicate, "true");
+    assert_eq!(body_digest.version_status, "reserved");
+    assert_eq!(body_digest.max_size_bytes, 32);
+    assert_eq!(body_digest.digest_class.as_deref(), Some("body"));
+    assert_eq!(
+        body_digest.bd_domain_separator.as_deref(),
+        Some("fgdb:body:mandatory-inventory:v1")
+    );
+    assert_eq!(body_digest.bd_schema_major, Some(1));
+    assert_eq!(body_digest.bd_included_field_tags, Some(vec![]));
+    assert_eq!(body_digest.bd_excluded_field_tags, Some(vec![7]));
+    let transcript = bodydigest_transcript(
+        "MandatoryInventory",
+        "fgdb:body:mandatory-inventory:v1",
+        1,
+        &[],
+        &[7],
+    );
+    assert_eq!(
+        body_digest.recipe_pin.as_deref(),
+        Some(bodydigest_pin(&transcript).as_str())
+    );
+
     let catalog = real_appendix_catalog();
     for source_key in [
         "field|GcDecisionRecord|GcDecisionRecord.applied_control_ref|applied_control_ref",
         "field|GcDecisionRecord|GcDecisionRecord.decision|decision",
         "field|MandatoryInventory|MandatoryInventory.role|role",
+        "field|MandatoryInventory|MandatoryInventory.body_digest|body_digest",
     ] {
         let targets = catalog
             .targets
