@@ -167,19 +167,19 @@ count = 138
 source_path = ".beads/issues.jsonl"
 resolution_precedence = ["direct_owner", "bet_label", "exact_override", "family_rule"]
 allowed_bet_labels = ["b1", "b2", "b3", "b4", "b5", "b6"]
-bead_count = 337
+bead_count = 338
 direct_owner_count = 98
 bet_label_count = 188
 exact_override_count = 13
-family_rule_count = 35
-binding_hash = "fnv1a64:871e7cef265fff85"
+family_rule_count = 36
+binding_hash = "fnv1a64:6ef322219e81d5c1"
 
 [[bead_family]]
 id = "appendix-a-catalog"
 match_kind = "appendix_a"
 pattern = "fgdb-a01..a21|fgdb-appendix-a-catalog-"
 decision_ids = ["FG-ADR-CON-06"]
-expected_match_count = 25
+expected_match_count = 26
 
 [[bead_family]]
 id = "risk-governance"
