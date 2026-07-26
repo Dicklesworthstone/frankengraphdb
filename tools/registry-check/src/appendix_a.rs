@@ -6082,9 +6082,14 @@ pub fn verify_repository_bindings(repo_root: &Path, catalog: &Catalog) -> Vec<Vi
         ));
     }
     validate_maintenance_checker_registry(&checker_by_id, &mut out);
-    validate_scenario_registry(repo_root, &checker_by_id, catalog, &mut out);
+    // ONE prover for the whole sweep. Liveness is no longer an `is_file()` call
+    // (`fgdb-checker-index-live-is-only-file-existence-tl0o`) — it reads the
+    // module tree of every crate a `binary` row names — and the catalog asks
+    // about a checker once per evidence row.
+    let prover = crate::liveness::Prover::new(repo_root);
+    validate_scenario_registry(&prover, &checker_by_id, catalog, &mut out);
     validate_checker_bindings(
-        repo_root,
+        &prover,
         "maintenance_proof",
         &catalog.maintenance_proof.evidence_status,
         &catalog.maintenance_proof.checker_ids,
@@ -6117,7 +6122,7 @@ pub fn verify_repository_bindings(repo_root: &Path, catalog: &Catalog) -> Vec<Vi
             ));
         }
         validate_checker_bindings(
-            repo_root,
+            &prover,
             &row.row_id,
             &row.status,
             &row.checker_ids,
@@ -6278,7 +6283,7 @@ fn cargo_package_name(manifest_text: &str, manifest_path: &Path) -> Result<Strin
     package_name.ok_or_else(|| format!("{}: missing package.name", manifest_path.display()))
 }
 
-fn safe_repository_relative(path: &str) -> bool {
+pub(crate) fn safe_repository_relative(path: &str) -> bool {
     let path = Path::new(path);
     !path.as_os_str().is_empty()
         && !path.is_absolute()
@@ -6300,8 +6305,17 @@ fn normalized_repository_relative(path: &str) -> Option<PathBuf> {
     Some(normalized)
 }
 
-fn live_checker_artifact_exists(repo_root: &Path, checker: &model::Checker) -> bool {
-    safe_repository_relative(&checker.artifact) && repo_root.join(&checker.artifact).is_file()
+/// Is this `status = "live"` row the live checker it claims to be?
+///
+/// Delegates to [`crate::liveness`], the ONE reader for that question. This
+/// predicate used to be `safe_repository_relative(...) && ...is_file()`, and
+/// `validate::validate_checker_index` asked the same question with a second,
+/// weaker copy that had no path guard at all. `is_file()` cannot distinguish a
+/// registered gate nobody invokes from one that runs every commit, and every
+/// G1–G4 exit gate rests on that distinction
+/// (`fgdb-checker-index-live-is-only-file-existence-tl0o`).
+fn live_checker_is_live(prover: &crate::liveness::Prover<'_>, checker: &model::Checker) -> bool {
+    prover.assess(checker).is_empty()
 }
 
 fn load_appendix_checker_index(repo_root: &Path) -> Option<Vec<model::Checker>> {
@@ -6337,7 +6351,7 @@ fn validate_maintenance_checker_registry(
 }
 
 fn validate_scenario_registry(
-    repo_root: &Path,
+    prover: &crate::liveness::Prover<'_>,
     checker_by_id: &BTreeMap<&str, &model::Checker>,
     catalog: &Catalog,
     out: &mut Vec<Violation>,
@@ -6357,7 +6371,7 @@ fn validate_scenario_registry(
         if checker_by_id
             .get(scenario.checker_id)
             .is_some_and(|checker| {
-                checker.status == "live" && !live_checker_artifact_exists(repo_root, checker)
+                checker.status == "live" && !live_checker_is_live(prover, checker)
             })
         {
             out.push(Violation::new(
@@ -6403,7 +6417,7 @@ struct CheckerBindingCodes<'a> {
 }
 
 fn validate_checker_bindings(
-    repo_root: &Path,
+    prover: &crate::liveness::Prover<'_>,
     row_id: &str,
     evidence_status: &str,
     ids: &[String],
@@ -6426,8 +6440,7 @@ fn validate_checker_bindings(
                 ));
             }
             Some(checker)
-                if evidence_status == "live"
-                    && !live_checker_artifact_exists(repo_root, checker) =>
+                if evidence_status == "live" && !live_checker_is_live(prover, checker) =>
             {
                 out.push(Violation::new(
                     codes.artifact_missing,
@@ -15606,12 +15619,8 @@ stable_name = "Ready"
         let root_without_artifacts = root.join("registries");
 
         let mut violations = Vec::new();
-        validate_scenario_registry(
-            &root_without_artifacts,
-            &checker_by_id,
-            &catalog,
-            &mut violations,
-        );
+        let prover = crate::liveness::Prover::new(&root_without_artifacts);
+        validate_scenario_registry(&prover, &checker_by_id, &catalog, &mut violations);
         assert!(
             violations
                 .iter()
@@ -15622,7 +15631,7 @@ stable_name = "Ready"
         let checker_ids = vec!["appendix_a_catalog_closure".to_owned()];
         let mut violations = Vec::new();
         validate_checker_bindings(
-            &root_without_artifacts,
+            &prover,
             "fixture",
             "live",
             &checker_ids,

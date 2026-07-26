@@ -20,6 +20,7 @@ use registry_check::hash::id_table_hash;
 use registry_check::identity;
 use registry_check::jsonl::{JsonValue, arr, b, event, n, s};
 use registry_check::lint;
+use registry_check::liveness;
 use registry_check::model::{self, Registries};
 use registry_check::validate::{self, Violation, expected_invariant_ids};
 use std::fs::{self, File, OpenOptions};
@@ -1528,6 +1529,39 @@ fn run_validate(r: &Registries, root: &Path) -> usize {
     let by_registry = |name: &str| -> Vec<&Violation> {
         violations.iter().filter(|v| v.registry == name).collect()
     };
+
+    // Reported explicitly, like `closure_self_test` and `unsafe-ledger-check`'s
+    // scanner self-test, and for the same reason: `status = "live"` is now
+    // proved by three source-text readers rather than `Path::is_file()`
+    // (`fgdb-checker-index-live-is-only-file-existence-tl0o`), and a reader that
+    // has stopped reading reports every row live. `live_rows` is the other half
+    // of the license — a registry that declares no live checker would otherwise
+    // produce the same green bar as one whose every gate is enforced.
+    let liveness_control = liveness::self_test();
+    println!(
+        "{}",
+        event(&[
+            ("event", s("checker_liveness_self_test")),
+            ("cases", n(liveness_control.cases as i64)),
+            ("failed_cases", n(liveness_control.failures.len() as i64)),
+            (
+                "live_rows",
+                n(r.checker_index
+                    .iter()
+                    .filter(|checker| checker.status == "live")
+                    .count() as i64)
+            ),
+            ("licensed", b(liveness_control.licensed())),
+            (
+                "outcome",
+                s(if liveness_control.licensed() {
+                    "pass"
+                } else {
+                    "fail"
+                })
+            ),
+        ])
+    );
     let row_counts: [(&str, i64); 6] = [
         (
             "constitution",

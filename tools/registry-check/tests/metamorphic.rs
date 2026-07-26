@@ -91,17 +91,27 @@
 //!
 //! # Scope
 //!
-//! These relations cover the workspace-manifest readers and the attribute
-//! readers. The same relations applied to the remaining readers in this crate
-//! are currently RED and are filed rather than encoded here, so that this suite
-//! stays a gate rather than a known-failing list:
-//! `fgdb-regcheck-closure-vacuous-no-control-hp0f`,
-//! `fgdb-regcheck-claimslint-allowlist-dead-excludes-5qcg`. As each is fixed,
-//! its relation belongs here. Already landed and pinned below:
+//! These relations cover the workspace-manifest readers, the attribute readers,
+//! the activation closure and the checker-liveness readers. The same relations
+//! applied to the remaining readers in this crate are currently RED and are
+//! filed rather than encoded here, so that this suite stays a gate rather than a
+//! known-failing list: `fgdb-regcheck-claimslint-allowlist-dead-excludes-5qcg`.
+//! As each is fixed, its relation belongs here. Already landed and pinned below:
 //! `fgdb-regcheck-two-readers-unsafe-relax-6amm` (relation 6),
 //! `fgdb-regcheck-root-forbid-line-equality-fhnr` (relation 7),
 //! `fgdb-regcheck-scansites-line-anchored-ds45` (relation 8),
-//! `fgdb-regcheck-commented-arm-counts-live-ctv8` (relation 9).
+//! `fgdb-regcheck-commented-arm-counts-live-ctv8` (relation 9),
+//! `fgdb-regcheck-closure-vacuous-no-control-hp0f` (relation 10),
+//! `fgdb-checker-index-live-is-only-file-existence-tl0o` (relation 11).
+//!
+//! Relation 11 is the same bug one level above every other entry in that list.
+//! The others are checkers that read a source file the wrong way; it is the
+//! predicate that decides whether a checker COUNTS — `status = "live"` proved by
+//! `Path::is_file()`, in two readers that had already drifted. AGENTS.md rests
+//! every G1–G4 exit gate on that word. Its relations carry an extra witness the
+//! others do not need: each mutant is asserted to satisfy the pre-fix predicate
+//! verbatim, so the tests state in one place that the old reader could not tell
+//! the cases apart and the new one must.
 
 use registry_check::unsafe_ledger::{self, LEDGER_PATH};
 use std::collections::BTreeSet;
@@ -1465,5 +1475,473 @@ fn a_manifest_atom_outside_the_vocabulary_is_reported() {
         codes.contains(&"undeclared_manifest_atom".to_owned()),
         "a manifest atom outside the vocabulary enables nothing and must be reported: \
          {codes:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Relation 11 — `status = "live"` must mean REGISTERED, INVOKED and CAPABLE OF
+//               FAILING, not `Path::is_file()`
+//               (`fgdb-checker-index-live-is-only-file-existence-tl0o`)
+// ---------------------------------------------------------------------------
+//
+// AGENTS.md rests every G1–G4 exit gate on the word `live`: "CI cross-checks
+// that every ID has a live checker", "no subsystem ships against an unenforced
+// invariant". `live` was proved by `Path::is_file()`, so a checker registered
+// live, cited by a clause as its enforcement mechanism, invoked by nothing and
+// containing no code capable of failing was byte-identical to one that runs
+// every commit.
+//
+// These are DIFFERENCE relations, and each carries the sharpest witness this
+// suite can state: [`legacy_is_file_predicate`] recomputes the ENTIRE
+// pre-fix predicate, and every mutant below is asserted to satisfy it. So each
+// test says, in one place, "the old reader cannot tell these apart and the new
+// one must" — which is precisely what makes reverting the fix turn this file
+// red rather than merely dropping a check nobody notices.
+
+/// The pre-fix liveness predicate, verbatim: a safe repository-relative path
+/// that names an existing file.
+///
+/// Kept here on purpose. A difference relation whose mutant the OLD code would
+/// also have rejected proves nothing about the fix.
+fn legacy_is_file_predicate(root: &std::path::Path, artifact: &str) -> bool {
+    let path = std::path::Path::new(artifact);
+    let safe = !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        });
+    safe && root.join(artifact).is_file()
+}
+
+fn checker(symbol: &str, kind: &str, artifact: &str, unit: &str) -> registry_check::model::Checker {
+    registry_check::model::Checker {
+        symbol: symbol.to_owned(),
+        kind: kind.to_owned(),
+        artifact: artifact.to_owned(),
+        status: "live".to_owned(),
+        unit: Some(unit.to_owned()),
+    }
+}
+
+fn liveness_codes(
+    root: &std::path::Path,
+    row: &registry_check::model::Checker,
+) -> BTreeSet<String> {
+    registry_check::liveness::assess(root, row)
+        .into_iter()
+        .map(|defect| defect.kind.code().to_owned())
+        .collect()
+}
+
+/// A miniature repository holding one of everything a checker row can name.
+///
+/// Every artifact below EXISTS, which is the point: the pre-fix predicate says
+/// yes to all of them.
+fn liveness_fixture(tag: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("fgdb-metamorphic-liveness-{tag}"));
+    if root.is_dir() {
+        fs::remove_dir_all(&root).expect("clear liveness fixture");
+    }
+    let member = root.join("crates/probe");
+    fs::create_dir_all(member.join("src/bin")).expect("member src");
+    fs::create_dir_all(member.join("tests")).expect("member tests");
+    fs::create_dir_all(member.join("notes")).expect("member notes");
+    fs::create_dir_all(root.join("scripts")).expect("scripts dir");
+
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"3\"\nmembers = [\n    \"crates/probe\",\n]\n",
+    )
+    .expect("workspace manifest");
+    fs::write(
+        member.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nedition = \"2024\"\n",
+    )
+    .expect("member manifest");
+
+    // A binary whose `main` can exit nonzero, and one that cannot.
+    fs::write(
+        member.join("src/main.rs"),
+        "pub mod reached;\nfn main() -> std::process::ExitCode { std::process::ExitCode::from(1) }\n",
+    )
+    .expect("main");
+    fs::write(
+        member.join("src/bin/toothless.rs"),
+        "fn main() -> std::process::ExitCode { std::process::ExitCode::SUCCESS }\n",
+    )
+    .expect("toothless bin");
+    fs::write(member.join("src/reached.rs"), "pub fn work() {}\n").expect("reached module");
+    // Identical content, declared by no `mod`: dead source that still exists.
+    fs::write(member.join("src/orphan.rs"), "pub fn work() {}\n").expect("orphan module");
+
+    // The assertion is assembled from a `char` for the same reason
+    // `scanner_fixture` assembles its attribute that way: this file is scanned
+    // by the very readers under test, and a literal here would be a real site.
+    let bang = '!';
+    let test_source = format!("#[test]\nfn probe_gate() {{\n    assert{bang}(1 + 1 == 2);\n}}\n");
+    let gutted_source = "#[test]\nfn probe_gate() {\n    let _ = 1 + 1;\n}\n";
+    fs::write(member.join("tests/gate.rs"), &test_source).expect("test target");
+    fs::write(member.join("tests/gutted.rs"), gutted_source).expect("gutted test target");
+    // The same bytes, one directory over — a place `cargo test` never compiles.
+    fs::write(member.join("notes/gate.rs"), &test_source).expect("uncompiled copy");
+
+    fs::write(
+        root.join("scripts/gate.sh"),
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [ -z \"${1:-}\" ]; then exit 1; fi\n",
+    )
+    .expect("gate script");
+    fs::write(
+        root.join("scripts/toothless.sh"),
+        "#!/usr/bin/env bash\n# exit 1 would be the honest answer here\necho checked\nexit 0\n",
+    )
+    .expect("toothless script");
+    root
+}
+
+/// The control. Two red verdicts differ from each other in uninteresting ways,
+/// so a difference relation over a base that is ALREADY defective proves
+/// nothing — and a liveness reader that has stopped reading returns "no
+/// defects" for every row, which is exactly what a healthy registry returns.
+#[test]
+fn liveness_base_and_readers_are_licensed() {
+    let control = registry_check::liveness::self_test();
+    assert!(
+        control.cases > 0,
+        "the liveness self-test ran no cases at all; a control that checks nothing \
+         licenses nothing"
+    );
+    assert!(
+        control.licensed(),
+        "the liveness readers got known answers wrong ({:?}); every verdict below is \
+         unlicensed until they are fixed",
+        control.failures
+    );
+
+    let root = liveness_fixture("base");
+    for row in [
+        checker(
+            "probe_gate",
+            "cargo-test",
+            "crates/probe/tests/gate.rs",
+            "symbol",
+        ),
+        checker(
+            "gate_law",
+            "cargo-test",
+            "crates/probe/tests/gate.rs",
+            "artifact",
+        ),
+        checker(
+            "reached_law",
+            "binary",
+            "crates/probe/src/reached.rs",
+            "artifact",
+        ),
+        checker("gate_e2e", "script", "scripts/gate.sh", "artifact"),
+    ] {
+        assert_eq!(
+            liveness_codes(&root, &row),
+            BTreeSet::new(),
+            "control: {:?} is genuinely live and must be reported live",
+            row.symbol
+        );
+    }
+}
+
+/// The real registry is the other half of the control: a law that only ever
+/// rejects would be caught by nothing else here.
+#[test]
+fn every_shipped_live_row_is_provably_live() {
+    let r = registry_check::model::load_registries(&repo_root().join("registries"))
+        .expect("real registries");
+    let live: Vec<_> = r
+        .checker_index
+        .iter()
+        .filter(|row| row.status == "live")
+        .collect();
+    assert!(
+        !live.is_empty(),
+        "control: the shipped registry declares no live checker at all, so every \
+         conclusion below is quantified over nothing"
+    );
+    let mut defective = Vec::new();
+    for row in &live {
+        let codes = liveness_codes(&repo_root(), row);
+        if !codes.is_empty() {
+            defective.push((row.symbol.clone(), codes));
+        }
+    }
+    assert!(
+        defective.is_empty(),
+        "shipped rows claim `status = \"live\"` without being live: {defective:?}"
+    );
+}
+
+/// INVOKED. The artifact exists; nothing runs it.
+///
+/// `crates/probe/notes/gate.rs` is byte-identical to the integration test one
+/// directory over, and `cargo test --workspace` never compiles it. `check.sh`
+/// would still report it PASS, because it credits every `cargo-test` row with
+/// the one workspace `cargo test` exit code.
+#[test]
+fn an_artifact_no_gate_compiles_is_not_live() {
+    let root = liveness_fixture("uninvoked");
+    let base = checker(
+        "probe_gate",
+        "cargo-test",
+        "crates/probe/tests/gate.rs",
+        "symbol",
+    );
+    let moved = checker(
+        "probe_gate",
+        "cargo-test",
+        "crates/probe/notes/gate.rs",
+        "symbol",
+    );
+
+    assert!(
+        legacy_is_file_predicate(&root, &base.artifact)
+            && legacy_is_file_predicate(&root, &moved.artifact),
+        "witness: the pre-fix predicate cannot tell these two apart"
+    );
+    assert_eq!(liveness_codes(&root, &base), BTreeSet::new());
+    assert!(
+        liveness_codes(&root, &moved).contains("checker_not_invocable"),
+        "a test file outside `tests/` is never run, so registering it live is a claim \
+         about a gate that does not exist: {:?}",
+        liveness_codes(&root, &moved)
+    );
+}
+
+/// INVOKED, the `binary` case: a module no `mod` declaration reaches is not
+/// compiled into any program, so no gate can run it.
+#[test]
+fn a_module_no_binary_contains_is_not_live() {
+    let root = liveness_fixture("orphan");
+    let reached = checker(
+        "reached_law",
+        "binary",
+        "crates/probe/src/reached.rs",
+        "artifact",
+    );
+    let orphan = checker(
+        "orphan_law",
+        "binary",
+        "crates/probe/src/orphan.rs",
+        "artifact",
+    );
+
+    assert!(
+        legacy_is_file_predicate(&root, &reached.artifact)
+            && legacy_is_file_predicate(&root, &orphan.artifact),
+        "witness: the pre-fix predicate cannot tell these two apart"
+    );
+    assert_eq!(liveness_codes(&root, &reached), BTreeSet::new());
+    assert!(
+        liveness_codes(&root, &orphan).contains("checker_not_invocable"),
+        "dead source registered as a live binary checker: {:?}",
+        liveness_codes(&root, &orphan)
+    );
+}
+
+/// CAPABLE OF FAILING, three ways. Each artifact is exactly where a runner
+/// looks for it, and each is executed on every run — and none of them can
+/// report a violation.
+#[test]
+fn an_invoked_gate_that_cannot_fail_is_not_live() {
+    let root = liveness_fixture("toothless");
+
+    let live_test = checker(
+        "probe_gate",
+        "cargo-test",
+        "crates/probe/tests/gate.rs",
+        "symbol",
+    );
+    let gutted_test = checker(
+        "probe_gate",
+        "cargo-test",
+        "crates/probe/tests/gutted.rs",
+        "symbol",
+    );
+    let live_script = checker("gate_e2e", "script", "scripts/gate.sh", "artifact");
+    let gutted_script = checker(
+        "toothless_e2e",
+        "script",
+        "scripts/toothless.sh",
+        "artifact",
+    );
+    let toothless_bin = checker(
+        "toothless_law",
+        "binary",
+        "crates/probe/src/bin/toothless.rs",
+        "artifact",
+    );
+
+    for row in [&gutted_test, &gutted_script, &toothless_bin] {
+        assert!(
+            legacy_is_file_predicate(&root, &row.artifact),
+            "witness: the pre-fix predicate accepts {:?}",
+            row.artifact
+        );
+    }
+    assert_eq!(liveness_codes(&root, &live_test), BTreeSet::new());
+    assert_eq!(liveness_codes(&root, &live_script), BTreeSet::new());
+
+    assert!(
+        liveness_codes(&root, &gutted_test).contains("checker_cannot_fail"),
+        "a `#[test]` with no assertion runs every commit and passes every commit: {:?}",
+        liveness_codes(&root, &gutted_test)
+    );
+    assert!(
+        liveness_codes(&root, &gutted_script).contains("checker_cannot_fail"),
+        "a script whose only nonzero exit is in a comment cannot report anything: {:?}",
+        liveness_codes(&root, &gutted_script)
+    );
+    assert!(
+        liveness_codes(&root, &toothless_bin).contains("checker_cannot_fail"),
+        "a checker binary whose `main` returns success unconditionally cannot report a \
+         violation however much its modules compute: {:?}",
+        liveness_codes(&root, &toothless_bin)
+    );
+}
+
+/// REGISTERED. A `unit = "symbol"` row names one function; renaming or deleting
+/// it must turn the row red rather than leave it green over a file that merely
+/// still exists. This is the rot the bead measured: every `cargo-test` symbol
+/// resolves today by author discipline, and nothing enforced it.
+#[test]
+fn a_renamed_test_symbol_does_not_stay_live() {
+    let root = liveness_fixture("renamed");
+    let present = checker(
+        "probe_gate",
+        "cargo-test",
+        "crates/probe/tests/gate.rs",
+        "symbol",
+    );
+    let renamed = checker(
+        "probe_gate_after_the_rename",
+        "cargo-test",
+        "crates/probe/tests/gate.rs",
+        "symbol",
+    );
+
+    assert!(
+        legacy_is_file_predicate(&root, &renamed.artifact),
+        "witness: the artifact still exists, so the pre-fix predicate still says live"
+    );
+    assert_eq!(liveness_codes(&root, &present), BTreeSet::new());
+    assert!(
+        liveness_codes(&root, &renamed).contains("checker_symbol_unresolved"),
+        "{:?}",
+        liveness_codes(&root, &renamed)
+    );
+
+    // And the attribute is load-bearing: a plain `fn` of the right name is not
+    // something `cargo test` runs, so accepting one would let a deleted test
+    // keep its row green because a helper survived under the same name.
+    let helper_only = liveness_fixture("renamed-helper");
+    fs::write(
+        helper_only.join("crates/probe/tests/gate.rs"),
+        "fn probe_gate() { assert!(1 + 1 == 2); }\n",
+    )
+    .expect("helper-only test file");
+    assert!(
+        liveness_codes(&helper_only, &present).contains("checker_symbol_unresolved"),
+        "a `fn` without `#[test]` is not a gate: {:?}",
+        liveness_codes(&helper_only, &present)
+    );
+}
+
+/// A live row that does not say what its `symbol` names cannot be checked at
+/// all, and must not be credited as live for it.
+#[test]
+fn a_live_row_must_declare_what_its_symbol_names() {
+    let root = liveness_fixture("undeclared");
+    let mut row = checker(
+        "probe_gate",
+        "cargo-test",
+        "crates/probe/tests/gate.rs",
+        "symbol",
+    );
+    row.unit = None;
+    assert!(
+        liveness_codes(&root, &row).contains("checker_unit_undeclared"),
+        "{:?}",
+        liveness_codes(&root, &row)
+    );
+    row.unit = Some("whole-file".to_owned());
+    assert!(
+        liveness_codes(&root, &row).contains("checker_unit_undeclared"),
+        "an unrecognised unit spelling must not be silently treated as either one: {:?}",
+        liveness_codes(&root, &row)
+    );
+}
+
+/// EQUIVALENCE. Reformatting `checker_index.toml` — quoting style, key order,
+/// comments, blank lines — changes nothing about which checkers are registered,
+/// so it must change nothing about the verdict. This is the relation that
+/// catches the whole substring-for-structure class in the registry reader
+/// itself, the same way `member_roster_is_quote_and_layout_invariant` catches it
+/// in the manifest reader.
+#[test]
+fn checker_rows_survive_a_meaning_preserving_requote() {
+    let text = fs::read_to_string(repo_root().join("registries/checker_index.toml"))
+        .expect("read checker index");
+    let table = registry_check::toml::parse(&text).expect("parse checker index");
+    let base = registry_check::model::checker_index_from(&table).expect("read checker index");
+
+    let requoted: String = text
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            match trimmed.split_once(" = ") {
+                // A TOML literal string is delimited by `'` and has no escapes,
+                // so a value containing `'`, `"` or `\` has no literal spelling
+                // and must be left alone. A transform that changes what the
+                // document MEANS is not an equivalence relation, and one that
+                // makes it unparseable is not a relation at all.
+                Some((key, value))
+                    if !trimmed.starts_with('#')
+                        && value.starts_with('"')
+                        && value.ends_with('"')
+                        && value.len() >= 2
+                        && !value[1..value.len() - 1].contains(['"', '\'', '\\']) =>
+                {
+                    format!("{key}='{}'", &value[1..value.len() - 1])
+                }
+                _ => line.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let requoted_table = registry_check::toml::parse(&requoted).expect("parse requoted index");
+    let after =
+        registry_check::model::checker_index_from(&requoted_table).expect("read requoted index");
+
+    assert!(
+        base.iter().any(|row| row.status == "live"),
+        "control: the base roster must hold a live row, or this relation compares two \
+         empty sets"
+    );
+    // The transform must actually transform. `lx43` — the requote that took
+    // `crates_scanned` from 14 to zero — would have been invisible to a
+    // relation whose "variant" was the original document.
+    let rewritten = text
+        .lines()
+        .zip(requoted.lines())
+        .filter(|(before, after)| before != after)
+        .count();
+    assert!(
+        rewritten >= base.len(),
+        "control: the requote rewrote only {rewritten} lines across {} rows, so this \
+         relation is comparing a document with itself",
+        base.len()
+    );
+    assert_eq!(
+        base, after,
+        "a cosmetic requote changed which checkers this registry declares"
     );
 }

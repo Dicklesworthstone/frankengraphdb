@@ -19,6 +19,7 @@ pub mod hash;
 pub mod identity;
 pub mod jsonl;
 pub mod lint;
+pub mod liveness;
 pub mod model;
 pub mod predicate;
 pub mod threat;

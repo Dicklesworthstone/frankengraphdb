@@ -139,6 +139,17 @@ pub struct Checker {
     pub kind: String,
     pub artifact: String,
     pub status: String,
+    /// What `symbol` names: `"symbol"` for a code symbol inside `artifact`,
+    /// `"artifact"` for a law name covering the whole file.
+    ///
+    /// Optional in the parser and REQUIRED on a `status = "live"` row, which is
+    /// where [`crate::liveness`] demands it. Stub rows point at artifacts that
+    /// do not exist yet, so there is nothing for a unit declaration to resolve
+    /// against; promoting a stub to live is exactly when the declaration has to
+    /// be made. Without it a row's `symbol` cannot be checked at all — eight of
+    /// the live rows carry law names rather than code symbols and no spelling
+    /// rule separates them from a test function whose name has rotted.
+    pub unit: Option<String>,
 }
 
 /// A `scripts/*.sh` deliverable that is deliberately NOT a registered gate.
@@ -420,6 +431,7 @@ pub fn checker_index_from(root: &Table) -> Result<Vec<Checker>, ReadError> {
             kind: get_str(t, "kind", &ctx)?,
             artifact: get_str(t, "artifact", &ctx)?,
             status: get_str(t, "status", &ctx)?,
+            unit: get_opt_str(t, "unit", &ctx)?,
         });
     }
     Ok(checkers)

@@ -685,8 +685,37 @@ fn validate_proof_lanes(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
     }
 }
 
+/// Schema and liveness for the `[[checker]]` rows of
+/// `registries/checker_index.toml`.
+///
+/// The liveness half is [`crate::liveness`], not a second `is_file()` — see that
+/// module's header. Two facts matter about the shape of this function:
+///
+/// * the self-test is consulted FIRST, and a broken reader is reported as a
+///   violation rather than allowed to produce a clean sweep. A liveness reader
+///   that has stopped reading returns "no defects" for every row, which is
+///   byte-identical to what a healthy registry returns;
+/// * a live row that is not actually live is reported per row, with the code
+///   naming which of the three claims — registered, invoked, capable of failing
+///   — it failed.
 fn validate_checker_index(r: &Registries, root: &Path, out: &mut Vec<Violation>) {
     let reg = "checker_index";
+    let self_test = crate::liveness::self_test();
+    if !self_test.licensed() {
+        out.push(Violation::new(
+            "checker_liveness_self_test_failed",
+            reg,
+            "<self-test>",
+            format!(
+                "the liveness readers got {} of {} known answers wrong ({}); refusing to \
+                 report any row live",
+                self_test.failures.len(),
+                self_test.cases,
+                self_test.failures.join(", ")
+            ),
+        ));
+    }
+    let prover = crate::liveness::Prover::new(root);
     let mut seen = BTreeSet::new();
     for c in &r.checker_index {
         if !seen.insert(c.symbol.clone()) {
@@ -711,15 +740,12 @@ fn validate_checker_index(r: &Registries, root: &Path, out: &mut Vec<Violation>)
         match c.status.as_str() {
             "stub" => {}
             "live" => {
-                if !root.join(&c.artifact).is_file() {
+                for defect in prover.assess(c) {
                     out.push(Violation::new(
-                        "artifact_missing",
+                        defect.kind.code(),
                         reg,
                         &c.symbol,
-                        format!(
-                            "status is \"live\" but artifact {:?} does not exist",
-                            c.artifact
-                        ),
+                        format!("status is \"live\" but {}", defect.detail),
                     ));
                 }
             }

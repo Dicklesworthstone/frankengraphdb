@@ -9,7 +9,27 @@
 # in invariants.toml must resolve to a row here. Rows may be stub-registered
 # pre-Genesis (status = "stub") so the g0-invariant-spine bead can bind clause
 # records before their runtime oracles exist — but the symbol must still be a
-# registered, reviewable row, and a "live" row's artifact must exist in-repo.
+# registered, reviewable row.
+#
+# WHAT `status = "live"` MEANS (fgdb-checker-index-live-is-only-file-existence-tl0o).
+# It used to mean `Path::is_file()` — the artifact exists. That is far weaker
+# than what AGENTS.md rests on it ("CI cross-checks that every ID has a live
+# checker"; "no subsystem ships against an unenforced invariant"): a checker
+# could be registered live, be cited by a clause as its enforcement mechanism,
+# be invoked by no gate, and contain no code capable of failing, and every
+# registry gate stayed green. A live row now has to survive three independent
+# reads in `tools/registry-check/src/liveness.rs`:
+#
+#   REGISTERED  the artifact is a safe repository-relative file AND `unit`
+#               resolves inside it;
+#   INVOKED     an executing gate can reach it — a cargo-test artifact must be
+#               an auto-discovered integration test of a workspace member, a
+#               binary artifact must be compiled into a bin target through live
+#               `mod` declarations, a script must be an executable program;
+#   CAN FAIL    the unit a runner reaches has a path to a failing outcome — a
+#               test that can panic, a bin whose `main` can exit nonzero, a
+#               script with a nonzero exit. Read from LIVE code only, so a
+#               commented-out assertion proves nothing.
 #
 # Row schema:
 #   [[checker]]
@@ -17,6 +37,15 @@
 #   kind     = "cargo-test" | "script" | "binary" | "stub"
 #   artifact = "..."        # repo-relative path implementing the symbol
 #   status   = "live" | "stub"
+#   unit     = "symbol" | "artifact"    # REQUIRED on a live row
+#
+# `unit` says what `symbol` names, because nothing else can. Nine live rows name
+# a `#[test] fn` (`unit = "symbol"`; deleting or renaming that function now turns
+# the row red instead of leaving it green over a file that merely still exists).
+# The other twenty-seven are law/gate names for a whole artifact
+# (`architecture_source_coverage`, `cargo-test:claims`, `g0_topology_e2e`, ...)
+# and say so (`unit = "artifact"`). Those are legitimate — the defect was that
+# no spelling rule separated them from a rotted symbol, so both read as a pass.
 # =============================================================================
 
 schema_version = 1
@@ -31,78 +60,91 @@ symbol = "claims_neg_missing_checker"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_neg_waiver_present"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_neg_statistical_in_invariants"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_neg_unregistered_dependency"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_hash_twenty_id_pin"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_escalation_slo_cannot_justify_invariant"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_proof_lane_manifest_resolves"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_class_lattice_narrowing"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_registry_toml_fuzz"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "claims_lint"
 kind = "binary"
 artifact = "tools/registry-check/src/main.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "g0_claims_e2e"
 kind = "script"
 artifact = "scripts/g0_claims_e2e.sh"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "g0_spine_e2e"
 kind = "script"
 artifact = "scripts/g0_spine_e2e.sh"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "g0_identity_e2e"
 kind = "script"
 artifact = "scripts/g0_identity_e2e.sh"
 status = "live"
+unit = "artifact"
 
 # --- Canonical Appendix A catalog scaffold and generated projections. ---
 
@@ -111,18 +153,21 @@ symbol = "appendix_a_catalog_source"
 kind = "binary"
 artifact = "tools/registry-check/src/appendix_a.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "appendix_a_catalog_projection_diff"
 kind = "binary"
 artifact = "tools/registry-check/src/appendix_a.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "appendix_a_catalog_closure"
 kind = "binary"
 artifact = "tools/registry-check/src/appendix_a.rs"
 status = "live"
+unit = "artifact"
 
 # --- Frozen architecture-decision record and reciprocal provenance closure.
 
@@ -131,36 +176,42 @@ symbol = "architecture_source_coverage"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/architecture-check.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "architecture_owner_closure"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/architecture-check.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "architecture_dependency_closure"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/architecture-check.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "architecture_research_dependency_firewall"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/architecture-check.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "architecture_decisions"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/architecture_decisions.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "g0_architecture_decisions_e2e"
 kind = "script"
 artifact = "scripts/g0_architecture_decisions_e2e.sh"
 status = "live"
+unit = "artifact"
 
 # Full verification-label identities. Architecture decisions use these exact
 # symbols so a human-friendly label cannot silently resolve to a different
@@ -172,24 +223,28 @@ symbol = "cargo-test:architecture_decisions"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/architecture_decisions.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "cargo-test:claims"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "cargo-test:proof-lane-resolution"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/claims.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "e2e:g0_architecture_decisions"
 kind = "script"
 artifact = "scripts/g0_architecture_decisions_e2e.sh"
 status = "live"
+unit = "artifact"
 
 # --- Identity-constitution byte-level walkers (stub-registered; each becomes
 # --- live with its phase-correct downstream owner and planned test artifact).
@@ -200,6 +255,7 @@ symbol = "idr_generated_encoder_decoder_roundtrip"
 kind = "cargo-test"
 artifact = "crates/fgdb-codec/tests/generated_durable_roundtrip.rs"
 status = "live"
+unit = "artifact"
 
 # Owner: fgdb-w1-format-test-corpora-lyf.
 [[checker]]
@@ -472,6 +528,7 @@ symbol = "w1_cross_crate_determinism_e2e"
 kind = "script"
 artifact = "scripts/w1_cross_crate_determinism_e2e.sh"
 status = "live"
+unit = "artifact"
 
 # --- G0 threat/trust model, authority lattice, and authority footprint. ---
 # Owner: fgdb-g0-threat-model-nqd.
@@ -481,18 +538,21 @@ symbol = "threat_model"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/threat_model.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "threat_registry_source"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/threat-check.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "g0_threat_e2e"
 kind = "script"
 artifact = "scripts/g0_threat_e2e.sh"
 status = "live"
+unit = "artifact"
 
 # --- W1 unsafe-boundary ledger: island roster, workspace forbid inheritance, ---
 # --- and the site<->row bijection. Owner: fgdb-w1-unsafe-ledger-icp.        ---
@@ -502,12 +562,14 @@ symbol = "unsafe_boundary_ledger"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/unsafe_ledger.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "unsafe_ledger_check"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/unsafe-ledger-check.rs"
 status = "live"
+unit = "artifact"
 
 # --- G0 workspace crate/layer topology and the build-versus-consume inventory. ---
 # Owner: fgdb-g0-workspace-topology-1q9m.
@@ -517,18 +579,21 @@ symbol = "workspace_topology"
 kind = "cargo-test"
 artifact = "tools/registry-check/tests/workspace_topology.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "topology_registry_source"
 kind = "binary"
 artifact = "tools/registry-check/src/bin/topology-check.rs"
 status = "live"
+unit = "artifact"
 
 [[checker]]
 symbol = "g0_topology_e2e"
 kind = "script"
 artifact = "scripts/g0_topology_e2e.sh"
 status = "live"
+unit = "artifact"
 
 # =============================================================================
 # script_disposition — the FILE -> ROW direction (fgdb-orphan-w1-e2e-gates-
