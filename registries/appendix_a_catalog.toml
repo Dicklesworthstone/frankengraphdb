@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2227
+target_count = 2250
 projection_fallback_count = 90
-target_source_assignment_sha256 = "6ba28ddde55bad34e982249db0a052868da637011a4a545944e9096dd24c5ecb"
+target_source_assignment_sha256 = "47e162b7ad61e06ba9024da2f41c4f04746a98359cc0cf89e2f59ec599a72f68"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -13924,6 +13924,397 @@ bd_schema_major = 1
 bd_included_field_tags = []
 bd_excluded_field_tags = [7]
 recipe_pin = "fnv1a64:f7f952a57272b71d"
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:certificate-attempt-plan-configuration-ref"
+containing_schema = "CertificateAttemptPlan"
+field_tag = 0x0005
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this CertificateAttemptPlan names; retained while the referrer is retained, and the acyclic order 5 <= 10 keeps the reference backward-only (a04:1572)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:certificate-signature-share-lock-ref"
+containing_schema = "CertificateSignatureShare"
+field_tag = 0x0001
+stable_name = "lock_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateSignerLock"
+construction_order = 14
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the CertificateSignerLock this CertificateSignatureShare names; retained while the referrer is retained, and the acyclic order 12 <= 14 keeps the reference backward-only (a04:1572)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:certificate-signer-lock-plan-ref"
+containing_schema = "CertificateSignerLock"
+field_tag = 0x0001
+stable_name = "plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptPlan"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the CertificateAttemptPlan this CertificateSignerLock names; retained while the referrer is retained, and the acyclic order 10 <= 12 keeps the reference backward-only (a04:1572)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:raft-consensus-cut-projection-role-configuration-at-cut-ref"
+containing_schema = "RaftConsensusCutProjection<Role>"
+field_tag = 0x0005
+stable_name = "configuration_at_cut_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this RaftConsensusCutProjection names; retained while the referrer is retained, and the acyclic order 5 <= 40 keeps the reference backward-only (a04:1564)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:raft-hard-state-configuration-state-ref"
+containing_schema = "RaftHardState"
+field_tag = 0x000d
+stable_name = "configuration_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this RaftHardState names; retained while the referrer is retained, and the acyclic order 5 <= 40 keeps the reference backward-only (a04:1560)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:raft-hard-state-prepared-order-attempt-root-ref"
+containing_schema = "RaftHardState"
+field_tag = 0x0011
+stable_name = "prepared_order_attempt_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreparedOrderAttemptRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreparedOrderAttemptRoot this RaftHardState names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a04:1560)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:raft-state-root-role-hard-state-ref"
+containing_schema = "RaftStateRoot<Role>"
+field_tag = 0x0001
+stable_name = "hard_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RaftHardState"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RaftHardState<Role> this RaftStateRoot names; retained while the referrer is retained, and the acyclic order 40 <= 40 keeps the reference backward-only (a04:1568)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-configuration-trust-root-evidence-ref"
+containing_schema = "RemoteConfigurationTrustRoot"
+field_tag = 0x0001
+stable_name = "evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteAuthorityConfigurationEvidence"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteAuthorityConfigurationEvidence this RemoteConfigurationTrustRoot names; retained while the referrer is retained, and the acyclic order 14 <= 40 keeps the reference backward-only (a04:1584)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-configuration-trust-root-anchor-ref"
+containing_schema = "RemoteConfigurationTrustRoot"
+field_tag = 0x0004
+stable_name = "anchor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ValidatedRemoteConfigurationAnchor"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ValidatedRemoteConfigurationAnchor this RemoteConfigurationTrustRoot names; retained while the referrer is retained, and the acyclic order 40 <= 40 keeps the reference backward-only (a04:1584)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-consumer-root-grant-evidence-ref"
+containing_schema = "RemoteRetentionConsumerRoot"
+field_tag = 0x0001
+stable_name = "grant_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantEvidence"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteRetentionGrantEvidence this RemoteRetentionConsumerRoot names; retained while the referrer is retained, and the acyclic order 24 <= 40 keeps the reference backward-only (a04:1580)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-consumer-root-new-authority-grant-evidence-ref"
+containing_schema = "RemoteRetentionConsumerRoot"
+field_tag = 0x0008
+stable_name = "new_authority_grant_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantEvidence"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteRetentionGrantEvidence this RemoteRetentionConsumerRoot names; retained while the referrer is retained, and the acyclic order 24 <= 40 keeps the reference backward-only (a04:1580)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-consumer-root-request-record-ref"
+containing_schema = "RemoteRetentionConsumerRoot"
+field_tag = 0x0009
+stable_name = "request_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionReleaseRequestRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteRetentionReleaseRequestRecord this RemoteRetentionConsumerRoot names; retained while the referrer is retained, and the acyclic order 28 <= 40 keeps the reference backward-only (a04:1580)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-consumer-root-request-leaf-ref"
+containing_schema = "RemoteRetentionConsumerRoot"
+field_tag = 0x000c
+stable_name = "request_leaf_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ExportLeaf"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ExportLeaf<RemoteRetentionReleaseRequestCertificate> this RemoteRetentionConsumerRoot names; retained while the referrer is retained, and the acyclic order 16 <= 40 keeps the reference backward-only (a04:1580)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-consumer-root-ack-leaf-ref"
+containing_schema = "RemoteRetentionConsumerRoot"
+field_tag = 0x000e
+stable_name = "ack_leaf_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ExportLeaf"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ExportLeaf<RemoteRetentionReleaseAckCertificate> this RemoteRetentionConsumerRoot names; retained while the referrer is retained, and the acyclic order 16 <= 40 keeps the reference backward-only (a04:1580)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-obligation-root-grant-record-ref"
+containing_schema = "RemoteRetentionObligationRoot"
+field_tag = 0x0001
+stable_name = "grant_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteRetentionGrantRecord this RemoteRetentionObligationRoot names; retained while the referrer is retained, and the acyclic order 22 <= 40 keeps the reference backward-only (a04:1578)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-obligation-root-transfer-record-ref"
+containing_schema = "RemoteRetentionObligationRoot"
+field_tag = 0x0005
+stable_name = "transfer_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LegacyRetentionAuthorityTransferRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the LegacyRetentionAuthorityTransferRecord this RemoteRetentionObligationRoot names; retained while the referrer is retained, and the acyclic order 29 <= 40 keeps the reference backward-only (a04:1578)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-obligation-root-migration-floor-ref"
+containing_schema = "RemoteRetentionObligationRoot"
+field_tag = 0x0008
+stable_name = "migration_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardingMigrationRetentionFloor"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ShardingMigrationRetentionFloor this RemoteRetentionObligationRoot names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a04:1578)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-obligation-root-transition-ref"
+containing_schema = "RemoteRetentionObligationRoot"
+field_tag = 0x0009
+stable_name = "transition_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertifiedRoleTransitionRef"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the CertifiedRoleTransitionRef this RemoteRetentionObligationRoot names; retained while the referrer is retained, and the acyclic order 29 <= 40 keeps the reference backward-only (a04:1578)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-obligation-root-new-meta-grant-record-ref"
+containing_schema = "RemoteRetentionObligationRoot"
+field_tag = 0x000b
+stable_name = "new_meta_grant_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteRetentionGrantRecord this RemoteRetentionObligationRoot names; retained while the referrer is retained, and the acyclic order 22 <= 40 keeps the reference backward-only (a04:1578)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-obligation-root-transfer-evidence-ref"
+containing_schema = "RemoteRetentionObligationRoot"
+field_tag = 0x000f
+stable_name = "transfer_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LegacyRetentionAuthorityTransferEvidence"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the LegacyRetentionAuthorityTransferEvidence this RemoteRetentionObligationRoot names; retained while the referrer is retained, and the acyclic order 29 <= 40 keeps the reference backward-only (a04:1578)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-obligation-root-tombstone-ref"
+containing_schema = "RemoteRetentionObligationRoot"
+field_tag = 0x0013
+stable_name = "tombstone_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionReleaseTombstone"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteRetentionReleaseTombstone this RemoteRetentionObligationRoot names; retained while the referrer is retained, and the acyclic order 34 <= 40 keeps the reference backward-only (a04:1578)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:remote-retention-obligation-root-ack-leaf-ref"
+containing_schema = "RemoteRetentionObligationRoot"
+field_tag = 0x0015
+stable_name = "ack_leaf_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ExportLeaf"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ExportLeaf<RemoteRetentionReleaseAckCertificate> this RemoteRetentionObligationRoot names; retained while the referrer is retained, and the acyclic order 16 <= 40 keeps the reference backward-only (a04:1578)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a04"
+row_id = "a04:field:topology-state-meta-configuration-ref"
+containing_schema = "TopologyState"
+field_tag = 0x000b
+stable_name = "meta_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this TopologyState names; retained while the referrer is retained, and the acyclic order 5 <= 40 keeps the reference backward-only (a04:1588)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[union]]
 slice_id = "a01"
@@ -69237,6 +69628,190 @@ target_row_id = "a12:union-arm:retention-cut-body-role-shard-22480c35fba111ba"
 slice_id = "a12"
 source_key = "arm|RetentionCutBody|RetentionCutBody.role|Shard"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-certificate-attempt-plan-configuration-ref"
+target_row_id = "a04:field:certificate-attempt-plan-configuration-ref"
+slice_id = "a04"
+source_key = "field|CertificateAttemptPlan|CertificateAttemptPlan.configuration_ref|configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-certificate-signature-share-lock-ref"
+target_row_id = "a04:field:certificate-signature-share-lock-ref"
+slice_id = "a04"
+source_key = "field|CertificateSignatureShare|CertificateSignatureShare.lock_ref|lock_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-certificate-signer-lock-plan-ref"
+target_row_id = "a04:field:certificate-signer-lock-plan-ref"
+slice_id = "a04"
+source_key = "field|CertificateSignerLock|CertificateSignerLock.plan_ref|plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-raft-consensus-cut-projection-role-configuration-at-cut-ref"
+target_row_id = "a04:field:raft-consensus-cut-projection-role-configuration-at-cut-ref"
+slice_id = "a04"
+source_key = "field|RaftConsensusCutProjection<Role>|RaftConsensusCutProjection<Role>.configuration_at_cut_ref|configuration_at_cut_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-raft-hard-state-configuration-state-ref"
+target_row_id = "a04:field:raft-hard-state-configuration-state-ref"
+slice_id = "a04"
+source_key = "field|RaftHardState|RaftHardState.configuration_state_ref|configuration_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-raft-hard-state-prepared-order-attempt-root-ref"
+target_row_id = "a04:field:raft-hard-state-prepared-order-attempt-root-ref"
+slice_id = "a04"
+source_key = "field|RaftHardState|RaftHardState.prepared_order_attempt_root_ref|prepared_order_attempt_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-raft-state-root-role-hard-state-ref"
+target_row_id = "a04:field:raft-state-root-role-hard-state-ref"
+slice_id = "a04"
+source_key = "field|RaftStateRoot<Role>|RaftStateRoot<Role>.hard_state_ref|hard_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-configuration-trust-root-evidence-ref"
+target_row_id = "a04:field:remote-configuration-trust-root-evidence-ref"
+slice_id = "a04"
+source_key = "field|RemoteConfigurationTrustRoot|RemoteConfigurationTrustRoot.CurrentEvidence.evidence_ref|evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-configuration-trust-root-anchor-ref"
+target_row_id = "a04:field:remote-configuration-trust-root-anchor-ref"
+slice_id = "a04"
+source_key = "field|RemoteConfigurationTrustRoot|RemoteConfigurationTrustRoot.ValidatedAnchor.anchor_ref|anchor_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-consumer-root-grant-evidence-ref"
+target_row_id = "a04:field:remote-retention-consumer-root-grant-evidence-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot.Acquired.grant_evidence_ref|grant_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-consumer-root-new-authority-grant-evidence-ref"
+target_row_id = "a04:field:remote-retention-consumer-root-new-authority-grant-evidence-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot.AuthorityTransferAdopted.new_authority_grant_evidence_ref|new_authority_grant_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-consumer-root-request-record-ref"
+target_row_id = "a04:field:remote-retention-consumer-root-request-record-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot.ReleaseRequested.request_record_ref|request_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-consumer-root-request-leaf-ref"
+target_row_id = "a04:field:remote-retention-consumer-root-request-leaf-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot.ReleaseCertified.request_leaf_ref|request_leaf_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-consumer-root-ack-leaf-ref"
+target_row_id = "a04:field:remote-retention-consumer-root-ack-leaf-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionConsumerRoot|RemoteRetentionConsumerRoot.Acknowledged.ack_leaf_ref|ack_leaf_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-obligation-root-grant-record-ref"
+target_row_id = "a04:field:remote-retention-obligation-root-grant-record-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot.Active.grant_record_ref|grant_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-obligation-root-transfer-record-ref"
+target_row_id = "a04:field:remote-retention-obligation-root-transfer-record-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot.TransferredOut.transfer_record_ref|transfer_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-obligation-root-migration-floor-ref"
+target_row_id = "a04:field:remote-retention-obligation-root-migration-floor-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot.TransferredOut.migration_floor_ref|migration_floor_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-obligation-root-transition-ref"
+target_row_id = "a04:field:remote-retention-obligation-root-transition-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot.TransferredInPending.transition_ref|transition_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-obligation-root-new-meta-grant-record-ref"
+target_row_id = "a04:field:remote-retention-obligation-root-new-meta-grant-record-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot.TransferredInPending.new_meta_grant_record_ref|new_meta_grant_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-obligation-root-transfer-evidence-ref"
+target_row_id = "a04:field:remote-retention-obligation-root-transfer-evidence-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot.TransferredIn.transfer_evidence_ref|transfer_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-obligation-root-tombstone-ref"
+target_row_id = "a04:field:remote-retention-obligation-root-tombstone-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot.ReleaseApplied.tombstone_ref|tombstone_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-remote-retention-obligation-root-ack-leaf-ref"
+target_row_id = "a04:field:remote-retention-obligation-root-ack-leaf-ref"
+slice_id = "a04"
+source_key = "field|RemoteRetentionObligationRoot|RemoteRetentionObligationRoot.AckPublished.ack_leaf_ref|ack_leaf_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a04:target:field-topology-state-meta-configuration-ref"
+target_row_id = "a04:field:topology-state-meta-configuration-ref"
+slice_id = "a04"
+source_key = "field|TopologyState|TopologyState.meta_configuration_ref|meta_configuration_ref"
+target_kind = "field"
 definition_status = "declared"
 
 [[source_symbol_disposition]]

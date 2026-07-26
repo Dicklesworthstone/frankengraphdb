@@ -4913,6 +4913,37 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("MandatoryInventory", "body_digest")
         )
     };
+    // The a04 StrongRef field tranche. Every row is a post-erratum
+    // addition, so the historical witness must reconstruct the namespace
+    // that predates it.
+    let post_erratum_a04_field_tranche = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("CertificateAttemptPlan", "configuration_ref")
+                | ("CertificateSignatureShare", "lock_ref")
+                | ("CertificateSignerLock", "plan_ref")
+                | ("RaftConsensusCutProjection<Role>", "configuration_at_cut_ref")
+                | ("RaftHardState", "configuration_state_ref")
+                | ("RaftHardState", "prepared_order_attempt_root_ref")
+                | ("RaftStateRoot<Role>", "hard_state_ref")
+                | ("RemoteConfigurationTrustRoot", "evidence_ref")
+                | ("RemoteConfigurationTrustRoot", "anchor_ref")
+                | ("RemoteRetentionConsumerRoot", "grant_evidence_ref")
+                | ("RemoteRetentionConsumerRoot", "new_authority_grant_evidence_ref")
+                | ("RemoteRetentionConsumerRoot", "request_record_ref")
+                | ("RemoteRetentionConsumerRoot", "request_leaf_ref")
+                | ("RemoteRetentionConsumerRoot", "ack_leaf_ref")
+                | ("RemoteRetentionObligationRoot", "grant_record_ref")
+                | ("RemoteRetentionObligationRoot", "transfer_record_ref")
+                | ("RemoteRetentionObligationRoot", "migration_floor_ref")
+                | ("RemoteRetentionObligationRoot", "transition_ref")
+                | ("RemoteRetentionObligationRoot", "new_meta_grant_record_ref")
+                | ("RemoteRetentionObligationRoot", "transfer_evidence_ref")
+                | ("RemoteRetentionObligationRoot", "tombstone_ref")
+                | ("RemoteRetentionObligationRoot", "ack_leaf_ref")
+                | ("TopologyState", "meta_configuration_ref")
+        )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_union(&field.exact_wire_type)
             && !post_erratum_a01_applied_field(&field.containing_schema, &field.stable_name)
@@ -4922,6 +4953,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a05_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a04_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a04_field_tranche(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 304,
@@ -4929,7 +4961,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 69,
+        pre_erratum.fields.len() + 92,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A14 GC anchor tranche"
     );
