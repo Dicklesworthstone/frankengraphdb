@@ -270,8 +270,8 @@ union_candidate_count = 93
 union_candidate_ids_sha256 = "a0b2d1f042ba38157fd68ebdbf5b56caa4bfb6bc815feac4cf05db3337992b23"
 arm_candidate_count = 248
 arm_candidate_ids_sha256 = "c784ab56077ffafef0f2f360a0768c72b624ad3901fc9146115ae11208b5e3dd"
-ambiguity_count = 503
-ambiguity_ids_sha256 = "eff639c3c31fb115d01c1a160011bb2233a49caffb4843ccc28336ccdf9b7835"
+ambiguity_count = 502
+ambiguity_ids_sha256 = "5bc33d39e1a45a26d77fcbe8b0e3938569625026bc4dfa1116f44cf022e268f7"
 
 [[slice]]
 ordinal = 8
@@ -339,14 +339,14 @@ expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fi
 definition_status = "declared"
 top_level_candidate_count = 17
 top_level_candidate_ids_sha256 = "c995329082d5b42ab512bb583c52d9cbfed6ade2ff616c812c13e6520f037140"
-field_candidate_count = 138
-field_candidate_ids_sha256 = "86830cdcb2a45d9fbab9af7b87f8fbef1883cf1d78396218cb1589bfdbdbbfb8"
+field_candidate_count = 150
+field_candidate_ids_sha256 = "7a813f1b302cb37836aaca1198104a504ba235a84f868b9631caf1adc94cab90"
 union_candidate_count = 5
 union_candidate_ids_sha256 = "ad9a6e5137cb020d17d5deb1296356146580661a0500823df541203875e56170"
 arm_candidate_count = 17
 arm_candidate_ids_sha256 = "7fcfd50dfd4f06f8be8676acbdc70683db596e0dd9f56020e0950b9c25aab16e"
-ambiguity_count = 91
-ambiguity_ids_sha256 = "998ad5fd54b4df8725bf43e7f838f9d06c465dbb29dd9e80759072c1e2cf8bde"
+ambiguity_count = 97
+ambiguity_ids_sha256 = "0b49aafcc5b556d003d25c85fc73e263d4577d391beb3645569c77bd1c5d7e5e"
 
 [[slice]]
 ordinal = 11

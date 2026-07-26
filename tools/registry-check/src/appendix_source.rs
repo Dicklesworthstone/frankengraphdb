@@ -823,6 +823,10 @@ struct DelimiterScan {
     stack: Vec<u8>,
     quote: Option<u8>,
     escaped: bool,
+    /// Offset of the `]` that terminates a half-open interval literal opened at
+    /// an earlier `(`. See [`half_open_interval_end`]: the pair is one TOKEN, so
+    /// neither byte reaches the stack.
+    interval_close: Option<usize>,
 }
 
 impl DelimiterScan {
@@ -832,6 +836,7 @@ impl DelimiterScan {
             stack: Vec::new(),
             quote: None,
             escaped: false,
+            interval_close: None,
         }
     }
 
@@ -841,6 +846,7 @@ impl DelimiterScan {
             stack: vec![opener],
             quote: None,
             escaped: false,
+            interval_close: None,
         }
     }
 
@@ -872,6 +878,21 @@ impl DelimiterScan {
         }
         if matches!(byte, b'\'' | b'"') {
             self.quote = Some(byte);
+            return Ok(DelimiterStep::Skipped);
+        }
+        // A half-open interval literal is ONE token, recognised at its `(` and
+        // released at its `]`. Both bytes are inert, exactly as a quoted string's
+        // contents are: the pair never enters the stack, so it can neither open a
+        // depth nor close somebody else's. Placed after the quote machine so an
+        // interval spelled inside a quoted string stays quoted text.
+        if self.interval_close == Some(index) {
+            self.interval_close = None;
+            return Ok(DelimiterStep::Skipped);
+        }
+        if matches!(byte, b'(' | b'[')
+            && let Some(end) = half_open_interval_end(text, index)
+        {
+            self.interval_close = Some(end);
             return Ok(DelimiterStep::Skipped);
         }
         if byte == b'<' && !is_generic_angle_open(text, index) {
@@ -909,6 +930,49 @@ impl DelimiterScan {
     }
 }
 
+/// If the `(` at `open_index` begins a half-open interval literal — `(term,term]`,
+/// the standard mathematical spelling Appendix A uses for a retained window —
+/// return the offset of the `]` that ends it.
+///
+/// This is a TOKEN recognizer and deliberately NOT a relaxed balance rule. The
+/// alternative measured on fgdb-8kzt (V4) let any `(` be closed by any `]`
+/// anywhere, which makes a genuine mismatched-delimiter typo parse silently — a
+/// fail-open reader inside a checker whose whole job is to be unfoolable. The
+/// shape required here is two nonempty identifier terms and exactly one comma, so
+/// `entries[foo)`, `(a,b)`, `(a]`, `(a,b,c]` and `(a b,c]` all stay mismatched.
+///
+/// Both orientations are recognised, because the census region spells both:
+/// measured over plan lines 1388-2728, `(term,term]` appears twice (a10:1928, the
+/// two delta indexes) and `[term,term)` once (line 1728, `[0,byte_count)`). Each
+/// is closed by the bracket the interval's own openness demands, so the closer is
+/// part of the token and never a structural closer.
+fn half_open_interval_end(text: &str, open_index: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let terminator = match bytes.get(open_index).copied() {
+        Some(b'(') => b']',
+        Some(b'[') => b')',
+        _ => return None,
+    };
+    let mut index = open_index + 1;
+    let mut terms = 0usize;
+    loop {
+        let term_start = index;
+        while matches!(bytes.get(index), Some(&byte) if byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            index += 1;
+        }
+        if index == term_start {
+            return None;
+        }
+        terms += 1;
+        match bytes.get(index).copied() {
+            Some(b',') if terms == 1 => index += 1,
+            Some(byte) if byte == terminator && terms == 2 => return Some(index),
+            _ => return None,
+        }
+    }
+}
+
 fn matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterIssue> {
     let bytes = text.as_bytes();
     let Some(opener) = bytes.get(open_index).copied() else {
@@ -917,7 +981,13 @@ fn matching_delimiter(text: &str, open_index: usize) -> Result<usize, DelimiterI
             mismatched: false,
         });
     };
-    if !OPENING_DELIMITERS.contains(&opener) {
+    // The interval token is inert HERE TOO. `inside` seeds the stack with the
+    // opener without routing it through `step`, so without this the same bracket
+    // would be an inert token mid-scan and a structural opener at the entry point
+    // — one rule spelled two ways, which is the defect fgdb-8kzt is about. A
+    // caller that points at an interval's bracket is not pointing at a body, and
+    // gets exactly what it gets for any other non-opener byte.
+    if !OPENING_DELIMITERS.contains(&opener) || half_open_interval_end(text, open_index).is_some() {
         return Err(DelimiterIssue {
             offset: open_index,
             mismatched: true,
@@ -3592,10 +3662,11 @@ pub fn census_appendix_source(
 mod tests {
     use super::{
         AmbiguityCandidate, AmbiguityKind, AmbiguityOccurrence, CensusErrorKind, DelimiterIssue,
-        FieldCandidateKey, SchemaCandidateKey, SourceMap, SourceSliceSpec, SplitSpan,
-        StructuralCandidateKey, affected_source_key, canonical_ambiguities, census_appendix_source,
-        is_generic_angle_open, matching_delimiter, normalize_whitespace, sha256_hex,
-        source_key_transcript, split_top_level, top_level_arrow,
+        FieldCandidateKey, OPENING_DELIMITERS, SchemaCandidateKey, SourceMap, SourceSliceSpec,
+        SplitSpan, StructuralCandidateKey, affected_source_key, canonical_ambiguities,
+        census_appendix_source, half_open_interval_end, is_generic_angle_open, matching_delimiter,
+        normalize_whitespace, opening_delimiter_for, sha256_hex, source_key_transcript,
+        split_top_level, top_level_arrow,
     };
 
     // ===================================================================
@@ -3765,6 +3836,12 @@ mod tests {
         "Outer<Inner<A|B>,[C,D]>",
         "{value:[u8;4)}",
         "entries[every commit_seq in (after,frontier] -> StrongRef<T>]",
+        // The mirror orientation, which the census region also spells (plan line
+        // 1728, `[0,byte_count)`), and the near-miss that the interval SHAPE does
+        // accept — `[u8,4)` — so the widening-surface measurement below has to
+        // account for it rather than never meeting it.
+        "{descriptors cover [0,byte_count) exactly}",
+        "{value:[u8,4)}",
         "{fragments[shard_id -> StrongRef<Frag>],count:u32}",
         "Left{x:u8}|Middle<Vec<A|B>>|Right{y:u16}",
         "{s:'a\\'b',t:\"c\\\"d\"}",
@@ -3815,16 +3892,42 @@ mod tests {
         mutants
     }
 
+    /// Does this text contain a half-open interval literal anywhere? This is the
+    /// FOOTPRINT of the interval rule, computed by the production recogniser
+    /// itself rather than by a hand list, and it is what partitions the
+    /// differential below.
+    ///
+    /// A text transformation was tried first and is NOT sound: there is no
+    /// length-preserving substitution for the two bracket bytes that leaves the
+    /// pre-collapse oracles' answers alone, because `is_generic_angle_open` reads
+    /// the raw byte before a `<` and accepts `]` and identifier bytes while
+    /// rejecting `)`. Any filler is therefore observable, and the resulting
+    /// "drift" would be an artifact of the model, not of the reader. Hence a
+    /// partition, whose predicate is exact, instead of a rewrite.
+    fn carries_interval_token(text: &str) -> bool {
+        text.as_bytes().iter().enumerate().any(|(index, byte)| {
+            matches!(byte, b'(' | b'[') && half_open_interval_end(text, index).is_some()
+        })
+    }
+
     /// THE MUTATION PROOF. For every mutant and every entry point, the one
-    /// reader answers exactly what the two frozen pre-collapse readers
-    /// answered. Stated the other way, which is the point: on this corpus the
-    /// old readers could not tell any case apart from the new one, so nothing
-    /// downstream can either.
+    /// reader answers exactly what the two frozen pre-collapse readers answered
+    /// on the same text with its interval literals erased. Stated the other way,
+    /// which is the point: the one reader IS the pre-collapse reader plus the
+    /// single rule "a half-open interval is an inert token", and nothing else
+    /// about it moved.
+    ///
+    /// The oracles are deliberately NOT re-frozen for the grammar change. A
+    /// re-frozen oracle proves only that the new code agrees with itself. Keeping
+    /// them pre-interval and quantifying the difference through `interval_erased`
+    /// keeps the differential TOTAL — there is no carve-out in which a second,
+    /// unrelated drift could hide.
     ///
     /// The vacuity controls are not decoration. "Every mutant agrees" is
     /// worthless if the corpus never produces disagreement-capable inputs, so
-    /// this test first proves its corpus reaches all three outcome classes and
-    /// then proves a deliberately wrong reader IS caught by it.
+    /// this test proves its corpus reaches all three outcome classes, proves the
+    /// erasure is load-bearing on it, and proves a deliberately wrong reader IS
+    /// caught by it.
     #[test]
     fn one_delimiter_reader_answers_exactly_as_the_two_it_replaced() {
         let mutants = delimiter_mutants();
@@ -3841,15 +3944,35 @@ mod tests {
         let mut split_ok = 0usize;
         let mut split_err = 0usize;
         let mut multi_span = 0usize;
+        let mut carrying_interval = 0usize;
+        let mut erasure_load_bearing = 0usize;
 
         for mutant in &mutants {
+            // OUTSIDE the interval rule's own footprint the agreement is total.
+            // INSIDE it the oracles are pre-interval by construction, so they are
+            // the wrong yardstick; those mutants are counted, their divergence is
+            // measured as the vacuity control, and their behaviour is pinned
+            // case-by-case in `half_open_interval_is_a_token_not_a_relaxed_closer`
+            // and at corpus scale by the a10 census count.
+            if carries_interval_token(mutant) {
+                carrying_interval += 1;
+                for open_index in 0..=mutant.len() {
+                    if matching_delimiter(mutant, open_index)
+                        != legacy_matching_delimiter(mutant, open_index)
+                    {
+                        erasure_load_bearing += 1;
+                    }
+                }
+                continue;
+            }
             for open_index in 0..=mutant.len() {
                 let expected = legacy_matching_delimiter(mutant, open_index);
                 let actual = matching_delimiter(mutant, open_index);
                 assert_eq!(
                     actual, expected,
                     "matching_delimiter drifted from its pre-collapse oracle at \
-                     open_index {open_index} of {mutant:?}"
+                     open_index {open_index} of {mutant:?}, which carries no \
+                     interval literal and so must be untouched by that rule"
                 );
                 match expected {
                     Ok(_) => balanced += 1,
@@ -3863,7 +3986,8 @@ mod tests {
                 assert_eq!(
                     actual, expected,
                     "split_top_level drifted from its pre-collapse oracle on \
-                     separators {separators:?} of {mutant:?}"
+                     separators {separators:?} of {mutant:?}, which carries no \
+                     interval literal"
                 );
                 match &expected {
                     Ok(spans) => {
@@ -3912,6 +4036,36 @@ mod tests {
             mutants.len()
         );
 
+        // VACUITY CONTROL 3 — the partition is LOAD-BEARING IN BOTH DIRECTIONS.
+        //
+        // If no mutant carried an interval, the differential above would be the
+        // pre-interval one and would prove nothing about the rule this increment
+        // landed. If interval-bearing mutants existed but the new reader answered
+        // exactly as the pre-collapse oracle on all of them, then the rule would
+        // be inert and the twelve recovered a10 field candidates could not have
+        // come from it. Both halves must be non-zero.
+        assert!(
+            carrying_interval > 0,
+            "no mutant carried an interval literal; the partition below is empty \
+             and the interval rule is untested"
+        );
+        assert!(
+            erasure_load_bearing > 0,
+            "{carrying_interval} mutants carried an interval literal but the new \
+             reader agreed with the pre-collapse oracle on every one of them; the \
+             interval rule is inert"
+        );
+        // And the footprint must stay a MINORITY. The differential's strength is
+        // the size of the set on which agreement is total; if the footprint ever
+        // swallowed the corpus, "total agreement outside it" would be a claim
+        // about almost nothing.
+        assert!(
+            carrying_interval * 4 < mutants.len(),
+            "the interval footprint grew to {carrying_interval} of {} mutants; \
+             the total-agreement claim now covers too little to be evidence",
+            mutants.len()
+        );
+
         // Printed so `--nocapture` reports the size of the claim rather than
         // just its verdict: "no drift" over 9 inputs and over 9000 are very
         // different sentences.
@@ -3919,9 +4073,185 @@ mod tests {
             "one-reader differential: {} mutants; matching balanced={balanced} \
              mismatched={mismatched} unclosed={unclosed}; split ok={split_ok} \
              err={split_err} multi_span={multi_span}; wrong-reader control \
-             caught on {caught} probes",
+             caught on {caught} probes; interval footprint {carrying_interval} \
+             mutants, on which the rule changed {erasure_load_bearing} oracle \
+             answers",
             mutants.len()
         );
+    }
+
+    /// THE RULING fgdb-8kzt was parked on, as a measurement rather than a
+    /// preference: the half-open interval is a TOKEN, not a relaxed closer.
+    ///
+    /// Two candidate grammars recover the same twelve a10 field candidates and
+    /// produce a byte-identical census (11705 fields, 8433 ambiguities, all five
+    /// transcript digests equal, measured):
+    ///
+    ///   TOKEN    — `(term,term]` / `[term,term)` is one inert token. Landed.
+    ///   RELAXED  — any `(` may be closed by any `]` and any `[` by any `)`
+    ///              ("V4" on the bead).
+    ///
+    /// They are indistinguishable on the real appendix and distinguishable on
+    /// typos, which is the only place it matters for a checker whose job is to be
+    /// unfoolable. This test pins that difference so nobody can quietly swap one
+    /// for the other: the relaxed form must be CAUGHT by the same corpus that the
+    /// landed form passes.
+    #[test]
+    fn half_open_interval_is_a_token_not_a_relaxed_closer() {
+        // Every interval spelling the census region actually contains is
+        // recognised AT ITS OPENING BRACKET, and consumes through its closer.
+        for (text, opener, close) in [
+            ("(retained_after_commit_seq,frontier]", 0usize, 35usize),
+            ("(retained_after_global_commit_seq,frontier]", 0, 42),
+            ("[0,byte_count)", 0, 13),
+        ] {
+            assert_eq!(
+                half_open_interval_end(text, opener),
+                Some(close),
+                "{text:?} is an interval literal spelled by the plan"
+            );
+        }
+
+        // The two real a10:1928 bodies, entered at the `[` of `entries[`: the
+        // interval inside no longer breaks the enclosing map, which IS the twelve
+        // recovered field candidates.
+        for body in [
+            "entries[every commit_seq in (retained_after_commit_seq,frontier] -> StrongRef<B>]",
+            "entries[every global_commit_seq in (retained_after_global_commit_seq,frontier] -> StrongRef<G>]",
+        ] {
+            let open = body.find('[').expect("seed has a map bracket");
+            assert_eq!(
+                matching_delimiter(body, open),
+                Ok(body.len() - 1),
+                "{body:?}: an interior interval must not break the enclosing map"
+            );
+        }
+
+        // A whole record carrying the mirror orientation is balanced too.
+        let mirror = "{descriptors cover [0,byte_count) exactly}";
+        assert_eq!(
+            matching_delimiter(mirror, 0),
+            Ok(mirror.len() - 1),
+            "the mirror interval must not break its enclosing record"
+        );
+
+        // An interval bracket is NOT a body opener. `matching_delimiter` seeds its
+        // stack directly from the byte at `open_index`, so the token has to be
+        // inert there as well or the rule exists twice.
+        let issue = matching_delimiter("[0,byte_count)", 0)
+            .expect_err("an interval bracket does not open a record body");
+        assert!(issue.mismatched);
+        assert_eq!(issue.offset, 0);
+
+        // Genuine mismatched-delimiter typos that must STAY mismatched. Each one
+        // fails the token shape for a different, stated reason.
+        const TYPOS: &[(&str, &str)] = &[
+            ("{value:[u8;4)}", "separator is `;`, not the interval comma"),
+            ("{entries[foo)}", "one term, no comma"),
+            ("{x:(a]}", "one term, no comma"),
+            ("{x:(a,b,c]}", "three terms"),
+            ("{x:(a b,c]}", "a term contains a space"),
+            ("{x:(a,]}", "second term is empty"),
+            ("{x:([a],b]}", "a term is itself bracketed"),
+        ];
+        let mut relaxed_would_accept = 0usize;
+        for (typo, why) in TYPOS {
+            let issue = matching_delimiter(typo, 0)
+                .expect_err(&format!("{typo:?} must stay mismatched ({why})"));
+            assert!(
+                issue.mismatched,
+                "{typo:?} must be mismatched, not unclosed"
+            );
+            // INJECTED FAULT / VACUITY CONTROL: the relaxed grammar. If this
+            // corpus stopped being able to see the difference, the ruling above
+            // would be unenforced and this test would be decoration.
+            if relaxed_closer_matching_delimiter(typo, 0).is_ok() {
+                relaxed_would_accept += 1;
+            }
+        }
+        assert!(
+            relaxed_would_accept > 0,
+            "the relaxed-closer control was accepted by none of the {} typos; \
+             this test can no longer tell the two grammars apart",
+            TYPOS.len()
+        );
+        println!(
+            "interval-token ruling: {} typos stay mismatched under the token \
+             grammar; the relaxed grammar would silently accept {relaxed_would_accept} \
+             of them",
+            TYPOS.len()
+        );
+    }
+
+    /// The REJECTED grammar from fgdb-8kzt ("V4"), kept only so
+    /// `half_open_interval_is_a_token_not_a_relaxed_closer` can prove the corpus
+    /// discriminates against it. Identical to the one reader except that the
+    /// closer test is relaxed instead of the interval being tokenised.
+    fn relaxed_closer_matching_delimiter(
+        text: &str,
+        open_index: usize,
+    ) -> Result<usize, DelimiterIssue> {
+        let bytes = text.as_bytes();
+        let Some(opener) = bytes.get(open_index).copied() else {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: false,
+            });
+        };
+        if !OPENING_DELIMITERS.contains(&opener) {
+            return Err(DelimiterIssue {
+                offset: open_index,
+                mismatched: true,
+            });
+        }
+        let mut stack = vec![opener];
+        let mut quote = None;
+        let mut escaped = false;
+        for (index, byte) in bytes.iter().copied().enumerate().skip(open_index + 1) {
+            if let Some(active_quote) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                continue;
+            }
+            if byte == b'<' && !is_generic_angle_open(text, index) {
+                continue;
+            }
+            if OPENING_DELIMITERS.contains(&byte) {
+                stack.push(byte);
+                continue;
+            }
+            if byte == b'>' && stack.last() != Some(&b'<') {
+                continue;
+            }
+            let Some(expected_opener) = opening_delimiter_for(byte) else {
+                continue;
+            };
+            let popped = stack.pop();
+            // THE REJECTED RELAXATION: any `(`/`]` or `[`/`)` pair passes.
+            let interval = matches!((popped, byte), (Some(b'('), b']') | (Some(b'['), b')'));
+            if popped != Some(expected_opener) && !interval {
+                return Err(DelimiterIssue {
+                    offset: index,
+                    mismatched: true,
+                });
+            }
+            if stack.is_empty() {
+                return Ok(index);
+            }
+        }
+        Err(DelimiterIssue {
+            offset: text.len(),
+            mismatched: false,
+        })
     }
 
     /// A deliberately WRONG reader: identical to the real one except that it
