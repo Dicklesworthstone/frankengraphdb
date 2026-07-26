@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "9878e84c7c72d0e098a66794ce56a00ffdfed62aaf251bc0d87efd665e0a630b"
 
 [target_manifest]
-target_count = 2226
+target_count = 2227
 projection_fallback_count = 90
-target_source_assignment_sha256 = "2405302600bde59f6e046659778f62592f0d656d12632a2f2f98d834d8f6f402"
+target_source_assignment_sha256 = "6ba28ddde55bad34e982249db0a052868da637011a4a545944e9096dd24c5ecb"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 46
+registry_epoch = 47
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -2042,6 +2042,17 @@ construction_order = 7
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/canonical_restore_source_acquisition_plan_copy/"
+
+[[logical_kind]]
+slice_id = "a17"
+row_id = "a17:logical-kind:sealed-pre-bootstrap-dispatch-journal-import"
+object_kind = 0x042e
+name = "SealedPreBootstrapDispatchJournalImport"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sealed_pre_bootstrap_dispatch_journal_import/"
 
 [[logical_kind]]
 slice_id = "a03"
@@ -37136,7 +37147,7 @@ symbol = "SealedPreBootstrapDispatchJournalImport"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x042e"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "plan:reservation:security-policy-mutation-body"
@@ -48701,7 +48712,7 @@ symbol = "SealedPreBootstrapDispatchJournalImport"
 generic_signature = "<Role>"
 source_key = "top|SealedPreBootstrapDispatchJournalImport<Role>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a17:2291"]
 
 [[top_level_candidate]]
@@ -52149,6 +52160,14 @@ row_id = "a17:target:logical-kind-canonical-restore-source-acquisition-plan-copy
 target_row_id = "a17:logical-kind:canonical-restore-source-acquisition-plan-copy"
 slice_id = "a17"
 source_key = "top|CanonicalRestoreSourceAcquisitionPlanCopy<Role>"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a17:target:logical-kind-sealed-pre-bootstrap-dispatch-journal-import"
+target_row_id = "a17:logical-kind:sealed-pre-bootstrap-dispatch-journal-import"
+slice_id = "a17"
+source_key = "top|SealedPreBootstrapDispatchJournalImport<Role>"
 target_kind = "logical-kind"
 definition_status = "declared"
 

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 46
+registry_epoch = 47
 
 [[kind]]
 object_kind = 0x0001
@@ -2671,6 +2671,15 @@ construction_order = 10
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/root_authority_trust_body/"
+
+[[kind]]
+object_kind = 0x042e
+name = "SealedPreBootstrapDispatchJournalImport"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/sealed_pre_bootstrap_dispatch_journal_import/"
 
 [[kind]]
 object_kind = 0x0433

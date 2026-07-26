@@ -6284,6 +6284,135 @@ fn idr_canonical_restore_source_acquisition_plan_copy_reserved_logical_shell_is_
 }
 
 #[test]
+fn idr_sealed_prebootstrap_dispatch_import_reserves_its_source_dag_stratum() {
+    let identity = real_identity();
+    let logical = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "SealedPreBootstrapDispatchJournalImport")
+        .expect("SealedPreBootstrapDispatchJournalImport logical shell exists");
+    assert_eq!(logical.object_kind, 0x042e);
+    assert_eq!(logical.status, "reserved");
+    assert_eq!(logical.construction_order, 10);
+    assert_eq!(logical.role_predicate, "true");
+    assert_eq!(logical.max_size_bytes, 16_777_216);
+    assert_eq!(
+        logical.golden_corpus,
+        "corpus/logical/sealed_pre_bootstrap_dispatch_journal_import/"
+    );
+
+    let plan_copy = identity
+        .logical
+        .iter()
+        .find(|logical| logical.name == "CanonicalRestoreSourceAcquisitionPlanCopy")
+        .expect("CanonicalRestoreSourceAcquisitionPlanCopy predecessor exists");
+    assert_eq!(
+        logical.construction_order,
+        plan_copy.construction_order + 3,
+        "the two generated refinement-copy reference strata separate the plan copy from the sealed import"
+    );
+
+    let catalog = real_appendix_catalog();
+    let reservation = catalog
+        .reservations
+        .iter()
+        .find(|reservation| reservation.symbol == "SealedPreBootstrapDispatchJournalImport")
+        .expect("SealedPreBootstrapDispatchJournalImport permanent reservation exists");
+    assert_eq!(
+        reservation.row_id,
+        "a17:reservation:sealed-pre-bootstrap-dispatch-journal-import"
+    );
+    assert_eq!(reservation.row_kind, "logical-kind");
+    assert_eq!(reservation.identity_class, "logical");
+    assert_eq!(reservation.code_reservation, "0x042e");
+    assert_eq!(reservation.disposition, "existing");
+
+    let source_key = "top|SealedPreBootstrapDispatchJournalImport<Role>";
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == source_key)
+        .expect("SealedPreBootstrapDispatchJournalImport source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "logical");
+
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == source_key)
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "source candidate must map exactly once");
+    assert_eq!(
+        targets[0].row_id,
+        "a17:target:logical-kind-sealed-pre-bootstrap-dispatch-journal-import"
+    );
+    assert_eq!(
+        targets[0].target_row_id,
+        "a17:logical-kind:sealed-pre-bootstrap-dispatch-journal-import"
+    );
+    assert_eq!(targets[0].target_kind, "logical-kind");
+    assert_eq!(targets[0].definition_status, "declared");
+
+    assert!(
+        !identity
+            .fields
+            .iter()
+            .any(|field| { field.containing_schema == "SealedPreBootstrapDispatchJournalImport" }),
+        "the shell increment must not preempt its generated-reference field census"
+    );
+    assert!(
+        !identity.ordinary_unions.iter().any(|union| {
+            union.containing_schema == "SealedPreBootstrapDispatchJournalImport"
+                || union.union_name == "SealedPreBootstrapDispatchJournalImport"
+        }) && !identity.unions.iter().any(|union| {
+            union.containing_schema == "SealedPreBootstrapDispatchJournalImport"
+                || union.union_name == "SealedPreBootstrapDispatchJournalImport"
+        }),
+        "the record shell must not manufacture a same-name union or any arms"
+    );
+    assert!(
+        !catalog.ambiguity_adjudications.iter().any(|row| {
+            row.ambiguity_source_key
+                .contains("|SealedPreBootstrapDispatchJournalImport|")
+                || row.resolved_source_keys.iter().any(|source_key| {
+                    source_key.contains("|SealedPreBootstrapDispatchJournalImport|")
+                })
+        }),
+        "shorthand ambiguities must remain open until exact field types are settled"
+    );
+
+    let target_row_id = "a17:logical-kind:sealed-pre-bootstrap-dispatch-journal-import";
+    let a17 = catalog
+        .slices
+        .iter()
+        .find(|slice| slice.id == "a17")
+        .expect("a17 slice exists");
+    assert_eq!(
+        a17.definition_status, "declared",
+        "coverage must close before completion-layer authoring"
+    );
+    assert!(
+        !catalog
+            .annotations
+            .iter()
+            .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .semantic_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .expansion_bindings
+                .iter()
+                .any(|row| row.target_row_id == target_row_id)
+            && !catalog
+                .evidence
+                .iter()
+                .any(|row| row.target_row_id == target_row_id),
+        "a declared shell must not skip coverage-first sequencing with premature completion rows"
+    );
+}
+
+#[test]
 fn idr_canonical_pre_bootstrap_evidence_reencryption_owner_reserved_logical_shell_is_exact() {
     let identity = real_identity();
     let logical = identity
