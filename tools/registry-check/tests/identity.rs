@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 53
+registry_epoch = 54
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 53);
+    assert_eq!(epoch, 54);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -1892,7 +1892,7 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
         appendix_a::EXPECTED_RESERVED_TYPE_RESERVATION_COUNT
     );
     assert_eq!(baseline.source_symbol_dispositions.len(), 848);
-    assert_eq!(baseline.top_level_candidates.len(), 1_229);
+    assert_eq!(baseline.top_level_candidates.len(), 1_230);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT
@@ -3490,6 +3490,17 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     proposal_fields.sort_by_key(|field| field.field_tag);
     let expected_fields = [
         (
+            0x0003,
+            "basis_state",
+            "WeakStateIdentity",
+            "one",
+            "inline",
+            "none",
+            None,
+            16_777_216,
+            "comparison-only WeakStateIdentity",
+        ),
+        (
             0x0004,
             "expected_current_configuration_ref",
             "StrongRef",
@@ -3566,11 +3577,33 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             16_777_216,
             "no duplicate target or operation ID",
         ),
+        (
+            0x000e,
+            "expected_state_conditions",
+            "ExpectedStateCondition",
+            "many",
+            "inline",
+            "none",
+            None,
+            16_777_216,
+            "source-ordered comparison-only CAS conditions",
+        ),
+        (
+            0x000f,
+            "terminal_audit_gate",
+            "TerminalAuditGate",
+            "one",
+            "inline",
+            "none",
+            None,
+            16_777_216,
+            "one source-required TerminalAuditGate",
+        ),
     ];
     assert_eq!(
         proposal_fields.len(),
         expected_fields.len(),
-        "only the fully resolved I7 and I8 field cohorts may land"
+        "only source-forced and fully resolved proposal fields may land"
     );
     for (
         field,
@@ -3673,12 +3706,20 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "a15:field:key-destroy-proposal-backup-legal-hold-and-external-consumer-ack-refs",
         ),
         (
+            "field|KeyDestroyProposal|KeyDestroyProposal.basis_state|basis_state",
+            "a15:field:key-destroy-proposal-basis-state",
+        ),
+        (
             "field|KeyDestroyProposal|KeyDestroyProposal.checkpoint_and_configuration_floor_refs|checkpoint_and_configuration_floor_refs",
             "a15:field:key-destroy-proposal-checkpoint-and-configuration-floor-refs",
         ),
         (
             "field|KeyDestroyProposal|KeyDestroyProposal.expected_current_configuration_ref|expected_current_configuration_ref",
             "a15:field:key-destroy-proposal-expected-current-configuration-ref",
+        ),
+        (
+            "field|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|expected_state_conditions",
+            "a15:field:key-destroy-proposal-expected-state-conditions",
         ),
         (
             "field|KeyDestroyProposal|KeyDestroyProposal.generated_scanned_root_inventory_ref|generated_scanned_root_inventory_ref",
@@ -3691,6 +3732,10 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         (
             "field|KeyDestroyProposal|KeyDestroyProposal.threshold_authorization_ref|threshold_authorization_ref",
             "a15:field:key-destroy-proposal-threshold-authorization-ref",
+        ),
+        (
+            "field|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|terminal_audit_gate",
+            "a15:field:key-destroy-proposal-terminal-audit-gate",
         ),
         (
             "field|KeyDestroyProposal|KeyDestroyProposal.zero_reference_proof_ref|zero_reference_proof_ref",
@@ -3719,18 +3764,190 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             .unions
             .iter()
             .any(|union| union.containing_schema == "KeyDestroyProposal"),
-        "the shell increment must not invent proposal unions"
+        "the increment must use shared producers, never an A15-local proposal union"
     );
-    assert!(
-        !catalog.ambiguity_adjudications.iter().any(|row| {
-            row.ambiguity_source_key.contains("|KeyDestroyProposal|")
-                || row
-                    .resolved_source_keys
+
+    let weak_state = identity
+        .wire
+        .iter()
+        .find(|wire| wire.name == "WeakStateIdentity")
+        .expect("WeakStateIdentity has its own producer row");
+    let weak_digest = identity
+        .wire
+        .iter()
+        .find(|wire| wire.name == "WeakDigest")
+        .expect("WeakDigest remains independently registered");
+    assert_eq!(weak_state.wire_type_id, 0x0193);
+    assert_eq!(weak_state.kind, "record");
+    assert_eq!(weak_state.status, "reserved");
+    assert_eq!(weak_state.containing_union, None);
+    assert_eq!(weak_state.wire_tag, None);
+    assert_eq!(weak_digest.wire_type_id, 0x0003);
+    assert_ne!(
+        weak_state.wire_type_id, weak_digest.wire_type_id,
+        "source-distinct WeakStateIdentity and WeakDigest must not be aliased"
+    );
+    assert_eq!(
+        catalog
+            .targets
+            .iter()
+            .filter(|target| target.source_key == "top|WeakStateIdentity")
+            .count(),
+        1
+    );
+
+    let assert_shared_union = |union_name: &str,
+                               allowed: &[&str],
+                               expected_arms: &[(&str, i64, &str, &str)],
+                               expected_target_count: usize| {
+        let union = identity
+            .ordinary_unions
+            .iter()
+            .find(|union| union.union_name == union_name)
+            .expect("shared ordinary union exists");
+        assert_eq!(union.containing_schema, union_name);
+        assert_eq!(union.union_path, union_name);
+        assert_eq!(union.field_tag, None);
+        assert_eq!(
+            union.allowed_containing_schemas,
+            allowed
+                .iter()
+                .map(|schema| (*schema).to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            union
+                .arms
+                .iter()
+                .map(|arm| {
+                    (
+                        arm.source_arm_name.as_str(),
+                        arm.arm_tag,
+                        arm.stable_name.as_str(),
+                        arm.payload_sha256
+                            .as_deref()
+                            .expect("every shared arm has a payload digest"),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            expected_arms
+        );
+        assert_eq!(
+            catalog
+                .targets
+                .iter()
+                .filter(|target| {
+                    target.source_key == format!("top|{union_name}")
+                        || target
+                            .source_key
+                            .starts_with(&format!("union|{union_name}|"))
+                        || target.source_key.starts_with(&format!("arm|{union_name}|"))
+                })
+                .count(),
+            expected_target_count,
+            "the shared union must carry its complete 2N+2 source/target shell"
+        );
+        let candidate = catalog
+            .top_level_candidates
+            .iter()
+            .find(|candidate| candidate.source_key == format!("top|{union_name}"))
+            .expect("shared union source candidate exists");
+        assert_eq!(candidate.identity_class, "wire");
+    };
+    assert_shared_union(
+        "ExpectedStateCondition",
+        &["ControlCommand", "KeyDestroyProposal"],
+        &[
+            (
+                "WeakStateIdentity",
+                0x0001,
+                "weak_state_identity",
+                "fab58bb486883dcb63e169533e152986932398afb581c026e1990c8ca846ab4a",
+            ),
+            (
+                "WeakMarkerIdentity",
+                0x0002,
+                "weak_marker_identity",
+                "f169ae0163b8faaa673cc0f2ee8c60c68dcbd4ecd40eaccb8610dca3f80097b8",
+            ),
+            (
+                "ExpectedEpoch",
+                0x0003,
+                "expected_epoch",
+                "bb0335783a1df7a0472b98ddb3633885de35d9133af1a10da90609303c2f3c60",
+            ),
+            (
+                "ExpectedIndex",
+                0x0004,
+                "expected_index",
+                "74dc0cbf0ad1e646cf563514c96c8961ac8b3ff4bb0ffdc0244e29698aacba70",
+            ),
+        ],
+        10,
+    );
+    assert_shared_union(
+        "TerminalAuditGate",
+        &["KeyDestroyProposal", "SequenceNeutralSpec<Tag>"],
+        &[
+            (
+                "StructurallyInapplicable",
+                0x0001,
+                "structurally_inapplicable",
+                "1a750c560dc03b9c5328def7c075e44d5eb0464e20b3e9ad0f0b8405cf6a5fc7",
+            ),
+            (
+                "NotRequired",
+                0x0002,
+                "not_required",
+                "27acef18721dfa1ec3a2bf2c4742c60a7aae1d17ac79ef1599ad68f6f0987966",
+            ),
+            (
+                "Required",
+                0x0003,
+                "required",
+                "d6bf34c187c66a2091c7655f9874144be1a581ef32d08124b86f9866d7daadb9",
+            ),
+        ],
+        8,
+    );
+
+    let mut proposal_adjudications = catalog
+        .ambiguity_adjudications
+        .iter()
+        .filter(|row| row.ambiguity_source_key.contains("|KeyDestroyProposal|"))
+        .flat_map(|row| row.resolved_source_keys.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    proposal_adjudications.sort_unstable();
+    assert_eq!(
+        proposal_adjudications,
+        vec![
+            "field|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|expected_state_conditions",
+            "field|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|terminal_audit_gate",
+        ],
+        "only the two source-forced shorthand fields may be adjudicated"
+    );
+    for unresolved in [
+        "expected_key_state",
+        "key_identity",
+        "expected_prospective_configuration_set_digest",
+        "exact_root_slot_generations",
+        "complete_target_set_digest",
+    ] {
+        assert!(
+            !identity.fields.iter().any(|field| {
+                field.containing_schema == "KeyDestroyProposal" && field.stable_name == unresolved
+            }),
+            "{unresolved} must remain absent pending its producer/transcript ruling"
+        );
+        assert!(
+            !catalog.ambiguity_adjudications.iter().any(|row| {
+                row.resolved_source_keys
                     .iter()
-                    .any(|source_key| source_key.contains("|KeyDestroyProposal|"))
-        }),
-        "proposal shorthand ambiguities must remain open until exact field types are settled"
-    );
+                    .any(|source_key| source_key.contains(&format!(".{unresolved}|")))
+            }),
+            "{unresolved} must remain unadjudicated"
+        );
+    }
 }
 
 #[test]
@@ -4738,6 +4955,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             "KeyDestroyExternalAckRef"
                 | "KeyDestroyFloorRef"
                 | "KeyDestructionTarget"
+                | "ExpectedStateCondition"
+                | "TerminalAuditGate"
                 | "RoleTransitionActivationState"
                 | "RestoreSourceAcquisitionSourceGate"
                 | "LeaseWindowSuccessorProof"
@@ -5169,15 +5388,18 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("TimeValidationEvidence", "observation_import_ref")
         )
     };
-    // A15 I7 and I8 add the first seven fully resolved KeyDestroyProposal
-    // members. Remove them as one cohort so the historical witness still
+    // A15 adds the first seven fully resolved KeyDestroyProposal members plus
+    // the source-forced WeakStateIdentity basis. The two shared-union consumer
+    // fields are already removed through `post_erratum_union`. Remove the
+    // remaining cohort so the historical witness still
     // reconstructs the exact namespace predating every post-erratum field
     // increment.
     let post_erratum_a15_field = |schema: &str, name: &str| {
         schema == "KeyDestroyProposal"
             && matches!(
                 name,
-                "expected_current_configuration_ref"
+                "basis_state"
+                    | "expected_current_configuration_ref"
                     | "checkpoint_and_configuration_floor_refs"
                     | "generated_scanned_root_inventory_ref"
                     | "zero_reference_proof_ref"
@@ -5880,12 +6102,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a09_field(&field.containing_schema)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 331,
+        pre_erratum.ordinary_unions.len() + 333,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A04 target tranche"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 348,
+        pre_erratum.fields.len() + 351,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the a09 storage-identity tranche"
     );

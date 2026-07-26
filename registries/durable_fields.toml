@@ -1,12 +1,12 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=5ff06d712eb7f125d0c92db54cc9d485eb334f5dde805ad83d3d3fa32e573e4a.
+# Appendix A lines 1388-2728; sha256=e754ed08b0d28cd9f779936c6f500aac184ccd71d89f3b67e061e64f74910058.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 53
+registry_epoch = 54
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -2361,6 +2361,20 @@ max_size_bytes = 65536
 
 [[field]]
 containing_schema = "KeyDestroyProposal"
+field_tag = 0x0003
+stable_name = "basis_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "comparison-only WeakStateIdentity basis embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the proposal (a15:2059)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "KeyDestroyProposal"
 field_tag = 0x0004
 stable_name = "expected_current_configuration_ref"
 exact_wire_type = "StrongRef"
@@ -2458,6 +2472,34 @@ reference_semantics = "none"
 construction_order = 80
 role_predicate = "role-local"
 retention_and_cut_rule = "inline authorization recipes sorted by canonical target identity with no duplicate target or operation ID; retained and cut with the proposal (a15:2057-2059)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x000e
+stable_name = "expected_state_conditions"
+exact_wire_type = "ExpectedStateCondition"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "source-ordered comparison-only CAS conditions embedded by value; every arm is nonretaining and the collection is retained and cut with the proposal (a10:1912, a15:2059)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x000f
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "the one source-required TerminalAuditGate embedded by value under the SequenceNeutralSpec wrapper law; the Required arm's separately registered payload members provide its exact retaining edges (a10:1914, a15:2059, a21:2699)"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -8712,6 +8754,17 @@ version_status = "reserved"
 max_size_bytes = 1
 
 [[union]]
+union_name = "ExpectedStateCondition"
+containing_schema = "ExpectedStateCondition"
+union_path = "ExpectedStateCondition"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ControlCommand", "KeyDestroyProposal"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "FinalCertificationSelection"
 containing_schema = "FinalCertificationSelection"
 union_path = "FinalCertificationSelection"
@@ -11463,6 +11516,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "TerminalAuditGate"
+containing_schema = "TerminalAuditGate"
+union_path = "TerminalAuditGate"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyDestroyProposal", "SequenceNeutralSpec<Tag>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "TerminalPublicOutcome"
 containing_schema = "TerminalPublicOutcome"
 union_path = "TerminalPublicOutcome"
@@ -13874,6 +13938,58 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ExpectedStateCondition"
+containing_schema = "ExpectedStateCondition"
+union_path = "ExpectedStateCondition"
+arm_tag = 0x0001
+source_arm_name = "WeakStateIdentity"
+stable_name = "weak_state_identity"
+payload_kind = "inline-record"
+payload_sha256 = "fab58bb486883dcb63e169533e152986932398afb581c026e1990c8ca846ab4a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ExpectedStateCondition"
+containing_schema = "ExpectedStateCondition"
+union_path = "ExpectedStateCondition"
+arm_tag = 0x0002
+source_arm_name = "WeakMarkerIdentity"
+stable_name = "weak_marker_identity"
+payload_kind = "inline-record"
+payload_sha256 = "f169ae0163b8faaa673cc0f2ee8c60c68dcbd4ecd40eaccb8610dca3f80097b8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ExpectedStateCondition"
+containing_schema = "ExpectedStateCondition"
+union_path = "ExpectedStateCondition"
+arm_tag = 0x0003
+source_arm_name = "ExpectedEpoch"
+stable_name = "expected_epoch"
+payload_kind = "inline-record"
+payload_sha256 = "bb0335783a1df7a0472b98ddb3633885de35d9133af1a10da90609303c2f3c60"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ExpectedStateCondition"
+containing_schema = "ExpectedStateCondition"
+union_path = "ExpectedStateCondition"
+arm_tag = 0x0004
+source_arm_name = "ExpectedIndex"
+stable_name = "expected_index"
+payload_kind = "inline-record"
+payload_sha256 = "74dc0cbf0ad1e646cf563514c96c8961ac8b3ff4bb0ffdc0244e29698aacba70"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "FinalCertificationSelection"
@@ -22912,6 +23028,45 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "TerminalAuditGate"
+containing_schema = "TerminalAuditGate"
+union_path = "TerminalAuditGate"
+arm_tag = 0x0001
+source_arm_name = "StructurallyInapplicable"
+stable_name = "structurally_inapplicable"
+payload_kind = "inline-record"
+payload_sha256 = "1a750c560dc03b9c5328def7c075e44d5eb0464e20b3e9ad0f0b8405cf6a5fc7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TerminalAuditGate"
+containing_schema = "TerminalAuditGate"
+union_path = "TerminalAuditGate"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "inline-record"
+payload_sha256 = "27acef18721dfa1ec3a2bf2c4742c60a7aae1d17ac79ef1599ad68f6f0987966"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "TerminalAuditGate"
+containing_schema = "TerminalAuditGate"
+union_path = "TerminalAuditGate"
+arm_tag = 0x0003
+source_arm_name = "Required"
+stable_name = "required"
+payload_kind = "inline-record"
+payload_sha256 = "d6bf34c187c66a2091c7655f9874144be1a581ef32d08124b86f9866d7daadb9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 union_name = "TerminalPublicOutcome"

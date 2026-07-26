@@ -33,17 +33,17 @@ pub const HASH_ALGORITHM: &str = "sha256";
 pub const APPENDIX_START_LINE: i64 = 1388;
 pub const APPENDIX_END_LINE: i64 = 2728;
 pub const APPENDIX_LINE_COUNT: i64 = 1341;
-pub const APPENDIX_BYTE_COUNT: i64 = 1_021_081;
+pub const APPENDIX_BYTE_COUNT: i64 = 1_021_429;
 pub const APPENDIX_SHA256: &str =
-    "5ff06d712eb7f125d0c92db54cc9d485eb334f5dde805ad83d3d3fa32e573e4a";
+    "e754ed08b0d28cd9f779936c6f500aac184ccd71d89f3b67e061e64f74910058";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2747;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 2769;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "a4be44b114d00e2327c5734937f5cec0e629329bf7a8a80e0d7eaa3ae9ad633c";
+    "5a9f39674621aed5111a7b56fa628d9e72cb51b641784ad983cb1871b5a64b2d";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 108;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "211d31f4f337b65886bbd8834e1f20a80731ae2de8ab2116d69150e7e4ba5f2b";
+    "e034622aa17bc0717a7729914ff4693c17fefbebe2a60e4a0c960df9d0a3ce55";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -60,9 +60,9 @@ pub const COMPLETION_LAYER_SCHEMA_VERSION: i64 = 1;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT: usize = 4;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 424;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 426;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "333950fe410726fc673208f8769240725eb335378342574e74ec9f612f87cdcd";
+    "8ab1b477d52f889eb5d5c1326fbe1f1da8f62c7c565e767d4ae59d15f0f11301";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 410;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 403;
@@ -347,7 +347,7 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 0] = [];
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
-static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] = [
+static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 426] = [
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459",
         slice_id: "a01",
@@ -4870,6 +4870,28 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 424] 
         ],
         rationale: "a09:1900: shorthand member `root_digest` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `digest256`; the derivation is that the appendix digest family is digest256/32, and the value commits the binding-root leaf mapping rather than the record's own preceding bytes, so it is digest_class=transcript with a registered recipe, matching a01 signed_transcript_digest rather than a BodyDigest. The single affected census key maps to that source form.",
     },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a15:ambiguity-adjudication:9d87b7faa3ae557cc0b0eb4aecf03219a98f5758e0e5607b1fa28c5d7eb3d55f",
+        slice_id: "a15",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|98f99be66a4f7e6dae8d94497c1dec6b36cde1de9f37ac488ffa72adbea0c4fe|1|b0269c814fc42bacf204d73a5e53a2a6bd6f885daed52569cd738538190972c1|shorthand field has no exact type",
+        source_locations: &["a15:2059"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|expected_state_conditions",
+        ],
+        rationale: "a15:2059 omits the repeated shared type spelling for readability, while a10:1912 fixes the exact comparison-only many-valued arm set as WeakStateIdentity | WeakMarkerIdentity | ExpectedEpoch | ExpectedIndex and a10:1913 gives that shared source-ordered union its durable name ExpectedStateCondition. The A15 field therefore maps to that shared union rather than an A15-local substitute.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a15:ambiguity-adjudication:d14591312dc555272847ff5149204b97bfc8f5ff4ceef5736d45d6b91bf71dda",
+        slice_id: "a15",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|03aa4f26c42ab045c593f45f87d78e0aa42c1f1e03198d96e839894c7ea7fb6f|1|69deea536c4e2a4367d3d22c27e70a3be3cc6b5d974b443f5109a571a5466530|shorthand field has no exact type",
+        source_locations: &["a15:2059"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|terminal_audit_gate",
+        ],
+        rationale: "a15:2059 uses the compact shorthand `terminal_audit_gate`; the a10:1914 SequenceNeutralSpec law requires exactly one TerminalAuditGate even where compact Appendix prose omits its type, and a21:2699 fixes the exact source-ordered StructurallyInapplicable | NotRequired | Required union. Prose omission is not absence and does not authorize a local gate alias.",
+    },
 ];
 
 pub const PROJECTION_CLASSES: [&str; 6] = [
@@ -5471,8 +5493,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1910,
         end_line: 1931,
         line_count: 22,
-        byte_count: 16_645,
-        sha256: "a435edb51aa09ddb6df21f400b5ddc810f6d9e0dfa8511864921a6c25ffd2d50",
+        byte_count: 16_993,
+        sha256: "e9d0ae8d2638e7af2889ffe9f6bf52b54e4dfb42453543175a4d29b82d0136c9",
     },
     SlicePin {
         ordinal: 11,

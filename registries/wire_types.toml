@@ -1,12 +1,12 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=5ff06d712eb7f125d0c92db54cc9d485eb334f5dde805ad83d3d3fa32e573e4a.
+# Appendix A lines 1388-2728; sha256=e754ed08b0d28cd9f779936c6f500aac184ccd71d89f3b67e061e64f74910058.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 36
+registry_epoch = 37
 
 [[type]]
 wire_type_id = 0x0001
@@ -4074,4 +4074,108 @@ containing_union = "ResourceOwnerKey"
 wire_tag = 0x0009
 encoding_context = "arm Maintenance of closed union ResourceOwnerKey"
 allowed_containing_schemas = ["ResourceOwnerKey"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0193
+name = "WeakStateIdentity"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical nonretaining WeakStateIdentity record, distinct from WeakDigest; exact member layout remains source-owned while Appendix A repeatedly uses both identities in the same record (a03:1478, a05:1602, a10:1912)"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0194
+name = "ExpectedStateCondition"
+kind = "union"
+status = "reserved"
+encoding_context = "shared closed u8-tagged comparison-only union WeakStateIdentity | WeakMarkerIdentity | ExpectedEpoch | ExpectedIndex in source order; no arm creates a reachability edge (a10:1912-1913)"
+allowed_containing_schemas = ["ControlCommand", "KeyDestroyProposal"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0195
+name = "ExpectedStateCondition.weak_state_identity"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ExpectedStateCondition"
+wire_tag = 0x0001
+encoding_context = "comparison-only WeakStateIdentity payload embedded by value; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ExpectedStateCondition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0196
+name = "ExpectedStateCondition.weak_marker_identity"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ExpectedStateCondition"
+wire_tag = 0x0002
+encoding_context = "comparison-only WeakMarkerIdentity payload embedded by value; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ExpectedStateCondition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0197
+name = "ExpectedStateCondition.expected_epoch"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ExpectedStateCondition"
+wire_tag = 0x0003
+encoding_context = "comparison-only ExpectedEpoch payload embedded by value; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ExpectedStateCondition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0198
+name = "ExpectedStateCondition.expected_index"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ExpectedStateCondition"
+wire_tag = 0x0004
+encoding_context = "comparison-only ExpectedIndex payload embedded by value; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ExpectedStateCondition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0199
+name = "TerminalAuditGate"
+kind = "union"
+status = "reserved"
+encoding_context = "shared closed u8-tagged terminal audit union StructurallyInapplicable | NotRequired | Required in source order; the Required payload carries the exact ticket, event, and terminal-resolution strong-reference triple (a21:2699)"
+allowed_containing_schemas = ["KeyDestroyProposal", "SequenceNeutralSpec<Tag>"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x019a
+name = "TerminalAuditGate.structurally_inapplicable"
+kind = "union_variant"
+status = "reserved"
+containing_union = "TerminalAuditGate"
+wire_tag = 0x0001
+encoding_context = "inline StructurallyInapplicable payload carrying StructuralAuditExemption; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["TerminalAuditGate"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x019b
+name = "TerminalAuditGate.not_required"
+kind = "union_variant"
+status = "reserved"
+containing_union = "TerminalAuditGate"
+wire_tag = 0x0002
+encoding_context = "inline NotRequired payload carrying NonRequiredAuditEvidence; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["TerminalAuditGate"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x019c
+name = "TerminalAuditGate.required"
+kind = "union_variant"
+status = "reserved"
+containing_union = "TerminalAuditGate"
+wire_tag = 0x0003
+encoding_context = "inline Required payload carrying the exact StrongRef<AuditTicket>, StrongRef<AuditEventRecord>, and StrongRef<AuditTicketResolution> triple; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["TerminalAuditGate"]
 max_size_bytes = 16777216

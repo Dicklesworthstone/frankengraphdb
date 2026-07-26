@@ -27,8 +27,8 @@ plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 start_line = 1388
 end_line = 2728
 line_count = 1341
-byte_count = 1021081
-sha256 = "5ff06d712eb7f125d0c92db54cc9d485eb334f5dde805ad83d3d3fa32e573e4a"
+byte_count = 1021429
+sha256 = "e754ed08b0d28cd9f779936c6f500aac184ccd71d89f3b67e061e64f74910058"
 heading = "## Appendix A — On-Disk Object Formats (normative contract)"
 next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 
@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 2747
+target_count = 2769
 projection_fallback_count = 108
-target_source_assignment_sha256 = "211d31f4f337b65886bbd8834e1f20a80731ae2de8ab2116d69150e7e4ba5f2b"
+target_source_assignment_sha256 = "e034622aa17bc0717a7729914ff4693c17fefbebe2a60e4a0c960df9d0a3ce55"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -331,20 +331,20 @@ title = "Appendix A exact catalog: Committed effects, commands, and logical delt
 start_line = 1910
 end_line = 1931
 line_count = 22
-byte_count = 16645
-sha256 = "a435edb51aa09ddb6df21f400b5ddc810f6d9e0dfa8511864921a6c25ffd2d50"
+byte_count = 16993
+sha256 = "e9d0ae8d2638e7af2889ffe9f6bf52b54e4dfb42453543175a4d29b82d0136c9"
 predecessor = "a09"
 successor = "a11"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 16
-top_level_candidate_ids_sha256 = "3346cbd9cdd7222638acb3ce921177380298329a49ec01f0a0430b3ecee8a7c1"
-field_candidate_count = 134
-field_candidate_ids_sha256 = "d3772f891d913f49a5fe58ab00825437de27209183f4efdeaea15d02c69b30aa"
-union_candidate_count = 4
-union_candidate_ids_sha256 = "75ebe16c9c17ce6e6b305ed0698851985ac53b2c42c6cc1683d7aaba03917211"
-arm_candidate_count = 13
-arm_candidate_ids_sha256 = "442fae0a7cf50d4c06719a00b37c26bfc16349763cf3f2cc9717b04039496fe7"
+top_level_candidate_count = 17
+top_level_candidate_ids_sha256 = "c995329082d5b42ab512bb583c52d9cbfed6ade2ff616c812c13e6520f037140"
+field_candidate_count = 138
+field_candidate_ids_sha256 = "86830cdcb2a45d9fbab9af7b87f8fbef1883cf1d78396218cb1589bfdbdbbfb8"
+union_candidate_count = 5
+union_candidate_ids_sha256 = "ad9a6e5137cb020d17d5deb1296356146580661a0500823df541203875e56170"
+arm_candidate_count = 17
+arm_candidate_ids_sha256 = "7fcfd50dfd4f06f8be8676acbdc70683db596e0dd9f56020e0950b9c25aab16e"
 ambiguity_count = 91
 ambiguity_ids_sha256 = "998ad5fd54b4df8725bf43e7f838f9d06c465dbb29dd9e80759072c1e2cf8bde"
 
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 36
+registry_epoch = 37
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 53
+registry_epoch = 54
 
 [[logical_kind]]
 slice_id = "a03"
@@ -11077,6 +11077,130 @@ encoding_context = "arm Maintenance of closed union ResourceOwnerKey"
 allowed_containing_schemas = ["ResourceOwnerKey"]
 max_size_bytes = 16777216
 
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:weak-state-identity"
+wire_type_id = 0x0193
+name = "WeakStateIdentity"
+kind = "record"
+status = "reserved"
+encoding_context = "canonical nonretaining WeakStateIdentity record, distinct from WeakDigest; exact member layout remains source-owned while Appendix A repeatedly uses both identities in the same record (a03:1478, a05:1602, a10:1912)"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a10"
+row_id = "a10:wire-type:expected-state-condition"
+wire_type_id = 0x0194
+name = "ExpectedStateCondition"
+kind = "union"
+status = "reserved"
+encoding_context = "shared closed u8-tagged comparison-only union WeakStateIdentity | WeakMarkerIdentity | ExpectedEpoch | ExpectedIndex in source order; no arm creates a reachability edge (a10:1912-1913)"
+allowed_containing_schemas = ["ControlCommand", "KeyDestroyProposal"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a10"
+row_id = "a10:wire-type:expected-state-condition-weak-state-identity"
+wire_type_id = 0x0195
+name = "ExpectedStateCondition.weak_state_identity"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ExpectedStateCondition"
+wire_tag = 0x0001
+encoding_context = "comparison-only WeakStateIdentity payload embedded by value; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ExpectedStateCondition"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a10"
+row_id = "a10:wire-type:expected-state-condition-weak-marker-identity"
+wire_type_id = 0x0196
+name = "ExpectedStateCondition.weak_marker_identity"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ExpectedStateCondition"
+wire_tag = 0x0002
+encoding_context = "comparison-only WeakMarkerIdentity payload embedded by value; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ExpectedStateCondition"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a10"
+row_id = "a10:wire-type:expected-state-condition-expected-epoch"
+wire_type_id = 0x0197
+name = "ExpectedStateCondition.expected_epoch"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ExpectedStateCondition"
+wire_tag = 0x0003
+encoding_context = "comparison-only ExpectedEpoch payload embedded by value; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ExpectedStateCondition"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a10"
+row_id = "a10:wire-type:expected-state-condition-expected-index"
+wire_type_id = 0x0198
+name = "ExpectedStateCondition.expected_index"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ExpectedStateCondition"
+wire_tag = 0x0004
+encoding_context = "comparison-only ExpectedIndex payload embedded by value; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ExpectedStateCondition"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:terminal-audit-gate"
+wire_type_id = 0x0199
+name = "TerminalAuditGate"
+kind = "union"
+status = "reserved"
+encoding_context = "shared closed u8-tagged terminal audit union StructurallyInapplicable | NotRequired | Required in source order; the Required payload carries the exact ticket, event, and terminal-resolution strong-reference triple (a21:2699)"
+allowed_containing_schemas = ["KeyDestroyProposal", "SequenceNeutralSpec<Tag>"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:terminal-audit-gate-structurally-inapplicable"
+wire_type_id = 0x019a
+name = "TerminalAuditGate.structurally_inapplicable"
+kind = "union_variant"
+status = "reserved"
+containing_union = "TerminalAuditGate"
+wire_tag = 0x0001
+encoding_context = "inline StructurallyInapplicable payload carrying StructuralAuditExemption; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["TerminalAuditGate"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:terminal-audit-gate-not-required"
+wire_type_id = 0x019b
+name = "TerminalAuditGate.not_required"
+kind = "union_variant"
+status = "reserved"
+containing_union = "TerminalAuditGate"
+wire_tag = 0x0002
+encoding_context = "inline NotRequired payload carrying NonRequiredAuditEvidence; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["TerminalAuditGate"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:terminal-audit-gate-required"
+wire_type_id = 0x019c
+name = "TerminalAuditGate.required"
+kind = "union_variant"
+status = "reserved"
+containing_union = "TerminalAuditGate"
+wire_tag = 0x0003
+encoding_context = "inline Required payload carrying the exact StrongRef<AuditTicket>, StrongRef<AuditEventRecord>, and StrongRef<AuditTicketResolution> triple; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["TerminalAuditGate"]
+max_size_bytes = 16777216
+
 [[field]]
 slice_id = "a03"
 row_id = "a03:field:logical-state-payload-applied-logical-command-seq"
@@ -17376,6 +17500,54 @@ retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-o
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-basis-state"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x0003
+stable_name = "basis_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "comparison-only WeakStateIdentity basis embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the proposal (a15:2059)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-expected-state-conditions"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x000e
+stable_name = "expected_state_conditions"
+exact_wire_type = "ExpectedStateCondition"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "source-ordered comparison-only CAS conditions embedded by value; every arm is nonretaining and the collection is retained and cut with the proposal (a10:1912, a15:2059)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-terminal-audit-gate"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x000f
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "the one source-required TerminalAuditGate embedded by value under the SequenceNeutralSpec wrapper law; the Required arm's separately registered payload members provide its exact retaining edges (a10:1914, a15:2059, a21:2699)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union]]
 slice_id = "a01"
@@ -36302,6 +36474,137 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a10"
+row_id = "a10:union:expected-state-condition-4979a5d9718448bd"
+union_name = "ExpectedStateCondition"
+containing_schema = "ExpectedStateCondition"
+union_path = "ExpectedStateCondition"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ControlCommand", "KeyDestroyProposal"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:expected-state-condition-weak-state-identity-dddaa059c4ac18ab"
+union_name = "ExpectedStateCondition"
+containing_schema = "ExpectedStateCondition"
+union_path = "ExpectedStateCondition"
+arm_tag = 0x0001
+source_arm_name = "WeakStateIdentity"
+stable_name = "weak_state_identity"
+payload_kind = "inline-record"
+payload_sha256 = "fab58bb486883dcb63e169533e152986932398afb581c026e1990c8ca846ab4a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:expected-state-condition-weak-marker-identity-e4a025d5c086e8be"
+union_name = "ExpectedStateCondition"
+containing_schema = "ExpectedStateCondition"
+union_path = "ExpectedStateCondition"
+arm_tag = 0x0002
+source_arm_name = "WeakMarkerIdentity"
+stable_name = "weak_marker_identity"
+payload_kind = "inline-record"
+payload_sha256 = "f169ae0163b8faaa673cc0f2ee8c60c68dcbd4ecd40eaccb8610dca3f80097b8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:expected-state-condition-expected-epoch-322477fc4d71f7a8"
+union_name = "ExpectedStateCondition"
+containing_schema = "ExpectedStateCondition"
+union_path = "ExpectedStateCondition"
+arm_tag = 0x0003
+source_arm_name = "ExpectedEpoch"
+stable_name = "expected_epoch"
+payload_kind = "inline-record"
+payload_sha256 = "bb0335783a1df7a0472b98ddb3633885de35d9133af1a10da90609303c2f3c60"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:expected-state-condition-expected-index-b2d0802b8985d608"
+union_name = "ExpectedStateCondition"
+containing_schema = "ExpectedStateCondition"
+union_path = "ExpectedStateCondition"
+arm_tag = 0x0004
+source_arm_name = "ExpectedIndex"
+stable_name = "expected_index"
+payload_kind = "inline-record"
+payload_sha256 = "74dc0cbf0ad1e646cf563514c96c8961ac8b3ff4bb0ffdc0244e29698aacba70"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a21"
+row_id = "a21:union:terminal-audit-gate-7e945735ba9d36fe"
+union_name = "TerminalAuditGate"
+containing_schema = "TerminalAuditGate"
+union_path = "TerminalAuditGate"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["KeyDestroyProposal", "SequenceNeutralSpec<Tag>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:terminal-audit-gate-structurally-inapplicable-4ebd5634be910103"
+union_name = "TerminalAuditGate"
+containing_schema = "TerminalAuditGate"
+union_path = "TerminalAuditGate"
+arm_tag = 0x0001
+source_arm_name = "StructurallyInapplicable"
+stable_name = "structurally_inapplicable"
+payload_kind = "inline-record"
+payload_sha256 = "1a750c560dc03b9c5328def7c075e44d5eb0464e20b3e9ad0f0b8405cf6a5fc7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:terminal-audit-gate-not-required-9161c0ca306a9b22"
+union_name = "TerminalAuditGate"
+containing_schema = "TerminalAuditGate"
+union_path = "TerminalAuditGate"
+arm_tag = 0x0002
+source_arm_name = "NotRequired"
+stable_name = "not_required"
+payload_kind = "inline-record"
+payload_sha256 = "27acef18721dfa1ec3a2bf2c4742c60a7aae1d17ac79ef1599ad68f6f0987966"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:terminal-audit-gate-required-6e0fcb8906720e76"
+union_name = "TerminalAuditGate"
+containing_schema = "TerminalAuditGate"
+union_path = "TerminalAuditGate"
+arm_tag = 0x0003
+source_arm_name = "Required"
+stable_name = "required"
+payload_kind = "inline-record"
+payload_sha256 = "d6bf34c187c66a2091c7655f9874144be1a581ef32d08124b86f9866d7daadb9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[reservation]]
 row_id = "a10:reservation:activated-delta-retention-cut"
 slice_id = "a10"
@@ -46600,6 +46903,16 @@ identity_class = "unclassified"
 source_locations = ["a21:2613"]
 
 [[top_level_candidate]]
+row_id = "a10:top-level-candidate:expected-state-condition-2bbdf67684de7781"
+slice_id = "a10"
+symbol = "ExpectedStateCondition"
+generic_signature = ""
+source_key = "top|ExpectedStateCondition"
+source_kind = "confirmed"
+identity_class = "wire"
+source_locations = ["a10:1913"]
+
+[[top_level_candidate]]
 row_id = "a05:top-level-candidate:expired-tombstone-fd0fa8d9f6d547eb"
 slice_id = "a05"
 symbol = "ExpiredTombstone"
@@ -55086,7 +55399,7 @@ symbol = "TerminalAuditGate"
 generic_signature = ""
 source_key = "top|TerminalAuditGate"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2699"]
 
 [[top_level_candidate]]
@@ -55886,7 +56199,7 @@ symbol = "WeakStateIdentity"
 generic_signature = ""
 source_key = "top|WeakStateIdentity"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a03:1478"]
 
 [[top_level_candidate]]
@@ -90979,3 +91292,197 @@ source_locations = ["a09:1900"]
 resolution = "maps-to-source"
 resolved_source_keys = ["field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.root_digest|root_digest"]
 rationale = "a09:1900: shorthand member `root_digest` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `digest256`; the derivation is that the appendix digest family is digest256/32, and the value commits the binding-root leaf mapping rather than the record's own preceding bytes, so it is digest_class=transcript with a registered recipe, matching a01 signed_transcript_digest rather than a BodyDigest. The single affected census key maps to that source form."
+
+[[target]]
+row_id = "a03:target:wire-type-weak-state-identity"
+target_row_id = "a03:wire-type:weak-state-identity"
+slice_id = "a03"
+source_key = "top|WeakStateIdentity"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:wire-type-expected-state-condition"
+target_row_id = "a10:wire-type:expected-state-condition"
+slice_id = "a10"
+source_key = "top|ExpectedStateCondition"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:wire-type-expected-state-condition-weak-state-identity"
+target_row_id = "a10:wire-type:expected-state-condition-weak-state-identity"
+slice_id = "a10"
+source_key = "arm|ExpectedStateCondition|ExpectedStateCondition|WeakStateIdentity"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:wire-type-expected-state-condition-weak-marker-identity"
+target_row_id = "a10:wire-type:expected-state-condition-weak-marker-identity"
+slice_id = "a10"
+source_key = "arm|ExpectedStateCondition|ExpectedStateCondition|WeakMarkerIdentity"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:wire-type-expected-state-condition-expected-epoch"
+target_row_id = "a10:wire-type:expected-state-condition-expected-epoch"
+slice_id = "a10"
+source_key = "arm|ExpectedStateCondition|ExpectedStateCondition|ExpectedEpoch"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:wire-type-expected-state-condition-expected-index"
+target_row_id = "a10:wire-type:expected-state-condition-expected-index"
+slice_id = "a10"
+source_key = "arm|ExpectedStateCondition|ExpectedStateCondition|ExpectedIndex"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-expected-state-condition-4979a5d9718448bd"
+target_row_id = "a10:union:expected-state-condition-4979a5d9718448bd"
+slice_id = "a10"
+source_key = "union|ExpectedStateCondition|ExpectedStateCondition"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-expected-state-condition-weak-state-identity-dddaa059c4ac18ab"
+target_row_id = "a10:union-arm:expected-state-condition-weak-state-identity-dddaa059c4ac18ab"
+slice_id = "a10"
+source_key = "arm|ExpectedStateCondition|ExpectedStateCondition|WeakStateIdentity"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-expected-state-condition-weak-marker-identity-e4a025d5c086e8be"
+target_row_id = "a10:union-arm:expected-state-condition-weak-marker-identity-e4a025d5c086e8be"
+slice_id = "a10"
+source_key = "arm|ExpectedStateCondition|ExpectedStateCondition|WeakMarkerIdentity"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-expected-state-condition-expected-epoch-322477fc4d71f7a8"
+target_row_id = "a10:union-arm:expected-state-condition-expected-epoch-322477fc4d71f7a8"
+slice_id = "a10"
+source_key = "arm|ExpectedStateCondition|ExpectedStateCondition|ExpectedEpoch"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-expected-state-condition-expected-index-b2d0802b8985d608"
+target_row_id = "a10:union-arm:expected-state-condition-expected-index-b2d0802b8985d608"
+slice_id = "a10"
+source_key = "arm|ExpectedStateCondition|ExpectedStateCondition|ExpectedIndex"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-terminal-audit-gate"
+target_row_id = "a21:wire-type:terminal-audit-gate"
+slice_id = "a21"
+source_key = "top|TerminalAuditGate"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-terminal-audit-gate-structurally-inapplicable"
+target_row_id = "a21:wire-type:terminal-audit-gate-structurally-inapplicable"
+slice_id = "a21"
+source_key = "arm|TerminalAuditGate|TerminalAuditGate|StructurallyInapplicable"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-terminal-audit-gate-not-required"
+target_row_id = "a21:wire-type:terminal-audit-gate-not-required"
+slice_id = "a21"
+source_key = "arm|TerminalAuditGate|TerminalAuditGate|NotRequired"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-terminal-audit-gate-required"
+target_row_id = "a21:wire-type:terminal-audit-gate-required"
+slice_id = "a21"
+source_key = "arm|TerminalAuditGate|TerminalAuditGate|Required"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-terminal-audit-gate-7e945735ba9d36fe"
+target_row_id = "a21:union:terminal-audit-gate-7e945735ba9d36fe"
+slice_id = "a21"
+source_key = "union|TerminalAuditGate|TerminalAuditGate"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-terminal-audit-gate-structurally-inapplicable-4ebd5634be910103"
+target_row_id = "a21:union-arm:terminal-audit-gate-structurally-inapplicable-4ebd5634be910103"
+slice_id = "a21"
+source_key = "arm|TerminalAuditGate|TerminalAuditGate|StructurallyInapplicable"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-terminal-audit-gate-not-required-9161c0ca306a9b22"
+target_row_id = "a21:union-arm:terminal-audit-gate-not-required-9161c0ca306a9b22"
+slice_id = "a21"
+source_key = "arm|TerminalAuditGate|TerminalAuditGate|NotRequired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-terminal-audit-gate-required-6e0fcb8906720e76"
+target_row_id = "a21:union-arm:terminal-audit-gate-required-6e0fcb8906720e76"
+slice_id = "a21"
+source_key = "arm|TerminalAuditGate|TerminalAuditGate|Required"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-basis-state"
+target_row_id = "a15:field:key-destroy-proposal-basis-state"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.basis_state|basis_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-expected-state-conditions"
+target_row_id = "a15:field:key-destroy-proposal-expected-state-conditions"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|expected_state_conditions"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-terminal-audit-gate"
+target_row_id = "a15:field:key-destroy-proposal-terminal-audit-gate"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|terminal_audit_gate"
+target_kind = "field"
+definition_status = "declared"
+
+[[ambiguity_adjudication]]
+row_id = "a15:ambiguity-adjudication:9d87b7faa3ae557cc0b0eb4aecf03219a98f5758e0e5607b1fa28c5d7eb3d55f"
+slice_id = "a15"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|98f99be66a4f7e6dae8d94497c1dec6b36cde1de9f37ac488ffa72adbea0c4fe|1|b0269c814fc42bacf204d73a5e53a2a6bd6f885daed52569cd738538190972c1|shorthand field has no exact type"
+source_locations = ["a15:2059"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|expected_state_conditions"]
+rationale = "a15:2059 omits the repeated shared type spelling for readability, while a10:1912 fixes the exact comparison-only many-valued arm set as WeakStateIdentity | WeakMarkerIdentity | ExpectedEpoch | ExpectedIndex and a10:1913 gives that shared source-ordered union its durable name ExpectedStateCondition. The A15 field therefore maps to that shared union rather than an A15-local substitute."
+
+[[ambiguity_adjudication]]
+row_id = "a15:ambiguity-adjudication:d14591312dc555272847ff5149204b97bfc8f5ff4ceef5736d45d6b91bf71dda"
+slice_id = "a15"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|03aa4f26c42ab045c593f45f87d78e0aa42c1f1e03198d96e839894c7ea7fb6f|1|69deea536c4e2a4367d3d22c27e70a3be3cc6b5d974b443f5109a571a5466530|shorthand field has no exact type"
+source_locations = ["a15:2059"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|terminal_audit_gate"]
+rationale = "a15:2059 uses the compact shorthand `terminal_audit_gate`; the a10:1914 SequenceNeutralSpec law requires exactly one TerminalAuditGate even where compact Appendix prose omits its type, and a21:2699 fixes the exact source-ordered StructurallyInapplicable | NotRequired | Required union. Prose omission is not absence and does not authorize a local gate alias."
