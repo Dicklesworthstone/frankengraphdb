@@ -15815,7 +15815,11 @@ stable_name = "Ready"
                 "validated-remote-configuration-anchor",
                 "top|ValidatedRemoteConfigurationAnchor",
                 0x04b7,
-                40,
+                // 40 -> 14 (fgdb-oicl): RemoteAuthorityConfigurationEvidence@14 carries
+                // ValidatedCheckpointSuccessor{predecessor_anchor_ref:StrongRef<
+                // ValidatedRemoteConfigurationAnchor>} (a04:1398), so the anchor is the
+                // ceiling-bound target of an already-frozen referrer and 40 was above it.
+                14,
                 "true",
                 16_777_216,
                 true,
@@ -16523,7 +16527,8 @@ stable_name = "Ready"
                 "one",
                 "true",
                 16_777_216,
-                40,
+                // moves with its containing kind, 40 -> 14 (fgdb-oicl)
+                14,
                 "a04:field:validated-remote-configuration-anchor-consumer-applied-identity",
                 "field|ValidatedRemoteConfigurationAnchor|ValidatedRemoteConfigurationAnchor.consumer_applied_identity|consumer_applied_identity",
             ),

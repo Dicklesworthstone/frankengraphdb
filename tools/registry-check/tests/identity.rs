@@ -6337,13 +6337,17 @@ fn idr_assignment_history_and_epoch_are_frozen() {
 #[test]
 fn idr_a14_gc_decision_and_inventory_union_anchors_are_exact() {
     let identity = real_identity();
+    // GcDecisionRecord 15 -> 25 (fgdb-oicl): its own body strongly references
+    // GcProposal -> ConfigPayloadFloor -> MandatoryInventory@25, so no value below 25
+    // satisfies projection_dag_future_result once those interiors mint. The field
+    // rows carry the containing kind's order by law.
     let expected_fields = [
         (
             "GcDecisionRecord",
             "applied_control_ref",
             0x0002,
             "AppliedControlRef",
-            15,
+            25,
             49,
         ),
         (
@@ -6351,7 +6355,7 @@ fn idr_a14_gc_decision_and_inventory_union_anchors_are_exact() {
             "decision",
             0x0007,
             "GcDecisionRecordDecision",
-            15,
+            25,
             16_777_216,
         ),
         (
