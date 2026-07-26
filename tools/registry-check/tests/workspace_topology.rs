@@ -33,7 +33,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:06dc3e04b7b7a0ca";
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:de81791998d1fe55";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -159,7 +159,8 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
             .iter()
             .filter(|row| row.activation_status == "active")
             .count(),
-        10
+        11,
+        "ten ordinary crates plus fgdb-unsafe-simd, the first island to land"
     );
     assert_eq!(
         registry
@@ -660,6 +661,7 @@ fn synthetic_crate(name: &str, deps: &[&str]) -> ScannedCrate {
         lints_workspace: true,
         root_path: "src/lib.rs".to_string(),
         root_forbids_unsafe: true,
+        root_denies_unsafe: false,
         relaxes_unsafe: false,
     }
 }
@@ -872,14 +874,45 @@ fn topology_live_scan_matches_the_registry() {
     let scan = scan_workspace(&repo_root()).expect("workspace scans");
     assert_eq!(scan.workspace_unsafe_lint, "forbid");
     assert_eq!(scan.toolchain_channel, registry.registry.toolchain_channel);
+    let mut islands = 0_usize;
     for row in registry.active_crates() {
         let scanned = scan
             .by_dir(&row.manifest_dir)
             .unwrap_or_else(|| panic!("{} has no manifest", row.name));
         assert_eq!(scanned.package_name, row.name);
-        assert!(scanned.root_forbids_unsafe, "{} root", row.name);
-        assert!(!scanned.relaxes_unsafe, "{} relaxes unsafe", row.name);
+        // The policy column is a claim about the manifest AND the root, and the
+        // two policies want OPPOSITE things of the manifest. An ordinary crate
+        // inherits the workspace forbid and may never relax it. An island must
+        // NOT inherit it -- `forbid` cannot be lowered, so inheriting it would
+        // make every ledgered site uncompilable -- which leaves its own
+        // `#![deny(unsafe_code)]` as the only thing constraining it, so that is
+        // asserted positively rather than assumed from the column.
+        if row.unsafe_policy == "deny_ledgered" {
+            islands += 1;
+            assert!(
+                scanned.root_denies_unsafe,
+                "{} is an island and its root must deny",
+                row.name
+            );
+            assert!(
+                !scanned.lints_workspace,
+                "{} is an island and must not inherit the workspace forbid",
+                row.name
+            );
+        } else {
+            assert!(scanned.root_forbids_unsafe, "{} root", row.name);
+            assert!(!scanned.relaxes_unsafe, "{} relaxes unsafe", row.name);
+            assert!(
+                scanned.lints_workspace,
+                "{} must inherit the workspace forbid",
+                row.name
+            );
+        }
     }
+    assert!(
+        islands > 0,
+        "no island is active, so the island branch above asserted nothing"
+    );
 }
 
 // -----------------------------------------------------------------------------

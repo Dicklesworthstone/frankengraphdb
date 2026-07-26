@@ -892,6 +892,12 @@ pub struct ScannedCrate {
     pub lints_workspace: bool,
     pub root_path: String,
     pub root_forbids_unsafe: bool,
+    /// `#![deny(unsafe_code)]` at the crate root. An island cannot inherit the
+    /// workspace `forbid` — `forbid` cannot be lowered, so inheriting it would
+    /// make every ledgered site uncompilable — so `deny` at the root is the
+    /// ONLY thing standing between an island and unrestricted unsafe. It is
+    /// therefore checked positively rather than assumed from the policy column.
+    pub root_denies_unsafe: bool,
     /// Any `allow(unsafe_code)` / `expect(unsafe_code)` attribute anywhere in
     /// the crate's sources. The unsafe-boundary LEDGER owns site-level rows;
     /// this flag only answers "did an ordinary crate try to lower the policy".
@@ -1125,6 +1131,7 @@ pub fn scan_manifest(dir: &str, text: &str) -> Result<ScannedCrate, String> {
         lints_workspace,
         root_path,
         root_forbids_unsafe: false,
+        root_denies_unsafe: false,
         relaxes_unsafe: false,
     })
 }
@@ -1210,6 +1217,9 @@ pub fn scan_workspace(root: &Path) -> Result<WorkspaceScan, String> {
             scanned.root_forbids_unsafe = source
                 .lines()
                 .any(|line| line.trim() == "#![forbid(unsafe_code)]");
+            scanned.root_denies_unsafe = source
+                .lines()
+                .any(|line| line.trim() == "#![deny(unsafe_code)]");
         }
         let src_dir = member_dir.join("src");
         if src_dir.is_dir() {
@@ -3231,7 +3241,22 @@ fn validate_live_tree(registry: &TopologyRegistry, root: &Path, violations: &mut
                         ),
                     ));
                 }
-                if !scanned.lints_workspace {
+                // Inheritance is decided by the policy column, and BOTH
+                // directions are errors. An ordinary crate that omits the
+                // table escapes the workspace forbid invisibly. An island that
+                // carries it inherits `forbid`, which cannot be lowered, so
+                // every one of its ledgered sites stops compiling — the island
+                // would be a boundary crate that can hold no boundary.
+                if row.unsafe_policy == "deny_ledgered" {
+                    if scanned.lints_workspace {
+                        violations.push(Violation::new(
+                            "island_inherits_forbid",
+                            &row.name,
+                            "§1 constraint 2",
+                            "an unsafe island must NOT carry [lints] workspace = true: it would inherit unsafe_code = \"forbid\", forbid cannot be lowered, and no ledgered allow site could compile",
+                        ));
+                    }
+                } else if !scanned.lints_workspace {
                     violations.push(Violation::new(
                         "lints_not_inherited",
                         &row.name,
@@ -3301,6 +3326,24 @@ fn validate_live_tree(registry: &TopologyRegistry, root: &Path, violations: &mut
                     "an allow/expect(unsafe_code) attribute appears in an ordinary crate; forbid cannot be lowered and only the three named islands may hold ledgered allows",
                 ));
             }
+        } else if !scanned.root_denies_unsafe {
+            // The island half of Law 5, and it is not symmetric with the
+            // ordinary half. An island's manifest deliberately omits the
+            // workspace lint table, so if its root also loses
+            // `#![deny(unsafe_code)]` NOTHING constrains unsafe in that crate
+            // and every gate still passes: the ledger checker would keep
+            // matching the sites that remain, and this map would keep
+            // reporting deny_ledgered. The policy column is a claim about the
+            // root, so the root is read.
+            violations.push(Violation::new(
+                "island_root_missing_deny",
+                &row.name,
+                "§1 constraint 2",
+                format!(
+                    "{}/{} does not carry #![deny(unsafe_code)]; an island that neither inherits forbid nor denies at its root is unconstrained",
+                    row.manifest_dir, scanned.root_path
+                ),
+            ));
         }
     }
 

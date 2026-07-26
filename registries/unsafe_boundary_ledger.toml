@@ -61,7 +61,7 @@ bead = "fgdb-w1-unsafe-ledger-icp"
 [[island]]
 name = "fgdb-unsafe-simd"
 charter = "SIMD and vector kernels only: codec decode inner loops, digest and cipher inner loops, hash-table control-group probes, linalg kernels, plus AMAC/memory-level-parallelism experiments. Every kernel carries a bit-identical scalar fallback (§8.7); STRICT kernels are fixed by the portable scalar profile and must agree bit-for-bit across every supported dispatch path. AMAC/prefetch policy is physical-only and may never change a result or a logical order."
-status = "planned"
+status = "present"
 
 [[island]]
 name = "fgdb-unsafe-arena"
@@ -84,3 +84,33 @@ status = "planned"
 # `allow` site. `site_unledgered` fires otherwise, and `ledger_row_orphaned`
 # fires if a row outlives the code it describes.
 # -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# fgdb-unsafe-simd — landed by fgdb-w1-unsafe-islands-eqrq.
+#
+# Two sites, deliberately of different kinds. The first must be BIT-IDENTICAL to
+# its fallback and is measured against it; the second must be INVISIBLE and is
+# measured by running the same probe sequence with and without it. A ledger that
+# only knew how to say "matches the scalar path" could not state the second
+# claim, and a prefetch that quietly changed a result would satisfy it.
+# -----------------------------------------------------------------------------
+
+[[site]]
+row_id = "simd-control-group-sse2"
+island = "fgdb-unsafe-simd"
+path = "crates/fgdb-unsafe-simd/src/control_group.rs"
+symbol = "fn classify_sse2(lanes: &[u8; CONTROL_GROUP_WIDTH], tag: u8) -> GroupMasks {"
+stated_invariant = "The load is `_mm_loadu_si128`, the UNALIGNED form, reading exactly 16 bytes from a pointer derived from a live `&[u8; CONTROL_GROUP_WIDTH]`, so the read is in bounds for its full width and the borrow outlives it. Every intrinsic used is SSE2, which the x86-64 ABI guarantees on every x86-64 target; the item carries `cfg(target_arch = \"x86_64\")`, which is what makes that a fact rather than an assumption, and no runtime feature probe exists that could disagree with it. `_mm_movemask_epi8` produces 16 meaningful bits in an i32, so the `as u16` truncation is total, and bit n is lane n — the same lane-to-bit map the scalar profile writes. Nothing in the block writes through a pointer and no value outlives it."
+evidence = "crates/fgdb-unsafe-simd/tests/dispatch_differential.rs — 5168 cases over the whole compiled dispatch matrix, asserting per-case equality AND equality of the rolling output digest against the scalar profile (input fnv1a64:6e31eccf1b7e3ed8, output fnv1a64:fd3805bdf6e8e20a on both paths); its companion row proves the harness separates a one-bit-rotated mask from an agreeing one, so the digests are licensed. src/control_group.rs unit rows — all 65536 sixteen-lane masks through every compiled path, and every control byte against every tag for the scalar profile versus an independently written naive reference. tests/control_group_dispatch_compat.rs — the kernel adapted into fgdb-collections' ControlGroupDispatch and differenced against SCALAR_CONTROL_GROUP_DISPATCH and SWAR_CONTROL_GROUP_DISPATCH."
+fallback = "classify_scalar, the portable specification, reachable on every target via classify_via(DispatchPath::Scalar, ..). The relationship asserted is bit-identity, not approximate agreement: the kernel is defined BY the scalar profile (§8.7 STRICT), so a drift is a defect in the kernel and never a tolerance."
+no_claim_boundary = "Says nothing about targets other than x86-64, where the item does not exist. Says nothing about non-baseline vector features: none are used, so no runtime dispatch decision is being claimed correct. Says nothing about aliasing of the caller's buffer beyond the 16 bytes borrowed for the load. NOT Miri-checked — the x86 intrinsics are outside the lane's supported set, so the differential harness is the evidence here and the Miri/ASAN/TSAN lanes remain open work on fgdb-w1-unsafe-islands-eqrq. No performance claim of any kind: no benchmark is attached and none is implied."
+
+[[site]]
+row_id = "simd-control-prefetch"
+island = "fgdb-unsafe-simd"
+path = "crates/fgdb-unsafe-simd/src/control_group.rs"
+symbol = "pub fn prefetch_controls(controls: &[u8], offset: usize) {"
+stated_invariant = "`controls.get(offset)` returns a live shared reference or nothing, so the pointer handed to `_mm_prefetch` is always valid for reads of at least one byte for the duration of the call and an out-of-range offset issues no hint at all rather than forming an out-of-bounds pointer. `_mm_prefetch` issues a cache hint and performs no architecturally visible access: it cannot fault, cannot write, and cannot be observed in any result. The strategy is the const generic `_MM_HINT_T0`, so no invalid strategy value can reach the instruction."
+evidence = "src/control_group.rs::prefetch_is_a_no_op_in_and_out_of_range — in-range, last index, one past the end, usize::MAX, and the empty slice, asserting classification is unchanged either side. tests/control_group_dispatch_compat.rs::prefetching_a_control_array_changes_no_classification — 128 wrapping gathers classified with and without hints and compared mask for mask, which is the observable form of the physical-only rule."
+fallback = "A no-op. On every non-x86-64 target the body compiles to `let _ = (controls, offset)`, so the fallback is not a slower path but the absence of one — which is exactly what §8.7 requires of prefetch policy: physical only, never a correctness input."
+no_claim_boundary = "Claims no speedup: no benchmark is attached, and a prefetch that helped nothing would still satisfy every assertion here. Claims nothing about cache state, timing, or memory-level parallelism, none of which are part of the deterministic result contract. NOT Miri-checked. This site is the one written with a `cfg_attr`-wrapped allow, and it is only counted at all because the site scanner matches attributes structurally (commit 4f58cc3); the prefix scanner it replaced reported this file as holding one site instead of two."

@@ -108,8 +108,8 @@ embedded_source_blocks = [
 # without moving these is schema drift, not an edit.
 layer_count = 14
 crate_count = 70
-active_crate_count = 10
-planned_crate_count = 59
+active_crate_count = 11
+planned_crate_count = 58
 reserved_crate_count = 1
 owner_scope_count = 14
 foundation_project_count = 3
@@ -125,7 +125,7 @@ dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
 id_table_hash = "fnv1a64:b422bc59c3da23ca"
-semantic_contract_hash = "fnv1a64:06dc3e04b7b7a0ca"
+semantic_contract_hash = "fnv1a64:de81791998d1fe55"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -867,7 +867,10 @@ manifest_dir = "crates/fgdb-evidence"
 
 # --- Unsafe islands (3) -------------------------------------------------------
 # Policy column only. Site-level ledger rows and the site<->row bijection belong
-# to fgdb-w1-unsafe-ledger-icp, which also lands these three directories.
+# to the unsafe-boundary ledger. fgdb-w1-unsafe-ledger-icp landed that ledger and
+# its checker and is closed; fgdb-w1-unsafe-islands-eqrq lands the three
+# directories themselves, one at a time, flipping the row here and the roster
+# status there in the same commit as the crate.
 
 [[crate]]
 name = "fgdb-unsafe-simd"
@@ -876,12 +879,12 @@ layer_position = 1
 role = "SIMD/vector kernels with bit-identical scalar fallbacks."
 role_basis = "layer_charter"
 unsafe_policy = "deny_ledgered"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "all"
 posture_basis = "product_shape"
 owner = "W1"
-owner_bead = "fgdb-w1-unsafe-ledger-icp"
-manifest_dir = ""
+owner_bead = "fgdb-w1-unsafe-islands-eqrq"
+manifest_dir = "crates/fgdb-unsafe-simd"
 
 [[crate]]
 name = "fgdb-unsafe-arena"

@@ -23,6 +23,7 @@ members = [
     "crates/fgdb-resource",
     "crates/fgdb-sketch",
     "crates/fgdb-types",
+    "crates/fgdb-unsafe-simd",
     "tools/registry-check",
 ]
 

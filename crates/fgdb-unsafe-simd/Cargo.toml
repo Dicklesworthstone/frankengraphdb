@@ -1,0 +1,26 @@
+[package]
+name = "fgdb-unsafe-simd"
+version = "0.0.1"
+edition = "2024"
+description = "Ledgered SIMD/vector kernels with bit-identical scalar fallbacks."
+publish = false
+
+# NO `[lints] workspace = true`, and that omission is the whole point.
+#
+# The workspace default is `unsafe_code = "forbid"`, and Rust's `forbid` cannot
+# be lowered by any inner attribute — which is exactly why raw-pointer work
+# cannot be sprinkled through ordinary crates. An island opts out of the
+# inherited lint table here and re-imposes `#![deny(unsafe_code)]` at its root
+# instead, so every relaxation must be written down, one narrowly scoped site at
+# a time, each with a row in `registries/unsafe_boundary_ledger.toml`.
+#
+# `unsafe-ledger-check` exempts exactly the three rostered islands from the
+# inheritance rule; any other crate that omits this table fails with
+# `member_does_not_inherit_forbid`.
+
+[dev-dependencies]
+# Test-only, and deliberately so: the island's runtime dependency set is empty.
+# `fgdb-collections` owns the semantic boundary this kernel must implement
+# (`ControlGroupDispatch`, `SCALAR_CONTROL_GROUP_DISPATCH`), so the compatibility
+# and differential tests read the oracle from its owner rather than restating it.
+fgdb-collections = { path = "../fgdb-collections" }
