@@ -8,7 +8,7 @@
 This document is generated from `registries/workspace_topology.toml` and checked byte-exact in CI. The registry is the master; this file is its rendering. Every plan excerpt below is embedded verbatim under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the map.
 
 * **Layers:** 14
-* **Crates:** 70 (12 active, 57 planned, 1 reserved)
+* **Crates:** 70 (13 active, 56 planned, 1 reserved)
 * **Inventory rows:** 51 (23 build-here, 19 consume-from, 9 design-only)
 * **Replay:** `cargo run -p registry-check --bin topology-check -- --root .`
 * **Constraints bound:** FG-CON-01, FG-CON-02
@@ -66,7 +66,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 |---|---|---|---|---|---|---|---|
 | 1 | `fgdb-unsafe-simd` | active | `deny_ledgered` | all | W1 | fgdb-w1-unsafe-islands-eqrq | SIMD/vector kernels with bit-identical scalar fallbacks. |
 | 2 | `fgdb-unsafe-arena` | active | `deny_ledgered` | all | W1 | fgdb-w1-unsafe-islands-eqrq | Bump/region arena internals and generational-handle plumbing behind safe APIs. |
-| 3 | `fgdb-unsafe-vfs` | planned | `deny_ledgered` | all | W1 | fgdb-w1-unsafe-ledger-icp | Raw file/mapping syscall surfaces beneath the filesystem-profile layer. |
+| 3 | `fgdb-unsafe-vfs` | active | `deny_ledgered` | all | W1 | fgdb-w1-unsafe-islands-eqrq | Raw file/mapping syscall surfaces beneath the filesystem-profile layer. |
 
 ### 3. Chronicle
 
@@ -381,4 +381,4 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 ## Pins
 
 * `id_table_hash` = `fnv1a64:b422bc59c3da23ca` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:02c6793128524766` — every normative decision, prose excluded.
+* `semantic_contract_hash` = `fnv1a64:30c7df0533e976dd` — every normative decision, prose excluded.

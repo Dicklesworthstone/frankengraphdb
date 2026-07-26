@@ -25,6 +25,7 @@ members = [
     "crates/fgdb-types",
     "crates/fgdb-unsafe-arena",
     "crates/fgdb-unsafe-simd",
+    "crates/fgdb-unsafe-vfs",
     "tools/registry-check",
 ]
 

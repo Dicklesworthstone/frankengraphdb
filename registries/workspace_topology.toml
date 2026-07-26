@@ -108,8 +108,8 @@ embedded_source_blocks = [
 # without moving these is schema drift, not an edit.
 layer_count = 14
 crate_count = 70
-active_crate_count = 12
-planned_crate_count = 57
+active_crate_count = 13
+planned_crate_count = 56
 reserved_crate_count = 1
 owner_scope_count = 14
 foundation_project_count = 3
@@ -125,7 +125,7 @@ dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
 id_table_hash = "fnv1a64:b422bc59c3da23ca"
-semantic_contract_hash = "fnv1a64:02c6793128524766"
+semantic_contract_hash = "fnv1a64:30c7df0533e976dd"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -907,12 +907,12 @@ layer_position = 3
 role = "Raw file/mapping syscall surfaces beneath the filesystem-profile layer."
 role_basis = "layer_charter"
 unsafe_policy = "deny_ledgered"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "all"
 posture_basis = "product_shape"
 owner = "W1"
-owner_bead = "fgdb-w1-unsafe-ledger-icp"
-manifest_dir = ""
+owner_bead = "fgdb-w1-unsafe-islands-eqrq"
+manifest_dir = "crates/fgdb-unsafe-vfs"
 
 # --- Chronicle (7) ------------------------------------------------------------
 

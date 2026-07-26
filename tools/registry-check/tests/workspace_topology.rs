@@ -33,7 +33,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:02c6793128524766";
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:30c7df0533e976dd";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -159,8 +159,9 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
             .iter()
             .filter(|row| row.activation_status == "active")
             .count(),
-        12,
-        "ten ordinary crates plus the two landed islands, fgdb-unsafe-simd and fgdb-unsafe-arena"
+        13,
+        "ten ordinary crates plus all three landed islands: fgdb-unsafe-simd, \
+         fgdb-unsafe-arena and fgdb-unsafe-vfs"
     );
     assert_eq!(
         registry
@@ -379,12 +380,16 @@ fn topology_island_roster_agrees_with_the_unsafe_boundary_ledger() {
 
 #[test]
 fn topology_neg_island_status_disagreement() {
-    // Claiming an island is active here while the ledger still rosters it as
-    // planned must fail: an island must be admitted to the ledger BEFORE it
-    // lands, never after.
+    // The two registries must agree about every island, and the fixture has to
+    // follow the tree rather than the other way round. It used to flip
+    // `fgdb-unsafe-vfs` from planned to active while the ledger still rostered
+    // it planned; all three islands have now landed, so the disagreement is
+    // seeded in the other direction — the topology calls the island planned
+    // while the ledger rosters it `present`. Either way round is the same law:
+    // a half-move fails loudly in both files.
     let codes = codes_after(
-        "name = \"fgdb-unsafe-vfs\"\nlayer = \"unsafe_islands\"\nlayer_position = 3\nrole = \"Raw file/mapping syscall surfaces beneath the filesystem-profile layer.\"\nrole_basis = \"layer_charter\"\nunsafe_policy = \"deny_ledgered\"\nactivation_status = \"planned\"",
         "name = \"fgdb-unsafe-vfs\"\nlayer = \"unsafe_islands\"\nlayer_position = 3\nrole = \"Raw file/mapping syscall surfaces beneath the filesystem-profile layer.\"\nrole_basis = \"layer_charter\"\nunsafe_policy = \"deny_ledgered\"\nactivation_status = \"active\"",
+        "name = \"fgdb-unsafe-vfs\"\nlayer = \"unsafe_islands\"\nlayer_position = 3\nrole = \"Raw file/mapping syscall surfaces beneath the filesystem-profile layer.\"\nrole_basis = \"layer_charter\"\nunsafe_policy = \"deny_ledgered\"\nactivation_status = \"planned\"",
     );
     assert_reports(&codes, "island_status_disagreement");
 }
