@@ -555,6 +555,26 @@ run_ubs() {
 #   135  12.9%  panic!/unreachable!/todo!/unimplemented!
 #   120  11.4%  JWT decode, validation bypass, or missing claim binding
 #
+# MOVED 794 -> 796 by fgdb-n061, and this is what the ratchet is for: the two
+# new findings are named here rather than absorbed. Retiring the 450 mirrored
+# rationale literals replaced one prose comparison with two digest comparisons
+# in tools/registry-check/src/appendix_a.rs:
+#   sha256_hex(row.rationale.as_bytes()) == pin.rationale_sha256   (the reader)
+#   sha256_hex(row.rationale.as_bytes()) != pin.rationale_sha256   (the guard)
+# UBS matches any `==`/`!=` over a value that looks like a digest, so both land
+# in this class.
+#
+# ATTRIBUTED BY MEASUREMENT, not by arithmetic on the total: scanning
+# appendix_a.rs ALONE reported 275 criticals at HEAD and 277 with the change --
+# +2, in this class, from this file. Nothing else in the tree moved.
+#
+# THEY ARE NOT TIMING DEFECTS. registry-check is a build-time developer tool
+# comparing content digests of PUBLIC repository files; there is no secret, no
+# remote caller and no timing channel, and an adversary who can time it already
+# has the repository. A constant-time helper would also need `subtle` or `ring`,
+# which Doctrine #1 forbids. Recorded as a real, explained increase rather than
+# suppressed -- the ratchet's job is to make growth deliberate, not zero.
+#
 # ALWAYS-FIX PER DOCTRINE — memory safety, UB, data races — IS ZERO OF 1049.
 # Stating that plainly because it is the load-bearing result: nothing here is in
 # the category AGENTS.md says to fix on sight. The workspace is
@@ -590,7 +610,7 @@ run_ubs() {
 # with NO "and N more" marker, so it truncates silently. Tightening this to an
 # exact set needs a per-finding output UBS does not currently emit.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=794"
+  "Secret/token comparisons without timing-safe equality=796"
   "panic!/unreachable!/todo!/unimplemented!=135"
   "JWT decode, validation bypass, or missing claim binding=120"
 )

@@ -233,7 +233,39 @@ struct AmbiguityAdjudicationContractPin {
     source_locations: &'static [&'static str],
     resolution: &'static str,
     resolved_source_keys: &'static [&'static str],
-    rationale: &'static str,
+    /// `sha256(catalog_row.rationale)`, NOT the prose.
+    ///
+    /// THE PROSE STAYS REACHABLE, and that is condition 1 of the fgdb-n061
+    /// authorisation: `row_id` names the catalog row and this digest proves
+    /// which bytes were approved, so any rationale is retrievable byte-exactly
+    /// with `rg -A8 '<row_id>' registries/appendix_a_catalog.toml`. Nothing is
+    /// deleted from the repository -- the text stays at its source, in a file
+    /// this change does not touch, and digest + row reconstructs any row.
+    ///
+    /// WHY A DIGEST AND NOT A COPY. The 450 literals here were byte-identical
+    /// to their catalog rows, 450 of 450, zero paraphrase -- so they carried no
+    /// independent content, and they were the LAST place an existence query
+    /// about Appendix A resolved against a copy of Appendix A. Every
+    /// `registered` law name in registries/laws.toml had ZERO occurrences in
+    /// this file outside them: the most-cited one returned 767 hits, every one
+    /// a copy, and the plan anchor shared by FG-LAW-01 and FG-LAW-02 was 76
+    /// hits and 100% copy. A first law sweep read three laws as RESOLVES and
+    /// all three were false for exactly that reason
+    /// (fgdb-checker-mirrors-subject-prose-23u1, fgdb-n061).
+    ///
+    /// THE LAW NAMES AND THE ANCHOR ARE DELIBERATELY NOT SPELLED HERE. Written
+    /// out, this very comment would put them back into the file and a law
+    /// existence query would resolve against it -- one hit instead of 767, but
+    /// the same defect, in the paragraph explaining the defect. Cite laws by
+    /// their registry ID; names and anchors live in registries/laws.toml.
+    ///
+    /// WHAT THIS FORECLOSES, stated because it is real: a reviewer approving a
+    /// digest bump can no longer read the justification at the point of
+    /// authorization, and `rg` archaeology for adjudication reasoning must move
+    /// to the catalog. Detection is preserved exactly -- see the fail-closed
+    /// digest guard in `validate_readable_ambiguity_contract` -- but legibility
+    /// here is not.
+    rationale_sha256: &'static str,
 }
 
 const ANNOTATION_FIELD_CONTRACTS: [&str; 19] = [
@@ -355,7 +387,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ExportLeaf<T>|ExportLeaf<T>.authority_ledger_floor|authority_ledger_floor",
         ],
-        rationale: "a01:1400: shorthand member `authority_ledger_floor` carries no inline exact type, and ExportLeaf is a logical kind, so no wire envelope commits the span. The a01 owner ruling landed in 694d14b fixes it to `u64` on the registered durable_fields row, derived from the a01 floor family: authority_retention_floor, minimum_authority_checkpoint_floor and authority_order_index are all u64/8. The single affected census key maps to that source form.",
+        rationale_sha256: "ab97a2012e7b50e10a04e6ec801a59129177de98e9df7bb72cfa5ddf8130a594",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:99a87928b4e9051fadedb901f4799986579d307add86f64e1c8848d530e53adf",
@@ -363,7 +395,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|CertifiedRemoteStrongRef<T>"],
-        rationale: "a01:1402: `CertifiedRemoteStrongRef<T> {...}` is introduced as W12's one cross-consensus edge with its full brace body; the flagged span is the top candidate's own normative definition.",
+        rationale_sha256: "66c0c7c9250af0c34214109009f0a19bd5a9197320a84287215d33ad5cbc7e93",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b73053d5a89314ce34bf5ab28ab0942c5ba8aa5c2d1cd43a6f59ff4449e15438",
@@ -371,7 +403,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ConditionalGlobalCommandRef"],
-        rationale: "a01:1406: `ConditionalGlobalCommandRef {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|ConditionalGlobalCommandRef` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "29e26c29e0acbb16b27bc301a50fa13c1869a736a8b208a8f4b932a5cfe2e681",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6b485c80a37d34cd7e268be5fa2499117ce1c88914eaafab9bc9ee53e32cc15f",
@@ -379,7 +411,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ConditionalGlobalTxnInputRef"],
-        rationale: "a01:1406: `ConditionalGlobalTxnInputRef {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|ConditionalGlobalTxnInputRef` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "3145df2620ce4efafa06845d7dc29300e1d1b155b40fec47ea32f0a9115e7574",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c1de29a1f04f3d29608d42035d829d168499200bf1449172de752428a74f6ba4",
@@ -387,7 +419,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["arm|ConditionalMarkerRef|ConditionalMarkerRef.axis|Branch"],
-        rationale: "a01:1394: `ConditionalMarkerRef{marker_ref,axis:Global|Branch(graph,branch)}` renders the `Branch` axis payload in tuple form rather than the brace form the closed source grammar expects, so the parenthesised `(graph,branch)` is flagged as trailing tokens; those tokens are that arm's own payload, not stray text, and the arm and its interior are committed byte-exactly by the exact ConditionalMarkerRef wire envelope contract. The single affected census key maps to that source form.",
+        rationale_sha256: "f5ba091475c4827c33b169e71c833c20a010d98ce7eef650573fc58ed27f46f7",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e5067c1188355a4aeedc045cd474f780b8f80e01a0e129dcfd0569e5dbf960c0",
@@ -395,7 +427,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ConditionalShardCommandRef"],
-        rationale: "a01:1406: `ConditionalShardCommandRef {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|ConditionalShardCommandRef` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "0820bdfbca4dee2bffdbf4d5f0de4f8944648ac9964d444110e07380c5ae9812",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6a6f71c5287f6e68eedbe69fa907319d95baf3c892ae49eb331e73f76a5a81bb",
@@ -403,7 +435,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ExportLeaf<T>"],
-        rationale: "a01:1400: `ExportLeaf<T> {...}` is defined with its full brace body as the imported representation of authority-local `T`; the flagged span is the top candidate's own normative definition.",
+        rationale_sha256: "dbb68e882a60337791f7b9cec4ad0567124af551aea4b54c3da529c571130510",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f6b057d813024d9cdae86474e26e70f832b8b56ea96997303e2ea6e8d9fb180f",
@@ -411,7 +443,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|MarkerRef"],
-        rationale: "a01:1394: `MarkerRef{marker_oid:[u8;32],commit_seq:u64}` is the slice's explicit bare-identity schema ('identities, not reachability by themselves'); the brace body is the normative definition of the top candidate despite lacking a heading cue.",
+        rationale_sha256: "b45d1ade8a35432b5b5fa98cc9db0cc909248513f5e73c670ab6a31d00487cfd",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:19071118724e502558c8001fc247894ad3c6e95f24063c3c06a7259543443905",
@@ -419,7 +451,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1443"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PlacementDescriptorWithoutId"],
-        rationale: "a01:1443: the specialized `PlacementDescriptorWithoutId {...}` body that RootSlot+RootBootstrap fields reproduce byte-for-byte is the normative rendering of the top candidate; the surrounding sentence merely lacks an ownership heading.",
+        rationale_sha256: "935be12365d4c15805b4eba48da75ec974244b6837e29ee4a4c554031a191ef3",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c4d2564bf7c395c7b349e663138fcb4c1e4361690d3c26044b1aecf73e43ec0e",
@@ -427,7 +459,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteReleaseSummaryEntry"],
-        rationale: "a01:1404: `RemoteReleaseSummaryEntry {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|RemoteReleaseSummaryEntry` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "39ba6d12845450a916a20d8fd62c87d97cae6f5633ecd59febaada0db90ac1c3",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0da0b826f748cf4bd8faa497654351a2a9764542ea6982b41924de7afa6d745f",
@@ -435,7 +467,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionAckPublishRecord"],
-        rationale: "a01:1404: `RemoteRetentionAckPublishRecord {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|RemoteRetentionAckPublishRecord` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "c4e00b28f3ae46be5105fece2eef83e96fbdfebdbc3cb97b91fc5d513b4d9e40",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f91e77715cb9aae0faef9408747017b3a72f0d8d8c57bc1ab44771bba3169884",
@@ -443,7 +475,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionConsumeAckRecord"],
-        rationale: "a01:1404: `RemoteRetentionConsumeAckRecord {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|RemoteRetentionConsumeAckRecord` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "ff61a276ccb88875005cb59ce7889d1efdae1ef9aef79a74bc605f10f268c35a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:4286033216d0e30f33f3289adca37f9ae9dbd4cdcfb89adbc1b94aa8cf488b43",
@@ -451,7 +483,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionGrantEvidence"],
-        rationale: "a01:1402: `RemoteRetentionGrantEvidence {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|RemoteRetentionGrantEvidence` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "5f1fef62e08e9566c79958f04af6fd6844a3b54a1cce12efdfdcc42e56db3709",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ca4727cb8f2c1151bad56af9e8998591d000a55bf9cf95566c5ddcafb4911df2",
@@ -459,7 +491,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionGrantRecord"],
-        rationale: "a01:1402: `RemoteRetentionGrantRecord {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|RemoteRetentionGrantRecord` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "539dfdd0f27bfb1285c6021953e9766a6283b48a7039703fb692dca8e6df22ac",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9201ddc13a840cea2d41c1df2285130c96caaf6c76b5d87456ebd7632f93fb5d",
@@ -467,7 +499,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseAckCertificate"],
-        rationale: "a01:1404: `RemoteRetentionReleaseAckCertificate {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|RemoteRetentionReleaseAckCertificate` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "0b8529905d9d23841676feb269c2cd8c1d2b8082201a9250c49de8b5568b4e00",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3e6f76af12b99912355abdcc8a766637447f32aa917a064eb14bfce535122caa",
@@ -475,7 +507,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseApplySpec"],
-        rationale: "a01:1404: `RemoteRetentionReleaseApplySpec {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|RemoteRetentionReleaseApplySpec` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "14eb7dd99b2890966941567ab163fc18afa4cb94d57c467759c6693ce826436e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:64ced526a660b98827cbc3ef997b177b68c4a84a15985fafd6640a432f68a5d3",
@@ -483,7 +515,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseRequestCertificate"],
-        rationale: "a01:1404: `RemoteRetentionReleaseRequestCertificate {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|RemoteRetentionReleaseRequestCertificate` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "6039c1ce43200f20ced820c0dfdbc7fdd0d361b21121d3d8fb0ad4e9bfc43edf",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:7a55234f5fdc43b6974252edcd0de7eba52e436ac217f10f8401ef6885ae9941",
@@ -491,7 +523,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseRequestRecord"],
-        rationale: "a01:1404: `RemoteRetentionReleaseRequestRecord {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|RemoteRetentionReleaseRequestRecord` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "22ea1cd4dc029ecff6ea9d322e372ab48780b85214bc412fba152ba945eb62a3",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:18d5436cd38b00236a2ca12e02bdeac86602803425abe2d1fa455996f2ad7f59",
@@ -499,7 +531,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseRequestSpec"],
-        rationale: "a01:1404: `RemoteRetentionReleaseRequestSpec {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|RemoteRetentionReleaseRequestSpec` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "dc25623c31405c6ce029232fdbbf5e34e7cd23d4eb621cbd4dc7f35f0bbd0a5c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e120bc8a45d1cffd3c567b730d1c1c94e3efc66dfdec7c758fc8a7a7ab7bd8af",
@@ -507,7 +539,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseTombstone"],
-        rationale: "a01:1404: `RemoteRetentionReleaseTombstone {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|RemoteRetentionReleaseTombstone` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "2c5f8983d5139853e849f15576f77bf6e749093e2169a59290be68b33b02ab63",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:159ccf72cd3fb33feaaa8a683be064682e50c25785f7cbe598da6b0be0087f92",
@@ -515,7 +547,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1410"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|StrongCiphertextRef<T>"],
-        rationale: "a01:1410: `StrongCiphertextRef<T> {...}` is the slice's definition of the separate retaining physical edge; the brace body is the top candidate's normative rendering, prose-embedded without a heading.",
+        rationale_sha256: "1bf7bcfd737f3177e0dfe676302b0f98df4ffde13e3198a5f1833133ac8c7e77",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b88b270c8e81a91838a8ad22b084d5f62869bfc4017064ffb7017275d923a751",
@@ -523,7 +555,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|StrongGlobalCommandRef"],
-        rationale: "a01:1406: `StrongGlobalCommandRef {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|StrongGlobalCommandRef` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "6149dd3569bf6268a79878d0bcbd551c91d7d3fc4003678b4dd5ccb0021bc734",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f2ff70af4b775f5145f4f900f742808ffade01b29c77ed78fafb5b4338eb7c37",
@@ -533,7 +565,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ExportLeaf<T>|ExportLeaf<T>.export_projection_version|export_projection_version",
         ],
-        rationale: "a01:1400: shorthand member `export_projection_version` carries no inline exact type, and ExportLeaf is a logical kind, so no wire envelope commits the span. The a01 owner ruling landed in 694d14b fixes it to `u16` on the registered durable_fields row, derived from the a01 format-version family: format_major, format_minor and incarnation_continuity_profile_id are all u16/2. The single affected census key maps to that source form.",
+        rationale_sha256: "9392833ece86ae837e4a6539c971ba7b419da39f2d492cd2b8bbb2259a25530d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f415e1d2a5f705c55cb0e824abed15b2718e4379274f36ef4173e7fbcdc07b56",
@@ -541,7 +573,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|StrongShardCommandRef"],
-        rationale: "a01:1406: `StrongShardCommandRef {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|StrongShardCommandRef` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "eb460ade5fb692fb1cf31f7eb32e8fa1554ce09cc294fdf1214caa298cc98054",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c7ce81e2e7f285a53c0c12aead439bc99a21ae05d08f9e8cdae9acf3a09e857d",
@@ -549,7 +581,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|WeakGlobalCommandIdentity"],
-        rationale: "a01:1406: `WeakGlobalCommandIdentity {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|WeakGlobalCommandIdentity` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "87b79edcdf266c94943351e7ad024e5bda63559288f9adf78f3f89df83346032",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:1268173b9b0e90db9b8c6ff9e5fecbccc41c62c0f6eca9a75bcc274bc78c89df",
@@ -557,7 +589,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|WeakShardCommandIdentity"],
-        rationale: "a01:1406: `WeakShardCommandIdentity {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|WeakShardCommandIdentity` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "2f03caca764bea0dd2b3190eb5b7c4dfd1840af893b9d776478c5dc59cc16f29",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c3451eba691ae2bb32b935e0e2f4f563b7ab458f675c0418e8af0b3a7a86b418",
@@ -565,7 +597,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ConditionalGlobalTxnInputRef"],
-        rationale: "a01:1406: the flagged name-span is the W12 history-wrapper sentence's normative rendering of `ConditionalGlobalTxnInputRef{command_oid,assigned_global_logical_command_seq,axis=GlobalLogical}`; it is the top candidate itself, and the divergent body elsewhere (plan line 1962) is a restatement the catalog's structural rows must reconcile, not a different schema.",
+        rationale_sha256: "dd55d453ca8b828bacd495201126387577f2625ea0bae86aa51d36163b2e535b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:83653995aca02322485f58cf8cc3a4937305ef9f84d50c6659fc2cd9004e136e",
@@ -573,7 +605,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1443"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PlacementDescriptorWithoutId"],
-        rationale: "a01:1443: the flagged name-span is the specialized `PlacementDescriptorWithoutId {...}` that RootSlot/RootBootstrap fields reproduce byte-for-byte; it is the top candidate itself, and the divergent body elsewhere (plan line 1449) is for the catalog's structural rows to reconcile, not a separate schema.",
+        rationale_sha256: "72cf8e168afba6c4d14c5e72b66f85b75880d5e197da0ad61cc9a0ac71fc2193",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:892b85a96dad0e9766ca9fbef78fc37c5df29d469861d7b1bc9d6b1f7c567182",
@@ -581,7 +613,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1392"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|CanonicalScalarProfile"],
-        rationale: "a01:1392: prose states `CanonicalScalarProfile` defines float/decimal/string/time bytes; it names a profile-registry concept and supplies no adjacent structural body, so the mention is definitional prose, not a durable schema rendering.",
+        rationale_sha256: "758c821f827b4fc93ff4d57b66f306a1bb63db065d0b67941cc07be4020cd71e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:608b425da6fb9c8cda3d49a78aae9a3e8c02fc48b30e613e1b2c417b202ae14c",
@@ -589,7 +621,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1390", "a21:2649"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|None"],
-        rationale: "a01:1390: `None` names the absence state ('legal only outside a role transition') reached via the payload's strong field; legality prose about absence, not a standalone durable schema. Duplicate mention at plan line 2649 carries no separate body.",
+        rationale_sha256: "677bd1b25242a8bd229d0a6d046a392226321240c2afeda4ab0e0ebc84577023",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:5c7c00068e6786930898a4cd7ca0936d1be398fa90428449bc501db193221292",
@@ -597,7 +629,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1410"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|PayloadAvailabilityCertificateRef<T>"],
-        rationale: "a01:1410: `PayloadAvailabilityCertificateRef<T>` is named as a generated exact union whose arms are generator-owned per ciphertext class and role; the prose supplies no structural body here, so the mention itself is not a durable schema rendering.",
+        rationale_sha256: "e88634777959f2290b42c00d4af2e85c76a7451f56b0a247f44cb4b4c609c7e2",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:05d7e3bb322be80fda931743566a01b05d3b38cf82f7b0d5c40fd940d655af1c",
@@ -605,7 +637,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1398"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|RemoteConfigurationRef"],
-        rationale: "a01:1398: `RemoteConfigurationRef` 'means a consumer-local StrongRef<RemoteAuthorityConfigurationEvidence>' — a prose naming alias for an existing reference type, not a distinct durable schema.",
+        rationale_sha256: "19ecb5ac139665e53b3a74c721df0119772a6f4df18321abe28a038cb121a0a7",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:36c38b8690c34ce658b11fd0ddde6ac14aa37b8c84284910f9de561091d317e3",
@@ -613,7 +645,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1402", "a04:1578"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|RemoteGrantTargetRef"],
-        rationale: "a01:1402: `RemoteGrantTargetRef` is named as the containing-schema-generated closed union with one typed strong-reference arm per exportable target kind and no generic arm; generator-owned with no structural body in this rendering, so the mention is definitional prose, not a durable schema. Duplicate mention at plan line 1578 carries no separate body.",
+        rationale_sha256: "6893d396ade13f58f8ad7aaf724fd1512bc94090382e718765bc79a3208093d3",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:bf3f4910c7babb04019eba3e8a9d5ff90e67cf04fb39ccb54ac7192b1d4ff437",
@@ -623,7 +655,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.adoption_log_prefix_digest|adoption_log_prefix_digest",
         ],
-        rationale: "a01:1398: `adoption_log_prefix_digest` is a digest-commitment field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "3321edfdd65d7494e9d20045d240f6d0478d132fa67a53a7b28f5c2226b3c758",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9ef85f201456d54979f092bb31b1777aaaf90d831e425af9b6701f465bb99d80",
@@ -633,7 +665,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.canonical_configuration_bytes|canonical_configuration_bytes",
         ],
-        rationale: "a01:1398: `canonical_configuration_bytes` is a shorthand-typed field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "97f8ea7531ed3659382382a9e5312ea555ee0716806d26d07e0505f20a2b8a31",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:44d2f6bcfdaa7e6ac3780a200d27f10a33a0b638fb0615f3c96f5e98d64c6592",
@@ -643,7 +675,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_adoption_raft_index|configuration_adoption_raft_index",
         ],
-        rationale: "a01:1398: `configuration_adoption_raft_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "a0faeebb69d6e272b4d68f2f0ec38eefecfa06591b61abae8d149ef4464934f4",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:af7e299a09a52c513493942368959abef28db73ce3341a288576b8eb4b53c0f4",
@@ -653,7 +685,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_canonical_digest|configuration_canonical_digest",
         ],
-        rationale: "a01:1398: `configuration_canonical_digest` is a digest-commitment field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "05a217513581d9bdfe70c541079650d8ba1a625b8825f4bf8074a2485428687c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:86202e40010f1afc8012891816b8808b7e6c8ce542ab9892b8cf0b01af0dd23d",
@@ -663,7 +695,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_oid|configuration_oid",
         ],
-        rationale: "a01:1398: `configuration_oid` is an object-identifier field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "031c9fd08dd7bc23a6bf18eb52e0c7e968c4965faa26e170774386fdf1749462",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:bf26b9e5234ca109bef539c1a4c98e58925e1c2e3dd5e123f0b75fc633ef523e",
@@ -673,7 +705,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_quorum_signatures|configuration_quorum_signatures",
         ],
-        rationale: "a01:1398: `configuration_quorum_signatures` is a canonically-sorted signature-set field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "655eec53b0fec38ad594469977c47a140402608fd4a462d0674dd68d4041d737",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0cbbda898da10fa9b89f900be61c7b9aed7bbd0934366e1e71f3abdde07956a0",
@@ -683,7 +715,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.member_verification_key_set|member_verification_key_set",
         ],
-        rationale: "a01:1398: `member_verification_key_set` is a named closed sub-schema field (compact-phrase law) rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "5cb149dbba5dff9cd468ab3e63cf0d27ed3925b198220e2f27ddb4e0e66e9cd7",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ee8990906ae0c1ecb94acbbe2f5723f319918c316d350f7108484833b54ba629",
@@ -693,7 +725,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.minimum_configuration_retention_floor|minimum_configuration_retention_floor",
         ],
-        rationale: "a01:1398: `minimum_configuration_retention_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "db9cf5c2dd7045aca7fd1712be8d51f88166ab48d1552764ce3e0fe3d1d62d0f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e9dc734b30ce92280487bf83e234b3face8e3ea47b93f841bf472a2ef76643a2",
@@ -703,7 +735,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.payload_predicate_digest|payload_predicate_digest",
         ],
-        rationale: "a01:1398: `payload_predicate_digest` is a digest-commitment field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "4a5ca3491f48b5c078cb650cfe910a91d543a32e7e0f4c9f74cdd407b2696113",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:785c16b82f46561a50e849315dd7e84c669b4f3b703746b32b4963ed6625b54e",
@@ -713,7 +745,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.signer_epoch|signer_epoch",
         ],
-        rationale: "a01:1398: `signer_epoch` is an epoch scalar field rendered shorthand inside the `RemoteAuthorityConfigurationEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "bed2a2d917f1766bd161285ac9531268a5e50cc29f3b3737f194dbaf707b86a0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:89368ae55192e51984ac23f81f0afa52c478e1ce606f91c776060f4c8a595396",
@@ -723,7 +755,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.authority_quorum_signatures|authority_quorum_signatures",
         ],
-        rationale: "a01:1400: `authority_quorum_signatures` is a canonically-sorted signature-set field rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "6e30c560b948d51d2cfcd42efde7a676d52e6b0f4e02ea6a3c86b3a2d2b37b49",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:550459906367220aa9ba71ed7b8aab0f60f321bb09c75879e1d3deec8fb0f15d",
@@ -733,7 +765,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.authority_retention_floor|authority_retention_floor",
         ],
-        rationale: "a01:1400: `authority_retention_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "bcebb1398f02ff87383dfcc64beda7fe1f37bb1fc08077affbb4219474f813cf",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0780dfaa7be7e082803da9d4d1d980f09c6ab855346e8a7f8638b7c5daea7ea9",
@@ -743,7 +775,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ExportLeaf<T>|ExportLeaf<T>.target_closure_inventory_digest|target_closure_inventory_digest",
         ],
-        rationale: "a01:1400: shorthand member `target_closure_inventory_digest` carries no inline exact type, and ExportLeaf is a logical kind, so no wire envelope commits the span. The a01 owner ruling landed in 694d14b fixes it to `digest256` on the registered durable_fields row, derived from three landed instances, unanimous at digest256/32 with digest_class=target. The single affected census key maps to that source form.",
+        rationale_sha256: "11699b54cc40afa5556ae450264f6abfe2410a4b66f515015a3796b5234f916a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:088c4ff91992149430ae731d5ff92818988720134060669d7f25967c8e35e59f",
@@ -753,7 +785,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.encoding_placement_coverage|encoding_placement_coverage",
         ],
-        rationale: "a01:1400: `encoding_placement_coverage` is a named closed sub-schema field (compact-phrase law) rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "7cdc78eb20e4a57a07c648325ef34b508e2aae4b8e7c451700a41a4a06290f3a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:330ec263173ef0a9576a1913c6ba0487bf4138413b87bd18ecf4f7ed4b08fb49",
@@ -763,7 +795,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.failure_domains|failure_domains",
         ],
-        rationale: "a01:1400: `failure_domains` is a named closed sub-schema field (compact-phrase law) rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "b0fc22126d5903741e558d74ac3bd59c42f002212461ba8c0e2ea0ec24de94f2",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a3d03272c5e918952e4ac5c7fa89e97a8e29c5540a63623ff0ea776fea86e0ee",
@@ -773,7 +805,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.payload_predicate_digest|payload_predicate_digest",
         ],
-        rationale: "a01:1400: `payload_predicate_digest` is a digest-commitment field rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "9f40f4f1d8ec3004298be30eb3f2a6eba62ee995743c052bf4da97c1951a4c93",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:8891ee1b2dce0bcac481ecf3bb37e10b1194281a42f9f16bc24838fb04f87454",
@@ -783,7 +815,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.receipt_set_commitment|receipt_set_commitment",
         ],
-        rationale: "a01:1400: `receipt_set_commitment` is a named closed sub-schema field (compact-phrase law) rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "b95f0ac158d4f5f8c01f079654903c2a2b0674cdaedbae03c9cb26e2528037d2",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:dadff94a138b7c32a653efd353155f880adab9d0a9d5bd1442b5faed58225b0c",
@@ -793,7 +825,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.signer_epoch|signer_epoch",
         ],
-        rationale: "a01:1400: `signer_epoch` is an epoch scalar field rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "2c0db974abf0a7bfd9bafa54a771ddcd02447b841d9298b9674bebf56009fc95",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0b2170ebc0cdcae1b0a8fc5ae73c50e6539cbe87246be6773e4eca53e8c24b7f",
@@ -803,7 +835,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.target_closure_inventory_digest|target_closure_inventory_digest",
         ],
-        rationale: "a01:1400: `target_closure_inventory_digest` is a digest-commitment field rendered shorthand inside the `RemotePayloadAvailabilityEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "7005bcb7eeed5d054203a46a61da9ca8b2dca3da2bdd8443bb43c7adab63337f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:aba1b29d59bfb1146158d7c01d9f17f701b1a2f9aceaca04c3e15583a52481b3",
@@ -813,7 +845,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.ack_digest|ack_digest",
         ],
-        rationale: "a01:1404: `ack_digest` is a digest-commitment field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "27e715c2b9bc6c269a97a469d604027f1f9becd50117e0ee8fbafd977213786f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ba383604b0f04fa552de5ca7b52083a58cec2bb816d9d50668b4cee84b8cb40e",
@@ -823,7 +855,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ExportLeaf<T>|ExportLeaf<T>.object_specific_scalar_projection|object_specific_scalar_projection",
         ],
-        rationale: "a01:1400: shorthand member `object_specific_scalar_projection` carries no inline exact type, and ExportLeaf is a logical kind, so no wire envelope commits the span. The a01 owner ruling landed in 694d14b fixes it to `bytes` on the registered durable_fields row, derived from the a01 canonical_configuration_bytes precedent; the layout is fixed per expansion of T, so the bound is the declared per-kind ceiling rather than a width. The single affected census key maps to that source form.",
+        rationale_sha256: "47ad7a3338ba6aee2064d2162b40e3a5b877a93c61ffe40390506e30f22caabf",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ba4b4e426fd4324114eaaad337e442b5ce7d6e038a34db56d1418c705e15954e",
@@ -833,7 +865,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.ack_leaf_identity|ack_leaf_identity",
         ],
-        rationale: "a01:1404: `ack_leaf_identity` is a shorthand-typed field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "8653639e0bb34b65564dcd4080fd82b9839edef17373b8bea3ddf59e4c8e1ff3",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:23f9c08803b086cdbfc8c97b6f9659e8bb5c6e6a8c9cf04032f5f5d28e079408",
@@ -843,7 +875,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.authority_domain|authority_domain",
         ],
-        rationale: "a01:1404: `authority_domain` is a shorthand-typed field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "1d84a9c5268998457c2ca7d29b8ab617775c9b4c4ea257d829ce7e7d09182521",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:7d1a0cc415b4e6a6170783944fabb87802c0c72103c47fae6f2c414de670e118",
@@ -853,7 +885,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.authority_order_index|authority_order_index",
         ],
-        rationale: "a01:1404: `authority_order_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "20c58a89825916d899c1569830a64e8f5913e115e7548646893f76c18d1670fe",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3ed46e16d278ca8758eb8f03cda81ec00cda011ecabf571c6efd9b1ced1f858d",
@@ -863,7 +895,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.consumer_domain|consumer_domain",
         ],
-        rationale: "a01:1404: `consumer_domain` is a shorthand-typed field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "7a107a46976a8282a5bc9ab1cdfd3a14a187e04b1b110acf6ca3ec70c5b34257",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0a140168b441efaf4eba40cc6f5f32b10863296cf590c9a62de21e0694f64a5f",
@@ -873,7 +905,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.grant_id|grant_id",
         ],
-        rationale: "a01:1404: `grant_id` is an identifier field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "7a3d8582263e2fced3d83a5d2aab4ebeace6f443ccb7b2dbdb0be615093be7f1",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:63373197a5998d375086fa33282c053b58e6273df62146964f86434530696359",
@@ -883,7 +915,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.permanent_release_proof_floor|permanent_release_proof_floor",
         ],
-        rationale: "a01:1404: `permanent_release_proof_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "3587de87b9235cd655f996d02087df158055dc2798f518a8681d9d3e18ac867c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9b5ce7da11e6c3031a9e2ff2d7f3f2c8868508ee8ee79cfe77c289a072e22a74",
@@ -893,7 +925,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.published_at_order_index|published_at_order_index",
         ],
-        rationale: "a01:1404: `published_at_order_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "659ea440a4010d0d41d80ae593f2b2faeb162383ff9a647685079cf891f8b371",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d010489d0119524a9d50b49a62f4f9944d175fac9a6ee4ad8de8128784e34969",
@@ -903,7 +935,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.release_nonce|release_nonce",
         ],
-        rationale: "a01:1404: `release_nonce` is a nonce scalar field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "55b3dd593d92780a76c768ff784154429eef7c4921e6180cf5d8e76a45f058e9",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a8344545b02b95a838fadd3e5bbb725c3d60093f1ac88f08a2cc9acfcecff955",
@@ -913,7 +945,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.target_identity|target_identity",
         ],
-        rationale: "a01:1404: `target_identity` is a shorthand-typed field rendered shorthand inside the `RemoteReleaseSummaryEntry` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "73ce077933637fdbe1652d162baec342f63d26143511a3ff72300f82667eb308",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:104955772015586008e43b5d3d99bd835f456ec5c11f29fce79c03c941ad0be3",
@@ -923,7 +955,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionAckPublishRecord|RemoteRetentionAckPublishRecord.summary_key|summary_key",
         ],
-        rationale: "a01:1404: `summary_key` is a shorthand-typed field rendered shorthand inside the `RemoteRetentionAckPublishRecord` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "25cf3a2f8094c770181aca57a47426e78daa41539f7b2ff799be8b11bf6d20d4",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c63e45723d33f104675de8ed3e9a8417545aa6209c6ef981a9b04c56fcca5bd0",
@@ -933,7 +965,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionConsumeAckRecord|RemoteRetentionConsumeAckRecord.summary_key|summary_key",
         ],
-        rationale: "a01:1404: `summary_key` is a shorthand-typed field rendered shorthand inside the `RemoteRetentionConsumeAckRecord` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "dcb662b44664ce0be39957ddc249e420f444f29ad64864f3b6de80d98cf9f5bb",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3228dd0b5dd8875265298f3a724ef85adbebeb35fcbb5d05df62e87b91c40f82",
@@ -943,7 +975,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.authority_order_index|authority_order_index",
         ],
-        rationale: "a01:1402: `authority_order_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "45c27a1be9f3437ad4a006ac73b2eafeb688fa6a32a389e7884f8f96abef7b9a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f18419d17e8a08e7609f35ebbc6f4c09735a946a02c5e7512a3ab0406f72f8cd",
@@ -953,7 +985,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.authority_quorum_signatures|authority_quorum_signatures",
         ],
-        rationale: "a01:1402: `authority_quorum_signatures` is a canonically-sorted signature-set field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "47fda35cd213e49000d663e58856ce47e93b968e634ab0c4dffc89d9400f94f4",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:fbd189543ad2fee10893b87f6f45d238a17c00595c70c1b415e5ab6dfd125b9a",
@@ -963,7 +995,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.grant_id|grant_id",
         ],
-        rationale: "a01:1402: `grant_id` is an identifier field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "1ff3a5f9fbd04056dbbcf15b1a5c3becc9007e368939a19cdc7e6c7d032ba260",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d6336ec6c39141df42c4ed61b1cac308f22a269f73b8ff4aa55106247f19ce93",
@@ -973,7 +1005,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.grant_nonce|grant_nonce",
         ],
-        rationale: "a01:1402: `grant_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "dd4ecfc341e057cd4e20bd372d0bc85e5dcc9b0ab0ab721ff6f1d33c2b090296",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ee01aff30d2078379b503b7895ae8be464a00a752466263025dfbd0a45fdb667",
@@ -983,7 +1015,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.minimum_authority_checkpoint_floor|minimum_authority_checkpoint_floor",
         ],
-        rationale: "a01:1402: `minimum_authority_checkpoint_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "9c64b1ecb2676bbeff369469eaad93060c5e11943f723db9965bdec3489c335f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a816a6e2f7d5f4db12015423d9bea5c670a3e072257be3f0931e3ed61d49bee7",
@@ -993,7 +1025,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.signer_epoch|signer_epoch",
         ],
-        rationale: "a01:1402: `signer_epoch` is an epoch scalar field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "29c8973cde57336f7f13dc09722ef676f6c33961aa8c95057a25a6fc3a343480",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:86987e71c410029e676e72048d9e14928105ac680c68d7b8dd9b3fa3a1e5c49d",
@@ -1003,7 +1035,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.target_closure_inventory_digest|target_closure_inventory_digest",
         ],
-        rationale: "a01:1402: `target_closure_inventory_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionGrantEvidence` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "244c3f374e118bc2cb2212ff08b9ef80c3ef6f1edbf893c9e9a100eea84917c6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0ea0c37a2094412a8669dca8c447980a4970f76b3485a3a4cdedc96d530f9740",
@@ -1013,7 +1045,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.grant_id|grant_id",
         ],
-        rationale: "a01:1402: `grant_id` is an identifier field rendered shorthand inside the `RemoteRetentionGrantSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "ca5812053c8e2a0bf76547e356d845b07f39219e4627dc4c86e45746c67b3c4f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d470f3413f5c4faa0a2bf88552faa881c88f926d15a1d7bbbe4ce71f53817a5d",
@@ -1023,7 +1055,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.grant_nonce|grant_nonce",
         ],
-        rationale: "a01:1402: `grant_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionGrantSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "d968a7e2e97abc05e79f6b4084e00d84f251231426ebb4db09f13e3794dbd947",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e14ae8c12903b4309edf9249c9fe2bf44de6671a7cce5cd73ae3e05ff8478495",
@@ -1033,7 +1065,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.minimum_authority_checkpoint_floor|minimum_authority_checkpoint_floor",
         ],
-        rationale: "a01:1402: `minimum_authority_checkpoint_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteRetentionGrantSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "4f3ba258a34f4b61e778a94da5c792c102e9fee99ab68edaff1232e5130c8e6c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ec608cc085dc6c92eb129bd6aaeaac5f75c75069834e27f23ce68b9733e6f445",
@@ -1043,7 +1075,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.target_closure_inventory_digest|target_closure_inventory_digest",
         ],
-        rationale: "a01:1402: `target_closure_inventory_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionGrantSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "6300c726a480d15e43ce8b254a55143f0d302419d168d0e0c12a8f6f984fe808",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:38e1b1a453a2d78b3cd9b61fb722eb5dbee4e3ef16190d31191f4024a26a3d9e",
@@ -1053,7 +1085,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.authority_order_index|authority_order_index",
         ],
-        rationale: "a01:1404: `authority_order_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteRetentionReleaseAckCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "6c6133af6e618a98a1239ae88045fce92496231d44bbc612ececf3a9c9c2ec53",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:41ca748dc55b6431eaf3918bbe1b9a9734df2d1ca956d7e6f852cfb95efe5197",
@@ -1063,7 +1095,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.authority_state_root_digest|authority_state_root_digest",
         ],
-        rationale: "a01:1404: `authority_state_root_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseAckCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "28f29e6ad36c95f5c48df0fa2444de4b76155bb132cb867923ab9449c15e21db",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:7d5b5b36c4658a32b106702e723141f57156946818eca7b8170d5acbe23674ee",
@@ -1073,7 +1105,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.grant_id|grant_id",
         ],
-        rationale: "a01:1404: `grant_id` is an identifier field rendered shorthand inside the `RemoteRetentionReleaseAckCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "1cb5a8eef01f25a2a132a96aef0574b98d75e88ad1eb15eb6d13b0c9c377667b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ab27fb38ceb289b9a170a10a6a37c35180aea44221f333402b340661c320a043",
@@ -1083,7 +1115,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.quorum_signatures|quorum_signatures",
         ],
-        rationale: "a01:1404: `quorum_signatures` is a canonically-sorted signature-set field rendered shorthand inside the `RemoteRetentionReleaseAckCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "de3800c42428f8d79731efab64cc182cc0d069a28afce2bb74265a3f56119b44",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:4bff13c8b469f1d738a8680dbae3d6c5f816043ad51d34dd0bd69416985ff533",
@@ -1093,7 +1125,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.release_nonce|release_nonce",
         ],
-        rationale: "a01:1404: `release_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionReleaseAckCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "6386d34608e607b7daf91490d867cfef1686a8e28696f718c7fa8cbc96a59908",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:2d325be7f8f0ffbecc4dcd60c205c8760a79e9e0f90ddbded5e1c491881921b5",
@@ -1103,7 +1135,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.expected_active_grant_digest|expected_active_grant_digest",
         ],
-        rationale: "a01:1404: `expected_active_grant_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseApplySpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "a5fa5f82ff21358de5b120ceea7109bec1a32bbe19649384f56bdf600fef3f9d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:edc4e45136d059b93d4d936f23332275c3cb4bde7ea64a96fe190c8170a56355",
@@ -1113,7 +1145,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.successor_transfer_proof|successor_transfer_proof",
         ],
-        rationale: "a01:1404: `successor_transfer_proof` is a shorthand-typed field rendered shorthand inside the `RemoteRetentionReleaseApplySpec` body (the trailing '?' declares registry-checked optional cardinality); per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "f6503c2dd41650a407dcd444b0d167f9de464ae589bd103ca2d8d82c45dc5660",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ad98d0bc880733e386ee6412e07437998406030d9bdb0efaff2e3793cb529ad4",
@@ -1123,7 +1155,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.verified_consumer_no_reference_floor|verified_consumer_no_reference_floor",
         ],
-        rationale: "a01:1404: `verified_consumer_no_reference_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteRetentionReleaseApplySpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "ef49287887c99c27f5946eebb35c791245e6e810ae4244df88303c11a9c4b22b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6f795daeb8ab9c6f9256b4c88ddb79c7fe051c84ffd60b6c0d97a9e9cf557467",
@@ -1133,7 +1165,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.complete_consumer_root_digest|complete_consumer_root_digest",
         ],
-        rationale: "a01:1404: `complete_consumer_root_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseRequestCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "4891fa7ba3d2bc9619df93d1a14863faa8e4661194820ce17cade744ccd65e1f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d0d66f4d6ea6017ab754904e8928b724aa730a3d5dc0354290c5e0f370981533",
@@ -1143,7 +1175,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.consumer_no_reference_floor_digest|consumer_no_reference_floor_digest",
         ],
-        rationale: "a01:1404: `consumer_no_reference_floor_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseRequestCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "c902ce1341f01ec7399624fde341fcfdb884ad5c77b5eb331faa5be0cf62651d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b16fd118a0a64392b8ae28941eaaaf3b910196151732a38fe44b7fba9d08cc54",
@@ -1153,7 +1185,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.quorum_signatures|quorum_signatures",
         ],
-        rationale: "a01:1404: `quorum_signatures` is a canonically-sorted signature-set field rendered shorthand inside the `RemoteRetentionReleaseRequestCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "a1a99a22301696bc69f3bf428a7f611d61013c5ed8ccdb4cf566089320d46afc",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a5377c0f69a2ceeaea82196dd3cfdfe3b5bc4106771c28224f4a6a90a1c46aae",
@@ -1163,7 +1195,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.release_nonce|release_nonce",
         ],
-        rationale: "a01:1404: `release_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionReleaseRequestCertificate` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "c600bddc9b555e3d1ed51a42311467ae4b5711d207d3bda117ec4191e569cbc2",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f08db86581e0fafa4b2e38638a61d8ecda6371c9da72cdb671f1b34212da455f",
@@ -1173,7 +1205,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.successor_grant_identity|successor_grant_identity",
         ],
-        rationale: "a01:1404: `successor_grant_identity` is a shorthand-typed field rendered shorthand inside the `RemoteRetentionReleaseRequestCertificate` body (the trailing '?' declares registry-checked optional cardinality); per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "5f28e7ec94c3fc01220ba44260653ff70c2d191f47d59a6dab5d285df62bf811",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:4bbdb01f00f659a0e01412ae5d5cbaa2ddbc312ce44a5997149d1a2cd6d4ce0f",
@@ -1183,7 +1215,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseRequestRecord|RemoteRetentionReleaseRequestRecord.consumer_no_reference_floor_digest|consumer_no_reference_floor_digest",
         ],
-        rationale: "a01:1404: `consumer_no_reference_floor_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseRequestRecord` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "a93329ecf52ee34e30c5b4a550aefa5fab433f2c866bc6acd4888fbdc2212946",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:05940c088f9ba416398714a189357ee97c8e2c7e728a68eb8f4bb9291e8e7c13",
@@ -1193,7 +1225,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.complete_consumer_root_digest|complete_consumer_root_digest",
         ],
-        rationale: "a01:1404: `complete_consumer_root_digest` is a digest-commitment field rendered shorthand inside the `RemoteRetentionReleaseRequestSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "047833d8b25340a40e9062fcaec97eebd297d42db47975e70a7e3c6c3cf59a0a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:cb107c3b25092a752db12aa072dceaae7e10ce08c8500f44d0e944ec974e7da6",
@@ -1203,7 +1235,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.consumer_checkpoint_floor|consumer_checkpoint_floor",
         ],
-        rationale: "a01:1404: `consumer_checkpoint_floor` is a retention/checkpoint floor field rendered shorthand inside the `RemoteRetentionReleaseRequestSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "7a948a0493f53397b3bbbf9e66a704f0dfef0c69ed357f46c4b845d353bf9990",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:08913cde0840a5415b20c38f4728fca9d06781a479e6bcaf770b368c5488df0f",
@@ -1213,7 +1245,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.release_nonce|release_nonce",
         ],
-        rationale: "a01:1404: `release_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionReleaseRequestSpec` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "9ecf8e96afbb34e7abfba6836fb0dc34946face2824b3f5c651d895f7e630f9e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ce182745bb770c96a671b0eba846d4d9a672cefa40a51f10cc88575445bd0e3c",
@@ -1223,7 +1255,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseTombstone|RemoteRetentionReleaseTombstone.authority_order_index|authority_order_index",
         ],
-        rationale: "a01:1404: `authority_order_index` is an ordering-sequence scalar field rendered shorthand inside the `RemoteRetentionReleaseTombstone` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "6b671300418b840236a0b01cacea3e8d2909473f2b5870a891287f5c34cb5e9c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:259538a996b4f52d0906e85b5e35436eee1012e4ada44589405094738a8b2725",
@@ -1233,7 +1265,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteRetentionReleaseTombstone|RemoteRetentionReleaseTombstone.release_nonce|release_nonce",
         ],
-        rationale: "a01:1404: `release_nonce` is a nonce scalar field rendered shorthand inside the `RemoteRetentionReleaseTombstone` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "6b1edd4d203286f262dbbf66f703f4591c5763c5e928a501c154f1f27768ebcb",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0cea5eb3bef0bc9ab4c17b1671ce03661e717d8ec0742dffff4e0566a2255868",
@@ -1243,7 +1275,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RootAuthorityTrustArtifact|RootAuthorityTrustArtifact.canonical_root_authority_signature_set|canonical_root_authority_signature_set",
         ],
-        rationale: "a01:1398: `canonical_root_authority_signature_set` is a canonically-sorted signature-set field rendered shorthand inside the `RootAuthorityTrustArtifact` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "d7e86d04d764526569fae4210a6bff3ac5e16bb7ba348eb2fd10d38435112bf0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:47fbac16db79678402e6382624522139d902f97907bd56096457c3c53d502918",
@@ -1253,7 +1285,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RootAuthorityTrustBody|RootAuthorityTrustBody.canonical_genesis_or_transition_bytes|canonical_genesis_or_transition_bytes",
         ],
-        rationale: "a01:1398: `canonical_genesis_or_transition_bytes` is a shorthand-typed field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "a2467cdc887a3c721fdcefafd4570ff1ec775d17a8062c797e41fbcfa569a79c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b458a33eb43d02f3b156bc7d4539c5ebbb3740aa8e13dc2d369d5d203d0873ef",
@@ -1263,7 +1295,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RootAuthorityTrustBody|RootAuthorityTrustBody.expected_root_verification_key_set_digest|expected_root_verification_key_set_digest",
         ],
-        rationale: "a01:1398: `expected_root_verification_key_set_digest` is a digest-commitment field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "05ad7f5dadb5272061284a3a1fc759b7269be384dc814ce0bcfd714b482dbc03",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:caddd2e243775866bb52f8da1e62fa89adabfb26042229cc138a2f2eb194b950",
@@ -1273,7 +1305,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RootAuthorityTrustBody|RootAuthorityTrustBody.externally_pinned_root_policy_id|externally_pinned_root_policy_id",
         ],
-        rationale: "a01:1398: `externally_pinned_root_policy_id` is an identifier field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "2d0a3e0a0a01926cffba563c588d0df24d4d4e87a82141fb8991075cbe919247",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3fce4db02d1cb690e1e7204de1499f3ed1982f8f8eaecd41e1629b4c5403375a",
@@ -1283,7 +1315,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RootAuthorityTrustBody|RootAuthorityTrustBody.source_identity_or_transition_continuity_commitment|source_identity_or_transition_continuity_commitment",
         ],
-        rationale: "a01:1398: `source_identity_or_transition_continuity_commitment` is a named closed sub-schema field (compact-phrase law) rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "d7538ba52117c2cc5af263cfe0250a866d5510660794a09cfcfbbb2bda5e1ff3",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0cfced7abb4163ebdcf4ffead214a475ffd662cb43bf1bb54c9848ce3cd137e6",
@@ -1293,7 +1325,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RootAuthorityTrustBody|RootAuthorityTrustBody.target_configuration_canonical_digest|target_configuration_canonical_digest",
         ],
-        rationale: "a01:1398: `target_configuration_canonical_digest` is a digest-commitment field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "b4c8ed30c5adaef4d383c1631e7dff3e081c70d6f41f31a8e71fae2dc7944a30",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ef9a226efe47962957214937e4f1158545bb53682355abfc8ee4b464438e32e4",
@@ -1303,7 +1335,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RootAuthorityTrustBody|RootAuthorityTrustBody.target_configuration_oid|target_configuration_oid",
         ],
-        rationale: "a01:1398: `target_configuration_oid` is an object-identifier field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "1a3f386cf78ded5dd6ca6b239047dfead99754b2d711b246dcb20cda08a45af8",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:396e4c7dcfc6962ef4e1b741b23543a382260c4385a4430104792dd47f60108a",
@@ -1313,7 +1345,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RootAuthorityTrustBody|RootAuthorityTrustBody.threshold|threshold",
         ],
-        rationale: "a01:1398: `threshold` is a shorthand-typed field rendered shorthand inside the `RootAuthorityTrustBody` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "bc5ee1747f0b34286eb1485d4f56dcabb1295558411f077e80f1e603b5a53f41",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ad518b83fc93d2e002e29f0b04c6997a3f4f7db95c0332b3396c97abdddbabce",
@@ -1321,7 +1353,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1425"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|RootSlot|RootSlot.reserved_zeroes|reserved_zeroes"],
-        rationale: "a01:1425: `reserved_zeroes` is a shorthand-typed field rendered shorthand inside the `RootSlot` body; per the a01:1412 flattened-rendering law its exact type/cardinality is owned by the durable_fields.toml row, so the flagged token is the field candidate itself.",
+        rationale_sha256: "2602f2dacef1ebf993d4f4f8efe62378dc0b2922e8190330be3c7469d14848fb",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:09e59fe9e8d42990d61d08b6b8f2c7edb2526c89f0fdb20fae7745ef014a81e8",
@@ -1329,7 +1361,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1398"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &[],
-        rationale: "a01:1398: the brace tuple `{schema/tag,authority_domain,artifact_kind,body_digest,externally_pinned_root_policy_id}` enumerates the domain-separated signing transcript each root signature signs; transcript-content notation, not a durable schema, and no parsed candidate owns it (empty set legal for unowned-structural-fragment).",
+        rationale_sha256: "7c46f389f893ee26a2b9469361b0c698cabdb27525a93e5aca71d27e56a1dd1a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:34577cda100fc597ce5020921e7520ccf2ff9ea71a5bee91bcfed896e09733cc",
@@ -1337,7 +1369,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1406"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &[],
-        rationale: "a01:1406: `GlobalTxnRecord|GlobalControlRecord` is a target-set enumeration naming what the global command wrappers target; the pipe-joined phrase is prose enumeration of externally defined schemas, not a union schema of this slice (empty set legal for unowned-structural-fragment).",
+        rationale_sha256: "dfa8ed796defbb7da16f3923d30453e60409ea5fe4dca0817492535acbf0a984",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0d9fa91b6888b1d850b7dc8d59eabdf2aa50b4782f6cfe5d9abec75bd9127586",
@@ -1345,7 +1377,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1443"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PlacementDescriptorWithoutId"],
-        rationale: "a01:1443: `ContiguousSpan { root_failure_domain_id, segment_id, offset, encoded_len, root_symbol_inventory_digest }` is a named closed sub-schema item inside the specialized descriptor per the a01:1412 compact-phrase law; it is part of the `top|PlacementDescriptorWithoutId` candidate, not an open bag or stray schema.",
+        rationale_sha256: "532406fb6b4a41c8485a97f234cb4e870b76e49786af0c5cdb46c3852035dd38",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d7a9a4eb5a85dfb74c358f357b30941729f34bcffd4a4a80e5acbe984df5ca50",
@@ -1353,7 +1385,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseAckCertificate"],
-        rationale: "a01:1404: the leading `SameGroupCertificateHeader` item is a named closed sub-schema (compact-phrase law, a01:1412) embedded in the ack-certificate body; it belongs to the `top|RemoteRetentionReleaseAckCertificate` candidate.",
+        rationale_sha256: "df9f6bf1289869c8c2794c1081361ce6707a107b3ae68f7a8440d8757366dc63",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b309ff017e04d9e2ad7b7d57dd82659a085c5ed58fb994ea08f5ca857aeb8b80",
@@ -1361,7 +1393,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseRequestCertificate"],
-        rationale: "a01:1404: the leading `SameGroupCertificateHeader` item is a named closed sub-schema (compact-phrase law, a01:1412) embedded in the request-certificate body; it belongs to the `top|RemoteRetentionReleaseRequestCertificate` candidate.",
+        rationale_sha256: "1f6b4648c21dcac4cddc9e3fb9f5c3e658bb42736a545a623b7145a1a9f025a5",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ba8e5e4bfced370e72e8c5f2de3110ca3176fc081dcbdf0ebbf5070c8109f914",
@@ -1371,7 +1403,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AppliedAbortRef|AppliedAbortRef.LocalControl.logical_command_seq|logical_command_seq",
         ],
-        rationale: "a01:1408: shorthand member `logical_command_seq` at census path `AppliedAbortRef.LocalControl.logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedAbortRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "9ddeeeadc8843b8104f6a705a80218d9ff1b84965069aed6d0d9c5677d3b0433",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:da6796d82ec8f0ad13cb7e98a3dd5027e081d6166fb25010f34fc1d3f942face",
@@ -1381,7 +1413,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AppliedAbortRef|AppliedAbortRef.LocalTxn.logical_command_seq|logical_command_seq",
         ],
-        rationale: "a01:1408: shorthand member `logical_command_seq` at census path `AppliedAbortRef.LocalTxn.logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedAbortRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "b3e6d66e2f5aa0f413a86b672fa463b4369e049477c594cffa0c9df445e27b73",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:cd5263e4e5a623d18abf05fd873322bd2aed0ecf4101650b392c8ac0dfe83342",
@@ -1391,7 +1423,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AppliedAbortRef|AppliedAbortRef.MetaControl.global_logical_command_seq|global_logical_command_seq",
         ],
-        rationale: "a01:1408: shorthand member `global_logical_command_seq` at census path `AppliedAbortRef.MetaControl.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedAbortRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "c75a3db98724dbf7943f3ed7fefe76f194b4152c135fae9704df411c97f84fad",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:86c7e179248aaf7991f43a1f3327c09353cf813cc01b8b33a36e4fa7bc70c63d",
@@ -1401,7 +1433,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AppliedAbortRef|AppliedAbortRef.MetaTxn.global_logical_command_seq|global_logical_command_seq",
         ],
-        rationale: "a01:1408: shorthand member `global_logical_command_seq` at census path `AppliedAbortRef.MetaTxn.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedAbortRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "c3f7137eef4a414a58a29330dee97f135213d5de68ebf7d6d8818324f997f13a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:5a6fd0f3b82c7f0e25cc7f2e54a6979556e86845159ade0fc5db84f20a68ce39",
@@ -1411,7 +1443,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AppliedControlRef|AppliedControlRef.Local.logical_command_seq|logical_command_seq",
         ],
-        rationale: "a01:1408: shorthand member `logical_command_seq` at census path `AppliedControlRef.Local.logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedControlRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "ef5b8167841fca5587fb7f64a1c5a0f288f68781c6679da5b6643c895d6056f4",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:2d3a238643d53101c5c0b1b76309f7842bac2fde143198374ce80f7a28460922",
@@ -1421,7 +1453,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AppliedControlRef|AppliedControlRef.Meta.global_logical_command_seq|global_logical_command_seq",
         ],
-        rationale: "a01:1408: shorthand member `global_logical_command_seq` at census path `AppliedControlRef.Meta.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AppliedControlRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "9d33e114bfe63bddded04cfa70f8d220d770f424b38fdfaf6ebb183999a6c8b6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:4cd9ff504a8f45737e9059b60893933afd7d86625b7e0c02f1f076120253317b",
@@ -1431,7 +1463,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AuditCandidateRef|AuditCandidateRef.Local.blocked_after_logical_command_seq|blocked_after_logical_command_seq",
         ],
-        rationale: "a01:1408: shorthand member `blocked_after_logical_command_seq` at census path `AuditCandidateRef.Local.blocked_after_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AuditCandidateRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "361bbc63240de8867b43e7acddaef5762ce346bf65b9661a96574f099b66171c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:000a7ee23e3de7a2a40e0eeaed2ea1b2597bf1afc47a0fa82604885626570e48",
@@ -1441,7 +1473,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AuditCandidateRef|AuditCandidateRef.Meta.blocked_after_global_logical_command_seq|blocked_after_global_logical_command_seq",
         ],
-        rationale: "a01:1408: shorthand member `blocked_after_global_logical_command_seq` at census path `AuditCandidateRef.Meta.blocked_after_global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AuditCandidateRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "84ad58a6b85752c7158f93e8345b6b18660991d51010807becb6c6d37ae69713",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3f8943e11fe38023572621016d3bd2736d76845c6fa86ca01ab11c963ac3d295",
@@ -1451,7 +1483,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AuthorityAppliedRef|AuthorityAppliedRef.Local.logical_command_seq|logical_command_seq",
         ],
-        rationale: "a01:1404: shorthand member `logical_command_seq` at census path `AuthorityAppliedRef.Local.logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AuthorityAppliedRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "fb93b4bc28574ac8687514cfe94220570c3190e71274cf43f7a7dd861c05b30b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:cd8a157343d76e480a778f55bb074c26f2b450fe8d1a019afcb01160605d0736",
@@ -1461,7 +1493,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AuthorityAppliedRef|AuthorityAppliedRef.Meta.global_logical_command_seq|global_logical_command_seq",
         ],
-        rationale: "a01:1404: shorthand member `global_logical_command_seq` at census path `AuthorityAppliedRef.Meta.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact AuthorityAppliedRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "63232aec44075c6b6bb1657abc7d5b2a94c994e34a32c0a62f8d3bb73bfafed9",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:645cd3190c29d6877e5b52fbd9a7eb2d12617be3015867f30ebf73aff4d632f6",
@@ -1471,7 +1503,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AuthorityAppliedRef|AuthorityAppliedRef.Shard.shard_raft_index|shard_raft_index",
         ],
-        rationale: "a01:1404: shorthand member `shard_raft_index` at census path `AuthorityAppliedRef.Shard.shard_raft_index` carries no inline exact type; the span is committed byte-exactly by the exact AuthorityAppliedRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "59ffc270027d73971d4a74a87762d1839862d4dc869170cc474c83a5480b2746",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:4798d0e4d5005fcd185c72d5e213ed7330f55d1af1d633542b7eab63fe45cf84",
@@ -1481,7 +1513,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CertifiedRemoteStrongRef<T>|CertifiedRemoteStrongRef<T>.target_closure_inventory_digest|target_closure_inventory_digest",
         ],
-        rationale: "a01:1402: shorthand member `target_closure_inventory_digest` at census path `CertifiedRemoteStrongRef<T>.target_closure_inventory_digest` carries no inline exact type; the span is committed byte-exactly by the exact CertifiedRemoteStrongRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "b47c6ab1bab2a66fae378658085854e17dcd6fe260609c007031ef8e4b287b24",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:8d3b56aa3a767ea542872bc1ba3fd0ab477a7ed2ca662c337ee1bf8949583e7d",
@@ -1491,7 +1523,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConditionalCommandRef|ConditionalCommandRef.command_ref|command_ref",
         ],
-        rationale: "a01:1394: shorthand member `command_ref` at census path `ConditionalCommandRef.command_ref` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "879d01c794bf43ab1265519d1e14ea46c179fa21f19367ac912096463c0e28bb",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:35bc46ce1fd0d6c8b7488a044ef386504bc03fbd5d1ec2b770e86ab030a492d5",
@@ -1501,7 +1533,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConditionalCoordinateRef|ConditionalCoordinateRef.branch|branch",
         ],
-        rationale: "a01:1394: shorthand member `branch` at census path `ConditionalCoordinateRef.branch` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalCoordinateRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "9d93098aa0e04fbe0d979d204495a49c8b30cd27fb03514a974002d06af79331",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:8bb17f7c3ce721f479db1a83c8e7dda855ec98c2eb641e4e187851f8c7c82723",
@@ -1511,7 +1543,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConditionalCoordinateRef|ConditionalCoordinateRef.graph|graph",
         ],
-        rationale: "a01:1394: shorthand member `graph` at census path `ConditionalCoordinateRef.graph` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalCoordinateRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "ca1fbd0716d42f408ae9cbd47da4f1b6c3e27387a27192bfd977bc4831bce1ad",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:71b82ee0c32114b11f3406e639c01a44934215169bc01a02acd1b77d779ffe60",
@@ -1519,7 +1551,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|ConditionalCoordinateRef|ConditionalCoordinateRef.oid|oid"],
-        rationale: "a01:1394: shorthand member `oid` at census path `ConditionalCoordinateRef.oid` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalCoordinateRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "1fd85acb8e20c4682303156b10a8363a8bb76f91c2527ed09ec33fd7afdb3b59",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ce9bbf77be4d878c886864f08776365de232040b4d71c98b3322860c517e225c",
@@ -1529,7 +1561,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConditionalGlobalCommandRef|ConditionalGlobalCommandRef.global_logical_command_seq|global_logical_command_seq",
         ],
-        rationale: "a01:1406: shorthand member `global_logical_command_seq` at census path `ConditionalGlobalCommandRef.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalGlobalCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "a2bbb760c3a0510c82f63f954d447af9ca89fcfe4cf876091ff77d7319cb7dc0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:91b4ecfbd59471f33fe1b99f790946e8559c552ac794ffb308e1dd109479fff3",
@@ -1539,7 +1571,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConditionalGlobalCommandRef|ConditionalGlobalCommandRef.record_oid|record_oid",
         ],
-        rationale: "a01:1406: shorthand member `record_oid` at census path `ConditionalGlobalCommandRef.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalGlobalCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "134f01a7b292a431c1eea7296dee3dbba58b22cd8a8aa30816ddc20ead5f0c77",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:fef8d53fe305b0feaba6773e11a19e89f6adbe510b9f58cb35907fed8fdda0ce",
@@ -1549,7 +1581,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConditionalGlobalTxnInputRef|ConditionalGlobalTxnInputRef.assigned_global_logical_command_seq|assigned_global_logical_command_seq",
         ],
-        rationale: "a01:1406, a11:1962: shorthand member `assigned_global_logical_command_seq` at census path `ConditionalGlobalTxnInputRef.assigned_global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalGlobalTxnInputRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "db324c993cfbb138be99b71bfbd942e207f427ee90f99f869c064d3a8684161d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:55674524425476cfb59b374d5d338c633a98488fde9d76d879b29e5b956b138c",
@@ -1559,7 +1591,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ExportLeaf<T>|ExportLeaf<T>.quorum_signatures|quorum_signatures",
         ],
-        rationale: "a01:1400: shorthand member `quorum_signatures` carries no inline exact type, and ExportLeaf is a logical kind, so no wire envelope commits the span. The a01 owner ruling landed in 694d14b fixes it to `bytes` on the registered durable_fields row, derived from the two landed instances in this same release family plus authority_quorum_signatures, all bytes/65536. The single affected census key maps to that source form.",
+        rationale_sha256: "efc089ac4a4c0397de2806e0df6781b38cc322a73c4d50ee51ff4ac22bdd658b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:56ab0b78574dcc4cc8ada1e27d64228256633d327386f25f3e31c79b082b93d3",
@@ -1569,7 +1601,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConditionalGlobalTxnInputRef|ConditionalGlobalTxnInputRef.command_oid|command_oid",
         ],
-        rationale: "a01:1406, a11:1962: shorthand member `command_oid` at census path `ConditionalGlobalTxnInputRef.command_oid` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalGlobalTxnInputRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "82cdb061b5cfcd45db0f865e1cd6b9a622d3d2f86c0d26097d62a63c23ecdb36",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c9eacf0a0499722ac0abbf874b419638446536d586ed009714f01c2fe685713e",
@@ -1579,7 +1611,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConditionalMarkerRef|ConditionalMarkerRef.marker_ref|marker_ref",
         ],
-        rationale: "a01:1394: shorthand member `marker_ref` at census path `ConditionalMarkerRef.marker_ref` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalMarkerRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "ec198011cbfa04f4e657fddba7f260246d843ab4ada35d9693cb9fc7003a88c0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:287525289d2fc48c53af7935b122ec99d01330bf6bc8e7acb3484a796c7b2dc1",
@@ -1589,7 +1621,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConditionalShardCommandRef|ConditionalShardCommandRef.record_oid|record_oid",
         ],
-        rationale: "a01:1406: shorthand member `record_oid` at census path `ConditionalShardCommandRef.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalShardCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "131da73affe4c6b869091e31a043930876cdda519ef623af04075f60e5fdcf6c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:27f66e75e71751e7776eb0bf7f45d44cc30ae3153b29daccd9d65a3d1341a0df",
@@ -1599,7 +1631,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConditionalShardCommandRef|ConditionalShardCommandRef.shard_id|shard_id",
         ],
-        rationale: "a01:1406: shorthand member `shard_id` at census path `ConditionalShardCommandRef.shard_id` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalShardCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "599b03c338d53705ddb64d6037670fc13a8fb6fd6b811debb820a1eec188c29b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:448fd4c780118dedd261ff04c0d3fdbb837394d31386becb8935f9bb5a7477f2",
@@ -1609,7 +1641,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConditionalShardCommandRef|ConditionalShardCommandRef.shard_raft_index|shard_raft_index",
         ],
-        rationale: "a01:1406: shorthand member `shard_raft_index` at census path `ConditionalShardCommandRef.shard_raft_index` carries no inline exact type; the span is committed byte-exactly by the exact ConditionalShardCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "bb9fd527faa11b628dea2e470cf12b06dfe7083cd429f2d5ac2c64b4a7f54b04",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:51fde1eb845f5b657f68fc1295946c8f2077008b1f8310d772b449ee0959a974",
@@ -1619,7 +1651,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConsensusDomain|ConsensusDomain.cluster_incarnation|cluster_incarnation",
         ],
-        rationale: "a01:1396: shorthand member `cluster_incarnation` at census path `ConsensusDomain.cluster_incarnation` carries no inline exact type; the span is committed byte-exactly by the exact ConsensusDomain wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "1522023f70bcc43fff1c506a9bee05eb566b077900692848b807d8b1568633d5",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:06e4b97e0d741edd0bb8d618d48df3daf7f39f7ff5f2b1aa0d2571b1cede5c2d",
@@ -1627,7 +1659,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1396"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|ConsensusDomain|ConsensusDomain.database_id|database_id"],
-        rationale: "a01:1396: shorthand member `database_id` at census path `ConsensusDomain.database_id` carries no inline exact type; the span is committed byte-exactly by the exact ConsensusDomain wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "d538a7cc25d6e50c870ef8b97ceef777eaa77f86eeeedce7191f501375d1cd2a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:bc4a928f57e4004abc66ef087f1484f9d14c2fa3ba3f740e52124e669b091bf2",
@@ -1637,7 +1669,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConsensusDomain|ConsensusDomain.database_security_namespace_id|database_security_namespace_id",
         ],
-        rationale: "a01:1396: shorthand member `database_security_namespace_id` at census path `ConsensusDomain.database_security_namespace_id` carries no inline exact type; the span is committed byte-exactly by the exact ConsensusDomain wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "46a27de3adb75ae64a393b259eb8670bde0861c7134a7c50768e767bd733db8a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e03210167c369f94d93dc4c8253d36d29ac78011864a802f5843834bf284c4fb",
@@ -1645,7 +1677,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1396"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|ConsensusDomain|ConsensusDomain.group_id|group_id"],
-        rationale: "a01:1396: shorthand member `group_id` at census path `ConsensusDomain.group_id` carries no inline exact type; the span is committed byte-exactly by the exact ConsensusDomain wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "b13c064732562bbc675ef728bb7e9e54aa770178e27ec3af788c9922563bfa7f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:afbc344d70d6cc6795f928f6378d234d4c01c0738c49b479437ecd307b85b863",
@@ -1655,7 +1687,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConsensusDomain|ConsensusDomain.group_role.Shard.shard_id|shard_id",
         ],
-        rationale: "a01:1396: shorthand member `shard_id` at census path `ConsensusDomain.group_role.Shard.shard_id` carries no inline exact type; the span is committed byte-exactly by the exact ConsensusDomain wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "c6830c9d5c07914f36af3cf7c63c62d4c3b725b4806bdffa24d343027fce256b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:5d0a9654f53322e956d33010ca7df5afc44cb67dbde765dcef51425db02dac13",
@@ -1665,7 +1697,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.encoding_id|encoding_id",
         ],
-        rationale: "a01:1443, a02:1449: shorthand member `encoding_id` at census path `PlacementDescriptorWithoutId.encoding_id` carries no inline exact type; the span is committed byte-exactly by the exact PlacementDescriptorWithoutId wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "5d9ceae808ce92c1a975dc82de58dd612ec0d8d1edb774d3818149e5265240b5",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d24695012d4044e09c759f8614fa9a032db2cbec2fc3c93e77ab749ce5a608d8",
@@ -1675,7 +1707,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.failure_domain_policy_id|failure_domain_policy_id",
         ],
-        rationale: "a01:1443: shorthand member `failure_domain_policy_id` at census path `PlacementDescriptorWithoutId.failure_domain_policy_id` carries no inline exact type; the span is committed byte-exactly by the exact PlacementDescriptorWithoutId wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "228188975e7d888e3e1c9c3b00c90f7d8adec3dc6acc2a4c9d11be49af2a940a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:43d2f0e65a4dc39f329e611ac733251f6188cb5cc544e93beef46e135474beab",
@@ -1685,7 +1717,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.root_placement_epoch|root_placement_epoch",
         ],
-        rationale: "a01:1443: shorthand member `root_placement_epoch` at census path `PlacementDescriptorWithoutId.root_placement_epoch` carries no inline exact type; the span is committed byte-exactly by the exact PlacementDescriptorWithoutId wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "1f25cdc4c4879cb7b06287c0c9f58e92595eb9b4982a86451697aef9b49604b8",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e1c52d6dcbd8885faf4eba1c8406864266ea081cd420b677c5467c4a97d9100b",
@@ -1695,7 +1727,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest|final_retirement_floor_digest",
         ],
-        rationale: "a01:1398: shorthand member `final_retirement_floor_digest` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "561a5d9616c2e70a8cc5ee78d51b861de3d29d6286edef3ddb12206916958a67",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:404a1f5ffca0b239e6d6304f019a320bfbb2f771e8d8f75075ea4aa41d31fbc6",
@@ -1705,7 +1737,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript|joint_transition_transcript",
         ],
-        rationale: "a01:1398: shorthand member `joint_transition_transcript` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "47781e05d21c6f5116cdeaefffc3ee4a0333cc4ec7a25de467e788f96d1d7f20",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6150ede1e1b9372211d8fcedffd089371e78f6ef8bdf839499417b25f27d9e22",
@@ -1715,7 +1747,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures|new_configuration_quorum_signatures",
         ],
-        rationale: "a01:1398: shorthand member `new_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "10f7e3518f34b10fece788335349504c7b6292f5406df19a1142d282dc9424c5",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:af2b5edb93577dd590386a385295f80a7ae01d42de718097a430f50357d49612",
@@ -1725,7 +1757,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures|old_configuration_quorum_signatures",
         ],
-        rationale: "a01:1398: shorthand member `old_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "749b7fa989f192c7f4812415a50e98139073bdd73a00333b7deb951fb77b2738",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:299ee60ab1337573ea4994c60bdbe86a53c9be1ecf08fd2f189e0a4f025be75e",
@@ -1735,7 +1767,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest|final_retirement_floor_digest",
         ],
-        rationale: "a01:1398: shorthand member `final_retirement_floor_digest` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "f499a7eb9dbe01ef99398d25219ca3037e16e257776df36f1295c283372afc3b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3543ce46e3d146757ff29ca8552c7c2c03766d34c11e9c4b2e70e47446a29da2",
@@ -1745,7 +1777,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript|joint_transition_transcript",
         ],
-        rationale: "a01:1398: shorthand member `joint_transition_transcript` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "bba24db734ecbcc9476d82117845a6e7cfbebc27aa42241385b33335c2bde922",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9bac05f943c14519aa377b05808e57bfa117279607768581f79fb2720b221f99",
@@ -1755,7 +1787,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures|new_configuration_quorum_signatures",
         ],
-        rationale: "a01:1398: shorthand member `new_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "8dab59da54955f980bd0f270fcb46a1a7ea82fccf995d2240542c79454a860a4",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:08cbc807047e544cd6c1e2598630e187feb142c28fc295cc0a7696e8d36dc68f",
@@ -1765,7 +1797,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures|old_configuration_quorum_signatures",
         ],
-        rationale: "a01:1398: shorthand member `old_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "ed8afd912cfda48219da80f500d6bf3061b46784c20b4934b8c63823a7bc49ca",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:107590809bb6e12167b2f2dd3e8f10051a169c3a28357753e2ddaeb18d7deb20",
@@ -1775,7 +1807,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteObjectIdentity|RemoteObjectIdentity.canonical_digest|canonical_digest",
         ],
-        rationale: "a01:1396: shorthand member `canonical_digest` at census path `RemoteObjectIdentity.canonical_digest` carries no inline exact type; the span is committed byte-exactly by the exact RemoteObjectIdentity wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "96128449ef9d01470a3bff175a2a8a41f8e3b5d689b342ba2340183fb24dfdbd",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:bd6a0a183874f88db3ea3ec0302152530c28df45a9f5dd4897784ea8a85ec3a4",
@@ -1785,7 +1817,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteObjectIdentity|RemoteObjectIdentity.object_kind|object_kind",
         ],
-        rationale: "a01:1396: shorthand member `object_kind` at census path `RemoteObjectIdentity.object_kind` carries no inline exact type; the span is committed byte-exactly by the exact RemoteObjectIdentity wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "97984b0edd24f51bf726aed05adc1eff3478b80e70e4e34e60d5bebb695851fd",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b5662f79036ce591940334355f520642a72b0634d4a15befe4513b36e25d90ba",
@@ -1795,7 +1827,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RemoteObjectIdentity|RemoteObjectIdentity.object_oid|object_oid",
         ],
-        rationale: "a01:1396: shorthand member `object_oid` at census path `RemoteObjectIdentity.object_oid` carries no inline exact type; the span is committed byte-exactly by the exact RemoteObjectIdentity wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "1ddef0fef2e9ff2e1b2cb105091f4a47d74ba0b79f021c8cd54bf6489a8ac6df",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6047adc7965b7865e94cb7668b9a58beefe4bc5ccad991358a95c9be0bc29aab",
@@ -1805,7 +1837,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTransitionActivationState|RoleTransitionActivationState.Meta.migration_nonce|migration_nonce",
         ],
-        rationale: "a01:1390: shorthand member `migration_nonce` at census path `RoleTransitionActivationState.Meta.migration_nonce` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "baad8a4a8b67ebf7739535afce3e2bff6dd28980a15df5dadf8394de1ae803ae",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:20a8a347b7c249c90e09deab30ed8ff464b44114e205bbef6f1852afb27419c5",
@@ -1815,7 +1847,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTransitionActivationState|RoleTransitionActivationState.Meta.phase.Complete.seal_release_state|seal_release_state",
         ],
-        rationale: "a01:1390: shorthand member `seal_release_state` at census path `RoleTransitionActivationState.Meta.phase.Complete.seal_release_state` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "c775448de53e7ea8fdb1b9cca1d78b2b57df1a8b15e893bee0cf9281051ce705",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ae9bc8dd611d9feec022771782f885fbc37718ed23bab487b4189f9841d51822",
@@ -1825,7 +1857,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTransitionActivationState|RoleTransitionActivationState.Meta.target_service_visibility_epoch|target_service_visibility_epoch",
         ],
-        rationale: "a01:1390: shorthand member `target_service_visibility_epoch` at census path `RoleTransitionActivationState.Meta.target_service_visibility_epoch` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "630c939c56f204d8b86502c1db018fb199f4c4cea0624450aa537b1a47b03594",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6fa3a8b63ee9d48d3658e670f75400ea12f03518bd4fea540eda6f1d8dc62f94",
@@ -1835,7 +1867,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTransitionActivationState|RoleTransitionActivationState.Shard.migration_nonce|migration_nonce",
         ],
-        rationale: "a01:1390: shorthand member `migration_nonce` at census path `RoleTransitionActivationState.Shard.migration_nonce` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "21f4df4344ea91a4208af2a21d918d7bf0093f96396b4dd6b7dfa4a3fe7e6b66",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:530ab398113ef1b97858212d423b792e306d68ce291da23fdb3ae00831158d3a",
@@ -1845,7 +1877,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTransitionActivationState|RoleTransitionActivationState.Shard.phase.Complete.seal_release_state|seal_release_state",
         ],
-        rationale: "a01:1390: shorthand member `seal_release_state` at census path `RoleTransitionActivationState.Shard.phase.Complete.seal_release_state` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "16788aeea876d42baceb64142198bb173ca95406197ae429ceef4e77c69796bf",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0dbcee60eff18a6b83fbfca6710c56cef320a2b09b9eacdd495000f524007939",
@@ -1855,7 +1887,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTransitionActivationState|RoleTransitionActivationState.Shard.shard_id|shard_id",
         ],
-        rationale: "a01:1390: shorthand member `shard_id` at census path `RoleTransitionActivationState.Shard.shard_id` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "32a40e29101904e460bf50b90db61288f7fd2fcd46caef93476402562d1f1fce",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:2b3f0d0dc9a723abcaf65c604e43b62aa250900a9806fc691b61ad743557b433",
@@ -1865,7 +1897,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTransitionActivationState|RoleTransitionActivationState.Shard.target_service_visibility_epoch|target_service_visibility_epoch",
         ],
-        rationale: "a01:1390: shorthand member `target_service_visibility_epoch` at census path `RoleTransitionActivationState.Shard.target_service_visibility_epoch` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RoleTransitionActivationState arm body, and the single affected census key maps to that source form.",
+        rationale_sha256: "54c637206eb1e2dcde1342e00914cffb4d2950b4b3a71fae0e15fc7490ec16eb",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:cb5825c40682074cd88d59caa2f46d67c9b6115be7ebbe0208b97da0b45d74c9",
@@ -1875,7 +1907,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.ciphertext_digest|ciphertext_digest",
         ],
-        rationale: "a01:1410: shorthand member `ciphertext_digest` at census path `StrongCiphertextRef<T>.ciphertext_digest` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "6fe5cd945c6a3c1f5f06d8aea045fc1abe4655149222a4611240610258065c2f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b7504277054b04c1cf2ceed042250c26449c0452fd4d7c8e99ea4b9f75bdb846",
@@ -1885,7 +1917,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.ciphertext_id|ciphertext_id",
         ],
-        rationale: "a01:1410: shorthand member `ciphertext_id` at census path `StrongCiphertextRef<T>.ciphertext_id` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "7f596b70a70eb4fdbf7c715942d9299489eb7cb5e3d9ec34694443352604f2f2",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0d955780da7823b64d2ac4832293cb252f40d4f7d23421df903e14e41dc3cab5",
@@ -1895,7 +1927,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.dek_id|dek_id",
         ],
-        rationale: "a01:1410: shorthand member `dek_id` at census path `StrongCiphertextRef<T>.dek_id` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "c17e17d8a2356f138728f86e4796b179ae3239914b7c705f8df0737b58451618",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a584b1e1a58dc60fff87a8bae2f09810790db317ac3222eccc0058ee781b6f6b",
@@ -1905,7 +1937,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.logical_oid|logical_oid",
         ],
-        rationale: "a01:1410: shorthand member `logical_oid` at census path `StrongCiphertextRef<T>.logical_oid` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "7470b899cda8a48d40fba4817cf0c0eef0673afc7af19fcde2da0d8ebfb04cb9",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:1e315e718c1dc57fdb221a62568115435bbd13f2273a677b758dcd6bc444e86d",
@@ -1915,7 +1947,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.protected_length|protected_length",
         ],
-        rationale: "a01:1410: shorthand member `protected_length` at census path `StrongCiphertextRef<T>.protected_length` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "2cf51930e39b4c9fb212b45dd4746d56c4483a48fb6f1950e9127de134f50668",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:652c475ecabc6c9b76ce0f9c6fc7e5158ce7db6433cbdfd4edd2e8013d9fcb04",
@@ -1925,7 +1957,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|StrongCiphertextRef<T>|StrongCiphertextRef<T>.recoverability_profile|recoverability_profile",
         ],
-        rationale: "a01:1410: shorthand member `recoverability_profile` at census path `StrongCiphertextRef<T>.recoverability_profile` carries no inline exact type; the span is committed byte-exactly by the exact StrongCiphertextRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "f796575e05d500347de2f4e0709dac5266ccaa876091be436f82861e7c419ff7",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:bf14b1da59063849fedae6811820b7eac779d226996884d50707d7a33b9016e4",
@@ -1933,7 +1965,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|StrongCommandRef|StrongCommandRef.command_ref|command_ref"],
-        rationale: "a01:1394: shorthand member `command_ref` at census path `StrongCommandRef.command_ref` carries no inline exact type; the span is committed byte-exactly by the exact StrongCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "f18b450788697bf5e669f51b56f32e72d812cb9c5992c94a5b28f26977915eae",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6eb7a154015a5376477a8c84497a17f9adcb3359e3f533d0547e2cc9c40a8799",
@@ -1943,7 +1975,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|StrongGlobalCommandRef|StrongGlobalCommandRef.global_logical_command_seq|global_logical_command_seq",
         ],
-        rationale: "a01:1406: shorthand member `global_logical_command_seq` at census path `StrongGlobalCommandRef.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact StrongGlobalCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "7e81d86efeb1667bb556bf9dddd31a69d3f7ab6af9fed23b668f387d1b498cee",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:acf6c339daf3a326175b85aabd84678e241367cdc7b5c946db9157b194a6ab34",
@@ -1953,7 +1985,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|StrongGlobalCommandRef|StrongGlobalCommandRef.record_oid|record_oid",
         ],
-        rationale: "a01:1406: shorthand member `record_oid` at census path `StrongGlobalCommandRef.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact StrongGlobalCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "a8ab3495cd7c0db32013791027ea6859be4912e6e8744f4d88e3692b0216effb",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:cd64b0149d18dc9934a66167c0937515a7618074d137a31ebb79344501932118",
@@ -1961,7 +1993,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|StrongMarkerRef|StrongMarkerRef.marker_ref|marker_ref"],
-        rationale: "a01:1394: shorthand member `marker_ref` at census path `StrongMarkerRef.marker_ref` carries no inline exact type; the span is committed byte-exactly by the exact StrongMarkerRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "bfffb13326dacb23757b336fff689aa084f8cf622baf89861da75d1369e97812",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3f8f3176a7718116cb6f1545bd688ad47df7968959d783ff0267d18843369182",
@@ -1969,7 +2001,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|StrongRef|StrongRef.oid|oid"],
-        rationale: "a01:1394: shorthand member `oid` at census path `StrongRef.oid` carries no inline exact type; the span is committed byte-exactly by the exact StrongRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "9cf98dd7c7ea5e313bf4edea057a6f62d5c64841e48d5ddfc73e69853c70450f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a6fb8ede356a5dcb049d10c0e248c928bc56e5eaedc09be55230e95f73c77310",
@@ -1979,7 +2011,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|StrongShardCommandRef|StrongShardCommandRef.record_oid|record_oid",
         ],
-        rationale: "a01:1406: shorthand member `record_oid` at census path `StrongShardCommandRef.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact StrongShardCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "c6d7d40af83ee3fd253f9aaa898663a35fc2240e1bd9a89a8d18500c3a3561e1",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6b31b163a80c3768fbba1b6cdbfd63504b7796fd719f38e655aa60e1c4c7ed20",
@@ -1989,7 +2021,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|StrongShardCommandRef|StrongShardCommandRef.shard_id|shard_id",
         ],
-        rationale: "a01:1406: shorthand member `shard_id` at census path `StrongShardCommandRef.shard_id` carries no inline exact type; the span is committed byte-exactly by the exact StrongShardCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "447b5184b9c78bc7088cdd1786803176eb9521849a95b4e986000e081a0ef967",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f84e8e64b2b57ad03afd6a8b703c0a8b7ed1979e0ecad941a601b2f9d4d39077",
@@ -1999,7 +2031,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|StrongShardCommandRef|StrongShardCommandRef.shard_raft_index|shard_raft_index",
         ],
-        rationale: "a01:1406: shorthand member `shard_raft_index` at census path `StrongShardCommandRef.shard_raft_index` carries no inline exact type; the span is committed byte-exactly by the exact StrongShardCommandRef wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "09d4e56cc5bb381b45f72c526ba91ba767aef231d9b8f3839d8c978ec0cbf140",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:50cbfe932bcfbb0429e3ec0a3f025fff8b69d37555f229b96b6bff6191c7bdb3",
@@ -2007,7 +2039,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|WeakDigest|WeakDigest.digest|digest"],
-        rationale: "a01:1394: shorthand member `digest` at census path `WeakDigest.digest` carries no inline exact type; the span is committed byte-exactly by the exact WeakDigest wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "df848358fba0f041e21a4426489c29ba1fa434ecc4eb21d6506b4f9426781692",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:139510a77fde9ead91fa0ec2678ea00991c4e70d1df84f8ab78848677f222a67",
@@ -2017,7 +2049,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|WeakGlobalCommandIdentity|WeakGlobalCommandIdentity.global_logical_command_seq|global_logical_command_seq",
         ],
-        rationale: "a01:1406: shorthand member `global_logical_command_seq` at census path `WeakGlobalCommandIdentity.global_logical_command_seq` carries no inline exact type; the span is committed byte-exactly by the exact WeakGlobalCommandIdentity wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "cb553d2c7443612dba1d067f45436740a34faed13f32164f88d09817b7960d39",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:7cad9b9c94e36c6ae8838f509fc3020a94487b0f21ebdd0de8116fbb71d64a82",
@@ -2027,7 +2059,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|WeakGlobalCommandIdentity|WeakGlobalCommandIdentity.record_oid|record_oid",
         ],
-        rationale: "a01:1406: shorthand member `record_oid` at census path `WeakGlobalCommandIdentity.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact WeakGlobalCommandIdentity wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "c35439ba83b7ecd1b358be4e8505d78e9eccbeeb96743dcbe7e368bbbddccd1c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9f08c1c75203bd3827179ad5f4a0310ca62537ca1fdc04fa423a491b8b53bf7d",
@@ -2037,7 +2069,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|WeakMarkerIdentity|WeakMarkerIdentity.commit_seq|commit_seq",
         ],
-        rationale: "a01:1394: shorthand member `commit_seq` at census path `WeakMarkerIdentity.commit_seq` carries no inline exact type; the span is committed byte-exactly by the exact WeakMarkerIdentity wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "d00350d8b9a0dc5106f3c467c1f061e72d991caa900cc7170fcbea98794fac4e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e838c4e8c16f22e447b9f945df464fd6d6cbcccf0c9eaf87d67d9aaffd2dfc19",
@@ -2047,7 +2079,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|WeakMarkerIdentity|WeakMarkerIdentity.marker_oid|marker_oid",
         ],
-        rationale: "a01:1394: shorthand member `marker_oid` at census path `WeakMarkerIdentity.marker_oid` carries no inline exact type; the span is committed byte-exactly by the exact WeakMarkerIdentity wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "2ebd598cf713a51d493c27cc22124493fb393feb673c41dab3b125cb803b9247",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:71357f9cccbb9858750afa743c8c43e767f73a60ed20110a01be6f4aa2558826",
@@ -2057,7 +2089,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|WeakShardCommandIdentity|WeakShardCommandIdentity.record_oid|record_oid",
         ],
-        rationale: "a01:1406: shorthand member `record_oid` at census path `WeakShardCommandIdentity.record_oid` carries no inline exact type; the span is committed byte-exactly by the exact WeakShardCommandIdentity wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "6cc9226d342a63bd949a6d344acaa489d19efdddb3dace036938aa01cfef2602",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d8cf9ed9c05e68dcf47540f49cf5e166b3e8a251f9c64c5f62afd135b057d125",
@@ -2067,7 +2099,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|WeakShardCommandIdentity|WeakShardCommandIdentity.shard_id|shard_id",
         ],
-        rationale: "a01:1406: shorthand member `shard_id` at census path `WeakShardCommandIdentity.shard_id` carries no inline exact type; the span is committed byte-exactly by the exact WeakShardCommandIdentity wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "652c7cbc9b1449d1e2abed0cec7db7ab17236610dd60d8959e92f1a5da3451eb",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6025faae5c1c51f71fecd00802a3336e4a8d6697a2073a9bab4340fbc38bea46",
@@ -2077,7 +2109,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|WeakShardCommandIdentity|WeakShardCommandIdentity.shard_raft_index|shard_raft_index",
         ],
-        rationale: "a01:1406: shorthand member `shard_raft_index` at census path `WeakShardCommandIdentity.shard_raft_index` carries no inline exact type; the span is committed byte-exactly by the exact WeakShardCommandIdentity wire envelope contract, and the single affected census key maps to that source form.",
+        rationale_sha256: "398a2e78216d60cb50769edc47c7409f984b19dea61a294d870835d554945074",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:460202d74810b05f3b369b22e66dd2f8b4a2ee578ae502a4359404a71187455e",
@@ -2087,7 +2119,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ContinuityAuthorityCurrentBasis<Role>|ContinuityAuthorityCurrentBasis<Role>.Local.current_root_manifest_and_slot_identity|current_root_manifest_and_slot_identity",
         ],
-        rationale: "a16:2225: shorthand member `current_root_manifest_and_slot_identity` at census path `ContinuityAuthorityCurrentBasis<Role>.Local.current_root_manifest_and_slot_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `ContinuityAuthorityCurrentBasis<Role>` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "7eb064525c178d613203be3f80a97b24b50c95395829c4c435dbe031ed61b2c6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:d84bc693fde08ebdb0e53e54492f602de34d43c66e1286a0c750b8c2eee55df8",
@@ -2097,7 +2129,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ContinuityAuthorityCurrentBasis<Role>|ContinuityAuthorityCurrentBasis<Role>.Local.writer_fence_epoch|writer_fence_epoch",
         ],
-        rationale: "a16:2225: shorthand member `writer_fence_epoch` at census path `ContinuityAuthorityCurrentBasis<Role>.Local.writer_fence_epoch` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `ContinuityAuthorityCurrentBasis<Role>` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "1b40770365e2d8e2704e29a00e841d67256817abc7df84d92ce862c5cfe2e330",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:87dfaf6e9cc2b8bbde832f18efa9fa3fb950f304d9dd594b8d9e3aa230e9a2d9",
@@ -2107,7 +2139,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ContinuityAuthorityCurrentBasis<Role>|ContinuityAuthorityCurrentBasis<Role>.Meta.current_root_manifest_and_slot_identity|current_root_manifest_and_slot_identity",
         ],
-        rationale: "a16:2225: shorthand member `current_root_manifest_and_slot_identity` at census path `ContinuityAuthorityCurrentBasis<Role>.Meta.current_root_manifest_and_slot_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `ContinuityAuthorityCurrentBasis<Role>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "cedb083bd71c8416e469437cee6088d0463eb174d6f653ce3d0067faabc27ebd",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:40f683d4ca2d305185386c3a0779f4a2d359d5d3164c77de96ce2995d4237908",
@@ -2117,7 +2149,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ContinuityAuthorityCurrentBasis<Role>|ContinuityAuthorityCurrentBasis<Role>.Meta.writer_fence_epoch|writer_fence_epoch",
         ],
-        rationale: "a16:2225: shorthand member `writer_fence_epoch` at census path `ContinuityAuthorityCurrentBasis<Role>.Meta.writer_fence_epoch` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `ContinuityAuthorityCurrentBasis<Role>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "f9397457496da8a94a35ae3d26fe50f4de9714f68bd032611aeaa5efb4eba989",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ce48b3992c5f79c6151433b0ac626110de8d73a50c9bebde4be1cbcb81201af7",
@@ -2127,7 +2159,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ContinuityAuthorityCurrentBasis<Role>|ContinuityAuthorityCurrentBasis<Role>.Shard.current_root_manifest_and_slot_identity|current_root_manifest_and_slot_identity",
         ],
-        rationale: "a16:2225: shorthand member `current_root_manifest_and_slot_identity` at census path `ContinuityAuthorityCurrentBasis<Role>.Shard.current_root_manifest_and_slot_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `ContinuityAuthorityCurrentBasis<Role>` `Shard` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "d81e287e9a21f1c243fd4926901a7939d03864ba689f1bb3083a8ec14b04a8ee",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f90c20349a918a0e970ca304cc68f78df1783ea71ac6293d72f2fcc573aa80e2",
@@ -2137,7 +2169,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ContinuityAuthorityCurrentBasis<Role>|ContinuityAuthorityCurrentBasis<Role>.Shard.source_meta_prefix_and_configuration|source_meta_prefix_and_configuration",
         ],
-        rationale: "a16:2225: shorthand member `source_meta_prefix_and_configuration` at census path `ContinuityAuthorityCurrentBasis<Role>.Shard.source_meta_prefix_and_configuration` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `ContinuityAuthorityCurrentBasis<Role>` `Shard` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "d55a25329823a6929209738cef04a04df5444309d86831e1602a22ca0363efbd",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:b7eb51a05d5214237786f8e4895601cd889cd204a9fdbbcc964daaa2d3b8d58b",
@@ -2147,7 +2179,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ContinuityAuthorityCurrentBasis<Role>|ContinuityAuthorityCurrentBasis<Role>.Shard.writer_fence_epoch|writer_fence_epoch",
         ],
-        rationale: "a16:2225: shorthand member `writer_fence_epoch` at census path `ContinuityAuthorityCurrentBasis<Role>.Shard.writer_fence_epoch` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `ContinuityAuthorityCurrentBasis<Role>` `Shard` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "947b6987525f9858fbba24b95ffb5f662487c3f5f52e970383cf15ea582a1311",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:0c0b4a16ce9bdbeccf7ec454b8e52e722e171bcf812d4c4413aeb99efccfa625",
@@ -2157,7 +2189,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.archive_authority_signature|archive_authority_signature",
         ],
-        rationale: "a16:2235: shorthand member `archive_authority_signature` at census path `LeaseWindowSuccessorProof.CrossEpochHandoff.archive_authority_signature` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `CrossEpochHandoff` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "64c4b31bf006cd397320f1500eafc0265371d04fb7a8f86910f60805c4700fa1",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2b2dd91a2b492e9de178a0dbc850077f422ae4397974f295f38128ee4d3be64a",
@@ -2167,7 +2199,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.checked_domain_mapping|checked_domain_mapping",
         ],
-        rationale: "a16:2235: shorthand member `checked_domain_mapping` at census path `LeaseWindowSuccessorProof.CrossEpochHandoff.checked_domain_mapping` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `CrossEpochHandoff` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "6bd13f975fd51468391ee4f4feebca33454e883524a51523b8d11286ca92b0a7",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:55f3b93319481ae5515b4979cbc26b3e5cf0fc60b472b45749710d0654a7ac77",
@@ -2177,7 +2209,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.dual_signed_transition_proof|dual_signed_transition_proof",
         ],
-        rationale: "a16:2235: shorthand member `dual_signed_transition_proof` at census path `LeaseWindowSuccessorProof.CrossEpochHandoff.dual_signed_transition_proof` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `CrossEpochHandoff` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "5c7b0fc39b1bac5e2f6c4664362889489048883fe1eae68fa0b9c8ca13fa7adf",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4604a342b681ed605409625ef352daad3d54bb49066723f90210c5ace15c52dd",
@@ -2187,7 +2219,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.lease_identity|lease_identity",
         ],
-        rationale: "a16:2235: shorthand member `lease_identity` at census path `LeaseWindowSuccessorProof.CrossEpochHandoff.lease_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `CrossEpochHandoff` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "6aeb8246e88dc181ddf41b89a0ea31d7f484d47c4e824cd9981f81c29f11ac9b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:134d0d4d4be731d4cf4487b042d933a79b058435563c7e9211e3f67d19dc2bfe",
@@ -2197,7 +2229,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.no_gap_coverage_proof|no_gap_coverage_proof",
         ],
-        rationale: "a16:2235: shorthand member `no_gap_coverage_proof` at census path `LeaseWindowSuccessorProof.CrossEpochHandoff.no_gap_coverage_proof` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `CrossEpochHandoff` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "a0ba4c5ca27308fdf4c0064a623fb8644251192a465d373a7ca70884e01f8c7e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e71935c154a5a543fea65cb5dcf070475bffd2fb48f6867e2aeda5bbf4bec6b5",
@@ -2207,7 +2239,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.old_and_new_profile_identities|old_and_new_profile_identities",
         ],
-        rationale: "a16:2235: shorthand member `old_and_new_profile_identities` at census path `LeaseWindowSuccessorProof.CrossEpochHandoff.old_and_new_profile_identities` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `CrossEpochHandoff` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "d1f0909156a03f43a1b7d75db31916597a86c221212a9156ebb343d7ed1bf340",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:49fe4ea025fa3b41520aa2c736d9cc92c2ef522a87438d53b4eddce5c15404c8",
@@ -2217,7 +2249,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.prior_and_successor_generations|prior_and_successor_generations",
         ],
-        rationale: "a16:2235: shorthand member `prior_and_successor_generations` at census path `LeaseWindowSuccessorProof.CrossEpochHandoff.prior_and_successor_generations` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `CrossEpochHandoff` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "c42a43e39138561558f3021c42c3ac375de5dab7a027f0cedc4d5eb5c4db005c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f87519086a8f536dc713ab1365a4bfb83c62192a8d0b5ce8cf81771d2963fe76",
@@ -2227,7 +2259,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.archive_authority_signature|archive_authority_signature",
         ],
-        rationale: "a16:2235: shorthand member `archive_authority_signature` at census path `LeaseWindowSuccessorProof.SameEpochNonshrinking.archive_authority_signature` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `SameEpochNonshrinking` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "c8a53560cd3612848b166fae9c20d3d6f6cf47e53c64c08c2e424e44d8c6ba09",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8d2ffdea256c376ad5b0006705b27ca6b51ccba5006c908129895cacd22ab53c",
@@ -2237,7 +2269,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.checked_nonshrinking_bounds_and_counter|checked_nonshrinking_bounds_and_counter",
         ],
-        rationale: "a16:2235: shorthand member `checked_nonshrinking_bounds_and_counter` at census path `LeaseWindowSuccessorProof.SameEpochNonshrinking.checked_nonshrinking_bounds_and_counter` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `SameEpochNonshrinking` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "b6efeaa86c50e5a8985eb08187a3636bd57a35a0affd33ddf2794d69b2f781d5",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:fa0cd7bad70d2a11070d4ac7aa07c6e9594bb9a2b1b1420b8b80bfc7457471de",
@@ -2247,7 +2279,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.lease_identity|lease_identity",
         ],
-        rationale: "a16:2235: shorthand member `lease_identity` at census path `LeaseWindowSuccessorProof.SameEpochNonshrinking.lease_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `SameEpochNonshrinking` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "902a6355b382f229699dfee6787e6e335e4526c28c3e82a896e1281ed2b142ab",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:829355fb5b65191691f8664c311fc856ec13d034e717af269cea446ad14c4216",
@@ -2257,7 +2289,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.prior_and_successor_bounds|prior_and_successor_bounds",
         ],
-        rationale: "a16:2235: shorthand member `prior_and_successor_bounds` at census path `LeaseWindowSuccessorProof.SameEpochNonshrinking.prior_and_successor_bounds` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `SameEpochNonshrinking` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "4acb63b2f6db45f0aaa557942d3b38156152d3a1a0eda5450cfc8a3dfeb1b25b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8ebc993bcd786c4f58842b7f4a0482a6606d5a09b3569a869089a37f43916d4a",
@@ -2267,7 +2299,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.prior_and_successor_generations|prior_and_successor_generations",
         ],
-        rationale: "a16:2235: shorthand member `prior_and_successor_generations` at census path `LeaseWindowSuccessorProof.SameEpochNonshrinking.prior_and_successor_generations` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `SameEpochNonshrinking` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "d6e204ebb0a3a275f655f7f4e0ec97ccc29dcdc00999fbb64c0bad0a16e3ebae",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:85dbeb0516fa252e9be5a5de75cd32741741e2125a82a450fc8729828675599e",
@@ -2277,7 +2309,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.same_profile_domain_epoch|same_profile_domain_epoch",
         ],
-        rationale: "a16:2235: shorthand member `same_profile_domain_epoch` at census path `LeaseWindowSuccessorProof.SameEpochNonshrinking.same_profile_domain_epoch` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `LeaseWindowSuccessorProof` `SameEpochNonshrinking` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "4b5b62b175ce1d4515563a331c82a54951dd3ab97ec8d14f6159a1976ab514af",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:631e05ec22d5bd0bd47535c6abea08a9afbf9bc2da7cf2fa67d12ee696cdfcb7",
@@ -2287,7 +2319,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.claim_id|claim_id",
         ],
-        rationale: "a16:2245: shorthand member `claim_id` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.claim_id` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "4d788848db1c871efbf585e576c70b99530618a0bfcd54e21f4d3046dd760d12",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:684dd613cf8d1b1d36038b3422de453aef92d6186e5e77525f46313e3752d1cb",
@@ -2297,7 +2329,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.claimant_identity|claimant_identity",
         ],
-        rationale: "a16:2245: shorthand member `claimant_identity` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.claimant_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "cbb1d4e6ecef9d88316e4b5b37e62b230a63cffb913ae13437b4787310ef7ea4",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:351b5f727acb44a2cc22dcf886346f73878a40a476ba55b19266bc15b0ead3b8",
@@ -2307,7 +2339,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.directory_bound_creation_evidence_recipe_digest|directory_bound_creation_evidence_recipe_digest",
         ],
-        rationale: "a16:2245: shorthand member `directory_bound_creation_evidence_recipe_digest` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.directory_bound_creation_evidence_recipe_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "b2bccb81528ed06d1e76e88a07417555853d0140ecfad4773c981f052112eefc",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:d51096cf7233f6066f047ab25034303514696d9f1745cd29920e9630706a3a7d",
@@ -2317,7 +2349,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.filesystem_profile_id|filesystem_profile_id",
         ],
-        rationale: "a16:2245: shorthand member `filesystem_profile_id` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.filesystem_profile_id` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "2ef4e158b2bce3735b1b29343f267a67e3436d2fac71983e44114cdf99b00d36",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:db72c08571d804730fdad3aa7a4fee4ad481a4e9670b5c46439cd44392a7c819",
@@ -2327,7 +2359,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.fixed_local_continuity_recipe_and_digest|fixed_local_continuity_recipe_and_digest",
         ],
-        rationale: "a16:2245: shorthand member `fixed_local_continuity_recipe_and_digest` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.fixed_local_continuity_recipe_and_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "6108f41cf3dabb14b92d259c36fa1a75c7d49207d5d721d6d4e5a01f4fd5a6b4",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:59e07a8fce6020b3269432fb6b921c8987cb1938688030616a2f5a342f2a62d5",
@@ -2337,7 +2369,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.mount_device_directory_and_target_manifest_inode_identity|mount_device_directory_and_target_manifest_inode_identity",
         ],
-        rationale: "a16:2245: shorthand member `mount_device_directory_and_target_manifest_inode_identity` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.mount_device_directory_and_target_manifest_inode_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "74250f78704f2db0d54692f0a421e968faab503fb4d2ad6d1dcdd487a88c04b4",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:66fda3d55f20ffbd14f2a44e4671916cb011e2911f4415fc6b7878dbc49d8df2",
@@ -2347,7 +2379,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.parent_directory_durability_recipe|parent_directory_durability_recipe",
         ],
-        rationale: "a16:2245: shorthand member `parent_directory_durability_recipe` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.parent_directory_durability_recipe` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "bd06383d68139d7254d6cff79323d58b831dc97dd8b8e16344b0da1daeaf4c2f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:710de412e21d880e486ff97a204979df9b5f70a5b586e886d210c20c4617b4e6",
@@ -2357,7 +2389,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.target_manifest_staging_inode_creation_nonce_digest|target_manifest_staging_inode_creation_nonce_digest",
         ],
-        rationale: "a16:2245: shorthand member `target_manifest_staging_inode_creation_nonce_digest` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.target_manifest_staging_inode_creation_nonce_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "03a56fcf2fba046727447c31b3e7d385dde92e52d5722224e5223349a86730cc",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:3cb12c928a14326b5ba0c022926f4558be38a6ff547679081daf0d3e498163d4",
@@ -2367,7 +2399,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.whole_inode_fence_identity|whole_inode_fence_identity",
         ],
-        rationale: "a16:2245: shorthand member `whole_inode_fence_identity` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.whole_inode_fence_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "73a06a3266bf7eda8fafde3ef40856a0e47ca93978fc613840f5ce065eb56e7d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:31ee4abcd164b58e192c76a563d2ddb710c49d224988e73ec9356854643b5400",
@@ -2377,7 +2409,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.zero_existing_root_slot_proof_recipe|zero_existing_root_slot_proof_recipe",
         ],
-        rationale: "a16:2245: shorthand member `zero_existing_root_slot_proof_recipe` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.zero_existing_root_slot_proof_recipe` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "8ecd464887220923eebb457481d3931cfa0bb580f678f722432dcf9f92841460",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:3c53ffd2cdd6a62ddcbd58a34a2a90572ba753ab1df0b4b3e713f47ca11af4e3",
@@ -2387,7 +2419,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.ExternalCas.enter_clone_reserved_operation_recipe|enter_clone_reserved_operation_recipe",
         ],
-        rationale: "a16:2245: shorthand member `enter_clone_reserved_operation_recipe` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.ExternalCas.enter_clone_reserved_operation_recipe` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "2d0bad10018d45c0557f1b8f1f7e4bca183f7097de58bfa35d723dae81c17230",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:9412f6cc59223ce1a66a34d89a55e685ef653105e6973d6c11215986ca6b9ca0",
@@ -2397,7 +2429,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.ExternalCas.expected_continuity_predecessor_digest_and_cas_version|expected_continuity_predecessor_digest_and_cas_version",
         ],
-        rationale: "a16:2245: shorthand member `expected_continuity_predecessor_digest_and_cas_version` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.ExternalCas.expected_continuity_predecessor_digest_and_cas_version` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "58fa2ee7fb1eb8152eb86926cc4cbe69ef44616147823913917413d2e85530c9",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8c4b21b6111a8db073ffe5a7a4eedc10e207ce1654f25df674e05a2de987125a",
@@ -2407,7 +2439,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.ExternalCas.recovery_only_lease_recipe|recovery_only_lease_recipe",
         ],
-        rationale: "a16:2245: shorthand member `recovery_only_lease_recipe` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.ExternalCas.recovery_only_lease_recipe` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "bc3cded0731c99c2185d1b433d5c18d2a0b5360de816c4f59b2242962f800175",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:01d951dd11d6fdaa8d31623cd9fd3539f67d2fcfbbdf285096fe10e57dc62baa",
@@ -2417,7 +2449,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.expected_reserved_head_digest_and_cas_version|expected_reserved_head_digest_and_cas_version",
         ],
-        rationale: "a16:2245: shorthand member `expected_reserved_head_digest_and_cas_version` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.expected_reserved_head_digest_and_cas_version` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "bb7158b6bbc771e29112876f3d3d5f2a13c54b6ca9512cfea60d09f660bdf5ba",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:1c12d7fe225198c1beef3b67c21b25d50ce94eb39c141f0000aed764d117f1f6",
@@ -2427,7 +2459,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.identity_reservation_id|identity_reservation_id",
         ],
-        rationale: "a16:2245: shorthand member `identity_reservation_id` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.identity_reservation_id` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "55a2197d96367676bc61bbb30f4e36132e3b3f52078c4fdd880c88dcbd4b0bc8",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f6359a728522f27ef940fb7dd42aaf5347f9d0c6abe54b411fd0830de7ff3166",
@@ -2437,7 +2469,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.recovery_writer_authority_digest|recovery_writer_authority_digest",
         ],
-        rationale: "a16:2245: shorthand member `recovery_writer_authority_digest` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.recovery_writer_authority_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "860ff90be02477e880f0ccb185337ee9cf193ff183d2ff005bbed942ee8189a0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:cdaa27bf799002729bb11c5025f5d7e89547de30c3d1a4d0d837d82f9033eda4",
@@ -2447,7 +2479,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.service_visibility_epoch|service_visibility_epoch",
         ],
-        rationale: "a16:2245: shorthand member `service_visibility_epoch` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.service_visibility_epoch` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "c5a2285cc806a6c8e4c7592845bfcd81adc102cbd06fabf9c7bd223cb9a51f23",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:0560e2a9ebe97b9c931583bcbf356f270ce83d735769b1d8b38f2868a68ec1c1",
@@ -2457,7 +2489,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.target_database_and_security_identity|target_database_and_security_identity",
         ],
-        rationale: "a16:2245: shorthand member `target_database_and_security_identity` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.target_database_and_security_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "16f607e23a7b52ca7d13bc1fa8258e9500de88579b0946e3f96bb9c7a771b679",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:6343dff659cb84cb85d6b0f03a664cd385bd0c8157c51f995279634d6d013393",
@@ -2467,7 +2499,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.target_incarnation|target_incarnation",
         ],
-        rationale: "a16:2245: shorthand member `target_incarnation` at census path `RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.target_incarnation` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `CloneNewIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "66f33586dc9a2939e3802b7c77b087f3692e0fdc9782e2a1b7e75f40cbd5591e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:fa8524d7c15de0f18cd494343c8fcb407f67fa565408d7adbe01ef387b1b7a93",
@@ -2477,7 +2509,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.expected_operational_or_fence_predecessor_digest_and_cas_version|expected_operational_or_fence_predecessor_digest_and_cas_version",
         ],
-        rationale: "a16:2245: shorthand member `expected_operational_or_fence_predecessor_digest_and_cas_version` at census path `RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.expected_operational_or_fence_predecessor_digest_and_cas_version` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `RecoverSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "dfda0f7790d25015b64480fbe2522ebe59615a0455349b4fa2ed639c8ede5401",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e8bf7c31fe0a21de42bdf6e964bcf7763272c4fb6b7baedbab94cbee0e13750e",
@@ -2487,7 +2519,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.planned_target_incarnation|planned_target_incarnation",
         ],
-        rationale: "a16:2245: shorthand member `planned_target_incarnation` at census path `RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.planned_target_incarnation` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `RecoverSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "3ca4c6841b2be52f553ce0af0af78f15a40fd816c24e4886f6fccb77ef1b7e84",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2b5b4e394a7eedc0c7561d3bd52ecaa6bf8a74810759f105c9e56e85f6a012d6",
@@ -2497,7 +2529,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.prior_lease_fence_plan_commitment|prior_lease_fence_plan_commitment",
         ],
-        rationale: "a16:2245: shorthand member `prior_lease_fence_plan_commitment` at census path `RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.prior_lease_fence_plan_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `RecoverSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "13db865b611d9d9bf03cb84d51442007db6062d9b29f915c4ab2ffb3b2b12bf5",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:44c745c9b2fed3ed6f450d0c31b581e73b86745cdf4d0533e4092c82e0ce5365",
@@ -2507,7 +2539,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.recovery_writer_authority_digest|recovery_writer_authority_digest",
         ],
-        rationale: "a16:2245: shorthand member `recovery_writer_authority_digest` at census path `RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.recovery_writer_authority_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `RecoverSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "f620d01de21925752abcfa32b01cfcf8713ffb1d401a9f3894a47cb17ef750e1",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:9e773b8e490ee9a2dc1d72cd77ac727e2912b017c4009938b3e0ee2515f5f6f1",
@@ -2517,7 +2549,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.restore_id|restore_id",
         ],
-        rationale: "a16:2245: shorthand member `restore_id` at census path `RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.restore_id` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `RecoverSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "ad66acb1950192c80a5ae063e5d14b9b8274426ea2a2452ee14668cb049a0dc6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4cac0529f2c92be614e26bf98adfa7d72d02a2da52f9875469ed1f10a5e71217",
@@ -2527,7 +2559,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.service_visibility_epoch|service_visibility_epoch",
         ],
-        rationale: "a16:2245: shorthand member `service_visibility_epoch` at census path `RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.service_visibility_epoch` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `RecoverSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "80ae3e1f2342e3d76ce485a911cc07212b5d3546a0a9f1b64e959667c371cf13",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f32accebd587a2bdf96b2c104ac49bbd63086b664565bf3632aa97cd46327239",
@@ -2537,7 +2569,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.source_backup_identity|source_backup_identity",
         ],
-        rationale: "a16:2245: shorthand member `source_backup_identity` at census path `RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.source_backup_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreClaimedTargetAuthorityRecipe` `RecoverSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "777728aaf3be0c443b06c5fcff32c98550a30f7f6a64b93f7c7f3dbd1a307557",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:eed1694e00ba2fe12597870d419b8963e8ab25f286676fac24006a93fbbf3354",
@@ -2547,7 +2579,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.distinct_namespace_proof|distinct_namespace_proof",
         ],
-        rationale: "a16:2243: shorthand member `distinct_namespace_proof` at census path `RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.distinct_namespace_proof` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyDispositionEvidence` `ClonedFreshIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "549d5fd532b355cc6b6d8c082251c33b69d617e635f950006bcac5c9f204895f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8b134d2ad5fc8b1cd4eef543a1b695b76ead1ab868350cb12a1814eaf13fcee0",
@@ -2557,7 +2589,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.plan_digest|plan_digest",
         ],
-        rationale: "a16:2243: shorthand member `plan_digest` at census path `RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.plan_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyDispositionEvidence` `ClonedFreshIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "e3897d252c2f56ee01b24bb128cb2c75a1e4f2582b7cc6455428bbdc8fe9bcd4",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:0ebce0aff84aa60ca53776c1924be86270c3f530e73ccc305f4289d3e2282d66",
@@ -2567,7 +2599,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.source_k_oid_source_open_only_commitment|source_k_oid_source_open_only_commitment",
         ],
-        rationale: "a16:2243: shorthand member `source_k_oid_source_open_only_commitment` at census path `RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.source_k_oid_source_open_only_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyDispositionEvidence` `ClonedFreshIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "8c766269c99caf3c600c574b13c8fb05aa264162120611342e8432605f4c7037",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f79e5b28c484822b5d2c57cedff5b89df5eacaab7356c3354811dc31d886164b",
@@ -2577,7 +2609,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.source_key_nontransplant_proof|source_key_nontransplant_proof",
         ],
-        rationale: "a16:2243: shorthand member `source_key_nontransplant_proof` at census path `RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.source_key_nontransplant_proof` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyDispositionEvidence` `ClonedFreshIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "06701e513379f45194217798b6195af59e1b1db7acd61d86a789ff4f49d62fe8",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4b15f18ca33a6bbd9618b4d86f6433d4edd1017e5aee708689ecffdf6fa71353",
@@ -2587,7 +2619,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.target_k_oid_commitment|target_k_oid_commitment",
         ],
-        rationale: "a16:2243: shorthand member `target_k_oid_commitment` at census path `RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.target_k_oid_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyDispositionEvidence` `ClonedFreshIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "029ebd78f13dd453876f7086a3e320587d43329e00585ff1c8673c8f634f8b37",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:aa8fc751eab932565dddac78db025e788a38646928ef0d5fdaf24f1e33f2f562",
@@ -2597,7 +2629,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.identical_namespace_proof|identical_namespace_proof",
         ],
-        rationale: "a16:2243: shorthand member `identical_namespace_proof` at census path `RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.identical_namespace_proof` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyDispositionEvidence` `PreservedSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "837e14ef7d4aa91a80a4ab3ce167545d058f2b965b34841cccd6fe3610fe65f5",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4f9b9e06323cb762ffcac15cf6a71b19ae9f4bc981caf5ffbf4acbdb5d8c7509",
@@ -2607,7 +2639,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.key_equality_proof|key_equality_proof",
         ],
-        rationale: "a16:2243: shorthand member `key_equality_proof` at census path `RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.key_equality_proof` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyDispositionEvidence` `PreservedSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "83d25093919bf05908a5c5db7aeb65fe94f5419098a506240c68acea2a7c35dd",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:a06189964678768435533d90ee460e107015578db70cd22f78b6b892f3f56974",
@@ -2617,7 +2649,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.plan_digest|plan_digest",
         ],
-        rationale: "a16:2243: shorthand member `plan_digest` at census path `RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.plan_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyDispositionEvidence` `PreservedSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "131e25d9b5b5b9ac75212fb00e5062e467a8dac7a1322534c98e01be6d21da02",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:9560b9c40af5f326f253491aafff7807c693ff33021e16b3b17b466c128224d7",
@@ -2627,7 +2659,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.source_k_oid_commitment|source_k_oid_commitment",
         ],
-        rationale: "a16:2243: shorthand member `source_k_oid_commitment` at census path `RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.source_k_oid_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyDispositionEvidence` `PreservedSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "293072de75a5d5d05a0e27823b6777302e95f9ca8d888559dcc32d7d9386c1b3",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:733122f0708df91db6da6ba6643b262794c139f839bf00461e87caee8c9e32e8",
@@ -2637,7 +2669,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.target_rewrapped_k_oid_commitment|target_rewrapped_k_oid_commitment",
         ],
-        rationale: "a16:2243: shorthand member `target_rewrapped_k_oid_commitment` at census path `RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.target_rewrapped_k_oid_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyDispositionEvidence` `PreservedSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "5a2f04ec39512d62400376469c086bd5ce9f3db2d42aa6e0d5e79ce29aeebd7d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2f946d8a8ebb11b3383ac3c166032aa77d9e95a55135417bea7fd2ee2ac13b34",
@@ -2647,7 +2679,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.zero_plaintext_persistence_proof|zero_plaintext_persistence_proof",
         ],
-        rationale: "a16:2243: shorthand member `zero_plaintext_persistence_proof` at census path `RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.zero_plaintext_persistence_proof` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyDispositionEvidence` `PreservedSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "f15d224d5332f3a0f14bcabea2f8420a7446583fcd81c283ac0c83119375c4d7",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f2a2e6ed9f1043d3703e55e55632f3435d305711b0cc99e87d1e620885911483",
@@ -2657,7 +2689,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.create_target_k_oid_operation_recipe|create_target_k_oid_operation_recipe",
         ],
-        rationale: "a16:2243: shorthand member `create_target_k_oid_operation_recipe` at census path `RestoreIdentityKeyPlan.CloneFreshIdentity.create_target_k_oid_operation_recipe` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `CloneFreshIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "fea4e3c149aa438419423943a281ef6cded597c327bc1c67c964839f1e606e4b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f3d13d2ca5b4dd2c2112c77da17209411b75ce69ccd1af10cbce488650a94d46",
@@ -2667,7 +2699,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.distinct_namespace_basis|distinct_namespace_basis",
         ],
-        rationale: "a16:2243: shorthand member `distinct_namespace_basis` at census path `RestoreIdentityKeyPlan.CloneFreshIdentity.distinct_namespace_basis` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `CloneFreshIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "1cb4140d7f1c7f927e8c8f672e2498e04583d27007468bd3e248bb10e7b4bc7d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:b0f6e5b9b71c069852886e98c69a257f258d0d87bf695be73b35d6cb8c223713",
@@ -2677,7 +2709,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.recover_source_k_oid_for_decode_operation_recipe|recover_source_k_oid_for_decode_operation_recipe",
         ],
-        rationale: "a16:2243: shorthand member `recover_source_k_oid_for_decode_operation_recipe` at census path `RestoreIdentityKeyPlan.CloneFreshIdentity.recover_source_k_oid_for_decode_operation_recipe` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `CloneFreshIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "e4615dbce9c06c75c9459d7197cc66b87af6806c587c6ad771c1abb60089b494",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:30dc167c4493d4c51e751a3d7e77af70c9c9a0e457eaf00ba57fff01dc0d235d",
@@ -2687,7 +2719,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.required_source_key_nontransplant_proof_profile|required_source_key_nontransplant_proof_profile",
         ],
-        rationale: "a16:2243: shorthand member `required_source_key_nontransplant_proof_profile` at census path `RestoreIdentityKeyPlan.CloneFreshIdentity.required_source_key_nontransplant_proof_profile` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `CloneFreshIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "0a3909675268381d337de1523dffc757246600d7b53dcc07c83222175528755a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:425f9c6202f370aebe6ca60eb1c8ceed11acfec76fd0d431e97a1ffd9684f5bb",
@@ -2697,7 +2729,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.source_k_oid_source_open_only_commitment|source_k_oid_source_open_only_commitment",
         ],
-        rationale: "a16:2243: shorthand member `source_k_oid_source_open_only_commitment` at census path `RestoreIdentityKeyPlan.CloneFreshIdentity.source_k_oid_source_open_only_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `CloneFreshIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "de766bcae44442e4efdc18226a52fdc7464efaf1bc8f05962cf13996b8add03e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4408fe8489bf3b8a56e92eddbd6a52f360583c3715cba3b3f83fb452245dd9aa",
@@ -2707,7 +2739,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.target_k_oid_recipient_commitment|target_k_oid_recipient_commitment",
         ],
-        rationale: "a16:2243: shorthand member `target_k_oid_recipient_commitment` at census path `RestoreIdentityKeyPlan.CloneFreshIdentity.target_k_oid_recipient_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `CloneFreshIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "dafa380aafebaaabb5e211a30602e09817e0a82471319d95bc13179ecb0bc6ce",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:428f4a28cda62c0d2fe400327ee5371384d435132bac156a1160119d2ba2adf9",
@@ -2717,7 +2749,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.identical_namespace_basis|identical_namespace_basis",
         ],
-        rationale: "a16:2243: shorthand member `identical_namespace_basis` at census path `RestoreIdentityKeyPlan.PreserveSameIdentity.identical_namespace_basis` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `PreserveSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "b8c6fc9126f1c93e7392f0aab8bc3d2fedf74f3dd4edb765a0d23b61fa169fc1",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:5808d0f941f3989cdc6937d82303a4f64634837f2be819f4ae0151e111a5b1de",
@@ -2727,7 +2759,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.recover_and_rewrap_operation_recipe|recover_and_rewrap_operation_recipe",
         ],
-        rationale: "a16:2243: shorthand member `recover_and_rewrap_operation_recipe` at census path `RestoreIdentityKeyPlan.PreserveSameIdentity.recover_and_rewrap_operation_recipe` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `PreserveSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "f5d602edd33f74a3dc8f7af2eebbb73a3858459d68400d5d96a2f395abe48fb1",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:31cc6283f91ff4bf1c4175dfa89f4f612aa184914b4412d0aa7375a884ae6199",
@@ -2737,7 +2769,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.required_key_equality_proof_profile|required_key_equality_proof_profile",
         ],
-        rationale: "a16:2243: shorthand member `required_key_equality_proof_profile` at census path `RestoreIdentityKeyPlan.PreserveSameIdentity.required_key_equality_proof_profile` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `PreserveSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "36e8c9ecfbc8f46d6566ac82be062809550cc864cea12f794ebfc22d7d670839",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:a3cf39ce48c28bd30f39483bfc16e055768701adb3ccdfb88281f1aa8f2811cd",
@@ -2747,7 +2779,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.required_zero_plaintext_persistence_proof_profile|required_zero_plaintext_persistence_proof_profile",
         ],
-        rationale: "a16:2243: shorthand member `required_zero_plaintext_persistence_proof_profile` at census path `RestoreIdentityKeyPlan.PreserveSameIdentity.required_zero_plaintext_persistence_proof_profile` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `PreserveSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "54b04b0344aee24e8cff099a20ce84b3de2ca92cca028f0b976b6ca51706ed26",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:60b0d02f6527985a2ede2d69f167c9ba7a85fc7b418df1e308f9bc9ae5ad4ebb",
@@ -2757,7 +2789,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.source_k_oid_identity_and_commitment|source_k_oid_identity_and_commitment",
         ],
-        rationale: "a16:2243: shorthand member `source_k_oid_identity_and_commitment` at census path `RestoreIdentityKeyPlan.PreserveSameIdentity.source_k_oid_identity_and_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `PreserveSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "feb68a98a948f2d610ec36c67917a6e12b722bb1e688fc0e32d72d62e9758c83",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:30eb8375a7e592e229c0fd3c2610ca145d0b62e57e3f247d2234b443b3f7b01f",
@@ -2767,7 +2799,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.target_rewrap_recipient_commitment|target_rewrap_recipient_commitment",
         ],
-        rationale: "a16:2243: shorthand member `target_rewrap_recipient_commitment` at census path `RestoreIdentityKeyPlan.PreserveSameIdentity.target_rewrap_recipient_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreIdentityKeyPlan` `PreserveSameIdentity` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "e8c602f03d8be85af205a18f86fbe9e92a0d84bf3a0101e0d616b0865cb79905",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:51e1d45595605b09416540d8f2f7bfc577e100c7cfc34d62c3f8d31ea3b4cdf5",
@@ -2777,7 +2809,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Local.configuration_set_digest|configuration_set_digest",
         ],
-        rationale: "a16:2203: shorthand member `configuration_set_digest` at census path `RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Local.configuration_set_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "f3a0bee368e15dcfa3182f8538ce31f7d97184a5db00e424e476b3d12caf5edd",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:63fc7261e030989938c367bdb25963327b60d9ea1d9d24dbb85d7d2dbd41618e",
@@ -2787,7 +2819,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Local.root_manifest_and_slot_cut|root_manifest_and_slot_cut",
         ],
-        rationale: "a16:2203: shorthand member `root_manifest_and_slot_cut` at census path `RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Local.root_manifest_and_slot_cut` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "014c06a64be8afdc117cfffb6ec0d519c9e06334f82919271299a2ba5566b00b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:216034541841b4dc0a18c6a9056d541edf9220e6baa68bccd57d9ce2d8447dbe",
@@ -2797,7 +2829,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Meta.configuration_set_digest|configuration_set_digest",
         ],
-        rationale: "a16:2203: shorthand member `configuration_set_digest` at census path `RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Meta.configuration_set_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "8690d587f3e3c33ee6ba87f89f2dd9b0255e152830b1efeb8fe47b7f91dbe831",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:80e7fb9081083f4cc82c9ab584105b308e38afb8978ba93b8c0e9b4a5fa010e7",
@@ -2807,7 +2839,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Meta.exact_current_and_prospective_shard_configuration_commitment|exact_current_and_prospective_shard_configuration_commitment",
         ],
-        rationale: "a16:2203: shorthand member `exact_current_and_prospective_shard_configuration_commitment` at census path `RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Meta.exact_current_and_prospective_shard_configuration_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "6e6a1f30fd6e69181d5bfce0072d1e2cc267b94152a223153bc66d6751701537",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:dbb7edba8ea7628b68f176f2fdcf74df26e3460a1f61f937b6ccbe9ce860dd87",
@@ -2817,7 +2849,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Meta.root_manifest_and_slot_cut|root_manifest_and_slot_cut",
         ],
-        rationale: "a16:2203: shorthand member `root_manifest_and_slot_cut` at census path `RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Meta.root_manifest_and_slot_cut` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "60d80aa01228b01641efc8f94796194ebc24344552bb2b7079d6180666f1652c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:6dd465c2c940014a013bc003a9e661deadc21487ac6313f05a50cbecea9097d9",
@@ -2827,7 +2859,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeAuthorityRetirementFloorSet<Role>|RoleTimeAuthorityRetirementFloorSet<Role>.Local.checkpoint_ref|checkpoint_ref",
         ],
-        rationale: "a16:2205: shorthand member `checkpoint_ref` at census path `RoleTimeAuthorityRetirementFloorSet<Role>.Local.checkpoint_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeAuthorityRetirementFloorSet<Role>` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "8d0565e61764ed0a45186621750f92398927f681cb8a9e57364317282edcada2",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:902d267153d8579147f02b8f03e991d7c32f9d7209fff31de61ba342ed72baf4",
@@ -2837,7 +2869,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeAuthorityRetirementFloorSet<Role>|RoleTimeAuthorityRetirementFloorSet<Role>.Local.config_payload_floor_ref|config_payload_floor_ref",
         ],
-        rationale: "a16:2205: shorthand member `config_payload_floor_ref` at census path `RoleTimeAuthorityRetirementFloorSet<Role>.Local.config_payload_floor_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeAuthorityRetirementFloorSet<Role>` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "2fad40677cba10e5b344f92de01e7f12082efc2b103b1082f415b0c7a65ae131",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:483a3d514dff97d1044b68ac3509def420cffaa13437bc8473568f75218b61ac",
@@ -2847,7 +2879,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeAuthorityRetirementFloorSet<Role>|RoleTimeAuthorityRetirementFloorSet<Role>.Local.configuration_ref|configuration_ref",
         ],
-        rationale: "a16:2205: shorthand member `configuration_ref` at census path `RoleTimeAuthorityRetirementFloorSet<Role>.Local.configuration_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeAuthorityRetirementFloorSet<Role>` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "108e60b349f8a2a95c6ce3cf76151e67f6fb89890e9f64696c9933d134f39cf8",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:1f20479cfd8941a0d1df5dcfce62960e4f5ef9dd4e3d41b65abd770d83777805",
@@ -2857,7 +2889,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeAuthorityRetirementFloorSet<Role>|RoleTimeAuthorityRetirementFloorSet<Role>.Meta.configuration_ref|configuration_ref",
         ],
-        rationale: "a16:2205: shorthand member `configuration_ref` at census path `RoleTimeAuthorityRetirementFloorSet<Role>.Meta.configuration_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeAuthorityRetirementFloorSet<Role>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "e83db05e938ade011368c9b9a080213fd62c213d20bbcdad9902db24870d3533",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:88ec0918d92724ea23c58210e0e16c0c04742f08c40f324c78c8a8f139dee4e6",
@@ -2867,7 +2899,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeAuthorityRetirementFloorSet<Role>|RoleTimeAuthorityRetirementFloorSet<Role>.Meta.global_checkpoint_ref|global_checkpoint_ref",
         ],
-        rationale: "a16:2205: shorthand member `global_checkpoint_ref` at census path `RoleTimeAuthorityRetirementFloorSet<Role>.Meta.global_checkpoint_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeAuthorityRetirementFloorSet<Role>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "152ff623e48433640b470cf76346d0288cfa1303fc5c1679a0cf6a358bb2a5b0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:b15497009f309c87fbd8f21e8d7d8c6242e4ab3b226e7da1e20b5ea465f1348c",
@@ -2877,7 +2909,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeAuthorityRetirementFloorSet<Role>|RoleTimeAuthorityRetirementFloorSet<Role>.Meta.meta_config_payload_floor_ref|meta_config_payload_floor_ref",
         ],
-        rationale: "a16:2205: shorthand member `meta_config_payload_floor_ref` at census path `RoleTimeAuthorityRetirementFloorSet<Role>.Meta.meta_config_payload_floor_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeAuthorityRetirementFloorSet<Role>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "1440827f3f8f3e59525cf78825670889a8903a26873e466927866e950ee69923",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:14ebc1cef7254371a9290cabc9931aa7b0a06c7cb57527b89d15186776e7ec50",
@@ -2887,7 +2919,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeAuthorityRetirementFloorSet<Role>|RoleTimeAuthorityRetirementFloorSet<Role>.Meta.shutdown_receipt_ref|shutdown_receipt_ref",
         ],
-        rationale: "a16:2205: shorthand member `shutdown_receipt_ref` at census path `RoleTimeAuthorityRetirementFloorSet<Role>.Meta.shutdown_receipt_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeAuthorityRetirementFloorSet<Role>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "69d72fc98972a98a4aaa46f874d6933e09f473fe1bc211ea2527964c33e92954",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e91e24a51392d6954d25959e9414a9ad41fbb3a557250c1c659af72b8d65fe35",
@@ -2897,7 +2929,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeAuthorityRetirementFloorSet<Role>|RoleTimeAuthorityRetirementFloorSet<Role>.Meta.verifier_retirement_floor_ref|verifier_retirement_floor_ref",
         ],
-        rationale: "a16:2205: shorthand member `verifier_retirement_floor_ref` at census path `RoleTimeAuthorityRetirementFloorSet<Role>.Meta.verifier_retirement_floor_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeAuthorityRetirementFloorSet<Role>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "312362c5749562f69386ca63b3ff1a2a0d9f9841e981f44c8df8813fd6607256",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:b16ef0d3622c032199d593c58ccb018188ef9ba2bb7f11a09fc8be0dc80bf2f3",
@@ -2907,7 +2939,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Local.closure_digest|closure_digest",
         ],
-        rationale: "a16:2197: shorthand member `closure_digest` at census path `RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Local.closure_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "517864b6a0aefa05a36e3c86ffd74ecc7da2eda9697e5a7fa0c5e10b4595e352",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:139736010760224ea01da42ec72d64e00f649760b94b82519832db88c20c87c4",
@@ -2917,7 +2949,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Meta.aggregate_maximum_expiry_derivation_proof_ref|aggregate_maximum_expiry_derivation_proof_ref",
         ],
-        rationale: "a16:2197: shorthand member `aggregate_maximum_expiry_derivation_proof_ref` at census path `RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Meta.aggregate_maximum_expiry_derivation_proof_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "83a2965b37dc67afc0ab0214ae6fbeaed9bba1ce39d7aae553700f6988a29f05",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ff4db66414518f7f1180ae56f9e0e1f62eff4eea91062e2e1a4e6021735c4525",
@@ -2927,7 +2959,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Meta.closure_digest|closure_digest",
         ],
-        rationale: "a16:2197: shorthand member `closure_digest` at census path `RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Meta.closure_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "f7b6b311a9e001642c9202fe6484a3b73b763e078120795f4d87814e0a01ad42",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:198d323e4bcdc1582896d21ce07fa233d15a72464c6d5234a96b053e4af44aba",
@@ -2937,7 +2969,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Meta.configured_group_inventory_bijection_proof_ref|configured_group_inventory_bijection_proof_ref",
         ],
-        rationale: "a16:2197: shorthand member `configured_group_inventory_bijection_proof_ref` at census path `RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Meta.configured_group_inventory_bijection_proof_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "ea0e796e79794bb505aadc69febb2a99354f131bd5461280b6ca6954a75161fc",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:36978d672f27a9404f4f2140e7de7b1f7d3cba5ba7395ba6247431031c873127",
@@ -2947,7 +2979,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeIssuanceReservationClosure<Role>|RoleTimeIssuanceReservationClosure<Role>.Local.own_complete_bijection_proof_ref|own_complete_bijection_proof_ref",
         ],
-        rationale: "a16:2193: shorthand member `own_complete_bijection_proof_ref` at census path `RoleTimeIssuanceReservationClosure<Role>.Local.own_complete_bijection_proof_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeIssuanceReservationClosure<Role>` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "9815b3be3b9f64a7144e6f815c96bafaf169112498f5f50ccd9449e578c851da",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e6fe389daff9216daf5eae4a5e9f60371cfee06c2285bc5d94e43ae3d62cf9f2",
@@ -2957,7 +2989,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeIssuanceReservationClosure<Role>|RoleTimeIssuanceReservationClosure<Role>.Meta.configured_group_certificate_bijection_proof_ref|configured_group_certificate_bijection_proof_ref",
         ],
-        rationale: "a16:2193: shorthand member `configured_group_certificate_bijection_proof_ref` at census path `RoleTimeIssuanceReservationClosure<Role>.Meta.configured_group_certificate_bijection_proof_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeIssuanceReservationClosure<Role>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "3c9a7b397eb311fa6246c4fba53ebca999cbfc41ead1b3b4dfb0ac9b64ed5430",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:22afadae2a28ad5464ce9a4779f1939a81035f3992249a1a2a7f9c7eddb44e07",
@@ -2967,7 +2999,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RoleTimeIssuanceReservationClosure<Role>|RoleTimeIssuanceReservationClosure<Role>.Meta.own_group_certificate_ref|own_group_certificate_ref",
         ],
-        rationale: "a16:2193: shorthand member `own_group_certificate_ref` at census path `RoleTimeIssuanceReservationClosure<Role>.Meta.own_group_certificate_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RoleTimeIssuanceReservationClosure<Role>` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "a365920b731954708c045ef1b10d1a3635d31f41d60bbdede41cb3e5d9553870",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8fd0bb570ac876054b677e9705401329de512801ee439276dc674a407df02f8e",
@@ -2977,7 +3009,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ShardRestoreSourceLeaseProjectionSource|ShardRestoreSourceLeaseProjectionSource.Bootstrap.bootstrap_projection_identity_and_digest|bootstrap_projection_identity_and_digest",
         ],
-        rationale: "a16:2239: shorthand member `bootstrap_projection_identity_and_digest` at census path `ShardRestoreSourceLeaseProjectionSource.Bootstrap.bootstrap_projection_identity_and_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `ShardRestoreSourceLeaseProjectionSource` `Bootstrap` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "26f1fbc24939fcd699f4bbdc110ef2ebeba37c573b467bb429099f721e74429e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:42d2a629736e07406ef6cec496247a08477fd4f24713e6b7f51b0756b4f5df63",
@@ -2987,7 +3019,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ShardRestoreSourceLeaseProjectionSource|ShardRestoreSourceLeaseProjectionSource.Bootstrap.source_lease_projection_payload_identity_and_digest|source_lease_projection_payload_identity_and_digest",
         ],
-        rationale: "a16:2239: shorthand member `source_lease_projection_payload_identity_and_digest` at census path `ShardRestoreSourceLeaseProjectionSource.Bootstrap.source_lease_projection_payload_identity_and_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `ShardRestoreSourceLeaseProjectionSource` `Bootstrap` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "b436c746843cdeea4a5086791cd3b0f30059b9a8016ee83d59f393e199c9605b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:3662fa006e86638ee2ff3041186200f8ef75e915a62142622b013db772c927b7",
@@ -2997,7 +3029,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ShardRestoreSourceLeaseProjectionSource|ShardRestoreSourceLeaseProjectionSource.Refresh.typed_meta_projection_payload_identity_and_digest|typed_meta_projection_payload_identity_and_digest",
         ],
-        rationale: "a16:2239: shorthand member `typed_meta_projection_payload_identity_and_digest` at census path `ShardRestoreSourceLeaseProjectionSource.Refresh.typed_meta_projection_payload_identity_and_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `ShardRestoreSourceLeaseProjectionSource` `Refresh` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "9a49497601c2aaec9361ab7f594125531654a37ba3399a188fef06b21c1ee507",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:6e7c4fbf5db3c3cf58224f222c31bb95b20241840a3ce0bb89ccb3e664407b8d",
@@ -3007,7 +3039,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Local.current_configuration_writer_fence_and_publication_commitment|current_configuration_writer_fence_and_publication_commitment",
         ],
-        rationale: "a16:2165: shorthand member `current_configuration_writer_fence_and_publication_commitment` at census path `TimeAuthorityObservationImport.Local.current_configuration_writer_fence_and_publication_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "ca12351bb8e298097279ff8782d8c6eb92ecacd8aa56018437cc38b22c08cbc7",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f84e5724e1fd386f4850343edec20569c16d3b71309a61c85c66fb582b071114",
@@ -3017,7 +3049,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Local.exact_profile_registry_and_transcript_match_digest|exact_profile_registry_and_transcript_match_digest",
         ],
-        rationale: "a16:2165: shorthand member `exact_profile_registry_and_transcript_match_digest` at census path `TimeAuthorityObservationImport.Local.exact_profile_registry_and_transcript_match_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "430ee543d3f64f7a8198fe32626730b4ff176db60f219a1adb071bb0cb4d3e6f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:eb4c402fb998455475a495a575802f161a3caf327e654e1e2a2c6f0b08b55f15",
@@ -3027,7 +3059,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Local.imported_at_maintenance_identity|imported_at_maintenance_identity",
         ],
-        rationale: "a16:2165: shorthand member `imported_at_maintenance_identity` at census path `TimeAuthorityObservationImport.Local.imported_at_maintenance_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "b97cfed9816fbc5ad77b64d06e86eba9ad8eaf64e7adee757434bf74e49741f2",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2b88dd4fe39941051f81018d2005d684b7e0a9beec3622d0a86fce28dbb6f690",
@@ -3037,7 +3069,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Local.role_and_group|role_and_group",
         ],
-        rationale: "a16:2165: shorthand member `role_and_group` at census path `TimeAuthorityObservationImport.Local.role_and_group` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Local` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "3623488b9a5ab9e394f1b2dedf1ef6b067b61fdb9d03875278e44268f5544280",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8b5c7f1c7920620c2661b436a184d102ac583a25c8f6c251e25854579a6cde97",
@@ -3047,7 +3079,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Meta.current_configuration_writer_fence_and_publication_commitment|current_configuration_writer_fence_and_publication_commitment",
         ],
-        rationale: "a16:2165: shorthand member `current_configuration_writer_fence_and_publication_commitment` at census path `TimeAuthorityObservationImport.Meta.current_configuration_writer_fence_and_publication_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "f492412c1dc4ed133d9d35ec694e9facaf3705ac73d3a3746c091242d16be14a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:77cad945943965f6823afc4ce110982fc90b3f1b7bb55d835b30d45bf74ef876",
@@ -3057,7 +3089,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Meta.exact_profile_registry_and_transcript_match_digest|exact_profile_registry_and_transcript_match_digest",
         ],
-        rationale: "a16:2165: shorthand member `exact_profile_registry_and_transcript_match_digest` at census path `TimeAuthorityObservationImport.Meta.exact_profile_registry_and_transcript_match_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "4b659628163e339c109405584f45e1f3adeef667bec52c0c87daa84b2d4af494",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:bbe2ed9b1b6f16c3558175619522d9be6d442f099cc198c0d6b5e8ebcaa55cc0",
@@ -3067,7 +3099,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Meta.imported_at_maintenance_identity|imported_at_maintenance_identity",
         ],
-        rationale: "a16:2165: shorthand member `imported_at_maintenance_identity` at census path `TimeAuthorityObservationImport.Meta.imported_at_maintenance_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "301b0500e6db1bb44a51357412d2a15a8779d1c7f9370c39bb913ab44d7fce38",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4b38e383af6cd3b3152ee3fd60ab247bd488ac0fd1921055815d572c6406d0de",
@@ -3077,7 +3109,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Meta.role_and_group|role_and_group",
         ],
-        rationale: "a16:2165: shorthand member `role_and_group` at census path `TimeAuthorityObservationImport.Meta.role_and_group` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Meta` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "0086228e3f37a68bf595df614efe2c66961c2112ba10b685736d9fe843231ebf",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8682f99fbb0811dea1a3c1ff717c7f6e4692127e146efa48a985de59e93214e2",
@@ -3087,7 +3119,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Shard.current_configuration_writer_fence_and_publication_commitment|current_configuration_writer_fence_and_publication_commitment",
         ],
-        rationale: "a16:2165: shorthand member `current_configuration_writer_fence_and_publication_commitment` at census path `TimeAuthorityObservationImport.Shard.current_configuration_writer_fence_and_publication_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Shard` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "52caf5606b8bfbfb8725dddc06b28a6c311a4ad358bdfaaba119a03ceb79da0d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:53da05c0fc82cf4701fb292f9907292c9088e287c6779e836840352920925ddc",
@@ -3097,7 +3129,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Shard.exact_profile_projection_and_transcript_match_digest|exact_profile_projection_and_transcript_match_digest",
         ],
-        rationale: "a16:2165: shorthand member `exact_profile_projection_and_transcript_match_digest` at census path `TimeAuthorityObservationImport.Shard.exact_profile_projection_and_transcript_match_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Shard` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "aef89d283e3de5742defc0c8a32ccc42a24902a886ab27a103272ef6372211d7",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:300d344bf5abdbd2ba3786dcb2f2101f0f44a7aef6794b192d392bc0d5f8e2ad",
@@ -3107,7 +3139,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Shard.imported_at_maintenance_identity|imported_at_maintenance_identity",
         ],
-        rationale: "a16:2165: shorthand member `imported_at_maintenance_identity` at census path `TimeAuthorityObservationImport.Shard.imported_at_maintenance_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Shard` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "0a63e8af78d3f482bfaad9101ff1321c8cb5980f43eacabac93ef728d2ee6367",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:60b6f049cbffd66661578e441fc181a08f56c8a19c041eea7846ee8e40b70c48",
@@ -3117,7 +3149,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Shard.role_and_group|role_and_group",
         ],
-        rationale: "a16:2165: shorthand member `role_and_group` at census path `TimeAuthorityObservationImport.Shard.role_and_group` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeAuthorityObservationImport` `Shard` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "ae28e301a9d38109042cdc7a377c8feca27d86d607f242b973f90becf96f47a9",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:0e6c35f78172a67ce5d4652dfa17cca9cfd5c6d68b64ab0aa9f0dccb40305910",
@@ -3127,7 +3159,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectDisposition<Role>|TimeSubjectDisposition<Role>.Reissued.successor_subject_key|successor_subject_key",
         ],
-        rationale: "a16:2201: shorthand member `successor_subject_key` at census path `TimeSubjectDisposition<Role>.Reissued.successor_subject_key` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectDisposition<Role>` `Reissued` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "14cf8ff5380574e3d75deb6c566d04c5d4102faf8d36344524e4d30287278ba7",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:c39a49d58a1e4f8383dcd973f24f1542a19b8b3a35edcfbb27e8ad08faade723",
@@ -3137,7 +3169,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Expired.portable_expiry_attestation_identity_and_digest|portable_expiry_attestation_identity_and_digest",
         ],
-        rationale: "a16:2209: shorthand member `portable_expiry_attestation_identity_and_digest` at census path `TimeSubjectTerminalProjection.Expired.portable_expiry_attestation_identity_and_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Expired` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "d11b712b3a38266e12ee91cdb47055f9c1b773e7cec528dc7a8fe2388ed8f9a6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:9e665016cb7a45f5ae6e4d68bb6455ff508789fe83d9e40fe4b0a599dd71bad6",
@@ -3147,7 +3179,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Expired.subject_body_and_profile_digest|subject_body_and_profile_digest",
         ],
-        rationale: "a16:2209: shorthand member `subject_body_and_profile_digest` at census path `TimeSubjectTerminalProjection.Expired.subject_body_and_profile_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Expired` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "bfb06f624e3d632b226ee268103756b1ef54986c3f32fdfdd86b58582c0605c9",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:439880508061ce9206720a2ce11022658a71030cc4f8d519a52415f1aa558123",
@@ -3157,7 +3189,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Expired.subject_key|subject_key",
         ],
-        rationale: "a16:2209: shorthand member `subject_key` at census path `TimeSubjectTerminalProjection.Expired.subject_key` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Expired` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "b02312eafeb341f79784f4767fb97450496fca7315c8f0343c8b944356593a98",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:1df3c1bc531c4e2e02d5d3114aaf64b9f3a26aad276f789f75bde2445bca7cc7",
@@ -3167,7 +3199,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Expired.terminal_authority_commitment|terminal_authority_commitment",
         ],
-        rationale: "a16:2209: shorthand member `terminal_authority_commitment` at census path `TimeSubjectTerminalProjection.Expired.terminal_authority_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Expired` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "8378242c3a9f62379abd8fcf075909628dc2781e8c03ac7a20e45e02db927ff6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:3235f879a698f52d63298366de7f6f35bea2adef2d55058df0350648a94af466",
@@ -3177,7 +3209,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Reissued.nonwidening_proof_digest|nonwidening_proof_digest",
         ],
-        rationale: "a16:2209: shorthand member `nonwidening_proof_digest` at census path `TimeSubjectTerminalProjection.Reissued.nonwidening_proof_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Reissued` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "a8167d49ccfc4efb9e019862e574bea1b4008ec28f2ada059bfa0a11f0933a47",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:403123812a10492300994071d83a66ac3b7e056829d79bdc5ddd69eb9d110d10",
@@ -3187,7 +3219,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Reissued.old_body_and_profile_digest|old_body_and_profile_digest",
         ],
-        rationale: "a16:2209: shorthand member `old_body_and_profile_digest` at census path `TimeSubjectTerminalProjection.Reissued.old_body_and_profile_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Reissued` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "140adc605dd05d54993d3c242d7d4c7223e6d40f967752f9b3d7f9e0c28b34b3",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2b515598a6fe76493393ac44fdc64bf6208f036442ef977ba94d33b6a110bdfa",
@@ -3197,7 +3229,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Reissued.old_identity_tombstone_digest|old_identity_tombstone_digest",
         ],
-        rationale: "a16:2209: shorthand member `old_identity_tombstone_digest` at census path `TimeSubjectTerminalProjection.Reissued.old_identity_tombstone_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Reissued` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "924c025df56faf144e236fe48fce758936461f9e084f9f2fd67232eb00784a03",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2236fed6acd8eee82cfb48df29a034f919dd8aad900b0e20c6cdf98611ffec4a",
@@ -3207,7 +3239,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Reissued.old_subject_key|old_subject_key",
         ],
-        rationale: "a16:2209: shorthand member `old_subject_key` at census path `TimeSubjectTerminalProjection.Reissued.old_subject_key` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Reissued` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "1619a6b69a27211266edd0b31219e6cca080cb7fee60db07c93999e6684e3a1d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ac681d7d9469b0042e8a114098420c4e08f9725dfffcd261b70a2c135d5b2f3f",
@@ -3217,7 +3249,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Reissued.successor_subject_key_and_public_commitment|successor_subject_key_and_public_commitment",
         ],
-        rationale: "a16:2209: shorthand member `successor_subject_key_and_public_commitment` at census path `TimeSubjectTerminalProjection.Reissued.successor_subject_key_and_public_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Reissued` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "75864caa2e77fc810fd5e8937e61c1db0c1e8f594ada7558316d3fb5c55e2c5e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:64b787a35f64549ba2fe85e0c0b1ef8290bd992e6f1e28c1432f3af64ea89e86",
@@ -3227,7 +3259,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Terminal.subject_body_and_profile_digest|subject_body_and_profile_digest",
         ],
-        rationale: "a16:2209: shorthand member `subject_body_and_profile_digest` at census path `TimeSubjectTerminalProjection.Terminal.subject_body_and_profile_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Terminal` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "112fc5a053975d97cc6313ee3f3a47ed6417e70afbe5f0df30ef9bd3738e4a81",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ec3ed5bd31064ce1d87e694da563bfefd7d5838d8b4b1b8a617a8dbabb76d4df",
@@ -3237,7 +3269,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Terminal.subject_key|subject_key",
         ],
-        rationale: "a16:2209: shorthand member `subject_key` at census path `TimeSubjectTerminalProjection.Terminal.subject_key` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Terminal` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "bc6a8ffb0e2e089b4cc5a2598ea50b76224b299f8f583dc0ceed3f833d8f3c94",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:090cb31de86f72015dffe5b58eddba0fb6ae766050c7d28ee911059708895582",
@@ -3247,7 +3279,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Terminal.terminal_authority_commitment|terminal_authority_commitment",
         ],
-        rationale: "a16:2209: shorthand member `terminal_authority_commitment` at census path `TimeSubjectTerminalProjection.Terminal.terminal_authority_commitment` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Terminal` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "e965108ff7d339914016dad9f87a7a3ed37bce6718164fb276f1c9416a845a1a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:412f94e68cbd3fafba3f239ad4edae688817333f62d5379772e577a74fb150ff",
@@ -3257,7 +3289,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Terminal.typed_terminal_evidence_identity_and_digest|typed_terminal_evidence_identity_and_digest",
         ],
-        rationale: "a16:2209: shorthand member `typed_terminal_evidence_identity_and_digest` at census path `TimeSubjectTerminalProjection.Terminal.typed_terminal_evidence_identity_and_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectTerminalProjection` `Terminal` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "43e3ac7083954bb5282fa4f2b85eeb886afd10fa7387ac280d1bd6bf8145d0f2",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:fe273b4d125585f91d7775d7061204c113cf295fbd53b607ec0e0cade19f25d5",
@@ -3265,7 +3297,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2215"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ShardTimeAuthorityRetirementAck"],
-        rationale: "a16:2215: the leading `SameGroupCertificateHeader` item is a named closed sub-schema (compact-phrase law, a01:1412) embedded in the shard retirement-ack body; it belongs to the `top|ShardTimeAuthorityRetirementAck` candidate.",
+        rationale_sha256: "ec32c2afc70e32fb487291d640ee93cec6adb3df0b466e2b16e1f9788ac8f593",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:0799a80b9503af44762c89c9bd28c21ce8615b3e50872f14c3d718cfb6b855ff",
@@ -3273,7 +3305,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2205"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ShardTimeAuthorityRetirementFloor"],
-        rationale: "a16:2205: the leading `SameGroupCertificateHeader` item is a named closed sub-schema (compact-phrase law, a01:1412) embedded in the shard retirement-floor body; it belongs to the `top|ShardTimeAuthorityRetirementFloor` candidate.",
+        rationale_sha256: "d67492564d081a7dbe9b622aea95cb0d3e504a168b80b89865338bac61b7b2f6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:89eb7fcff73cdc05f717b5f8888b49680d0d11e5d8b7ac63fbaec93d118bfc84",
@@ -3281,7 +3313,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2197"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ShardTimeBoundSubjectInventoryCertificate"],
-        rationale: "a16:2197: the leading `SameGroupCertificateHeader` item is a named closed sub-schema (compact-phrase law, a01:1412) embedded in the shard inventory-certificate body; it belongs to the `top|ShardTimeBoundSubjectInventoryCertificate` candidate.",
+        rationale_sha256: "5b0d030db5659ce056158e43252ce1920ed007805c166d87231a6e151a0ae1a6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e4cd82413f511826adaebd47c79e439c7cf26a366db7682136e3e70085ec8902",
@@ -3289,7 +3321,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|CrossLogTransparencyFreshness"],
-        rationale: "a16:2171: `CrossLogTransparencyFreshness {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|CrossLogTransparencyFreshness` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "5397b2c13b92c6ff93eacfab51efbd325431fac7f5439115ca4568a461bcb015",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:b9347cd7b769ace4ffbb1db74e730bbdbb736dccd01fa43aabc5f762322d4d2b",
@@ -3297,7 +3329,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2193"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|GroupTimeIssuanceQuiescenceCertificate"],
-        rationale: "a16:2193: `GroupTimeIssuanceQuiescenceCertificate {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|GroupTimeIssuanceQuiescenceCertificate` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "6aee4d5011b7f68baf9e8ab189f441a8c3ee1fb189f07c269694eed92bb39831",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:bbeb7610f005f870af91589e584a196b7b10d4898f7da64f0d8edc78dc7dbbdf",
@@ -3305,7 +3337,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|KeyEnvelopeGrantWindow<Role>"],
-        rationale: "a16:2171: `KeyEnvelopeGrantWindow<Role> {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|KeyEnvelopeGrantWindow<Role>` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "b6ee3a210b354cc1cceb247347c625c911d7ad3129c52cafbf79b4a780d6bc2e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:994a81b46f241832d3170159b4c71dd7083d9fefe89aa659273a1c4426970fab",
@@ -3313,7 +3345,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PayloadReceiptProposalFreshnessBasis"],
-        rationale: "a16:2171: `PayloadReceiptProposalFreshnessBasis {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|PayloadReceiptProposalFreshnessBasis` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "d5fff5d08e808b2539e66bb145ff4ad007d9943bff84e9c156e3824cceb03664",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:9c6c718123cf055dc9a456ace50120d2beaf8d0ba42cd7aabab639de7ecf9fd6",
@@ -3321,7 +3353,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PriorIncarnationLeaseCohortWindow"],
-        rationale: "a16:2171: `PriorIncarnationLeaseCohortWindow {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|PriorIncarnationLeaseCohortWindow` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "fd0301a8de862f07836f1082f87e4a8553345db48ef4071a2a9cec8572f4845b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:40b07c775488fa9786d84a11088f6f57e4b9a5c95299ad4ffc143fc696574286",
@@ -3329,7 +3361,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ProtectedErrorReplayTimeBasis<Role>"],
-        rationale: "a16:2171: `ProtectedErrorReplayTimeBasis<Role> {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|ProtectedErrorReplayTimeBasis<Role>` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "00b0d197a69ebec3f2af7609c7295ec3ff952bcb61ca23146575fe709bcb7c22",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:eaa26b8f61958eeabd97319a5546c82f57bad2e255e80e863d3dcd1900482f97",
@@ -3337,7 +3369,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2185"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|TimeAuthorityIssuanceClosingReceipt"],
-        rationale: "a16:2185: `TimeAuthorityIssuanceClosingReceipt {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|TimeAuthorityIssuanceClosingReceipt` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "b296a6070c3858f066a140e17af2ca2d22cf43d93112f12a79723be8362ee3a5",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8f06d57bcaee0a663a16812a9981d7bd2478b69706dd7c042f70ed8b137e8231",
@@ -3345,7 +3377,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2217"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|TimeAuthorityRegistryTransitionReceipt"],
-        rationale: "a16:2217: `TimeAuthorityRegistryTransitionReceipt {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|TimeAuthorityRegistryTransitionReceipt` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "f5440c70e971644dc597b90ea0b089a0ecf65613403a1a4c5c65a208d35b7ece",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8382d602a7cfb3b34c9b3adc956a9aceaab94ee8e651d9eafad600a00a1f175a",
@@ -3353,7 +3385,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2191"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|TimeSubjectIssuanceReservation<Role>"],
-        rationale: "a16:2191: `TimeSubjectIssuanceReservation<Role> {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|TimeSubjectIssuanceReservation<Role>` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "1cb26594d908f2ad22f08e9e66e1383ba5a547dd7ec0cc9522a752c13525f7fc",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:a0148dfd5ecafa3bd5cdb3dbc1e191d682e5eeb8d6023b8bcd9e504b33ed85f6",
@@ -3361,7 +3393,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|TransparencyCheckpointFreshnessBasis"],
-        rationale: "a16:2171: `TransparencyCheckpointFreshnessBasis {...}` appears with its full brace body as the slice's own definition (prose-embedded, no heading cue); the flagged span is the normative rendering of the top candidate `top|TransparencyCheckpointFreshnessBasis` itself, not an alias, enumeration, or citation.",
+        rationale_sha256: "f27ec62ca912bcfef33ffaf09348c7b982a2bbd899e81a2c5a98b76916d508b2",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f1c6073209ca7d229ae3f22e6b388d4775edd7625e3c0d7a08492cd3b091968d",
@@ -3369,7 +3401,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PriorIncarnationLeaseCohortWindow"],
-        rationale: "a16:2171: the flagged span is the top candidate `top|PriorIncarnationLeaseCohortWindow` itself — the a16:2171 rendering is the full sixteen-member definition and the a19:2465 rendering is the ten-member restatement its lease-barrier bootstrap import quotes (adding `time_authority_profile_oid`); the divergence is for the catalog's structural rows to reconcile, not a second schema.",
+        rationale_sha256: "59b3586f2f8b7f78bdfa165f54b638ab22e63e0f020e3e41232b35fce6cfb5f4",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:d0fbe5b2a75940c2e66ca399d38b8efa3ca39e33d44bf639a2c965fba6ef4e0b",
@@ -3377,7 +3409,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a16:2193"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|GroupTimeIssuanceQuiescenceCertificate"],
-        rationale: "a16:2193: the leading `SameGroupCertificateHeader` item is a named closed sub-schema (compact-phrase law, a01:1412) embedded in the group quiescence-certificate body; it belongs to the `top|GroupTimeIssuanceQuiescenceCertificate` candidate.",
+        rationale_sha256: "6a3f8f991d6607a7da0f23c4a7329b2ffbb2b4bbfaf87626337858a16069d438",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f0d112a99c9db91ac5aacac17a50ab039e9d6dda70ea189fd0428ae7e5f6077e",
@@ -3387,7 +3419,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Expired.time_validation_evidence_ref|time_validation_evidence_ref",
         ],
-        rationale: "a16:2173: shorthand member `time_validation_evidence_ref` at census path `MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Expired.time_validation_evidence_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state` `Expired` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "c524232926b4c669e4cb5e9974ae6b445fb3b4f3416d7ba478eacf20cca136fc",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:27b38b207a4da96fce9484e5d14596a5c429122c2e0b1828fc0d5a30b9df4ba1",
@@ -3397,7 +3429,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Revoked.revocation_evidence_ref|revocation_evidence_ref",
         ],
-        rationale: "a16:2173: shorthand member `revocation_evidence_ref` at census path `MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Revoked.revocation_evidence_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state` `Revoked` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "2933a223502479180e785d5af08ef4fac172b35e26c6f27a4018815ada8fb8d0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:d3972d524264e6449e2528313a7976b508eac8acabf9593a4c8ce1ffe06f7c7c",
@@ -3407,7 +3439,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.receipt_digest|receipt_digest",
         ],
-        rationale: "a16:2217: shorthand member `receipt_digest` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.receipt_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `AlreadyApplied` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "5f8f10726d7d86a9e8d6078fbefc6b3034bf31b7ccfd4c79b7725fe8dd340324",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:73143cf7fd34135bee48b34d7acfe28e8d8b7d465f7045f6d3aa6db79174a6f2",
@@ -3417,7 +3449,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_cas_version|returned_cas_version",
         ],
-        rationale: "a16:2217: shorthand member `returned_cas_version` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_cas_version` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `AlreadyApplied` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "e932f6e53e7f3c32e13c2daa4b6a8f982d034e3b44ec77ac413e0c07d84a40ba",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:40fc6209f306a671ccd4db75f22833ab2aa76d13d8442ebc25674a04196cb132",
@@ -3427,7 +3459,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_head_digest|returned_head_digest",
         ],
-        rationale: "a16:2217: shorthand member `returned_head_digest` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_head_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `AlreadyApplied` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "918bf06f538035be20fa7a56ac26b9bfaaff3d66e71d70eb873746f93d5ffe15",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8058b555f1a86c8409f8539532fc03036c349fa2f6fee639571fad438e13358b",
@@ -3437,7 +3469,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.receipt_digest|receipt_digest",
         ],
-        rationale: "a16:2217: shorthand member `receipt_digest` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.receipt_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `Applied` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "87ebd74a7ab923c0dd5b9570a8e17cd89f9337127cd6f06b4b370500d892e4b0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e62694631633aa73ecfadb4ad6d290ed730a138cc9e521583c2200708582fc9b",
@@ -3447,7 +3479,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_cas_version|returned_cas_version",
         ],
-        rationale: "a16:2217: shorthand member `returned_cas_version` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_cas_version` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `Applied` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "301ecef0e95281bc7273ec3ac6e8a61dc346f2e877f6ab179c1c14131edc07a8",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:7cae16fadad1f0eaafdf3ebaded743a00bd755995d0a1d8db5d6a6d00507d90a",
@@ -3457,7 +3489,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_head_digest|returned_head_digest",
         ],
-        rationale: "a16:2217: shorthand member `returned_head_digest` at census path `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_head_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition` `Applied` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "554aa5c01be9a3e723ebf20a24bf13091c8f72bb838bf65eff6d02f2cf95bd24",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:3f70b6d5956b91cbed5b83cf1c9a008e0582772e43187bbd4307c896c9a58b0f",
@@ -3467,7 +3499,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind.AcquireImported.prebootstrap_owner_digest|prebootstrap_owner_digest",
         ],
-        rationale: "a16:2237: shorthand member `prebootstrap_owner_digest` at census path `RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind.AcquireImported.prebootstrap_owner_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind` `AcquireImported` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "92bad281132177dfec1f17f5afa179bde0bf2585e9d5357efbbd0fb9eba42b31",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ee2a0d26ffa8fc46b9f93e2f68ff4faec17728d1615fa20416ac52779fb5fe24",
@@ -3477,7 +3509,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state.Burned.typed_no_publication_proof_ref|typed_no_publication_proof_ref",
         ],
-        rationale: "a16:2191: shorthand member `typed_no_publication_proof_ref` at census path `TimeSubjectIssuanceReservation<Role>.state.Burned.typed_no_publication_proof_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectIssuanceReservation<Role>.state` `Burned` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "26a93fce4538f564caf9fee9e96dfc674961feb410a9ef5e897a064d17812c36",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:501aac0906acf541265937cca86f1d5e075cbecbad580e128e54fa76e93e0455",
@@ -3487,7 +3519,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state.Published.publication_cut|publication_cut",
         ],
-        rationale: "a16:2191: shorthand member `publication_cut` at census path `TimeSubjectIssuanceReservation<Role>.state.Published.publication_cut` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectIssuanceReservation<Role>.state` `Published` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "953a8215a73a7d7c6e85b37f27dbdc7b460dd874a5da4506768b0ee84348ba3e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8762b46c4d850de631aa9c367c2e30c1f082d0306636f98323fdd1d17bfe7b52",
@@ -3497,7 +3529,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state.Published.subject_identity|subject_identity",
         ],
-        rationale: "a16:2191: shorthand member `subject_identity` at census path `TimeSubjectIssuanceReservation<Role>.state.Published.subject_identity` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectIssuanceReservation<Role>.state` `Published` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "6d66ad0d7b74e9b04ab8d4f3b155e568b33f68c27e2c9300c22ee924091c5d91",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:47ca97c9c1b146df0c47c3f7591362bdb4b898f8ed393ece13b85c505d8d74ca",
@@ -3507,7 +3539,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.state.Published.subject_membership_proof_ref|subject_membership_proof_ref",
         ],
-        rationale: "a16:2191: shorthand member `subject_membership_proof_ref` at census path `TimeSubjectIssuanceReservation<Role>.state.Published.subject_membership_proof_ref` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeSubjectIssuanceReservation<Role>.state` `Published` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "d3b600696b7b91cb87dc6a3794f1bfaa2690257add9e7420d93abef2fe80d513",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:fa23a8cbb7abc8dd79d1abab0b34316219cdace6a76e2bff9c4b1e0499a10650",
@@ -3517,7 +3549,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeValidationEvidence|TimeValidationEvidence.classification.Expired.expires_at|expires_at",
         ],
-        rationale: "a16:2167: shorthand member `expires_at` at census path `TimeValidationEvidence.classification.Expired.expires_at` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `Expired` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "7a47c4f5903a3850b2d1e193276ece0e843288ce63262461bcf588ae882c81fa",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e3b83ea20d0ae098e66e43bf5c550af8f0ef4e5deb0611dff362dc221147dd87",
@@ -3527,7 +3559,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeValidationEvidence|TimeValidationEvidence.classification.NotYetValid.not_before|not_before",
         ],
-        rationale: "a16:2167: shorthand member `not_before` at census path `TimeValidationEvidence.classification.NotYetValid.not_before` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `NotYetValid` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "72221adbc9d51bff2c2248e18d4daafa1e2af17824adaad7f7e2f9e75714db19",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:130c006a13e9ca83c0077198adc547325eef648f40464ca11c5b7c361ee50b78",
@@ -3537,7 +3569,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.expires_at|expires_at",
         ],
-        rationale: "a16:2167: shorthand member `expires_at` at census path `TimeValidationEvidence.classification.Usable.expires_at` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `Usable` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "a6201f134624c935564416f476592c512839484d7cf22cdd8acd013f7fb64d8d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ae09c78d9160d13ccf4f3c6dd11c1519b46645b455ad4719681f09b22eb4a015",
@@ -3547,7 +3579,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.guard_deadline_local_monotonic_tick|guard_deadline_local_monotonic_tick",
         ],
-        rationale: "a16:2167: shorthand member `guard_deadline_local_monotonic_tick` at census path `TimeValidationEvidence.classification.Usable.guard_deadline_local_monotonic_tick` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `Usable` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "acd606c5279c57efafb7b1925a98325b42dcc81358702f5ad6abbb0d875669f6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:92d41da0431b14a88135a2a3b5bbedbb281ab58af478f2ad2f04bcb383441774",
@@ -3557,7 +3589,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.not_before|not_before",
         ],
-        rationale: "a16:2167: shorthand member `not_before` at census path `TimeValidationEvidence.classification.Usable.not_before` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `Usable` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "f8512c104e90842329bc620dcb5fcaeaf042689fded89cfb9933ea78f7094253",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e2c84603e3f6477231e1f9b44471df57d2ca0197a763b02659b10b0d5da10fa0",
@@ -3567,7 +3599,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.validated_process_incarnation_id|validated_process_incarnation_id",
         ],
-        rationale: "a16:2167: shorthand member `validated_process_incarnation_id` at census path `TimeValidationEvidence.classification.Usable.validated_process_incarnation_id` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of the registered `TimeValidationEvidence.classification` `Usable` arm, and the single affected census key maps to that source form.",
+        rationale_sha256: "329f1b272f51f7d66c2e4709c0a725e19e8bcd665064a880e4b07e5548bb9dc8",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:db66247a27fb86a8603024209e2ddd3fe88d0af75ee5f1ee02c68f9788142a3c",
@@ -3575,7 +3607,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PlacementDescriptorWithoutId"],
-        rationale: "a02:1449: `PlacementDescriptorWithoutId` is rendered with divergent bodies at a01:1443 and a02:1449, which is why the census flags conflicting evidence. The family is nevertheless a registered durable schema: a01 registered it as wire type 0x001e with its own target, so the affected census key maps to that registered source form. Which of the two bodies is normative is a separate a01+a02 erratum and is deliberately not settled by this row.",
+        rationale_sha256: "1e1256b68ef4ee9f68844c63884e3b5848dc0adfd6f5fba85cf59334a10ffbec",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:44e6b6852bdc2c0f3336cc4a9f866a0430e83a64baa491610e066c4e9e0a113f",
@@ -3583,7 +3615,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a02:1447"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|FenceToken"],
-        rationale: "a02:1447: definitional prose names `FenceToken` and supplies no structural body because it is a runtime type, not a durable one. FenceToken is explicitly nonserializable and nonconstructible outside the VFS/commit boundary, and PendingFenceGuard is a linear guard that cannot survive restart; neither is encodable, so neither is a durable schema.",
+        rationale_sha256: "811147cc642034731fd9e06f1c98ef7bb6a6b03ae5f8b8768266c73e4ac90224",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:b6f908b8122821b649d176365f4deb62078c49b328f0f9848bdec7b7dea770b2",
@@ -3591,7 +3623,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a02:1447"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|PendingFenceGuard"],
-        rationale: "a02:1447: definitional prose names `PendingFenceGuard` and supplies no structural body because it is a runtime type, not a durable one. FenceToken is explicitly nonserializable and nonconstructible outside the VFS/commit boundary, and PendingFenceGuard is a linear guard that cannot survive restart; neither is encodable, so neither is a durable schema.",
+        rationale_sha256: "be90d2b7256f2b34091168d266bf0866b85ce290dcc2b0d16fa7d4781cf72bf9",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:b7095531bad16e02ee36f522e449e2352c619acf383706f42d879b4794d93dc6",
@@ -3599,7 +3631,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|SymbolRecord"],
-        rationale: "a02:1449: definitional prose names `SymbolRecord` without an adjacent structural expression, because its body is supplied as a fenced record block rather than inline. `SymbolRecord` is a registered physical kind, so the flagged span maps to that registered source form.",
+        rationale_sha256: "0818a611bdd35c92c9b6ca5ee6caf7b594fbe6db1d320fdf79b6dacd614e2156",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:4ccedc0588f7be74f4888666d503fde3bc7bc24371cf1ce1e3626a81d160c577",
@@ -3609,7 +3641,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.canonical_plaintext_len|canonical_plaintext_len",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6faf4376e87565480ba77bb182995707821110a48467f4134992fcb150791349",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:09e450db53ed431535948a0409580058cec35c34706c8d2e356e090ba0858523",
@@ -3619,7 +3651,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.codec_profile|codec_profile",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6faf4376e87565480ba77bb182995707821110a48467f4134992fcb150791349",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:2107f6bb310d1738e09dbc78172590eb86e893bdc1122828d6c89b4872d0dd4c",
@@ -3629,7 +3661,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.compressed_len|compressed_len",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6faf4376e87565480ba77bb182995707821110a48467f4134992fcb150791349",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:78bc7d81d3ea77a5f7cbafe8087902fe5408ae96fd0196ccc8853add6213b849",
@@ -3639,7 +3671,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.data_crypto_profile|data_crypto_profile",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6faf4376e87565480ba77bb182995707821110a48467f4134992fcb150791349",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:01b0e2f905955e3f08d85feea3eaa8ece8b3733508e8bb5f32659f2c5665d2b7",
@@ -3649,7 +3681,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.dek_id|dek_id",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6faf4376e87565480ba77bb182995707821110a48467f4134992fcb150791349",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:65f322cfd0c28b197696f849d53882d7a792fd2641775c105f7d6016bfcbdc67",
@@ -3659,7 +3691,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.logical_oid|logical_oid",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6faf4376e87565480ba77bb182995707821110a48467f4134992fcb150791349",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:aff152416fbd814b48c7e182decf54f4e4e8f31a7e39bf85bf7b2c8a35b39ed9",
@@ -3669,7 +3701,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_kind|object_kind",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6faf4376e87565480ba77bb182995707821110a48467f4134992fcb150791349",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:3b10032b12d68f801a7a16decacf694eed72525f8432d18257d23fa2974cb862",
@@ -3679,7 +3711,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_nonce_or_siv|object_nonce_or_siv",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6faf4376e87565480ba77bb182995707821110a48467f4134992fcb150791349",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:70dd1ce6a619845e395216c30b5cc24523f715d660652f6c59233b2f4a1cdb3b",
@@ -3689,7 +3721,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_tag_len|object_tag_len",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `CipherDescriptorWithoutDigest` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6faf4376e87565480ba77bb182995707821110a48467f4134992fcb150791349",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:21b51c04904bd6d0f06771ddd3fcff1e8f7dc47b406c10d1d817b81ceee93536",
@@ -3699,7 +3731,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CiphertextRecord|CiphertextRecord.ciphertext_digest|ciphertext_digest",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes ciphertext_digest to source tag 0x0003, exact type digest256, cardinality one and digest_class=target; the affected census key maps to that exact row.",
+        rationale_sha256: "aa7ad6e148c18f5290c482dc22f3c0311b9da48f15169251bad90dabc6fe862d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:e30d0e52a9b56177e2817418658afed5827dadf120553f44103643ee0f1aae7d",
@@ -3709,7 +3741,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CiphertextRecord|CiphertextRecord.ciphertext_id|ciphertext_id",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes ciphertext_id to source tag 0x0002, exact type id256, cardinality one and physical identity class; the affected census key maps to that exact row.",
+        rationale_sha256: "1c88d4b9f2758416ad7270079677bd950cbdacf7fc14c77ed4fa4ce96013f7c3",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:0b3b432489be5ce60147873ff27823f6a116229dfdc512f64024a49580237c8c",
@@ -3717,7 +3749,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|CiphertextRecord|CiphertextRecord.descriptor|descriptor"],
-        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes descriptor to source tag 0x0001, exact type CipherDescriptorWithoutDigest and cardinality one; the affected census key maps to that exact row.",
+        rationale_sha256: "3e0eb82b56a6fa86b1a8537dd005b7b83c4d9cb704980648e2a8aab54d98d882",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:7e38b5617e877b4c4d04aab2aceb9038d3998e272786e35c565ea11a61fc8402",
@@ -3727,7 +3759,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CiphertextRecord|CiphertextRecord.object_tag_digest|object_tag_digest",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes object_tag_digest to source tag 0x0004, exact type digest256, cardinality one and digest_class=target; the affected census key maps to that exact row.",
+        rationale_sha256: "97c773dd8c86f5c7bbad94a38c3e63210d91656a6ecdbc01522fefe2e5d30be3",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:0239498a2cba36ac46ba1927f4162f60e75399abfbb660542f8d307745300617",
@@ -3737,7 +3769,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|CiphertextRecord|CiphertextRecord.protected_length|protected_length",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes protected_length to source tag 0x0005, exact type u64 and cardinality one; the affected census key maps to that exact row.",
+        rationale_sha256: "8df12e6553ee88c8e4df247e9184fcc0530a34de215ce0e7200b4b45013d12cc",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:58efaec60718539e0d6fe9e4a1d057dd06ac699ceb1a3ab48e932808c2fa8133",
@@ -3747,7 +3779,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.ciphertext_id|ciphertext_id",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "a444342f1ac92824b51897a98b156083d2dc22b3a560bc142fb4d3a9a6546ff0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:c93e1bddb4c4026b3a846c187e67d3691154bb09a0d2c27549ed13d33c4faee3",
@@ -3757,7 +3789,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.fec_profile|fec_profile",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "a444342f1ac92824b51897a98b156083d2dc22b3a560bc142fb4d3a9a6546ff0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:36ce0f3f763b04170b64e17634530ae0b9f94d01676e993e5ed6cdf4f162bbf6",
@@ -3767,7 +3799,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.oti_common|oti_common",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "a444342f1ac92824b51897a98b156083d2dc22b3a560bc142fb4d3a9a6546ff0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:0fd7f1abd9e2c65b77a7b222d54c3da2786eafb0c0a0ef19dbd85113383b17ff",
@@ -3777,7 +3809,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.oti_scheme|oti_scheme",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "a444342f1ac92824b51897a98b156083d2dc22b3a560bc142fb4d3a9a6546ff0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:fc15e98ed9b83aca5947f32942eaef36bfe8ac25720614ccf5eccdd473462033",
@@ -3787,7 +3819,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.source_block_count|source_block_count",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "a444342f1ac92824b51897a98b156083d2dc22b3a560bc142fb4d3a9a6546ff0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:91902b26aa0a57dc07f52ad4d764ced91c8abdf107028a2ff451daf3f658b386",
@@ -3797,7 +3829,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.symbol_auth_profile|symbol_auth_profile",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "a444342f1ac92824b51897a98b156083d2dc22b3a560bc142fb4d3a9a6546ff0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:74c44cccf917099778495230c0ec66ff6391deb20367e75fccd7315f3ac6b929",
@@ -3807,7 +3839,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.symbol_size|symbol_size",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "a444342f1ac92824b51897a98b156083d2dc22b3a560bc142fb4d3a9a6546ff0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:e5a35dd4fe8de0fb93b60737c11309eea3fee0445f97b87965f72b1440a46590",
@@ -3817,7 +3849,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.transfer_length|transfer_length",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `EncodingDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "a444342f1ac92824b51897a98b156083d2dc22b3a560bc142fb4d3a9a6546ff0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:e950732c0153855d0e18984a9a8efc352d8856cc1fab0222138f4b42cc3bec9a",
@@ -3827,7 +3859,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.allowed_filesystems_and_mount_predicates|allowed_filesystems_and_mount_predicates",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:3ebc591c25f9c7eeab7a5df0a9850620fcfd9db848142c7c1de3a36f7915d444",
@@ -3837,7 +3869,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.cache_flush_assumption|cache_flush_assumption",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:4b63359434d412cb4e93da35ec045ceae13989d042b84d7ae6314386df91c871",
@@ -3847,7 +3879,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.directory_sync_rule|directory_sync_rule",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:8873904cf4efb6da4b32353b2091f387b40f93ceff6af9fcf79813cf5644c638",
@@ -3857,7 +3889,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.file_sync_rule|file_sync_rule",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:17d6d325b40c98e821df86f2214f8769f1605d56941c6ee69ea933198cb37433",
@@ -3865,7 +3897,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|FilesystemDurabilityProfile"],
-        rationale: "a02:1445: the member position spells a slash-compressed token, so the source names several members in one and spells none of them individually. The parser now refuses the token instead of splitting it at the first slash, which named a prefix and gave it a type beginning with '/'; expanding it by pattern would invent names, and the compression rule is not uniform (a10:1920 against its uncompressed sibling at a08:1804, which spells required_certificate_floor_ref beside required_remote_obligation_floor_ref). No field row is claimed for the token. The flagged span is part of the owner's own normative definition, the registered top-level candidate, so it maps to that source form.",
+        rationale_sha256: "b4bd78c4edfe946cf85a81a6dd5ee8f6a05efdfa5838cf598a5a55190370385a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:c7416022d96db48fb8420248771537b28d29cffb1e9428859c9fb36ea4853cfe",
@@ -3873,7 +3905,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|FilesystemDurabilityProfile"],
-        rationale: "a02:1445: the member position spells a slash-compressed token, so the source names several members in one and spells none of them individually. The parser now refuses the token instead of splitting it at the first slash, which named a prefix and gave it a type beginning with '/'; expanding it by pattern would invent names, and the compression rule is not uniform (a10:1920 against its uncompressed sibling at a08:1804, which spells required_certificate_floor_ref beside required_remote_obligation_floor_ref). No field row is claimed for the token. The flagged span is part of the owner's own normative definition, the registered top-level candidate, so it maps to that source form.",
+        rationale_sha256: "b4bd78c4edfe946cf85a81a6dd5ee8f6a05efdfa5838cf598a5a55190370385a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:eef13b4b7a2306d6fe972c7c2d821b7e62ba883e6ffb2a9e6fdd313323849073",
@@ -3883,7 +3915,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.owner_death_rule|owner_death_rule",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:f647dad9e7de474a5854ee8f2254e916bee0d666b285d71f678368395354f05d",
@@ -3893,7 +3925,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.probe_suite_oid|probe_suite_oid",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:bc62521d65078a2781fe44d3efb08cd84e5d65e876b31ea864407d9332cd20fb",
@@ -3903,7 +3935,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.profile_id|profile_id",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:05ee487e0b125b8d10eb6d1c00f301fff764d0caa5dafe3ec9da98c6477584b9",
@@ -3913,7 +3945,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.profile_version|profile_version",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:99f8784a375d4d11bb423cc86fc89929a0674791e65daad040c44ae0e2415060",
@@ -3923,7 +3955,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.rename_no_replace_rule|rename_no_replace_rule",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:a846ae0b543e13fc45e6a5f69df06c09d4d13aef5289f4195c9e4490b97ccf67",
@@ -3933,7 +3965,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.required_lock_primitive|required_lock_primitive",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:418f3bc0a20a19de8b690a2bf879b4eb13452aca56deb8885b70a3840edba3af",
@@ -3943,7 +3975,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.slot_write_rule|slot_write_rule",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:010e36ee5de62c235893df457e3727287ec8a3c933e2350f364f259104b82659",
@@ -3953,7 +3985,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.stable_inode_rule|stable_inode_rule",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "984062c6fff6fda6abcf5bfa3c27f2a901f3de2da8021c3f475a5873d67a0921",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:dfc4ee027f44f5a6de4cbad5c1e1ea667efc9f0bb8caedc8f3c95090c0a1d3b1",
@@ -3963,7 +3995,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemInstanceRecord|FilesystemInstanceRecord.canonical_mount_options|canonical_mount_options",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6162e87889190dd36b7b29ba0350a257f8158f35cd622c6d900fa441798a4596",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:59835471a2ee6ac1e9331216d06953e05c349a60ac9784235a02802c2514492c",
@@ -3973,7 +4005,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemInstanceRecord|FilesystemInstanceRecord.checked_at|checked_at",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6162e87889190dd36b7b29ba0350a257f8158f35cd622c6d900fa441798a4596",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:55cf4f7028a45ef7d65a28a261fa7d7a3516b7d830592ae65bf7df05e455db6a",
@@ -3983,7 +4015,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemInstanceRecord|FilesystemInstanceRecord.device_chain_digest|device_chain_digest",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6162e87889190dd36b7b29ba0350a257f8158f35cd622c6d900fa441798a4596",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:75f019a44ff22a05c88a94feab810d4ea5e37d5d09199e38e376efb9b35325e5",
@@ -3993,7 +4025,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemInstanceRecord|FilesystemInstanceRecord.directory_device_inode|directory_device_inode",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6162e87889190dd36b7b29ba0350a257f8158f35cd622c6d900fa441798a4596",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:187c4435bf8b3e3c71d4c9991d9f9aa365586d2a8f5d222afd7f1973e98bdad7",
@@ -4003,7 +4035,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemInstanceRecord|FilesystemInstanceRecord.filesystem_type|filesystem_type",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6162e87889190dd36b7b29ba0350a257f8158f35cd622c6d900fa441798a4596",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:58e8995d6dff4c106bde4b883c447df2fb5f23741ff4b27a13dffe03b4f5a846",
@@ -4013,7 +4045,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemInstanceRecord|FilesystemInstanceRecord.manifest_device_inode|manifest_device_inode",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6162e87889190dd36b7b29ba0350a257f8158f35cd622c6d900fa441798a4596",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:f0c77d4630f11fdfdb94e63f0eb32f9a5b62ec529eed748cb92e281f73c269d8",
@@ -4023,7 +4055,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemInstanceRecord|FilesystemInstanceRecord.mount_id|mount_id",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6162e87889190dd36b7b29ba0350a257f8158f35cd622c6d900fa441798a4596",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:37dd75a6f44baa134b14e608eb509469c77653e9bf407141e9a2d456002e58dc",
@@ -4033,7 +4065,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemInstanceRecord|FilesystemInstanceRecord.probe_suite_oid|probe_suite_oid",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6162e87889190dd36b7b29ba0350a257f8158f35cd622c6d900fa441798a4596",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:7493dcf2c9989d73978202b23a33520b3dae91d9b3322116b24d8c778479c089",
@@ -4043,7 +4075,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemInstanceRecord|FilesystemInstanceRecord.profile_id|profile_id",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6162e87889190dd36b7b29ba0350a257f8158f35cd622c6d900fa441798a4596",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:c9a8f5c62ed9dfd6d2bb96b7d0041ea2070123fe3a64def0a1341d7f47a1b9b7",
@@ -4053,7 +4085,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|FilesystemInstanceRecord|FilesystemInstanceRecord.result_digest|result_digest",
         ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemInstanceRecord` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "6162e87889190dd36b7b29ba0350a257f8158f35cd622c6d900fa441798a4596",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:4589a1a610a23f057f6b5862ea7c6f0237c355edacd39c5d5b1795cf6b0cc5be",
@@ -4063,7 +4095,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.failure_domain_policy|failure_domain_policy",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `PlacementDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "f457f1396d29bafbf9f30ba7bf6415f9a63058c18581011e3139ee731782b48d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:1121451997661af6c018ac5cb8a92e35e459d9cea025b5dfb39f12bc16c38e20",
@@ -4073,7 +4105,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.location_form|location_form",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `PlacementDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "f457f1396d29bafbf9f30ba7bf6415f9a63058c18581011e3139ee731782b48d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:d6eb0a856c857d051ccc3db1bbbdfc5333456257cab21d9eec3372302d2a44aa",
@@ -4083,7 +4115,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.placement_epoch|placement_epoch",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type, but its owner `PlacementDescriptorWithoutId` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        rationale_sha256: "f457f1396d29bafbf9f30ba7bf6415f9a63058c18581011e3139ee731782b48d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:200f2d59a98b49a305f74582c258b6b32316c146f35b4b436ec9620d319c2b52",
@@ -4091,7 +4123,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|PlacementRecord|PlacementRecord.descriptor|descriptor"],
-        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes descriptor to source tag 0x0002, exact type PlacementDescriptorWithoutId and cardinality one; the affected census key maps to that exact row.",
+        rationale_sha256: "0614a0ea68d0649f8180fce15da38b0c3c091c68914e77c6ad137b7503106cba",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:f7c039dd333ca9b1bd1e78736d84f3afe200de8795e7791698012f017f5f5f5a",
@@ -4099,7 +4131,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|PlacementRecord|PlacementRecord.placement_id|placement_id"],
-        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes placement_id to source tag 0x0001, exact type id256, cardinality one and physical identity class; the affected census key maps to that exact row.",
+        rationale_sha256: "d6153f198c3358c43ad20e84bfbb7a286fb597c8ec27b543612dc276f801b453",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:34cf0a3cb4495aaffdd79a0489e1b6a8caa672ad4ed267b7e32b2c42f13e59b1",
@@ -4107,7 +4139,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a09:1904"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|LocalFinalCertificationReserveSpec"],
-        rationale: "a09:1904: the flagged span is the body of `FinalCertificationReservationRecord<Local> {plan_ref,registration_identity,finalization_generation,sorted_mappings,permanent_spent_extension_commitment,applied_control_ref,state:Active}`, which the sentence introduces as the object `LocalFinalCertificationReserveSpec`'s apply INSTALLS. The parser attributes the brace body to the sentence's grammatical subject, so the alias expression is unparsed against that subject rather than against the record. The affected key is the subject itself, which a07 registers as a structural definition at a07:1750 and mints at its reserved code 0x030a.",
+        rationale_sha256: "100b797bde0d25ff732446e2a30aa65d565e594829017f41d01b37cd1c7508c0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:31cc7fb171ebf8e60218481acbf4ae4a9a46c47d0bf7e2636d2c44c14dbd5dcc",
@@ -4115,7 +4147,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a09:1904"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|LocalFinalCertificationReserveSpec"],
-        rationale: "a09:1904: the same span carries a second structural body for `top|LocalFinalCertificationReserveSpec`, whose own definition is a07:1750. a09 references the symbol and shows an installed record inside the same sentence, so the two bodies diverge for one source key. The divergence resolves to the a07 owner's definition; a09 contributes no competing structural claim.",
+        rationale_sha256: "053de58ad70257991c3a1819a3bca0e9999d4774230070364860b48d4a11975b",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a03:ambiguity-adjudication:8c725fa15a9bc362be089cd1c4a8a996d6f4e20664fcac5528a2df62b880ef17",
@@ -4125,7 +4157,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TxnOutcomeRecord|TxnOutcomeRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a03:1524: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "684219a2bbf8179cf5554fa9ed38e1bbae8138b7b42eaf7a1bc3c9b184577001",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a06:ambiguity-adjudication:8723ace590fa1a79389ba18bd5aab08bcc1d3ebe7eb3a17528e939386f05cd0c",
@@ -4135,7 +4167,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|MetaPreparedCommandRecord|MetaPreparedCommandRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a06:1698: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "fdeaf89b1f397d6a285015c14d413694c660ae6bb2e493a5d983059fa1b78ad7",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a06:ambiguity-adjudication:d29cf70d19793cee02c2ad22e8df60d5ad6dd3357ba46123cc85f4d5728315f9",
@@ -4145,7 +4177,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ShardPreparedPayloadRecord|ShardPreparedPayloadRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a06:1700: the bare nonretaining predecessor spelling matches the prepared-root family precedent and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "dc98ecbb2a9cbda48801ebbcb424659d07d48d5172378c54ddf905e968796a85",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a10:ambiguity-adjudication:a2ec9c9e4687c66ca7527a460cb9a9629e7e9297e0e9d39a307025de544f061f",
@@ -4155,7 +4187,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|PreparedCommitRecord|PreparedCommitRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a10:1922: the bare nonretaining predecessor spelling matches PreparedRootHeader<Role> in the same prepared-root family and is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "9c00a2d310b0606c80a400957bf50826a0f0b27c5c37ff9bcc9e6b14bb3d4a26",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:733086702e6b63491e3b2a762e92e10d4e93ed043291c93f73edc4769a46c3d2",
@@ -4165,7 +4197,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a16:2191: nonretaining_predecessor_digest is the carrying field for the plan-named comparison digest, so it is fixed to digest256 with digest_class=weak_identity, reference_semantics=none, and identity_class=inline; a plan-named digest is not a wire type, and this field never contributes a traversal edge.",
+        rationale_sha256: "1d623bcee74387ab454300c2327fda8ee0cd0287c93d82e332ee23490c7b907c",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a11:ambiguity-adjudication:98bfc2c6ef27ede75714946eaa38ebe9b92541fbd58e123d1e2f8a793ce2d21a",
@@ -4173,7 +4205,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a11:1932"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|InternalBaselineDigest"],
-        rationale: "a11:1932 defines InternalBaselineDigest as the domain-separated BLAKE3 transcript carried by DeliveredBaselinePayload.internal_baseline_digest. The durable field is digest256 with digest_class=transcript; the capitalized prose name is not a separately encoded schema.",
+        rationale_sha256: "9d321bfec8544d9f640cc3c34d4ba5c1ccdd3677dac5635703d735d66f8c0e90",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a11:ambiguity-adjudication:d93a7697a2040a94c9e91b9234c0c9ddf0f411dd9a4f6b67e3273e9205b2be4e",
@@ -4181,7 +4213,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a11:1932"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|PublicBaselineDigest"],
-        rationale: "a11:1932 defines PublicBaselineDigest as the domain-separated BLAKE3 transcript carried by DeliveredBaselinePayload.public_baseline_digest. Wire visibility does not create a distinct wire schema: the carrier is digest256 with digest_class=transcript.",
+        rationale_sha256: "bf3b35bf268173e2585908a1db81f501212c6139971826fe80529dbf4e79fd99",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a11:ambiguity-adjudication:4a22f9a9db5d5ed1f2f62f6512dc1e2bcbeee6d916c46c48d39ef610cf35c613",
@@ -4189,7 +4221,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a11:1934"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|PublicDeliveryDigest"],
-        rationale: "a11:1934 says PublicDeliveryDigest is separately constructed under the exact section 9.5 and Appendix D declassification contract and supplies no structural body here. It names a digest transcript value, not an independently encoded durable schema.",
+        rationale_sha256: "400611262bd5c2098c72401fd92b9d1bbc69ac7d13e549e3e303afdb1c2a6f70",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:7989140375531b62a0427337b27000ebb3a319364975a0a7de7635fd2990b18a",
@@ -4199,7 +4231,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdentityContinuityRecord|IdentityContinuityRecord.database_security_namespace_id|database_security_namespace_id",
         ],
-        rationale: "a09:1892: shorthand member `database_security_namespace_id` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `id256`; the derivation is that the a01 database_security_namespace_id family is id256/32 on both landed rows (RootSlot and its bootstrap projection), and this is the same namespace identity. The single affected census key maps to that source form.",
+        rationale_sha256: "b023d753e48e5e6c7fac0bcf3a3fc38ef17ddd2ef54b6469b1b2af67afcfd8a9",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:5eb46aa4d18d045fbab17d48d4fa4c2e04fe241b6339c21e60007af58b89dfef",
@@ -4209,7 +4241,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdentityContinuityRecord|IdentityContinuityRecord.allocation_epoch|allocation_epoch",
         ],
-        rationale: "a09:1892: shorthand member `allocation_epoch` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that the appendix `*_epoch` family is u64/8 on all seven landed rows. The single affected census key maps to that source form.",
+        rationale_sha256: "6755049dde800bd98eabbe4d2240ebe581adc2beadbc0770e831ed0e7e7be5e5",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:5a108c87bcaf7af97c68b4de5140f580e0595077c32b9dc2101ce3020e0386ef",
@@ -4219,7 +4251,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdentityContinuityRecord|IdentityContinuityRecord.predecessor_digest|predecessor_digest",
         ],
-        rationale: "a09:1892: shorthand member `predecessor_digest` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `WeakDigest`; the derivation is that the appendix nonretaining-predecessor family is WeakDigest/32 with reference_semantics=weak_digest, digest_class=weak_identity and NO target_schema_id on the four applicable landed rows (a03, a06 x2, a10). A16's separately settled plan-named digest is carried as digest256/inline/none and is not a wire-type precedent. The WeakDigest shape here keeps a continuity chain from becoming a retaining edge. The single affected census key maps to that source form.",
+        rationale_sha256: "e5c3b4b9d7ad9f63d143e7221f65bb431d186cd2d1ae5243456f176203614165",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:0fc76e8406b9a839f450c938eaff50007c961724ba28ce1f64977219c65d0d15",
@@ -4229,7 +4261,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdentityContinuityRecord|IdentityContinuityRecord.external_registry_id|external_registry_id",
         ],
-        rationale: "a09:1892: shorthand member `external_registry_id` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `id256`; the derivation is that the appendix `*_id` identity family is id256/32, and this names an external registry object by identity rather than by reachability. The single affected census key maps to that source form.",
+        rationale_sha256: "29aa734cf76d5717f0f0b6d36c686c4cfd7b0b0bd66f2a57f48213c632511c59",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:7b44d5b03543471edf15dc99e30e657583e45f02cabaf48e320af54c665eb518",
@@ -4239,7 +4271,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdentityContinuityRecord|IdentityContinuityRecord.cas_version|cas_version",
         ],
-        rationale: "a09:1892: shorthand member `cas_version` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that the sibling a01 RootSlot member `continuity_cas_version`, which the slot registers against this same continuity record, is u64/8; the two must byte-match. The single affected census key maps to that source form.",
+        rationale_sha256: "602ab23ff92a524ac2cdf6c6f1ed14fdb5d8a4683a40b752dff25bb49e02cb10",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:35c1e0d07f3eb18d887676c63f91a58a9ee0a9a4009183bcd7ec016c3b660932",
@@ -4249,7 +4281,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdentityContinuityRecord|IdentityContinuityRecord.status|status",
         ],
-        rationale: "a09:1892: shorthand member `status` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u16`; the derivation is that the source names a closed status but spells no arms, so no union may be minted without fabricating them; the appendix closed-discriminant scalar convention is u16/2, and a later arm registration remains an additive-minor change. The single affected census key maps to that source form.",
+        rationale_sha256: "0f6a030703c692299c5a0cb634ce464ea0bf690a59a34af02d61860e8dde53c5",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:afddde1229bb99bc5b43ecf670fb764381aad05dd58da905f2068c9f7cf78f0b",
@@ -4259,7 +4291,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdentityContinuityRecord|IdentityContinuityRecord.issued_at|issued_at",
         ],
-        rationale: "a09:1892: shorthand member `issued_at` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that it is an opaque instant in the issuing registry's own declared domain, the slice pins no width, and u64/8 is the appendix scalar counter/instant convention. The single affected census key maps to that source form.",
+        rationale_sha256: "3f8a7775d3b3bb4cceb8730361d28ced0e81c83cec04d2495a174acdee1162a9",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:f6fead0d3b3c1a3cd04821d4626ca07675c108902deda2d4d50aea669073edf7",
@@ -4269,7 +4301,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdentityContinuityRecord|IdentityContinuityRecord.signer_set_epoch|signer_set_epoch",
         ],
-        rationale: "a09:1892: shorthand member `signer_set_epoch` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that the appendix `*_epoch` family is u64/8 on all seven landed rows. The single affected census key maps to that source form.",
+        rationale_sha256: "374c06988202ff70e5595116f4393515bfbbe8e93e175ea44d1751f58f3fff00",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:3bc7da5d29eaeb33f284b3e0664cbfdcce0645a313b045f01ba12501ed2c26a8",
@@ -4279,7 +4311,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdentityContinuityRecord|IdentityContinuityRecord.threshold_signatures|threshold_signatures",
         ],
-        rationale: "a09:1892: shorthand member `threshold_signatures` carries no inline exact type inside the `IdentityContinuityRecord` body, and IdentityContinuityRecord is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `bytes`; the derivation is that the appendix `*_signatures` family is bytes/65536 on all six landed rows. The single affected census key maps to that source form.",
+        rationale_sha256: "155a4d3d27a5976ccecf90f96fe3ff3329971d0b2c92e97319c138182c293574",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:a56e96e992fa004d53648fff60577968c42e7eb1e76e061ec17ad916d8d3199b",
@@ -4289,7 +4321,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.lease_id|lease_id",
         ],
-        rationale: "a09:1892: shorthand member `lease_id` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `id256`; the derivation is that the appendix `*_id` identity family is id256/32. The single affected census key maps to that source form.",
+        rationale_sha256: "b3af50c450b6fe9b563bddbfdae1dc30e87bc0c8bddd1b8e7b5a1934733812f0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:3cbeed9a9ea13d29a959320cb4c972acdcc149cb61c03b43b64284e6ba669799",
@@ -4299,7 +4331,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.graph|graph",
         ],
-        rationale: "a09:1892: shorthand member `graph` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `id256`; the derivation is that it is a graph identity and takes the appendix id256/32 identity convention. The single affected census key maps to that source form.",
+        rationale_sha256: "1b457c30add76f582fdd439b235a1e3e1d561197eb302e585baa4285f506b53e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:a5247158af450d3874c3381f2ebb1a4bad5b01381a5db492e66e7ba3dbbd42cc",
@@ -4309,7 +4341,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.element_kind|element_kind",
         ],
-        rationale: "a09:1892: shorthand member `element_kind` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u16`; the derivation is that it is a closed element-kind discriminant with no arms spelled in the slice, and the appendix `*_kind` scalar convention is u16/2. The single affected census key maps to that source form.",
+        rationale_sha256: "287e6a9d340725f5dc0045ef6e6540074eea295e155c4937e175abac98d81ac7",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:9a3fd9fdb09fd9fd8034325657de2cadf652ec3713ec11fe97391773744c5249",
@@ -4319,7 +4351,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.allocation_epoch|allocation_epoch",
         ],
-        rationale: "a09:1892: shorthand member `allocation_epoch` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that the appendix `*_epoch` family is u64/8 on all seven landed rows. The single affected census key maps to that source form.",
+        rationale_sha256: "a14959de0bc60523d8c2bdaaf4c02ed36a166db8b39cbf53d6db8087bfa9674f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:99f471783470d1394c5e9b58102a4cbe715c18f5353e9784a913513b859235a7",
@@ -4329,7 +4361,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.partition|partition",
         ],
-        rationale: "a09:1892: shorthand member `partition` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u32`; the derivation is that it is a partition ordinal within the graph's element-kind space, the slice makes no width claim (the 128-bit identity shape is w2-id-allocator's remit), and u32/4 is the appendix ordinal convention. The single affected census key maps to that source form.",
+        rationale_sha256: "d55897a92eec462e2f66ba6d3240e78a6a8c30fbca35053705b69d3a1c185fbb",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:24a3d803731ca838564933d4c189d3a334877983cff3b22faf085f146d49bfc4",
@@ -4339,7 +4371,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.half_open_range|half_open_range",
         ],
-        rationale: "a09:1892: shorthand member `half_open_range` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `bytes`; the derivation is that it is a [start,end) offset pair for which the appendix registers no range wire type, so bytes/16 carries the canonical pair without minting a fabricated record, and the authenticated transcript covers it either way. The single affected census key maps to that source form.",
+        rationale_sha256: "25e54a37ab165d559889ecb73118e43dbfe9e10f2f9da257664777d7804ffc86",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:ba4f137cd4482c720db3387c1f579bdd42a41c65b935a93ac146d42d369a3db5",
@@ -4349,7 +4381,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.time_authority_profile_oid|time_authority_profile_oid",
         ],
-        rationale: "a09:1892: shorthand member `time_authority_profile_oid` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `oid256`; the derivation is that the appendix `*_oid` family is oid256/32 with identity_class=logical and reference_semantics=weak_digest on both landed non-locator rows (a01 configuration_oid and target_configuration_oid): an authority-group object named by identity and never followed locally. The single affected census key maps to that source form.",
+        rationale_sha256: "6cf8550618130562371e3727eca1d3c4f7f344fa108bbe922290a4a57bfa87a6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:f92ecc970f0808864f6330f4bea378f455e73f83eac39266660daf596c273b56",
@@ -4359,7 +4391,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.issuance_not_before|issuance_not_before",
         ],
-        rationale: "a09:1892: shorthand member `issuance_not_before` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that it is a bound in the domain named by the sibling time_authority_profile_oid, the appendix registers no profiled-time wire type, and u64/8 is the scalar instant convention. The single affected census key maps to that source form.",
+        rationale_sha256: "bd68cab0af4387f7cb216d20c54023ddcd2a7768b87c1d76aa0ed5faa28b2888",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:e980cabf89166a1b611e2908e02485c320159dfb33dfb8b56bb34ad71c463614",
@@ -4369,7 +4401,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.issuance_not_after|issuance_not_after",
         ],
-        rationale: "a09:1892: shorthand member `issuance_not_after` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that it is a bound in the domain named by the sibling time_authority_profile_oid, the appendix registers no profiled-time wire type, and u64/8 is the scalar instant convention. The single affected census key maps to that source form.",
+        rationale_sha256: "e0fdac1496a41a0dff27c995820935e0fe8c4acc1c21fcdab4b1ec84b312f206",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:8df2a4c61a0630de9609946d1278eead5147d6512dbc752ce2fc5adc9f277e13",
@@ -4379,7 +4411,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.permanent_spent_commitment|permanent_spent_commitment",
         ],
-        rationale: "a09:1892: shorthand member `permanent_spent_commitment` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `digest256`; the derivation is that the appendix `*_commitment` family is digest256/32; digest_class=weak_identity matches a01 source_identity_or_transition_continuity_commitment, a comparison-only commitment that is never a reachability edge. The single affected census key maps to that source form.",
+        rationale_sha256: "36cc747a40d2fd894a1aaa869398c4edf92974f541cc5ee020d6aadab0137c7d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:4f3f680f6528cfc80f55800a442a3251b4075724849f4cd6740839215556c8bc",
@@ -4389,7 +4421,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|IdRangeLease<Role:AuthorityOwningRole>|IdRangeLease<Role:AuthorityOwningRole>.body_digest|body_digest",
         ],
-        rationale: "a09:1892: shorthand member `body_digest` carries no inline exact type inside the `IdRangeLease<Role:AuthorityOwningRole>` body, and IdRangeLease is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `digest256`; the derivation is that the appendix body_digest family is digest256/32 with digest_class=body on nine of ten landed rows; the registered BodyDigest recipe excludes exactly this field's own tag. The single affected census key maps to that source form.",
+        rationale_sha256: "913c63f4a6d1d447c19ac2db81f893f7da233b4110a64517c0cc43cdbbd28dd0",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:8de057a6c84c235bec83c7ba8237e7f991be0809d8863d347cffcf7932c6ed56",
@@ -4399,7 +4431,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.generation|generation",
         ],
-        rationale: "a09:1900: shorthand member `generation` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that it is a workspace generation counter and takes the appendix u64/8 scalar counter convention. The single affected census key maps to that source form.",
+        rationale_sha256: "9a7579d06dfdd05d73252cd36893075934b17835b73f5beb757124ffae234672",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:dbc2d9bca1bafc5c870e00da7218b31231b1c64558f67415d710bf1f07c6464d",
@@ -4409,7 +4441,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.attempt_identity|attempt_identity",
         ],
-        rationale: "a09:1900: shorthand member `attempt_identity` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `WeakDigest`; the derivation is that the appendix weak-identity family is WeakDigest/32 with reference_semantics=weak_digest and digest_class=weak_identity (a04 predecessor_topology_identity, a07 reservation_identity, a19 source_manifest_identity); the attempt is named, never retained. The single affected census key maps to that source form.",
+        rationale_sha256: "94017e0f49094e957debf88a1faecd0cf10cf584c9e03ea67bddfd3aa0518a83",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:4576279cf232c7845c55021c16aaf532138f3ef656c0e1d5532ad1bb978b191a",
@@ -4419,7 +4451,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.through_statement_seq|through_statement_seq",
         ],
-        rationale: "a09:1900: shorthand member `through_statement_seq` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `u64`; the derivation is that the appendix `*_seq` family is u64/8 on all four landed rows. The single affected census key maps to that source form.",
+        rationale_sha256: "a47915473cdb336f723f51bd00ef71a0af3fd54b54daf497ad3d98f886a4bead",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:43c3e5daf2b3bbd201ad393a918221d7137fd173c7abe6529878909c6e449b02",
@@ -4429,7 +4461,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.sorted_spent_commitments|sorted_spent_commitments",
         ],
-        rationale: "a09:1900: shorthand member `sorted_spent_commitments` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `digest256`; the derivation is that it carries the same commitment values as permanent_spent_commitment as a canonically-sorted set, so digest256/weak_identity with cardinality=many, and the appendix `many` convention caps the aggregate at 16777216. The single affected census key maps to that source form.",
+        rationale_sha256: "32cfed27fe9159be1d27a097634da61ee13d1c0e3c657ddc0e99c27acea3af4d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:a654ba46e405b504506c1ecaf92c7fe0f0e8de107a6da5f174150750abd2da5d",
@@ -4439,7 +4471,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|TxnAllocationBindingRoot|TxnAllocationBindingRoot.root_digest|root_digest",
         ],
-        rationale: "a09:1900: shorthand member `root_digest` carries no inline exact type inside the `TxnAllocationBindingRoot` body, and TxnAllocationBindingRoot is a logical kind, so no wire envelope commits the span and its exact type/cardinality is owned by the registered durable_fields row. That row fixes it to `digest256`; the derivation is that the appendix digest family is digest256/32, and the value commits the binding-root leaf mapping rather than the record's own preceding bytes, so it is digest_class=transcript with a registered recipe, matching a01 signed_transcript_digest rather than a BodyDigest. The single affected census key maps to that source form.",
+        rationale_sha256: "ce30bfdf59ad976630a7bc5eab38a36be0c36f381c83131abd213633dc37fabd",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:9fcf021dbaea4ffe1daf6fb1ceac10df49ebc45b5b43054c0c5cf93eb4471643",
@@ -4449,7 +4481,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|KeyDestroyProposal|KeyDestroyProposal.key_identity|key_identity",
         ],
-        rationale: "A15 repeatedly requires byte-equal key_identity projections but spells neither a KeyIdentity structural producer nor a StrongRef/typed by-value use that would license one. The owner ruling therefore selects the builtin opaque id256 form, not a fabricated record and not WeakStateIdentity/WeakDigest. Its canonical bytes are BLAKE3(\"fgdb:key-identity:v1\" || canonical(0x0001 database_security_namespace_id:id256, 0x0002 material_class:u16, 0x0003 key_id:id256, 0x0004 key_epoch:u64)); the namespace makes clone identities distinct while same-identity restore remains stable, and excluding physical targets keeps rewrap/replication/relocation from changing the logical key identity.",
+        rationale_sha256: "1d4aaaba46a14e8bc922862dad5c285b11a11d9dfcdb32e64c74e88b3dd97fb6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:c4b54a063bd35e654e0c35628c05ea2005055123fe1fbb308e31054cd4be76b7",
@@ -4459,7 +4491,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|complete_target_set_digest",
         ],
-        rationale: "A15 fixes the committed set as the unique sorted canonical KeyDestructionTarget identities and keeps this commitment distinct from operation IDs and the canonical operation-root digest. The owner ruling therefore selects one nonretaining digest256 carrying field with digest_class=transcript, never a plan-named wire type: BLAKE3(utf8(\"fgdb:key-destruction-target-set:v1\") || 0x00 || u32_le(target_count) || each u32_le(32) || target_identity[32] in ascending byte order), rejecting overflow and duplicates before hashing. No source law requires authenticated membership proofs, so Merkle/tree shape is excluded and any recipe change requires a new transcript version.",
+        rationale_sha256: "0e8e4c307ae1d8704c2c8d9deb04ef7170795959db42aeca8bfec86e9282d0a8",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:b62b76d8465a74e44a868d3ea1cabd3eb3b9ca6e970d47ea69f35e21c7cd5e29",
@@ -4469,7 +4501,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|KeyDestroyProposal|KeyDestroyProposal.expected_prospective_configuration_set_digest|expected_prospective_configuration_set_digest",
         ],
-        rationale: "A15 requires proposal creation and finalization to compare the exact current prospective configuration set while carrying the current ConfigurationState separately. The owner ruling selects one nonretaining digest256 field with digest_class=transcript, never a plan-named wire type. The transcript commits the unique sorted set of prospective ConfigurationState ObjectIds under a versioned domain, explicit count and per-identity length framing; each content-addressed ObjectId already commits its canonical body, so rehashing bodies would introduce a redundant second serialization contract without adding authority. The current configuration, duplicates, and nonidentity configuration components are excluded, the empty set is explicit, and any recipe change requires a new transcript version.",
+        rationale_sha256: "e36ee193d425c68982746ed33431af8f43458def8ec8471f2635f22ec842600d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:9d87b7faa3ae557cc0b0eb4aecf03219a98f5758e0e5607b1fa28c5d7eb3d55f",
@@ -4479,7 +4511,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|expected_state_conditions",
         ],
-        rationale: "a15:2059 omits the repeated shared type spelling for readability, while a10:1912 fixes the exact comparison-only many-valued arm set as WeakStateIdentity | WeakMarkerIdentity | ExpectedEpoch | ExpectedIndex and a10:1913 gives that shared source-ordered union its durable name ExpectedStateCondition. The A15 field therefore maps to that shared union rather than an A15-local substitute.",
+        rationale_sha256: "7f6fcca585f5599607b942d5c858ff611a5524ab35a90a1af9213fbf3da8e5fb",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:d14591312dc555272847ff5149204b97bfc8f5ff4ceef5736d45d6b91bf71dda",
@@ -4489,7 +4521,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|terminal_audit_gate",
         ],
-        rationale: "a15:2059 uses the compact shorthand `terminal_audit_gate`; the a10:1914 SequenceNeutralSpec law requires exactly one TerminalAuditGate even where compact Appendix prose omits its type, and a21:2699 fixes the exact source-ordered StructurallyInapplicable | NotRequired | Required union. Prose omission is not absence and does not authorize a local gate alias.",
+        rationale_sha256: "337a77ec5a9549f29ad8dbdad943c6a1520c28fa725f3373adf508944a34688f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:670d6a3c6e1369d3bc38d6f3076252157264e695e05b76984089286770501c7b",
@@ -4499,7 +4531,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LocationForm|LocationForm.ContiguousSpan.encoded_len|encoded_len",
         ],
-        rationale: "a02:1449: the shorthand encoded_len member is committed byte-exactly by the registered LocationForm ContiguousSpan arm payload digest; the single affected census key maps to that arm-interior source form.",
+        rationale_sha256: "9f96d4ee6bf656de9518acf82f0cfcb18e6adb9d5662a6919e2dd1e684387801",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:cecf9025af9662200ebec0ca362365459431e220b7d0b989415630838a42ce3d",
@@ -4509,7 +4541,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LocationForm|LocationForm.ContiguousSpan.failure_domain_id|failure_domain_id",
         ],
-        rationale: "a02:1449: the shorthand failure_domain_id member is committed byte-exactly by the registered LocationForm ContiguousSpan arm payload digest; the single affected census key maps to that arm-interior source form.",
+        rationale_sha256: "39d9df7c37031760e78860c8cae1154bc47322132fa978fd304176b0b53b0f57",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:1add14f68841c209d9602d82b0d4974f1c7e0307bdc4e70a11b7805ab03369fb",
@@ -4517,7 +4549,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|LocationForm|LocationForm.ContiguousSpan.offset|offset"],
-        rationale: "a02:1449: the shorthand offset member is committed byte-exactly by the registered LocationForm ContiguousSpan arm payload digest; the single affected census key maps to that arm-interior source form.",
+        rationale_sha256: "6939774b7bee697154a70d7671ffee52048ebe693a4abcf0fd6fd6bed2377a0a",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:cf1828242c9de970216388ce83137d5debc49b7b633a229d89e52d5409e41d76",
@@ -4527,7 +4559,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LocationForm|LocationForm.ContiguousSpan.segment_id|segment_id",
         ],
-        rationale: "a02:1449: the shorthand segment_id member is committed byte-exactly by the registered LocationForm ContiguousSpan arm payload digest; the single affected census key maps to that arm-interior source form.",
+        rationale_sha256: "3907bd704c495b38d1456d4c2a20c6ca4055aeaf463ac9d2fca097d0d53bb5cf",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:d73d40486b24cb361fcb957a65f0ceecc6a2c33196af11ea8ce9c8ef527936a7",
@@ -4537,7 +4569,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LocationForm|LocationForm.ContiguousSpan.symbol_inventory_digest|symbol_inventory_digest",
         ],
-        rationale: "a02:1449: the shorthand symbol_inventory_digest member is committed byte-exactly by the registered LocationForm ContiguousSpan arm payload digest; the single affected census key maps to that arm-interior source form.",
+        rationale_sha256: "471ed99089c490d13b2e94d289f8fd82a5c5bd066b9099cee490efccad1af70f",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:f889bf772824c1a9353bbd3b25ee290a6aca8bba2a931a9fc09f3018a0ff3355",
@@ -4547,7 +4579,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LocationForm|LocationForm.Explicit.failure_domains|failure_domains",
         ],
-        rationale: "a02:1449: the shorthand failure_domains member is committed byte-exactly by the registered LocationForm Explicit arm payload digest; the single affected census key maps to that arm-interior source form.",
+        rationale_sha256: "fd08346f1160fa65ac779a822218b8eb7cd8294668d7da958fbe4b62b4dc0def",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:3186d0debf2fb0589fc0c814cd95c8fec9e6c4c4e3b1a3e09b8f284bee7515ae",
@@ -4557,7 +4589,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LocationForm|LocationForm.Explicit.sorted_symbol_inventory_and_locators|sorted_symbol_inventory_and_locators",
         ],
-        rationale: "a02:1449: the shorthand sorted_symbol_inventory_and_locators member is committed byte-exactly by the registered LocationForm Explicit arm payload digest; the single affected census key maps to that arm-interior source form.",
+        rationale_sha256: "9a280d366754c9da1f8755cfe69bf07e3511c7f1f7ee5e21aa2d5c1920761998",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a07:ambiguity-adjudication:ee23aced90506d99111b719ae0f8486df181ed161f5ec8a12c8214f574341d65",
@@ -4567,7 +4599,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.expected_registered_outcome_digest|expected_registered_outcome_digest",
         ],
-        rationale: "a07:1780 explicitly defines a comparison-only expected Registered predecessor digest; it maps to the source-ordered digest256 field and creates no retention or construction edge.",
+        rationale_sha256: "4158c0b849c684fc61f061eda6a7aad019851041ce38e15ba6a33faca642ce7e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:37232bd950b2c30115d0e2e9a2c861fbf52ee2e33dfeff50914c944c05927b86",
@@ -4577,7 +4609,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.freeze_digest|freeze_digest",
         ],
-        rationale: "a08:1838 explicitly defines a comparison-only ReleasePending freeze digest; it maps to the source-ordered digest256 field and creates no retention or construction edge.",
+        rationale_sha256: "23b56cdd10ebbcc4af2d84becf45667ae5088bcf52283e1fcad7ea4363afb317",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a13:ambiguity-adjudication:3b42cf9567870731386d634a72ce4198def5da7fa1007e561b11c740bd67e521",
@@ -4587,7 +4619,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_digest|source_root_digest",
         ],
-        rationale: "a13:2006 explicitly defines the inherited source-root identity as a comparison-only digest; it maps to the source-ordered digest256 field and creates no retention or construction edge.",
+        rationale_sha256: "754e4dc4bd9aa571f1b3d506d7b5ddd399258d6cf9d84b68d06cfc17b2dc9a05",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a13:ambiguity-adjudication:3d70fb474e157bb474917cb69259eb2374ba0bc450888830e9b9d4790efa4da3",
@@ -4597,7 +4629,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_ciphertext_digest|source_root_ciphertext_digest",
         ],
-        rationale: "a13:2006 explicitly defines the selected inherited-root ciphertext realization as a comparison-only digest; it maps to the source-ordered digest256 field and creates no retention or construction edge.",
+        rationale_sha256: "67bd17cb4b6968d527560d880ce0f8aba67144dcc2dcd93bad16140e9a996234",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a03:ambiguity-adjudication:60ad7a389bdf6b49899267136a03d8d6dd1a05b01b06a859ed2a2daa3ca63872",
@@ -4607,7 +4639,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|LocalTxnWorkspaceGeneration|LocalTxnWorkspaceGeneration.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a03:1486: the bare nonretaining predecessor spelling is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "b79ad52b480455a4a25b48fe3b1617b5bbba018b1a42e52ecf4db0e91b457aa6",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a07:ambiguity-adjudication:2de6b2d328c5ebd2cd67822daa04d16386a948037599f4d4b2de7f5cdd49bd89",
@@ -4617,7 +4649,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|GlobalTxnOutcomeRecord|GlobalTxnOutcomeRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a07:1782: the bare nonretaining predecessor spelling is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "431ec5fbd30c890ef949dfcbdcba655f29980d4138c69c39ab403ee7493d99ec",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a07:ambiguity-adjudication:81afa6cb323423720d6188e180dfd25d3e6feefee35f8c726995bbfc0f88fcbe",
@@ -4627,7 +4659,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|GlobalTxnWorkspaceGeneration|GlobalTxnWorkspaceGeneration.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a07:1720: the bare nonretaining predecessor spelling is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "d9d5c3215b43b05e2e9374a979cd8de407cfa3f766689b485b3986c94b9450a3",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:5e6422da03c18143ac7c23a26b0a04992d0a8fa2bccab560c67f15c966ad4244",
@@ -4637,7 +4669,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AuditTerminalAttemptRecord|AuditTerminalAttemptRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a08:1850: the bare nonretaining predecessor spelling is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "aeca066a8b61a2aa7dace7be20bfbddd1d80fc2d567d54e20d3252fbe84f0587",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:8b267282f9b1651ea6b6af6c075314f90f11513814db27e6ff5c3f0817c28f63",
@@ -4647,7 +4679,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AuditTerminalFreezeRecord|AuditTerminalFreezeRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a08:1832: the bare nonretaining predecessor spelling is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "4c52a65b3c41f7ebc128ebf8250538fb960eba61fd1d38726f2378c77a760d09",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:362433ba168c3c4c4b453872a778843309bbcf7d6cf4b7682f39291ba488de18",
@@ -4657,7 +4689,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|AuditTerminalSigningPlan|AuditTerminalSigningPlan.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a08:1842: the bare nonretaining predecessor spelling is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "aae2fe85be44fd8a744b4c93c999d1cd35b74c96f747b9776d8785a914070c8d",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:da107d6726829e70ab937238f9611c7724e392ab0377ca9f1b24e8998f107359",
@@ -4667,7 +4699,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ConstraintReservationRecord|ConstraintReservationRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a08:1856: the bare nonretaining predecessor spelling is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "7d9f5680a21c3aee8f9a74379563b831a29cc240af5278a2e18ce9b1be78b6ae",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:fecce341a8c91acf77a729277e6ab34a2304e63fbb997817e3afc16c71c31703",
@@ -4677,7 +4709,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|MetaConstraintReservationRecord|MetaConstraintReservationRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a08:1858: the bare nonretaining predecessor spelling is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "6a9f6a7530d082e43a533edb5bc17269f60ce5ce93757200543992780036001e",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:6628dd4541c84c2ed0068e1cc6629df1167e7b6d53c58da3a43e34946d1d2016",
@@ -4687,7 +4719,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|ShardPrepareRecord|ShardPrepareRecord.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a08:1854: the bare nonretaining predecessor spelling is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "56c37291396c1e91a7019c93135bf20d6de1b0019dec50c0e3765f340e4668ab",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a13:ambiguity-adjudication:bee0b07c2bcd39653dc4f186ca535b17c3e92d1df298f0695b4f2b211f5cc2db",
@@ -4697,7 +4729,7 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         resolved_source_keys: &[
             "field|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
-        rationale: "a13:2027: the bare nonretaining predecessor spelling is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge.",
+        rationale_sha256: "3810555a449ca3b41f582767c776ad09b69e6b4478fb31405cf029eb986953ad",
     },
 ];
 
@@ -10600,7 +10632,12 @@ fn ambiguity_adjudication_contract_matches_with(
             .iter()
             .map(String::as_str)
             .eq(pin.resolved_source_keys.iter().copied())
-        && row.rationale == pin.rationale
+        // The pin no longer carries a copy of `rationale`; it carries the
+        // digest of the bytes it approved, which is equivalent for this
+        // function's only use. All eight callers read the result as a BOOLEAN
+        // APPROVAL PREDICATE and then read the CATALOG row's fields -- no call
+        // site anywhere reads a pinned rationale as text (fgdb-n061).
+        && sha256_hex(row.rationale.as_bytes()) == pin.rationale_sha256
 }
 
 fn approved_final_ambiguity_keys_with<'a>(
@@ -10713,6 +10750,59 @@ fn validate_readable_ambiguity_contract(catalog: &Catalog, out: &mut Vec<Violati
                 &row.row_id,
                 "ambiguity adjudication has no independent readable source contract",
             )),
+        }
+    }
+    // CONDITION 2 OF THE fgdb-n061 AUTHORISATION: a guard that FAILS CLOSED
+    // when a pin's rationale digest and the catalog's rationale have drifted.
+    //
+    // WHY IT IS SEPARATE FROM THE MATCH ABOVE, which compares the same two
+    // values. `..._contract_mismatch` is ONE code covering six fields, so a
+    // rationale drift and a resolution drift are indistinguishable in the
+    // report -- and a rationale drift is the one failure this change makes
+    // possible that was not possible before. It gets its own code so it is
+    // NAMED when it happens. It is checked here rather than only inside the
+    // approval predicate because that predicate is a BOOLEAN: a caller that
+    // never invokes it never asks the question. This loop asks it for every
+    // row, unconditionally.
+    //
+    // Both directions fail closed. A malformed digest is its own violation
+    // rather than a value that happens not to match, because a pin carrying
+    // `""` or a truncated digest would otherwise report as an ordinary drift
+    // and send a reader looking at the prose instead of at the pin.
+    //
+    // MUTATION-PROVEN 2026-07-27 in a quiet root, each alone, with a clean
+    // control at 0 violations / exit 0:
+    //   weaken one catalog rationale ("derived from" -> "ASSUMED")
+    //       -> catalog_ambiguity_rationale_digest_mismatch, exit 1
+    //   truncate one pin digest to "deadbeef"
+    //       -> catalog_ambiguity_rationale_digest_malformed, exit 1
+    for row in &catalog.ambiguity_adjudications {
+        let Some(pin) = AMBIGUITY_ADJUDICATION_CONTRACT
+            .iter()
+            .find(|pin| pin.row_id == row.row_id)
+        else {
+            continue;
+        };
+        if pin.rationale_sha256.len() != 64
+            || !pin
+                .rationale_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            out.push(Violation::new(
+                "catalog_ambiguity_rationale_digest_malformed",
+                &row.row_id,
+                "pinned rationale digest is not 64 lowercase hex characters",
+            ));
+            continue;
+        }
+        if sha256_hex(row.rationale.as_bytes()) != pin.rationale_sha256 {
+            out.push(Violation::new(
+                "catalog_ambiguity_rationale_digest_mismatch",
+                &row.row_id,
+                "catalog rationale does not hash to its pinned digest; the prose \
+                 and the approval that covered it have drifted",
+            ));
         }
     }
     let rows: BTreeSet<&str> = catalog
@@ -15963,7 +16053,13 @@ name = "Probe"
             source_locations: &["a20:2575"],
             resolution: "not-a-durable-schema",
             resolved_source_keys: &["top|Sharded"],
-            rationale,
+            // The digest, not the prose -- the same law the 450 landed pins
+            // follow. This site is why the `--test` leg of the quiet-root
+            // recipe is mandatory: the lib's own `#[cfg(test)]` module is
+            // compiled by NO other leg, and this was the only construction in
+            // the tree still building the pin with a `rationale` field. It was
+            // caught by that leg and by nothing else (fgdb-n061).
+            rationale_sha256: Box::leak(sha256_hex(rationale.as_bytes()).into_boxed_str()),
         }];
         let keys = approved_final_ambiguity_keys_with(&pin, &catalog, "a20");
         let raw_count = 1;
