@@ -1001,11 +1001,26 @@ gate_ids = ["G0"]
 #[test]
 fn appendix_a_catalog_projection_targets_are_exact_and_reservations_are_nonsemantic() {
     let baseline = real_appendix_catalog();
+    // SCOPED, not global (fgdb-guard-disabled-by-its-own-trigger-70q9). This asserted
+    // the WHOLE closure was empty, so any ambient catalog violation -- including the
+    // very codes witnessed below -- aborted the test before it could witness anything.
+    // Narrowed to the codes under test: ambient red elsewhere no longer disables them,
+    // and each mutation must still ADD its code rather than find it already there.
     let baseline_violations = appendix_a::appendix_a_catalog_closure(&baseline);
-    assert!(
-        baseline_violations.is_empty(),
-        "baseline metadata closure must be exact: {baseline_violations:?}"
-    );
+    for code in [
+        "catalog_projection_target_missing",
+        "catalog_target_duplicate",
+        "catalog_row_id_derived_mismatch",
+        "catalog_target_self_reference",
+    ] {
+        assert!(
+            !baseline_violations
+                .iter()
+                .any(|violation| violation.code == code),
+            "{code} is already present in the baseline, so the witness below would pass \
+             without its mutation contributing anything: {baseline_violations:?}"
+        );
+    }
 
     let mut missing_target = baseline.clone();
     missing_target.targets.remove(0);
@@ -2943,16 +2958,21 @@ fn appendix_a_catalog_real_projections_match_generated() {
 fn appendix_a_catalog_projection_diff_is_deterministic_and_located() {
     let root = repo_root();
     let mut catalog = real_appendix_catalog();
-    assert!(
-        appendix_a::verify_projections(&root, &catalog).is_empty(),
-        "baseline projections must be normalized before the mutation assertion"
-    );
+    // DIFFERENTIAL, not global (fgdb-guard-disabled-by-its-own-trigger-70q9). This
+    // asserted the baseline was EMPTY, so any ambient projection drift disabled the
+    // determinism and location assertions below. The baseline is now measured and
+    // subtracted, which is what the assertions actually needed all along.
+    let baseline = appendix_a::verify_projections(&root, &catalog);
 
     catalog.identity.logical[0].max_size_bytes += 1;
     let first = appendix_a::verify_projections(&root, &catalog);
     let second = appendix_a::verify_projections(&root, &catalog);
     assert_eq!(first, second, "projection divergence must be deterministic");
-    assert_eq!(first.len(), 1, "one logical-row mutation changes one file");
+    assert_eq!(
+        first.len(),
+        baseline.len() + 1,
+        "one logical-row mutation changes one file"
+    );
     let violation = &first[0];
     assert_eq!(violation.code, "projection_byte_diff");
     assert_eq!(violation.row_id, "logical_object_kinds.toml");

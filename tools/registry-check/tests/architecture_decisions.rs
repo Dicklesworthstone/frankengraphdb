@@ -982,9 +982,25 @@ fn concurrent_bead_creation_cannot_red_another_panes_tree() {
 
     // Control: the fixture must reproduce the repo's own verdict. Without this,
     // an empty violation set could mean the fixture is not being read at all.
-    assert!(
-        write_and_validate(&corpus).is_empty(),
-        "the unmodified fixture must be as green as the repo it mirrors"
+    //
+    // DIFFERENTIAL, not global (fgdb-guard-disabled-by-its-own-trigger-70q9). This
+    // asserted the mirror was EMPTY, which is the negation of the very condition the
+    // test detects: when an unlabelled bead redded the tree, this guard aborted here
+    // and could not warn anyone -- available exactly when nothing was wrong. Equality
+    // against the repo's own verdict keeps the whole protection (a fixture that is not
+    // being read produces a DIFFERENT set, not an empty one) while tolerating ambient
+    // red, and the property below is then asserted as "creation ADDS nothing".
+    let repo_verdict: Vec<String> = {
+        let repo_registry = architecture::load_from_repo(&root).expect("repo registry loads");
+        architecture::validate_architecture(&repo_registry, &root)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect()
+    };
+    let mirror_verdict = write_and_validate(&corpus);
+    assert_eq!(
+        mirror_verdict, repo_verdict,
+        "the unmodified fixture must reproduce the repo's own verdict, not merely be empty"
     );
 
     // Pane B creates k beads while pane A holds a freeze taken before any of
@@ -997,9 +1013,9 @@ fn concurrent_bead_creation_cannot_red_another_panes_tree() {
             ));
         }
         let codes = write_and_validate(&grown);
-        assert!(
-            codes.is_empty(),
-            "{k} concurrently created bead(s) red the tree: {codes:?}"
+        assert_eq!(
+            codes, repo_verdict,
+            "{k} concurrently created bead(s) changed pane A's verdict"
         );
     }
 

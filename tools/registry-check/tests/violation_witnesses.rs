@@ -611,13 +611,22 @@ fn threat_model_laws_are_seen_to_fire() {
         .into_iter()
         .map(|violation| violation.code)
         .collect();
-    assert!(
-        control.is_empty(),
-        "the control must be clean, or no row below is a witness: {control:?}"
-    );
+    // SCOPED PER ROW, not global (fgdb-guard-disabled-by-its-own-trigger-70q9). One
+    // global "the control must be clean" gated this ENTIRE witness table: a single
+    // ambient violation anywhere disabled every row, including rows whose code was
+    // nowhere near it. The baseline is now tolerated, and only the rows it actually
+    // collides with are withheld -- and those are REPORTED as UNRUN rather than
+    // silently skipped, because a witness that did not run must read as neither passed
+    // nor failed (fgdb-1nqb, and the PASS/FAIL/RED/UNRUN vocabulary of
+    // scripts/lib/gate_verdict.sh, fgdb-udco).
 
     let mut silent: Vec<String> = Vec::new();
+    let mut unrun: Vec<String> = Vec::new();
     for row in threat_witnesses() {
+        if control.contains(row.code) {
+            unrun.push(format!("{} [{}]", row.code, row.fact));
+            continue;
+        }
         let mut mutated = base.clone();
         (row.mutate)(&mut mutated);
         let codes: BTreeSet<String> = threat::validate_threat(&mutated, &root)
@@ -633,6 +642,14 @@ fn threat_model_laws_are_seen_to_fire() {
         "{} threat-model laws did not fire on the fact that violates them:\n{}",
         silent.len(),
         silent.join("\n")
+    );
+    assert!(
+        unrun.is_empty(),
+        "UNRUN: {} witness row(s) were not exercised because their code is already \
+         present in the baseline, so mutating for them would prove nothing. UNRUN is \
+         neither pass nor fail:\n{}",
+        unrun.len(),
+        unrun.join("\n")
     );
 }
 
@@ -668,13 +685,22 @@ fn claim_registry_laws_are_seen_to_fire() {
     let root = repo_root();
     let base = model::load_registries(&root.join("registries")).expect("registries load");
     let control = registry_codes(&base, &root);
-    assert!(
-        control.is_empty(),
-        "the control must be clean, or no row below is a witness: {control:?}"
-    );
+    // SCOPED PER ROW, not global (fgdb-guard-disabled-by-its-own-trigger-70q9). One
+    // global "the control must be clean" gated this ENTIRE witness table: a single
+    // ambient violation anywhere disabled every row, including rows whose code was
+    // nowhere near it. The baseline is now tolerated, and only the rows it actually
+    // collides with are withheld -- and those are REPORTED as UNRUN rather than
+    // silently skipped, because a witness that did not run must read as neither passed
+    // nor failed (fgdb-1nqb, and the PASS/FAIL/RED/UNRUN vocabulary of
+    // scripts/lib/gate_verdict.sh, fgdb-udco).
 
     let mut silent: Vec<String> = Vec::new();
+    let mut unrun: Vec<String> = Vec::new();
     for row in registry_witnesses() {
+        if control.contains(row.code) {
+            unrun.push(format!("{} [{}]", row.code, row.fact));
+            continue;
+        }
         let mut mutated = base.clone();
         (row.mutate)(&mut mutated);
         let codes = registry_codes(&mutated, &root);
@@ -687,6 +713,14 @@ fn claim_registry_laws_are_seen_to_fire() {
         "{} claim-registry laws did not fire on the fact that violates them:\n{}",
         silent.len(),
         silent.join("\n")
+    );
+    assert!(
+        unrun.is_empty(),
+        "UNRUN: {} witness row(s) were not exercised because their code is already \
+         present in the baseline, so mutating for them would prove nothing. UNRUN is \
+         neither pass nor fail:\n{}",
+        unrun.len(),
+        unrun.join("\n")
     );
 }
 
