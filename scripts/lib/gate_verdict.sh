@@ -97,6 +97,100 @@ GATE_FAIL=0
 GATE_UNRUN=0
 GATE_TALLY_HOOK=""
 GATE_CONTRACT_LINE_EMITTED=0
+GATE_TREE_FP_START=""
+GATE_TREE_HEAD_START=""
+GATE_TREE_CHECKED=0
+
+# gate_tree_fingerprint — the identity of the tree a gate is judging.
+#
+# WHY THIS EXISTS. A gate's assertions are only meaningful about the tree they
+# ran against, and in this swarm the tree moves: several panes land commits
+# continuously while `scripts/check.sh` runs for ~35 minutes. The checker has two
+# clocks — `tools/registry-check/src/*.rs` bakes pins in at COMPILE time with
+# `include_str!`, while `tools/registry-check/tests/identity.rs` reads the corpus
+# at RUN time with `fs::read_to_string`. A commit landing between those two
+# moments desynchronises them, and the pins go red on a tree where every pin is
+# actually correct. Measured cost of that defect: one full diagnostic cycle, a
+# 40-minute landing hold, and two false attributions, all against innocent code.
+#
+# The build tokens do not help. They serialise BUILDS; they do not freeze the
+# working tree, and the landing that breaks the run is a `git commit` by a pane
+# that holds no build slot at all.
+#
+# WHAT IS HASHED, and why each choice. HEAD catches the landing. The content of
+# every TRACKED file catches the rest: a staged edit, an uncommitted working-tree
+# change, a file deleted underneath the run. UNTRACKED paths are deliberately
+# excluded — the gates create their own scratch dirs, logs and quiet roots, so
+# including untracked state would make this tripwire fire on the gate's own work
+# and turn every run UNRUN, which is the "guard disabled by its own trigger"
+# shape. Verified before choosing: `scripts/check.sh` writes only inside its
+# temp work roots and never mutates a tracked file, so a tracked-content
+# fingerprint cannot self-trigger.
+#
+# COST, measured on this repo rather than assumed: 195 tracked files / 24.7 MB,
+# 101 ms per call, twice per gate. Against a ~35-minute run that is 0.005%. The
+# alternative — running each gate against a detached snapshot of the tree so
+# concurrent commits cannot reach it — copies in 47 ms but forces a cold rebuild
+# in the snapshot path, which costs vastly more than the entire tripwire and
+# still cannot say WHY a run was void. Cost did not decide this; the third state
+# did. Detecting and reporting honestly beats hiding the race.
+#
+# Outside a git repo (a quiet root, a scratch copy) both calls return the same
+# sentinel, so the comparison is a no-op — correct, because a tree nothing can
+# commit to cannot be raced.
+gate_tree_fingerprint() {
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf 'not-a-git-worktree\n'
+    return 0
+  fi
+  {
+    git rev-parse HEAD 2>&1
+    # stderr is folded into the digest on purpose: if a tracked file vanishes
+    # mid-run, sha256sum's error is itself the evidence the tree moved, and a
+    # digest that silently ignored it would report a void run as a clean one.
+    git ls-files -z 2>/dev/null | xargs -0 sha256sum 2>&1
+  } | sha256sum | cut -d' ' -f1
+}
+
+# gate_tree_head — the human-readable half, for the diagnostic.
+gate_tree_head() {
+  git rev-parse HEAD 2>/dev/null || printf 'no-head'
+}
+
+# gate_check_tree_stable — the third state for a run whose premises moved.
+#
+# A gate whose subject changed underneath it DID NOT RUN, in the exact sense the
+# contract already names: its assertions executed, but not against any single
+# tree, so neither their passes nor their failures are claims about anything.
+# Reporting PASS would certify a tree that was never wholly tested. Reporting
+# FAIL would blame whichever pane's code happened to be resident when the
+# assertion fired — the two false attributions this closes. So: UNRUN, carrying
+# both shas so the reader can see exactly what moved, and non-zero either way.
+#
+# The already-emitted PASS/FAIL lines are left standing. AGENTS.md's contract is
+# that UNRUN appears BESIDE a FAIL line, never instead of one, and `gate_unrun`
+# emits the FAIL token itself, so `grep -c '^FAIL '` stays total.
+gate_check_tree_stable() {
+  [ "$GATE_TREE_CHECKED" -eq 1 ] && return 0
+  GATE_TREE_CHECKED=1
+  [ -z "$GATE_TREE_FP_START" ] && return 0
+  local fp_end head_end
+  fp_end="$(gate_tree_fingerprint)"
+  [ "$fp_end" = "$GATE_TREE_FP_START" ] && return 0
+  head_end="$(gate_tree_head)"
+  gate_unrun "${GATE_NAME:-gate}: tree changed under the run; verdict is void"
+  gate_diag "  tree moved while this gate was running, so its assertions are not"
+  gate_diag "  claims about any single tree:"
+  gate_diag "    HEAD at start: $GATE_TREE_HEAD_START"
+  gate_diag "    HEAD at end:   $head_end"
+  if [ "$GATE_TREE_HEAD_START" = "$head_end" ]; then
+    gate_diag "  HEAD is unchanged, so this was a working-tree or index edit, not a"
+    gate_diag "  landing. Tracked-file content differs between start and end."
+  fi
+  gate_diag "  Re-run the gate on a settled tree. Do NOT attribute the FAIL lines"
+  gate_diag "  above to the code they name until a clean run reproduces them."
+  return 1
+}
 
 # gate_init <name> [tally_hook]
 #
@@ -113,6 +207,9 @@ gate_init() {
   GATE_FAIL=0
   GATE_UNRUN=0
   GATE_CONTRACT_LINE_EMITTED=0
+  GATE_TREE_CHECKED=0
+  GATE_TREE_HEAD_START="$(gate_tree_head)"
+  GATE_TREE_FP_START="$(gate_tree_fingerprint)"
   trap gate_on_exit EXIT
 }
 
@@ -173,6 +270,9 @@ gate_verdict() {
   if [ $((GATE_PASS + GATE_FAIL + GATE_UNRUN)) -eq 0 ]; then
     gate_unrun "$GATE_NAME: reached its verdict having executed no assertions"
   fi
+  # A verdict is a claim about a tree. If the tree moved, there is no tree to
+  # make the claim about, so this must resolve to UNRUN before the tally.
+  gate_check_tree_stable || true
   printf '%s: %d passed, %d failed, %d unrun\n' \
     "$GATE_NAME" "$GATE_PASS" "$GATE_FAIL" "$GATE_UNRUN"
   [ "$GATE_FAIL" -eq 0 ] && [ "$GATE_UNRUN" -eq 0 ]
@@ -188,6 +288,25 @@ gate_on_exit() {
   local rc=$?
   if [ -n "$GATE_TALLY_HOOK" ]; then
     "$GATE_TALLY_HOOK" "$rc" || true
+  fi
+  # A gate that never reaches gate_verdict — gate_die, an unguarded `set -e`
+  # abort — still owes the tree-stability answer, and owes it MOST there: a
+  # fail-fast death under a moving tree is precisely the false attribution this
+  # closes. No-op if gate_verdict already asked. A moving tree makes a green
+  # exit dishonest, so it forces non-zero; an already-failing exit keeps its
+  # own status.
+  # NOTE THE `exit`, NOT `rc=1`. Assigning rc here and falling through to the
+  # trailing `return "$rc"` does NOT change the script's exit status: by the time
+  # an EXIT trap runs the status is already fixed, and `return` from the trap
+  # cannot override it. `exit` can, which is why the zero-assertion branch below
+  # uses it too. Measured, not reasoned: the first cut of this used `rc=1` and a
+  # real gate raced by a real commit emitted `UNRUN` on stdout while exiting 0 —
+  # a gate that says "did not run" and reports success in the same breath, which
+  # is the exact contradiction this bead exists to remove. Caught only by the
+  # real-gate proof, because the synthetic probe moved the tree BEFORE
+  # gate_verdict and so never exercised this window.
+  if ! gate_check_tree_stable; then
+    [ "$rc" -eq 0 ] && exit 1
   fi
   # A GREEN EXIT OVER ZERO EXECUTED ASSERTIONS IS THE THIRD STATE, NOT THE
   # FIRST. This is the path that catches a gate whose body was skipped whole —
