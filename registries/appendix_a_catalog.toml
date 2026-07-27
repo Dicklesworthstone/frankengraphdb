@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3633
+target_count = 3634
 projection_fallback_count = 133
-target_source_assignment_sha256 = "558dd3ee269b0ae533a4828cd5266ac6c8475dae930d20353ae1877c12717d6b"
+target_source_assignment_sha256 = "b9ace92bf8a4e98e90c30d01690625850d19c864e4a9c62553c59bb299e030c0"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -111567,7 +111567,7 @@ symbol = "ExternalCasRestoreServicePromotionManifestRef"
 generic_signature = ""
 source_key = "top|ExternalCasRestoreServicePromotionManifestRef"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a20:2593"]
 
 [[field]]
@@ -111718,4 +111718,23 @@ target_row_id = "a20:field:shard-restore-reopen-confirm-spec-independent-reopen-
 slice_id = "a20"
 source_key = "field|ShardRestoreReopenConfirmSpec|ShardRestoreReopenConfirmSpec.independent_reopen_proof_ref|independent_reopen_proof_ref"
 target_kind = "field"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:external-cas-restore-service-promotion-manifest-ref"
+wire_type_id = 0x0550
+name = "ExternalCasRestoreServicePromotionManifestRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated tag-refined strong reference whose validator admits only the Sharded/ExternalCas RestoreServicePromotionManifest arm; variant syntax is never used as a reference target (a20:2593)"
+allowed_containing_schemas = ["GlobalRestoreServiceFinalizeSpec"]
+max_size_bytes = 40
+
+[[target]]
+row_id = "a20:target:wire-type-external-cas-restore-service-promotion-manifest-ref"
+target_row_id = "a20:wire-type:external-cas-restore-service-promotion-manifest-ref"
+slice_id = "a20"
+source_key = "top|ExternalCasRestoreServicePromotionManifestRef"
+target_kind = "wire-type"
 definition_status = "declared"
