@@ -536,18 +536,21 @@ stage_appendix_support() { # stage_appendix_support <name> -> non-registry proof
   local name="$1"
   local manifest relative
   mkdir -p "$WORK/$name/.beads"
-  cp "$ROOT/.beads/issues.jsonl" "$WORK/$name/.beads/"
+  # These support inputs are read-only after staging. Hard-linking them avoids
+  # duplicating ~10 MB per fixture; registries and the plan remain real copies
+  # because fixtures mutate those paths.
+  cp -l "$ROOT/.beads/issues.jsonl" "$WORK/$name/.beads/"
   cp "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" "$WORK/$name/"
-  cp "$ROOT/Cargo.toml" "$WORK/$name/"
+  cp -l "$ROOT/Cargo.toml" "$WORK/$name/"
   for manifest in "$ROOT"/crates/*/Cargo.toml "$ROOT"/tools/*/Cargo.toml; do
     [ -f "$manifest" ] || continue
     relative="${manifest#"$ROOT"/}"
     mkdir -p "$WORK/$name/${relative%/*}"
-    cp "$manifest" "$WORK/$name/$relative"
+    cp -l "$manifest" "$WORK/$name/$relative"
   done
   mkdir -p "$WORK/$name/scripts" "$WORK/$name/tools/registry-check/src"
-  cp "$ROOT/scripts/g0_identity_e2e.sh" "$WORK/$name/scripts/"
-  cp "$ROOT"/tools/registry-check/src/*.rs \
+  cp -l "$ROOT/scripts/g0_identity_e2e.sh" "$WORK/$name/scripts/"
+  cp -l "$ROOT"/tools/registry-check/src/*.rs \
     "$WORK/$name/tools/registry-check/src/"
 }
 
@@ -658,6 +661,8 @@ expect_identity_violation() { # expect_identity_violation <fixture> <code> <regi
     die "$fixture omitted exact $expected_code diagnostic for $expected_registry::$expected_row_id"
   fi
 }
+
+ROOT_SNAPSHOT_BEFORE=$(snapshot_nonprojection_tree "$ROOT" | sha256sum)
 
 assert_only_violation_code() { # assert_only_violation_code <fixture> <code>
   local fixture="$1"
@@ -1806,6 +1811,12 @@ expect_appendix_structural_error \
   neg-appendix-projection-schema catalog_projection_schema logical_object_kinds
 
 # --- Verdict -----------------------------------------------------------------
+ROOT_SNAPSHOT_AFTER=$(snapshot_nonprojection_tree "$ROOT" | sha256sum)
+if [ "$ROOT_SNAPSHOT_BEFORE" != "$ROOT_SNAPSHOT_AFTER" ]; then
+  die "source root changed during evidence gate (write-through guard fired)"
+else
+  ok "source root unchanged during evidence gate"
+fi
 log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-reference-union-name-collision,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-completion-schema,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second,appendix-regenerate-first,appendix-regenerate-second,appendix-regenerate-third}.jsonl"
 VERDICT_REACHED=1
 log "result: $PASS passed, $FAIL failed"
