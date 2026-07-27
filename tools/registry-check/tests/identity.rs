@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 68
+registry_epoch = 69
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 68);
+    assert_eq!(epoch, 69);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -6965,17 +6965,18 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 )
         )
     };
-    // A15 adds the first seven fully resolved KeyDestroyProposal members plus
-    // the source-forced WeakStateIdentity basis. The two shared-union consumer
-    // fields are already removed through `post_erratum_union`. Remove the
-    // remaining cohort so the historical witness still
+    // A15 adds the first seven fully resolved KeyDestroyProposal members, the
+    // source-forced WeakStateIdentity basis, and n45i's opaque key identity.
+    // The two shared-union consumer fields are already removed through
+    // `post_erratum_union`. Remove the remaining cohort so the historical witness still
     // reconstructs the exact namespace predating every post-erratum field
     // increment.
     let post_erratum_a15_field = |schema: &str, name: &str| {
         schema == "KeyDestroyProposal"
             && matches!(
                 name,
-                "basis_state"
+                "key_identity"
+                    | "basis_state"
                     | "expected_current_configuration_ref"
                     | "checkpoint_and_configuration_floor_refs"
                     | "generated_scanned_root_inventory_ref"
@@ -8119,7 +8120,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 569,
+        pre_erratum.fields.len() + 570,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A12 residue tranche"
     );
