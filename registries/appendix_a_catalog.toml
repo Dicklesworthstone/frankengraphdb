@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3627
+target_count = 3633
 projection_fallback_count = 133
-target_source_assignment_sha256 = "61b32f677e875b915368f79ef27dd1c6e04137508d5f3b02cd006f0423f0e167"
+target_source_assignment_sha256 = "558dd3ee269b0ae533a4828cd5266ac6c8475dae930d20353ae1877c12717d6b"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -111569,3 +111569,153 @@ source_key = "top|ExternalCasRestoreServicePromotionManifestRef"
 source_kind = "name-only"
 identity_class = "unclassified"
 source_locations = ["a20:2593"]
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-completion-spec-meta-independent-reopen-proof-ref"
+containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0004
+stable_name = "meta_independent_reopen_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "MetaRestoreIndependentReopenProof"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the fresh-context Meta independent reopen proof that alone selects Meta Operational; retained while the completion spec is retained and cut only with that spec, and order 44 <= 50 keeps the edge backward-only (a20:2601)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-prepare-spec-activation-certificate-ref"
+containing_schema = "LocalRestoreServicePrepareSpec"
+field_tag = 0x0002
+stable_name = "activation_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalRestoreActivationCertificate"
+construction_order = 24
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the Local activation certificate whose hidden root and profile basis this prepare consumes; retained while the prepare spec is retained and cut only with that spec, and order 20 <= 24 keeps the edge backward-only (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-promotion-spec-prepare-certificate-ref"
+containing_schema = "LocalRestoreServicePromotionSpec"
+field_tag = 0x0002
+stable_name = "prepare_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalRestoreServicePrepareCertificate"
+construction_order = 35
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the hidden Local service prepare certificate required for manifest/prepare/receipt/profile equality; retained while the promotion spec is retained and cut only with that spec, and order 24 <= 35 keeps the edge backward-only (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-reopen-publication-certificate-ref"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0007
+stable_name = "reopen_publication_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardStatePublicationCertificate"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the shard publication certificate that byte-matches reopen_confirm_applied_identity; retained while the acknowledgement is retained and cut only with it, and order 10 <= 50 keeps the edge backward-only (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-independent-reopen-proof-ref"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x000a
+stable_name = "independent_reopen_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardRestoreIndependentReopenProof"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the fresh-process shard independent reopen proof consumed before this acknowledgement; retained while the acknowledgement is retained and cut only with it, and order 40 <= 50 keeps the edge backward-only (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:shard-restore-reopen-confirm-spec-independent-reopen-proof-ref"
+containing_schema = "ShardRestoreReopenConfirmSpec"
+field_tag = 0x0004
+stable_name = "independent_reopen_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardRestoreIndependentReopenProof"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the exact shard independent reopen proof this confirmation consumes as the only transition out of the sealed pending state; retained while the confirm spec is retained and cut only with that spec, and order 40 <= 44 keeps the edge backward-only (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-completion-spec-meta-independent-reopen-proof-ref"
+target_row_id = "a20:field:global-restore-service-completion-spec-meta-independent-reopen-proof-ref"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceCompletionSpec|GlobalRestoreServiceCompletionSpec.meta_independent_reopen_proof_ref|meta_independent_reopen_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-prepare-spec-activation-certificate-ref"
+target_row_id = "a20:field:local-restore-service-prepare-spec-activation-certificate-ref"
+slice_id = "a20"
+source_key = "field|LocalRestoreServicePrepareSpec|LocalRestoreServicePrepareSpec.activation_certificate_ref|activation_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-promotion-spec-prepare-certificate-ref"
+target_row_id = "a20:field:local-restore-service-promotion-spec-prepare-certificate-ref"
+slice_id = "a20"
+source_key = "field|LocalRestoreServicePromotionSpec|LocalRestoreServicePromotionSpec.prepare_certificate_ref|prepare_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-reopen-publication-certificate-ref"
+target_row_id = "a20:field:restore-shard-operational-ack-reopen-publication-certificate-ref"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.reopen_publication_certificate_ref|reopen_publication_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-independent-reopen-proof-ref"
+target_row_id = "a20:field:restore-shard-operational-ack-independent-reopen-proof-ref"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.independent_reopen_proof_ref|independent_reopen_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-shard-restore-reopen-confirm-spec-independent-reopen-proof-ref"
+target_row_id = "a20:field:shard-restore-reopen-confirm-spec-independent-reopen-proof-ref"
+slice_id = "a20"
+source_key = "field|ShardRestoreReopenConfirmSpec|ShardRestoreReopenConfirmSpec.independent_reopen_proof_ref|independent_reopen_proof_ref"
+target_kind = "field"
+definition_status = "declared"

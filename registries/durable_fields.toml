@@ -3690,6 +3690,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0004
+stable_name = "meta_independent_reopen_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "MetaRestoreIndependentReopenProof"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the fresh-context Meta independent reopen proof that alone selects Meta Operational; retained while the completion spec is retained and cut only with that spec, and order 44 <= 50 keeps the edge backward-only (a20:2601)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalRestoreServiceCompletionSpec"
 field_tag = 0x0005
 stable_name = "exact_sorted_operational_ack_refs"
 exact_wire_type = "CertifiedRemoteStrongRef"
@@ -5928,6 +5943,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "LocalRestoreServicePrepareSpec"
+field_tag = 0x0002
+stable_name = "activation_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalRestoreActivationCertificate"
+construction_order = 24
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the Local activation certificate whose hidden root and profile basis this prepare consumes; retained while the prepare spec is retained and cut only with that spec, and order 20 <= 24 keeps the edge backward-only (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalRestoreServicePrepareSpec"
 field_tag = 0x0003
 stable_name = "expected_local_restore_state"
 exact_wire_type = "WeakStateIdentity"
@@ -5953,6 +5983,21 @@ role_predicate = "role-local"
 retention_and_cut_rule = "closed source-ordered promotion-authority recipe embedded by value; no arm creates reachability and the union is retained and cut with the prepare spec (a20:2603)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LocalRestoreServicePromotionSpec"
+field_tag = 0x0002
+stable_name = "prepare_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalRestoreServicePrepareCertificate"
+construction_order = 35
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the hidden Local service prepare certificate required for manifest/prepare/receipt/profile equality; retained while the promotion spec is retained and cut only with that spec, and order 24 <= 35 keeps the edge backward-only (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "LocalRestoreServicePromotionSpec"
@@ -10621,6 +10666,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0007
+stable_name = "reopen_publication_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardStatePublicationCertificate"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the shard publication certificate that byte-matches reopen_confirm_applied_identity; retained while the acknowledgement is retained and cut only with it, and order 10 <= 50 keeps the edge backward-only (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreShardOperationalAck"
 field_tag = 0x0008
 stable_name = "seal_ref"
 exact_wire_type = "StrongRef"
@@ -10631,6 +10691,21 @@ target_schema_id = "RestorePromotionRootSeal"
 construction_order = 50
 role_predicate = "role-shard"
 retention_and_cut_rule = "strong reference to the exact Shard promotion root seal acknowledged operational; retained while the acknowledgement is retained and cut only with it (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x000a
+stable_name = "independent_reopen_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardRestoreIndependentReopenProof"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the fresh-process shard independent reopen proof consumed before this acknowledgement; retained while the acknowledgement is retained and cut only with it, and order 40 <= 50 keeps the edge backward-only (a20:2599)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -13010,6 +13085,21 @@ target_schema_id = "RestorePromotionRootSeal"
 construction_order = 44
 role_predicate = "role-shard"
 retention_and_cut_rule = "strong reference to the exact Shard promotion root seal opened by this confirmation; retained while the confirm spec is retained and cut only with that spec (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardRestoreReopenConfirmSpec"
+field_tag = 0x0004
+stable_name = "independent_reopen_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardRestoreIndependentReopenProof"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the exact shard independent reopen proof this confirmation consumes as the only transition out of the sealed pending state; retained while the confirm spec is retained and cut only with that spec, and order 40 <= 44 keeps the edge backward-only (a20:2599)"
 version_status = "reserved"
 max_size_bytes = 40
 
