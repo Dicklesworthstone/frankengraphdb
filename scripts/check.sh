@@ -48,6 +48,7 @@ REGISTERED_OTHER_EXPECTED=0
 REGISTERED_SEQ=0
 LAST_GATE_RC=0
 GATE_LOG_DIR=""
+CARGO_TEST_LOG=""
 COV_TRACKED=0
 COV_INSPECTED=0
 COV_EXEMPT=0
@@ -354,15 +355,107 @@ run_registered_command() {
   fi
 }
 
+# Run the workspace test gate and keep its output, because the registered
+# cargo-test artifacts below are attributed FROM it.
+#
+# --no-fail-fast, MEASURED 2026-07-26 on `-p registry-check` with two planted
+# failures in two independent test targets:
+#   without it   exit 101, 12 binaries run, 12 suites reported, 1 of 2 named
+#   with it      exit 101, 16 binaries run, 17 suites reported, 2 of 2 named
+# It only governs whether cargo keeps RUNNING binaries after one fails; it
+# cannot recover a target that failed to COMPILE. That was measured too, and it
+# is why the attribution below exists rather than a second flag: with a parse
+# error planted in one test target, `cargo test` ran 0 of 16 binaries, and
+# --no-fail-fast, --keep-going and both together all still ran 0 -- including
+# the tests of a second, dependency-free package named on the same command line.
+# No cargo flag recovers that case, so the honest verdict for an artifact whose
+# binary never ran is UNRUN, not RED.
+run_cargo_test_workspace() {
+  cargo test --workspace --no-fail-fast 2>&1 | tee "$CARGO_TEST_LOG"
+  return "${PIPESTATUS[0]}"
+}
+
+# Decide one registered cargo-test artifact's outcome from the workspace run,
+# printing "<outcome>\t<detail>".
+#
+# WHY THIS REPLACED ONE SHARED EXIT CODE. Every cargo-test artifact used to take
+# the workspace exit code verbatim: rc 0 -> all pass, rc != 0 -> all red. Two
+# real runs on 2026-07-26 show what that reports.
+#   4710fd6: a compile error in tools/registry-check/tests/claims.rs. 0 of 67
+#            suites ran. Six artifacts were reported RED on zero test evidence.
+#   9c0d3c1: a test binary vanished from the shared target dir mid-run
+#            ("could not execute process ... (never executed)"). 31 suites ran
+#            and ALL 31 PASSED; 36 never ran. Six artifacts were reported RED --
+#            five whose binaries never executed, and one,
+#            crates/fgdb-codec/tests/generated_durable_roundtrip.rs, which had
+#            just reported "ok. 12 passed; 0 failed" in that very run.
+# So the old rule could call a passing artifact red and an unmeasured artifact
+# red, and it could never call anything unrun. UNRUN still reds the overall gate
+# (print_registered_summary treats REGISTERED_UNRUN != 0 as red), so this is
+# strictly more truthful without being more permissive.
+cargo_test_artifact_outcome() { # log artifact cargo_test_rc
+  local log="$1" artifact="$2" rc="$3"
+  local target runs
+
+  if [ ! -f "$log" ]; then
+    printf 'unrun\tworkspace cargo-test log is absent; cargo test --workspace exited %s\n' "$rc"
+    return 0
+  fi
+  # Only `<pkg>/tests/<name>.rs` integration targets are attributable from the
+  # run's own output. Anything else falls back to the shared exit code and SAYS
+  # that it did, so an unattributable artifact can never look measured.
+  case "$artifact" in
+    */tests/*.rs) target="tests/${artifact##*/tests/}" ;;
+    *)
+      if [ "$rc" -eq 0 ]; then
+        printf 'pass\tcovered by cargo test --workspace (not individually attributable)\n'
+      else
+        printf 'unrun\tnot individually attributable; cargo test --workspace exited %s\n' "$rc"
+      fi
+      return 0
+      ;;
+  esac
+
+  runs=$(grep -cE "^ *Running $target \(" "$log")
+  if [ "$runs" -eq 0 ]; then
+    printf 'unrun\tits test binary never ran; cargo test --workspace exited %s\n' "$rc"
+    return 0
+  fi
+  if [ "$runs" -ne 1 ]; then
+    # Two packages carrying the same test-file name would make the next
+    # "test result:" line ambiguous. Refuse to guess.
+    printf 'unrun\t%s matches %s test targets in this workspace; not attributable\n' \
+      "$target" "$runs"
+    return 0
+  fi
+  awk -v needle="Running $target (" '
+    index($0, needle) { seen = 1; next }
+    seen && /^ *Running .* \(/ { exit }
+    seen && /^test result:/ {
+      if ($0 ~ /^test result: ok\./) { print "pass\t" $0 } else { print "red\t" $0 }
+      done = 1
+      exit
+    }
+    END {
+      if (!done) {
+        print "unrun\tits binary was launched but reported no test result"
+      }
+    }
+  ' "$log"
+}
+
 run_registered_gates() {
   local root="$1"
   local registry="$2"
   local cargo_test_rc="$3"
+  local cargo_test_log="${4:-$CARGO_TEST_LOG}"
   local inventory
   local row
   local kind
   local artifact
   local binary_name
+  local cargo_outcome
+  local cargo_detail
   local -a gates=()
 
   if [ ! -f "$registry" ]; then
@@ -401,13 +494,15 @@ run_registered_gates() {
     fi
     case "$kind" in
       cargo-test)
-        if [ "$cargo_test_rc" -eq 0 ]; then
-          record_registered_result "$kind" "$artifact" pass \
-            "covered by cargo test --workspace"
-        else
-          record_registered_result "$kind" "$artifact" red \
-            "cargo test --workspace exited $cargo_test_rc"
-        fi
+        cargo_outcome=""
+        cargo_detail=""
+        IFS=$'\t' read -r cargo_outcome cargo_detail < <(
+          cargo_test_artifact_outcome \
+            "$cargo_test_log" "$artifact" "$cargo_test_rc"
+        )
+        record_registered_result "$kind" "$artifact" \
+          "${cargo_outcome:-unrun}" \
+          "${cargo_detail:-attribution produced no verdict}"
         ;;
       script)
         run_registered_command "$kind" "$artifact" bash "$root/$artifact"
@@ -548,9 +643,86 @@ EOF
     return 1
   fi
 
+  # cargo-test attribution. The old rule was one workspace exit code stamped on
+  # every cargo-test artifact, so it could not express any of the four verdicts
+  # below and could never say UNRUN. These fixtures are the control: each one
+  # asserts a DIFFERENT verdict from the SAME nonzero workspace exit code, which
+  # the old rule would have reported identically as RED.
+  mkdir -p "$fixture_root/crates/demo/tests" "$fixture_root/crates/twin/tests"
+  : >"$fixture_root/crates/demo/tests/ran_ok.rs"
+  : >"$fixture_root/crates/demo/tests/ran_failed.rs"
+  : >"$fixture_root/crates/demo/tests/never_ran.rs"
+  : >"$fixture_root/crates/demo/tests/dup.rs"
+  : >"$fixture_root/crates/twin/tests/dup.rs"
+  cargo_fixture_log="$work/cargo-test-fixture.log"
+  cat >"$cargo_fixture_log" <<'EOF'
+     Running tests/ran_ok.rs (/t/deps/ran_ok-1111111111111111)
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/ran_failed.rs (/t/deps/ran_failed-2222222222222222)
+running 2 tests
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/dup.rs (/t/deps/dup-3333333333333333)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/dup.rs (/t/deps/dup-4444444444444444)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+EOF
+  cargo_case() { # artifact expected-outcome label
+    local got
+    got="$(cargo_test_artifact_outcome "$cargo_fixture_log" "$1" 101 | cut -f1)"
+    if [ "$got" != "$2" ]; then
+      echo "SELF-TEST RED: $3 attributed '$got', expected '$2'" >&2
+      return 1
+    fi
+    return 0
+  }
+  cargo_case "crates/demo/tests/ran_ok.rs" pass \
+    "a cargo-test artifact whose own binary passed" || return 1
+  cargo_case "crates/demo/tests/ran_failed.rs" red \
+    "a cargo-test artifact whose own binary failed" || return 1
+  cargo_case "crates/demo/tests/never_ran.rs" unrun \
+    "a cargo-test artifact whose binary never ran" || return 1
+  cargo_case "crates/demo/tests/dup.rs" unrun \
+    "an ambiguous cargo-test artifact name" || return 1
+  if [ "$(cargo_test_artifact_outcome /nonexistent-log \
+      crates/demo/tests/ran_ok.rs 101 | cut -f1)" != "unrun" ]; then
+    echo "SELF-TEST RED: a missing workspace log did not attribute UNRUN" >&2
+    return 1
+  fi
+  if [ "$(cargo_test_artifact_outcome "$cargo_fixture_log" \
+      tools/registry-check/src/main.rs 101 | cut -f1)" != "unrun" ]; then
+    echo "SELF-TEST RED: an unattributable artifact did not fall back to UNRUN" >&2
+    return 1
+  fi
+
+  cat >"$fixture_root/registries/cargo_never_ran.toml" <<'EOF'
+[[checker]]
+symbol = "mutation_cargo_never_ran"
+kind = "cargo-test"
+artifact = "crates/demo/tests/never_ran.rs"
+status = "live"
+EOF
+  cargo_unrun_log="$work/cargo-unrun-registration.log"
+  if (
+    reset_registered_counters
+    run_registered_gates "$fixture_root" \
+      "$fixture_root/registries/cargo_never_ran.toml" 101 "$cargo_fixture_log"
+    print_registered_summary
+  ) >"$cargo_unrun_log" 2>&1; then
+    echo "SELF-TEST RED: an unrun cargo-test artifact produced a green exit" >&2
+    return 1
+  fi
+  if ! grep -Fq "UNRUN registered cargo-test crates/demo/tests/never_ran.rs" \
+      "$cargo_unrun_log"; then
+    echo "SELF-TEST RED: an unrun cargo-test artifact was not reported UNRUN" >&2
+    return 1
+  fi
+
   echo "CHECK.SH MUTATION SELF-TEST PASS"
   echo "  failing registered gate: RED"
   echo "  registered gate without a runner: UNRUN and nonzero"
+  echo "  cargo-test attribution: pass / red / unrun / ambiguous all separated"
+  echo "  unrun cargo-test artifact: UNRUN and nonzero"
   echo "  evidence retained at $work"
 }
 
@@ -581,7 +753,8 @@ run_core_gate "cargo fmt --check" cargo fmt --check
 run_core_gate "cargo check --all-targets" cargo check --all-targets
 run_core_gate "cargo clippy --all-targets -- -D warnings" \
   cargo clippy --all-targets -- -D warnings
-run_core_gate "cargo test --workspace" cargo test --workspace
+CARGO_TEST_LOG="$GATE_LOG_DIR/core-cargo-test.log"
+run_core_gate "cargo test --workspace --no-fail-fast" run_cargo_test_workspace
 CARGO_TEST_RC="$LAST_GATE_RC"
 run_core_gate "UBS over every tracked Rust source" run_ubs
 
