@@ -7496,7 +7496,244 @@ fn verify_structural_source_census(
     verify_annotation_source_contracts(catalog, &census, out);
     verify_ambiguity_adjudications(catalog, &census, out);
     verify_complete_field_census_coverage(catalog, &census, out);
+    verify_census_construction_dag(catalog, &census, out);
     Some(census)
+}
+
+/// One census reference the construction-DAG law deliberately does not enforce,
+/// together with the VERDICT that licenses it.
+///
+/// The verdict field is mandatory and is the whole point of the table: a waiver
+/// that should be a repair is a documented lie, so the two cases are named
+/// separately and an `Erratum` row carries the repair that retires it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CensusDagVerdict {
+    /// Both re-ordering windows are empty, derived from BOTH reference
+    /// directions: the owner is pinned from above by what retains it and the
+    /// target is pinned from below by what it retains. No ordering repair
+    /// exists, so the shape or the reference strength is the open question.
+    Exception,
+    /// A repair IS available and this waiver is temporary. `repair` states it
+    /// exactly so the row can be retired rather than inherited.
+    Erratum,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CensusDagWaiver {
+    owner: &'static str,
+    stable_name: &'static str,
+    target: &'static str,
+    verdict: CensusDagVerdict,
+    /// The measured window, both directions, that produced the verdict.
+    evidence: &'static str,
+    /// For an `Erratum`, the exact repair that retires this row.
+    repair: &'static str,
+    owning_bead: &'static str,
+}
+
+/// The complete waiver set for the census-level construction DAG (fgdb-owlp).
+///
+/// Measured at HEAD over the funnel documented on `verify_census_construction_dag`.
+/// The bead proposed waiving 14 future-result witnesses plus 19 self-edges; every
+/// one of those was re-derived and all but these two are gone — seven were
+/// resolved by re-ordering (`construction_order` is not pinned), and the self-edge
+/// population went to zero once arm-path references were excluded, because an arm
+/// payload member can never legally become an enforced field row.
+const CENSUS_DAG_WAIVERS: &[CensusDagWaiver] = &[
+    CensusDagWaiver {
+        owner: "CommitCommand",
+        stable_name: "capsule_ref",
+        target: "CommittedEffectCapsule",
+        verdict: CensusDagVerdict::Erratum,
+        evidence: "owner pinned <= 10 by CommitCapsule@10 through a landed reference-union arm, \
+                   so it cannot rise to 30; but the TARGET is free to fall — it retains only \
+                   AuthorizationDecisionRecord@10 (needs >= 10) and is retained only by \
+                   CommitMarker@30 (needs <= 30), so order 10 satisfies both bounds with no cascade",
+        repair: "re-order CommittedEffectCapsule 30 -> 10; construction_order is not pinned, so \
+                 this is a mechanical catalog repair and retires this waiver",
+        owning_bead: "fgdb-a10-command-delta-ooy1",
+    },
+    CensusDagWaiver {
+        owner: "CommitCommand",
+        stable_name: "final_certification_reservation_ref",
+        target: "LocalFinalCertificationReservation",
+        verdict: CensusDagVerdict::Exception,
+        evidence: "both windows empty: the owner is pinned <= 10 by CommitCapsule@10, and the \
+                   target is pinned >= 20 because it retains LocalFinalCertificationReserveSpec@20 \
+                   while it would need <= 10. No ordering repair exists, so this is a \
+                   reference-strength or shape question, not an order one",
+        repair: "",
+        owning_bead: "fgdb-a10-command-delta-ooy1",
+    },
+];
+
+/// LAW: the construction DAG must be checked over CENSUS references, not only
+/// over landed `[[field]]` rows (fgdb-owlp).
+///
+/// `validate_identity` enforces `dag_self_edge`, `dag_future_result` and
+/// `dag_cycle` over rows that EXIST. A census strong reference with no row yet
+/// contributes no edge, so a slice can pass every check while already carrying an
+/// unsatisfiable ordering — and it only detonates when someone does the honest
+/// field-body modelling, by which time the orders are frozen and the window may be
+/// empty. Checking the census surfaces the contradiction at MINT time, while the
+/// order is still free to choose.
+///
+/// The scope is derived, not assumed, and every narrowing below is a measured
+/// non-obligation rather than a silent skip:
+///   * RETAINING only. Strength comes from `registered_reference_definition_semantics`
+///     — the same table `identity::declared_field_reference_semantics` consults, so a
+///     wrapper cannot be retaining on one artifact and not the other. 13 of the 17
+///     registered `reference_wrapper` types are retaining (7 strong + 6 conditional);
+///     `locator` and the three `*Identity` wrappers impose no ordering obligation,
+///     which is the a01 identity-is-not-reachability law used as an admission rule.
+///   * FLAT census paths only. A candidate deeper than `{Owner}.{stable_name}` is an
+///     arm PAYLOAD member; `validate_identity` accepts a `[[field]]` row on a union
+///     owner, so such a row can never legally land, and counting it here would report
+///     violations no correct modelling can produce (783 of 1950 are arm-path).
+///   * A bare wrapper with no concrete target in the source spelling names no target,
+///     so no edge is derivable from it.
+///   * An owner or target that is not a registered logical kind has no order to
+///     compare; the law cannot rule on what is not yet minted.
+///
+/// The COMPLETENESS GUARD fails CLOSED: a registered `reference_wrapper` whose
+/// strength the shared table does not classify is a VIOLATION, never a skip. Zero
+/// such wrappers exist today, which is exactly why the guard must be present — the
+/// next wrapper added without a strength lands silently otherwise.
+fn verify_census_construction_dag(
+    catalog: &Catalog,
+    census: &AppendixSourceCensus,
+    out: &mut Vec<Violation>,
+) {
+    let id = &catalog.identity;
+    let wrapper_kind: BTreeMap<&str, &str> = id
+        .wire
+        .iter()
+        .map(|wire| (wire.name.as_str(), wire.kind.as_str()))
+        .collect();
+    let order: BTreeMap<&str, i64> = id
+        .logical
+        .iter()
+        .map(|kind| (kind.name.as_str(), kind.construction_order))
+        .collect();
+    let landed: BTreeSet<(&str, &str)> = id
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                identity::generic_free_family(&field.containing_schema),
+                field.stable_name.as_str(),
+            )
+        })
+        .collect();
+    let waived: BTreeSet<(&str, &str, &str)> = CENSUS_DAG_WAIVERS
+        .iter()
+        .map(|w| (w.owner, w.stable_name, w.target))
+        .collect();
+
+    let mut edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for slice in &census.slices {
+        for field in &slice.fields {
+            let Some(exact) = field.exact_types.first() else {
+                continue;
+            };
+            let family = exact.split('<').next().unwrap_or(exact);
+            if wrapper_kind.get(family).copied() != Some("reference_wrapper") {
+                continue;
+            }
+            let row_id = format!("{}#{}", field.key.schema_owner, field.key.stable_name);
+            // COMPLETENESS GUARD — an unclassified wrapper fails CLOSED.
+            let Some(semantics) = census_reference_strength(family) else {
+                out.push(Violation::new(
+                    "census_reference_wrapper_unclassified",
+                    row_id,
+                    format!(
+                        "registered reference_wrapper {family:?} has no strength in the shared \
+                         reference-definition table, so the construction DAG cannot tell whether \
+                         it retains its target: classify it rather than letting it pass"
+                    ),
+                ));
+                continue;
+            };
+            if !matches!(semantics, "strong" | "conditional" | "weak_digest") {
+                continue;
+            }
+            if field.key.path != format!("{}.{}", field.key.schema_owner, field.key.stable_name) {
+                continue;
+            }
+            let owner = identity::generic_free_family(&field.key.schema_owner);
+            if landed.contains(&(owner, field.key.stable_name.as_str())) {
+                continue;
+            }
+            let Some(target) = exact
+                .strip_prefix(family)
+                .and_then(|rest| {
+                    rest.strip_prefix('<')
+                        .and_then(|rest| rest.strip_suffix('>'))
+                })
+                .map(|target| identity::generic_free_family(target.trim()))
+            else {
+                continue;
+            };
+            let (Some(&owner_order), Some(&target_order)) = (order.get(owner), order.get(target))
+            else {
+                continue;
+            };
+            if waived.contains(&(owner, field.key.stable_name.as_str(), target)) {
+                continue;
+            }
+            if owner == target {
+                out.push(Violation::new(
+                    "census_dag_self_edge",
+                    row_id,
+                    format!(
+                        "source reference {owner:?}.{} retains {target:?}: a schema may not \
+                         reference itself, and the landed-row law cannot see this until a field \
+                         body lands",
+                        field.key.stable_name
+                    ),
+                ));
+                continue;
+            }
+            if target_order > owner_order {
+                out.push(Violation::new(
+                    "census_dag_future_result",
+                    row_id,
+                    format!(
+                        "source reference {owner:?}@{owner_order} retains {target:?}@{target_order}: \
+                         a future result is never referenceable, and the order is still free to \
+                         change only until a field body lands"
+                    ),
+                ));
+            }
+            edges.entry(owner).or_default().insert(target);
+        }
+    }
+    // dag_cycle is a SEPARATE law from dag_future_result: a graph can be free of
+    // strict future edges and still carry a cycle among equal-order kinds, which no
+    // amount of re-ordering repairs.
+    if let Some(cycle) = identity::find_construction_cycle(&edges) {
+        out.push(Violation::new(
+            "census_dag_cycle",
+            cycle.first().copied().unwrap_or(""),
+            format!("source construction-DAG cycle among census references: {cycle:?}"),
+        ));
+    }
+}
+
+/// The strength the construction DAG assigns a reference wrapper, composed exactly
+/// as `identity::declared_field_reference_semantics` composes it so the two
+/// artifacts cannot drift apart.
+fn census_reference_strength(family: &str) -> Option<&'static str> {
+    match registered_reference_definition_semantics(family) {
+        Some("identity") => Some("none"),
+        Some(other) => Some(other),
+        None => match family {
+            "WeakGlobalCommandIdentity" | "WeakMarkerIdentity" | "WeakShardCommandIdentity" => {
+                Some("none")
+            }
+            _ => None,
+        },
+    }
 }
 
 fn verify_ordinary_union_source_contracts(
@@ -14884,6 +15121,192 @@ name = "Probe"
             .expect("a01 slice exists")
             .definition_status = "complete".to_owned();
         catalog
+    }
+
+    // --- census construction DAG (fgdb-owlp) --------------------------------
+
+    fn typed_field_candidate(
+        owner: &str,
+        path: &str,
+        stable_name: &str,
+        exact: &str,
+    ) -> FieldCandidate {
+        let mut candidate = field_candidate(owner, path, stable_name);
+        candidate.exact_types = vec![exact.to_owned()];
+        candidate
+    }
+
+    fn census_dag_codes(fields: Vec<FieldCandidate>) -> Vec<String> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let census = census_with_slice("a10", fields, Vec::new());
+        let mut violations = Vec::new();
+        verify_census_construction_dag(&catalog, &census, &mut violations);
+        violations
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect()
+    }
+
+    /// The waiver metadata is load-bearing, not decoration: an `Erratum` is a
+    /// temporary row that must carry the repair retiring it, and an `Exception`
+    /// must NOT carry one, because "there is a fix" and "there is no fix" are the
+    /// two verdicts the table exists to keep apart.
+    #[test]
+    fn census_dag_waivers_state_a_verdict_and_an_erratum_states_its_repair() {
+        assert!(
+            !CENSUS_DAG_WAIVERS.is_empty(),
+            "non-vacuity: an empty waiver table would make the checks below meaningless"
+        );
+        for waiver in CENSUS_DAG_WAIVERS {
+            assert!(
+                !waiver.evidence.is_empty(),
+                "{}.{} must state the measured window that licenses it",
+                waiver.owner,
+                waiver.stable_name
+            );
+            assert!(
+                waiver.owning_bead.starts_with("fgdb-"),
+                "{}.{} must name the bead that owns the ruling",
+                waiver.owner,
+                waiver.stable_name
+            );
+            match waiver.verdict {
+                CensusDagVerdict::Erratum => assert!(
+                    !waiver.repair.is_empty(),
+                    "{}.{} is an ERRATUM, so it must state the repair that retires it — a waiver \
+                     that should be a fix is a documented lie",
+                    waiver.owner,
+                    waiver.stable_name
+                ),
+                CensusDagVerdict::Exception => assert!(
+                    waiver.repair.is_empty(),
+                    "{}.{} is an EXCEPTION, so it must not claim a repair exists",
+                    waiver.owner,
+                    waiver.stable_name
+                ),
+            }
+        }
+    }
+
+    /// CONTROL, firing direction: an edge the waiver table does NOT cover must be
+    /// named. CommitCommand@10 retaining CommittedEffectCapsule@30 is the real
+    /// shape; spelled under a different field name it is outside the waiver and
+    /// must be reported.
+    #[test]
+    fn census_dag_names_a_future_result_the_waiver_does_not_cover() {
+        let codes = census_dag_codes(vec![typed_field_candidate(
+            "CommitCommand",
+            "CommitCommand.unwaived_probe_ref",
+            "unwaived_probe_ref",
+            "StrongRef<CommittedEffectCapsule>",
+        )]);
+        assert!(
+            codes.contains(&"census_dag_future_result".to_owned()),
+            "an uncovered future-result edge must be named, got {codes:?}"
+        );
+    }
+
+    /// CONTROL, passing direction: the same edge under its WAIVED field name is
+    /// accepted, so the table is what licenses it rather than the law being blind.
+    #[test]
+    fn census_dag_accepts_the_waived_spelling_of_the_same_edge() {
+        let codes = census_dag_codes(vec![typed_field_candidate(
+            "CommitCommand",
+            "CommitCommand.capsule_ref",
+            "capsule_ref",
+            "StrongRef<CommittedEffectCapsule>",
+        )]);
+        assert!(codes.is_empty(), "the waived edge must pass, got {codes:?}");
+    }
+
+    #[test]
+    fn census_dag_names_a_self_edge_and_ignores_an_arm_path_one() {
+        let flat = census_dag_codes(vec![typed_field_candidate(
+            "CommitCommand",
+            "CommitCommand.self_probe_ref",
+            "self_probe_ref",
+            "StrongRef<CommitCommand>",
+        )]);
+        assert!(
+            flat.contains(&"census_dag_self_edge".to_owned()),
+            "a flat self-edge must be named, got {flat:?}"
+        );
+        // An arm payload member can never legally become an enforced field row, so
+        // reporting it would be a violation no correct modelling could produce.
+        let arm = census_dag_codes(vec![typed_field_candidate(
+            "CommitCommand",
+            "CommitCommand.state.Started.self_probe_ref",
+            "self_probe_ref",
+            "StrongRef<CommitCommand>",
+        )]);
+        assert!(
+            arm.is_empty(),
+            "an arm-path reference must not be ruled on, got {arm:?}"
+        );
+    }
+
+    /// CONTROL for the COMPLETENESS GUARD. A registered `reference_wrapper` whose
+    /// strength the shared table does not classify must FAIL CLOSED. No such
+    /// wrapper exists today, so the guard is proved by adding one.
+    #[test]
+    fn census_dag_completeness_guard_fails_closed_on_an_unclassified_wrapper() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let mut wrapper = catalog
+            .identity
+            .wire
+            .iter()
+            .find(|wire| wire.name == "StrongRef")
+            .expect("StrongRef is registered")
+            .clone();
+        wrapper.name = "UnclassifiedProbeRef".to_owned();
+        catalog.identity.wire.push(wrapper);
+        assert!(
+            census_reference_strength("UnclassifiedProbeRef").is_none(),
+            "the fixture wrapper must be genuinely unclassified"
+        );
+        let census = census_with_slice(
+            "a10",
+            vec![typed_field_candidate(
+                "CommitCommand",
+                "CommitCommand.unclassified_probe_ref",
+                "unclassified_probe_ref",
+                "UnclassifiedProbeRef<CommittedEffectCapsule>",
+            )],
+            Vec::new(),
+        );
+        let mut violations = Vec::new();
+        verify_census_construction_dag(&catalog, &census, &mut violations);
+        let codes: Vec<&str> = violations.iter().map(|v| v.code.as_str()).collect();
+        assert!(
+            codes.contains(&"census_reference_wrapper_unclassified"),
+            "an unclassified wrapper must fail closed rather than be skipped, got {codes:?}"
+        );
+    }
+
+    /// The real Appendix source must be clean under the law as landed, reached
+    /// through the REAL entry point rather than by calling the check directly —
+    /// which also proves the law is actually wired into `verify_source`. This is
+    /// the statement that the waiver set is COMPLETE at HEAD, and it is what goes
+    /// red when a new latent violation is authored.
+    #[test]
+    fn census_dag_is_clean_over_the_real_appendix_source() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let source = fs::read(root.join(PLAN_PATH)).expect("plan reads");
+        let census_dag: Vec<(String, String)> = verify_source(&catalog, &source)
+            .into_iter()
+            .filter(|violation| {
+                violation.code.starts_with("census_dag_")
+                    || violation.code == "census_reference_wrapper_unclassified"
+            })
+            .map(|violation| (violation.code, violation.msg))
+            .collect();
+        assert!(
+            census_dag.is_empty(),
+            "the census construction DAG must be clean at HEAD under the landed waiver set, got {census_dag:?}"
+        );
     }
 
     fn uncovered_field_violations(violations: &[Violation]) -> Vec<&Violation> {

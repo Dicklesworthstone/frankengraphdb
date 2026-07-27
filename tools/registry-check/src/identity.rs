@@ -3164,6 +3164,12 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
 }
 
 /// Iterative three-color DFS over string-keyed edges.
+pub(crate) fn find_construction_cycle<'a>(
+    edges: &BTreeMap<&'a str, BTreeSet<&'a str>>,
+) -> Option<Vec<&'a str>> {
+    find_cycle_str(edges)
+}
+
 fn find_cycle_str<'a>(edges: &BTreeMap<&'a str, BTreeSet<&'a str>>) -> Option<Vec<&'a str>> {
     #[derive(Clone, Copy, PartialEq)]
     enum Color {
