@@ -17,100 +17,105 @@
 # all. Excluding it needs a token a GATE RUN can take and a COMMIT must respect —
 # which is why the enforcement point is a git hook, not a convention.
 #
-# -----------------------------------------------------------------------------
-# WHY A MECHANISM AND NOT A RULE, stated because the rule was tried
-# -----------------------------------------------------------------------------
-# Doing this coordination by hand cost, in one evening: a ~40-minute landing hold
-# placed on pane4 on the strength of a `pgrep` that was MATCHING ITS OWN COMMAND
-# LINE (the operator's own diagnosis), and a mid-run landing that cost pane2 a
-# full diagnostic cycle and produced two false attributions. Both failures are in
-# the operator, not the code. A mechanism removes the operator from the loop.
+# WHY A MECHANISM AND NOT A RULE, stated because the rule was tried. Doing this
+# by hand cost, in one evening: a ~40-minute landing hold placed on pane4 on the
+# strength of a `pgrep` that was MATCHING ITS OWN COMMAND LINE, and a mid-run
+# landing that cost pane2 a full diagnostic cycle plus two false attributions.
+# Both failures are in the operator, not the code.
 #
-# THE pgrep DEFECT IS DESIGNED OUT, not documented around. Liveness here is
-# `kill -0 <pid>` against a pid recorded BY THE HOLDER, cross-checked against
-# that pid's start time from /proc. A process cannot self-match the way a
-# pattern search over command lines can, because nothing is being pattern
-# matched. The identical trap fired again while building this: an early
-# `pgrep -af check.sh` in this very session returned the pgrep's own shell.
+# =============================================================================
+# THE FOUR POLICY RULINGS THIS FILE IMPLEMENTS (operator, 2026-07-27)
+# =============================================================================
 #
-# -----------------------------------------------------------------------------
-# THE THREE DESIGN DECISIONS, and what each one chose
-# -----------------------------------------------------------------------------
-# 1. A STALE HOLDER CAN NEVER STARVE THE SWARM. DELIBERATE, and it is the
-#    opposite of what `token.sh` does for `catalog`: there, `acquire` refuses
-#    forever while the lock dir exists, no matter how old, and only SUGGESTS a
-#    `steal` that requires a human to judge the holder dead. For a token that
-#    gates EVERY COMMIT IN THE SWARM that is the catastrophic failure: one dead
-#    pane and nobody can ever land again, which is the pane4 outage repeated
-#    automatically and without end.
-#    So this lease AUTO-EXPIRES, by two independent tests, either of which frees
-#    it: the holder's process is gone, or the hold has outlived its declared TTL
-#    plus a grace. TTL is a label in this substrate, so the timeout lives HERE.
-#    The asymmetry that licenses it: over-blocking costs every pane indefinitely;
-#    under-blocking costs ONE gate run, and 38cca3f already makes that run report
-#    UNRUN with both shas instead of a false red. Detection is solved, so
-#    prevention is allowed to fail open. It is never allowed to fail closed.
+# ONE — NO TIME-BASED EXPIRY. A lease is broken by a LIVENESS TEST THAT CAN
+# FAIL, never by a clock. TTL in this substrate is a LABEL, not a timeout:
+# `token.sh acquire` is a plain `mkdir` that fails regardless of age, so a TTL
+# has never enforced anything. And an age threshold CANNOT DISTINGUISH A DEAD
+# HOLDER FROM A SLOW ONE — measured the hard way in this project, where a
+# time-based sweep destroyed 37 pin-clean staged rows precisely because BLOCKED
+# work is untouched for being blocked, so it looked abandoned.
+#   THE LEASE IS BREAKABLE IF AND ONLY IF THE HOLDER'S PID IS GONE.
+# Age is RECORDED AND REPORTED. It is never a reason to reclaim. An earlier cut
+# of this file had a TTL+grace backstop that silently freed the lease; it was
+# wrong on exactly this point and has been removed.
 #
-# 2. LIVENESS IS A TEST THAT CAN FAIL, NOT AN AGE THRESHOLD. An age sweep cannot
-#    distinguish a dead holder from a legitimately long one — the mistake that
-#    once deleted 37 clean staged rows in this project because BLOCKED work is
-#    untouched precisely for being blocked. `kill -0` plus the /proc start-time
-#    comparison answers the actual question and can return a definite NO. The age
-#    cap is only the backstop for a pid that was never recorded.
-#    The start-time cross-check is what makes it exact: a bare pid test would be
-#    fooled by pid reuse, silently re-binding a lease to an unrelated process.
+# TWO — BREAKING IS LOUD. When the lease IS broken, say so: holder id, pid, and
+# the evidence that the pid is gone. A mechanism that reclaims QUIETLY is how a
+# team ends up trusting a guarantee that stopped holding.
 #
-# 3. IT HOLDS LANDINGS, NOT PANES. A blocked pane must still be able to derive —
-#    edit, build, test, run gates, commit in its own scratch worktree — because
-#    holding panes rather than holding landings is exactly what wasted pane4's
-#    time. Enforcement therefore binds ONLY a commit on branch `main`. Measured
-#    at the time of writing: this repository has 29 linked worktrees and 28 of
-#    them are detached HEAD, so "on main" and "is a landing" coincide almost
-#    perfectly, and every scratch worktree is untouched by construction.
+# THREE — FAIL OPEN, BUT LOUD. If the lease cannot be read, the commit proceeds
+# WITH A VISIBLE WARNING.
+#   WHY THIS DOES NOT CONTRADICT THE THIRD-STATE DOCTRINE, which says a check
+#   that did not run must never report green: A GATE MUST FAIL CLOSED BECAUSE IT
+#   IS THE LAST WORD. A LEASE IS NOT THE LAST WORD. 38cca3f already DETECTS a
+#   tree that moved under a gate and reports UNRUN carrying both shas.
+#   Prevention plus detection is defence in depth, so an unreadable lease costs
+#   a warning and the tripwire still catches the bad outcome. What cannot be
+#   tolerated is SILENCE, not permissiveness. A gate has no second line behind
+#   it; this does.
 #
-# -----------------------------------------------------------------------------
+# FOUR — HOLD LANDINGS, NEVER PANES. A leased-out pane must still derive, stage
+# and run read-only checks. Only `git commit` on branch `main` is bound; nothing
+# here touches `git add`, a build, a test, a gate, or a commit in a scratch
+# worktree. Measured: this repo has 29 linked worktrees and 28 are detached
+# HEAD, so every staging worktree is unaffected by construction. Holding panes
+# rather than landings is what cost pane4 forty minutes.
+#
+# =============================================================================
+# STATES
+# =============================================================================
+#   FREE        no lease held.                          -> allow, silent
+#   BINDING     holder's pid is ALIVE.                  -> refuse
+#   BINDING     liveness INDETERMINATE (no pid on file) -> refuse, saying why,
+#               Not breakable: we cannot PROVE the         and naming the
+#               holder is gone, and ruling ONE forbids      manual remedy.
+#               reclaiming on any other ground. Reported, never silently taken.
+#   BREAKABLE   holder's pid is GONE.                   -> allow, LOUD
+#   UNREADABLE  the lease cannot be read at all.        -> allow, LOUD
+#
+# =============================================================================
 # ON-DISK FORMAT, and why it needs no change to token.sh
-# -----------------------------------------------------------------------------
+# =============================================================================
 # The mutual-exclusion primitive stays `token.sh` (atomic `mkdir`), as directed.
 # Its holder file is three lines: who / epoch / ttl, read with `sed -n 1p|2p|3p`.
 # This lease APPENDS two more — pid and pid start time — which token.sh never
-# reads, so `status`, `renew`, `release` and `steal` keep working untouched and
-# an older reader simply sees the hold it always saw. Release stays token.sh's
-# `rm -f holder; rmdir lock`, so nothing here deletes a file of its own.
-# A hold created by a bare `token.sh acquire landing ...` has no pid recorded;
-# that is legal and falls back to the age test alone.
+# reads, so `status`, `renew`, `release` and `steal` keep working untouched.
+# Release stays token.sh's own `rm -f holder; rmdir lock`; nothing here deletes.
+#
+# The start-time cross-check is what makes liveness EXACT. A bare `kill -0`
+# would be fooled by PID REUSE — an unrelated process inheriting the number
+# would read as "holder alive" and the lease would never become breakable.
+# pid + start time identifies a process uniquely for as long as it exists.
+#
+# The pid is recorded BY THE HOLDER at acquire. Nothing is pattern-matched, so
+# nothing can self-match the way `pgrep -af check.sh` matched its own command
+# line tonight — the defect this design removes rather than documents around.
 # =============================================================================
 
 FGDB_TOKEN_SH="${FGDB_TOKEN_SH:-/data/tmp/fgdb_swarm/token.sh}"
 FGDB_TOKEN_DIR="${FGDB_TOKEN_DIR:-/data/tmp/fgdb_swarm/tokens}"
-# Grace beyond the declared TTL before a hold is treated as abandoned. Small on
-# purpose: see decision 1 — the failure mode of holding too long is unbounded.
-FGDB_LANDING_GRACE_MIN="${FGDB_LANDING_GRACE_MIN:-5}"
 
 LANDING_LOCK="$FGDB_TOKEN_DIR/landing.lock"
 LANDING_META="$LANDING_LOCK/holder"
 
-# These are set by landing_lease_state for its caller to read — they are this
-# library's return channel, not dead stores. LANDING_HOLDER/TTL/AGE are read by
-# scripts/git_hooks/pre-commit.sh to compose its refusal; LANDING_PID and
-# LANDING_REASON are read by diagnostics and by the red-proof harness. shellcheck
-# cannot see across the source boundary, so SC2034 is silenced here with that
-# reason rather than by deleting a live output.
+# Return channel, read across the source boundary by
+# scripts/git_hooks/pre-commit.sh and by the red-proof harness.
 # shellcheck disable=SC2034
 LANDING_STATE=""
 LANDING_HOLDER=""
 LANDING_AGE_MIN=""
 LANDING_TTL_MIN=""
 LANDING_PID=""
-LANDING_REASON=""
+LANDING_LIVENESS=""
+LANDING_EVIDENCE=""
 
-# _ll_starttime <pid> — field 22 of /proc/<pid>/stat, the process start time in
-# clock ticks since boot. Constant for the life of a process and not reused with
-# the pid, so pid+starttime identifies a process exactly.
+# _ll_starttime <pid> — field 22 of /proc/<pid>/stat: process start time in clock
+# ticks since boot. Constant for the life of a process, so pid+starttime is an
+# exact identity.
 #
-# The comm field (field 2) is parenthesised and MAY CONTAIN SPACES AND
-# PARENTHESES, so awk '{print $22}' is wrong on any process whose name has one.
-# Cut through the LAST ')' and count from there: start time is then field 20.
+# The comm field (2) is parenthesised and MAY CONTAIN SPACES AND PARENTHESES, so
+# `awk '{print $22}'` is wrong for any process whose name has one. Cut through
+# the LAST ')' and count from there: start time is field 20 of the remainder.
 _ll_starttime() {
   local pid="$1" stat rest
   [ -r "/proc/$pid/stat" ] || return 1
@@ -122,24 +127,27 @@ _ll_starttime() {
   printf '%s\n' "${20}"
 }
 
-# landing_lease_state — the one query. Echoes FREE, BINDING or VOID and sets the
-# LANDING_* variables. A caller that cannot parse this must treat it as FREE:
-# failing open is the whole point (decision 1).
-# shellcheck disable=SC2034  # LANDING_* are this library's return channel, read by
-# scripts/git_hooks/pre-commit.sh and the red-proof harness across a source boundary
+# landing_lease_state — the one query. Sets LANDING_* and echoes the state.
+#
+# CALL IT PLAIN, NOT IN A COMMAND SUBSTITUTION. `s=$(landing_lease_state)` runs
+# it in a SUBSHELL and every variable it sets is discarded — which is exactly how
+# the first cut of the hook came to print an empty holder and "m of m" while
+# still correctly refusing. Read $LANDING_STATE instead.
+# shellcheck disable=SC2034  # LANDING_* are the return channel; see above
 landing_lease_state() {
   LANDING_STATE=""; LANDING_HOLDER=""; LANDING_AGE_MIN=""; LANDING_TTL_MIN=""
-  LANDING_PID=""; LANDING_REASON=""
+  LANDING_PID=""; LANDING_LIVENESS=""; LANDING_EVIDENCE=""
 
   if [ ! -d "$LANDING_LOCK" ]; then
     LANDING_STATE=FREE; printf 'FREE\n'; return 0
   fi
   if [ ! -r "$LANDING_META" ]; then
-    LANDING_REASON="lock directory exists but its holder file is unreadable"
-    LANDING_STATE=VOID; printf 'VOID\n'; return 0
+    LANDING_STATE=UNREADABLE
+    LANDING_EVIDENCE="lock directory exists at $LANDING_LOCK but its holder file is unreadable"
+    printf 'UNREADABLE\n'; return 0
   fi
 
-  local who epoch ttl pid start now age live
+  local who epoch ttl pid start now age cur
   who="$(sed -n 1p "$LANDING_META" 2>/dev/null)"
   epoch="$(sed -n 2p "$LANDING_META" 2>/dev/null)"
   ttl="$(sed -n 3p "$LANDING_META" 2>/dev/null)"
@@ -147,64 +155,60 @@ landing_lease_state() {
   start="$(sed -n 5p "$LANDING_META" 2>/dev/null)"
 
   case "$epoch" in ''|*[!0-9]*) epoch=0 ;; esac
-  case "$ttl"   in ''|*[!0-9]*) ttl=45 ;; esac
   now="$(date +%s)"
-  age=$(( ( now - epoch ) / 60 ))
+  # Age is REPORTED ONLY. Ruling ONE: never a reason to reclaim.
+  if [ "$epoch" -gt 0 ]; then age=$(( ( now - epoch ) / 60 )); else age="?"; fi
 
   LANDING_HOLDER="${who:-?}"
   LANDING_AGE_MIN="$age"
-  LANDING_TTL_MIN="$ttl"
-  LANDING_PID="$pid"
+  LANDING_TTL_MIN="${ttl:-?}"
+  LANDING_PID="${pid:-}"
 
-  # TEST 1 — liveness, the one that can return a definite NO.
+  # THE ONLY TEST THAT MAY BREAK A LEASE.
   case "$pid" in
-    ''|*[!0-9]*) ;;                       # no pid recorded; fall through to age
-    *)
-      live=yes
-      kill -0 "$pid" 2>/dev/null || live=no
-      if [ "$live" = yes ] && [ -n "$start" ]; then
-        local cur
-        cur="$(_ll_starttime "$pid" 2>/dev/null)"
-        # A different start time means the pid was REUSED by an unrelated
-        # process. Treating that as alive would re-bind the lease to a stranger.
-        [ -n "$cur" ] && [ "$cur" != "$start" ] && live=no
-      fi
-      if [ "$live" = no ]; then
-        LANDING_REASON="holder process $pid is gone (lease abandoned, not released)"
-        LANDING_STATE=VOID; printf 'VOID\n'; return 0
-      fi
+    ''|*[!0-9]*)
+      # No pid on file — e.g. a hold made by a bare `token.sh acquire landing`.
+      # We cannot PROVE the holder is gone, and ruling ONE forbids reclaiming on
+      # any other ground. So it BINDS, and says exactly why.
+      LANDING_LIVENESS=indeterminate
+      LANDING_EVIDENCE="no pid recorded in the holder file, so the liveness test cannot be run; ruling ONE forbids reclaiming a lease on any ground except a liveness test that failed"
+      LANDING_STATE=BINDING; printf 'BINDING\n'; return 0
       ;;
   esac
 
-  # TEST 2 — the age backstop. Independent of test 1 on purpose: a wedged but
-  # still-running holder must not hold the swarm forever either.
-  if [ "$age" -gt $(( ttl + FGDB_LANDING_GRACE_MIN )) ]; then
-    # shellcheck disable=SC2034  # return channel; see the declaration block
-    LANDING_REASON="hold is ${age}m old, past its ${ttl}m TTL + ${FGDB_LANDING_GRACE_MIN}m grace"
-    LANDING_STATE=VOID; printf 'VOID\n'; return 0
+  if ! kill -0 "$pid" 2>/dev/null; then
+    LANDING_LIVENESS=dead
+    LANDING_EVIDENCE="kill -0 $pid failed: no such live process"
+    LANDING_STATE=BREAKABLE; printf 'BREAKABLE\n'; return 0
+  fi
+  if [ -n "$start" ]; then
+    cur="$(_ll_starttime "$pid" 2>/dev/null)"
+    if [ -n "$cur" ] && [ "$cur" != "$start" ]; then
+      LANDING_LIVENESS=dead
+      LANDING_EVIDENCE="pid $pid exists but its start time is $cur, not the recorded $start — the pid was REUSED by an unrelated process, so the holder itself is gone"
+      LANDING_STATE=BREAKABLE; printf 'BREAKABLE\n'; return 0
+    fi
   fi
 
+  LANDING_LIVENESS=alive
+  LANDING_EVIDENCE="kill -0 $pid succeeded and its start time matches the recorded $start; the holder is running"
   LANDING_STATE=BINDING; printf 'BINDING\n'; return 0
 }
 
-# landing_lease_acquire <holder> [ttl_min] — take the lease for a gate run.
-# Exit 0 = held by you. Non-zero = someone else holds it; DO NOT proceed as if
-# you do. Never blocks: a gate that cannot get the lease should still run (its
-# verdict may then be voided by a landing, which 38cca3f reports honestly).
+# landing_lease_acquire <holder> [ttl_label] — take the lease for a gate run.
+# The ttl is recorded as a LABEL for a human reading `token.sh status`. Nothing
+# in this file acts on it (ruling ONE).
 landing_lease_acquire() {
   local who="$1" ttl="${2:-45}" start
-  if [ ! -x "$FGDB_TOKEN_SH" ]; then
-    return 1
-  fi
+  [ -x "$FGDB_TOKEN_SH" ] || return 1
   "$FGDB_TOKEN_SH" acquire landing "$who" "$ttl" >/dev/null 2>&1 || return 1
-  # Append the liveness half. token.sh reads only lines 1-3, so this is additive.
   start="$(_ll_starttime "$$" 2>/dev/null)"
   printf '%s\n%s\n' "$$" "${start:-}" >> "$LANDING_META" 2>/dev/null || true
   export FGDB_LANDING_HOLDER="$who"
   return 0
 }
 
-# landing_lease_release <holder> — give it back. Safe to call when not held.
+# landing_lease_release <holder> — give it back. Safe when not held.
 landing_lease_release() {
   local who="$1"
   [ -x "$FGDB_TOKEN_SH" ] || return 0
