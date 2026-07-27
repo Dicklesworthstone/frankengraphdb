@@ -176,113 +176,113 @@ allowed_bet_labels = ["b1", "b2", "b3", "b4", "b5", "b6"]
 # this file). Raising a floor to the observed count is an optional ratchet, is
 # never required to make the tree green, and is the one operation here that can
 # red a pane that has not yet pulled — so batch it at a quiet point.
-bead_count = 401
-direct_owner_count = 98
-bet_label_count = 245
-exact_override_count = 19
-family_rule_count = 39
+bead_count_floor = 401
+direct_owner_floor = 98
+bet_label_floor = 245
+exact_override_floor = 19
+family_rule_floor = 39
 # Keyed by RULE, not by bead: a hash over every bead's binding was an equality
 # over the same shared-mutable corpus and broke exactly as hard. This one is a
 # function of the rules alone, so no bead can move it and a rule edit must.
-binding_hash = "fnv1a64:66a303ca1f79e606"
+rule_binding_hash = "fnv1a64:66a303ca1f79e606"
 
 [[bead_family]]
 id = "appendix-a-catalog"
 match_kind = "appendix_a"
 pattern = "fgdb-a01..a21|fgdb-appendix-a-catalog-"
 decision_ids = ["FG-ADR-CON-06"]
-expected_match_count = 29
+min_match_count = 29
 
 [[bead_family]]
 id = "risk-governance"
 match_kind = "prefix"
 pattern = "fgdb-risk-"
 decision_ids = ["FG-ADR-CON-11", "FG-ADR-CON-12"]
-expected_match_count = 7
+min_match_count = 7
 
 [[bead_family]]
 id = "workstream-w1"
 match_kind = "prefix"
 pattern = "fgdb-w1-"
 decision_ids = ["FG-ADR-CON-01", "FG-ADR-CON-02", "FG-ADR-CON-03", "FG-ADR-CON-11"]
-expected_match_count = 0
+min_match_count = 0
 
 [[bead_family]]
 id = "workstream-w2"
 match_kind = "prefix"
 pattern = "fgdb-w2-"
 decision_ids = ["FG-ADR-BET-B1"]
-expected_match_count = 1
+min_match_count = 1
 
 [[bead_family]]
 id = "workstream-w3"
 match_kind = "prefix"
 pattern = "fgdb-w3-"
 decision_ids = ["FG-ADR-BET-B2"]
-expected_match_count = 0
+min_match_count = 0
 
 [[bead_family]]
 id = "workstream-w4"
 match_kind = "prefix"
 pattern = "fgdb-w4-"
 decision_ids = ["FG-ADR-BET-B1"]
-expected_match_count = 1
+min_match_count = 1
 
 [[bead_family]]
 id = "workstream-w5"
 match_kind = "prefix"
 pattern = "fgdb-w5-"
 decision_ids = ["FG-ADR-BET-B3"]
-expected_match_count = 0
+min_match_count = 0
 
 [[bead_family]]
 id = "workstream-w6"
 match_kind = "prefix"
 pattern = "fgdb-w6-"
 decision_ids = ["FG-ADR-BET-B4"]
-expected_match_count = 0
+min_match_count = 0
 
 [[bead_family]]
 id = "workstream-w7"
 match_kind = "prefix"
 pattern = "fgdb-w7-"
 decision_ids = ["FG-ADR-BET-B4"]
-expected_match_count = 0
+min_match_count = 0
 
 [[bead_family]]
 id = "workstream-w8"
 match_kind = "prefix"
 pattern = "fgdb-w8-"
 decision_ids = ["FG-ADR-BET-B3"]
-expected_match_count = 0
+min_match_count = 0
 
 [[bead_family]]
 id = "workstream-w9"
 match_kind = "prefix"
 pattern = "fgdb-w9-"
 decision_ids = ["FG-ADR-BET-B6"]
-expected_match_count = 0
+min_match_count = 0
 
 [[bead_family]]
 id = "workstream-w10"
 match_kind = "prefix"
 pattern = "fgdb-w10-"
 decision_ids = ["FG-ADR-BET-B6", "FG-ADR-CON-05"]
-expected_match_count = 0
+min_match_count = 0
 
 [[bead_family]]
 id = "workstream-w11"
 match_kind = "prefix"
 pattern = "fgdb-w11-"
 decision_ids = ["FG-ADR-BET-B1"]
-expected_match_count = 0
+min_match_count = 0
 
 [[bead_family]]
 id = "workstream-w12"
 match_kind = "prefix"
 pattern = "fgdb-w12-"
 decision_ids = ["FG-ADR-BET-B1"]
-expected_match_count = 1
+min_match_count = 1
 
 [[bead_override]]
 id = "post-1-0-roadmap-epic"

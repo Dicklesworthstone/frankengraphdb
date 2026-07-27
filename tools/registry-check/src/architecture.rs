@@ -75,18 +75,18 @@ pub const ALLOWED_FAMILY_MATCH_KINDS: [&str; 2] = ["prefix", "appendix_a"];
 /// Corpus-cardinality FLOORS, not equalities — see `validate_bead_resolution`.
 /// A `br create` in any pane can only raise the observed counts, so it never
 /// moves these; only records disappearing does.
-pub const PINNED_BEAD_COUNT: usize = 401;
-pub const PINNED_DIRECT_OWNER_COUNT: usize = 98;
-pub const PINNED_BET_LABEL_COUNT: usize = 245;
-pub const PINNED_EXACT_OVERRIDE_COUNT: usize = 19;
-pub const PINNED_FAMILY_RULE_COUNT: usize = 39;
+pub const PINNED_BEAD_COUNT_FLOOR: usize = 401;
+pub const PINNED_DIRECT_OWNER_FLOOR: usize = 98;
+pub const PINNED_BET_LABEL_FLOOR: usize = 245;
+pub const PINNED_EXACT_OVERRIDE_FLOOR: usize = 19;
+pub const PINNED_FAMILY_RULE_FLOOR: usize = 39;
 pub const PINNED_BEAD_FAMILY_TABLE_COUNT: usize = 14;
 pub const PINNED_BEAD_OVERRIDE_TABLE_COUNT: usize = 19;
-pub const PINNED_BEAD_BINDING_HASH: &str = "fnv1a64:66a303ca1f79e606";
+pub const PINNED_RULE_BINDING_HASH: &str = "fnv1a64:66a303ca1f79e606";
 /// The per-family floor SPLIT, pinned by equality.
 ///
-/// `PINNED_FAMILY_RULE_COUNT` pins only the SUM of these floors (the registry
-/// declares `family_rule_count`, that value is pinned, and the floors must sum
+/// `PINNED_FAMILY_RULE_FLOOR` pins only the SUM of these floors (the registry
+/// declares `family_rule_floor`, that value is pinned, and the floors must sum
 /// to it).  The split between families is a separate degree of freedom: a
 /// sum-preserving rebalance moves one family's tripwire onto another and every
 /// aggregate check stays green.  The only thing that can object is the
@@ -106,7 +106,7 @@ pub const PINNED_BEAD_BINDING_HASH: &str = "fnv1a64:66a303ca1f79e606";
 /// what made 44 of its 45 movements bead churn.  This pin costs no re-freeze of
 /// its own — the six commits that ever changed a floor value
 /// (2cba0a8 4a6943d 5b76722 adc4abb b0c61f7 f805ec7) are exactly the six that
-/// already had to change `PINNED_FAMILY_RULE_COUNT`.
+/// already had to change `PINNED_FAMILY_RULE_FLOOR`.
 ///
 /// The length is `PINNED_BEAD_FAMILY_TABLE_COUNT` on purpose: adding a family
 /// row is a compile error until both pins move together.
@@ -356,12 +356,12 @@ pub struct BeadProvenanceConfig {
     pub source_path: String,
     pub resolution_precedence: Vec<String>,
     pub allowed_bet_labels: Vec<String>,
-    pub bead_count: usize,
-    pub direct_owner_count: usize,
-    pub bet_label_count: usize,
-    pub exact_override_count: usize,
-    pub family_rule_count: usize,
-    pub binding_hash: String,
+    pub bead_count_floor: usize,
+    pub direct_owner_floor: usize,
+    pub bet_label_floor: usize,
+    pub exact_override_floor: usize,
+    pub family_rule_floor: usize,
+    pub rule_binding_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,7 +370,7 @@ pub struct BeadFamily {
     pub match_kind: String,
     pub pattern: String,
     pub decision_ids: Vec<String>,
-    pub expected_match_count: usize,
+    pub min_match_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -724,12 +724,12 @@ fn bead_provenance_from(table: &Table) -> Result<BeadProvenanceConfig, ReadError
             "source_path",
             "resolution_precedence",
             "allowed_bet_labels",
-            "bead_count",
-            "direct_owner_count",
-            "bet_label_count",
-            "exact_override_count",
-            "family_rule_count",
-            "binding_hash",
+            "bead_count_floor",
+            "direct_owner_floor",
+            "bet_label_floor",
+            "exact_override_floor",
+            "family_rule_floor",
+            "rule_binding_hash",
         ],
         ctx,
     )?;
@@ -737,12 +737,12 @@ fn bead_provenance_from(table: &Table) -> Result<BeadProvenanceConfig, ReadError
         source_path: get_str(table, "source_path", ctx)?,
         resolution_precedence: get_str_array(table, "resolution_precedence", ctx)?,
         allowed_bet_labels: get_str_array(table, "allowed_bet_labels", ctx)?,
-        bead_count: usize_field(table, "bead_count", ctx)?,
-        direct_owner_count: usize_field(table, "direct_owner_count", ctx)?,
-        bet_label_count: usize_field(table, "bet_label_count", ctx)?,
-        exact_override_count: usize_field(table, "exact_override_count", ctx)?,
-        family_rule_count: usize_field(table, "family_rule_count", ctx)?,
-        binding_hash: get_str(table, "binding_hash", ctx)?,
+        bead_count_floor: usize_field(table, "bead_count_floor", ctx)?,
+        direct_owner_floor: usize_field(table, "direct_owner_floor", ctx)?,
+        bet_label_floor: usize_field(table, "bet_label_floor", ctx)?,
+        exact_override_floor: usize_field(table, "exact_override_floor", ctx)?,
+        family_rule_floor: usize_field(table, "family_rule_floor", ctx)?,
+        rule_binding_hash: get_str(table, "rule_binding_hash", ctx)?,
     })
 }
 
@@ -755,7 +755,7 @@ fn bead_family_from(table: &Table, index: usize) -> Result<BeadFamily, ReadError
             "match_kind",
             "pattern",
             "decision_ids",
-            "expected_match_count",
+            "min_match_count",
         ],
         &ctx,
     )?;
@@ -764,7 +764,7 @@ fn bead_family_from(table: &Table, index: usize) -> Result<BeadFamily, ReadError
         match_kind: get_str(table, "match_kind", &ctx)?,
         pattern: get_str(table, "pattern", &ctx)?,
         decision_ids: get_str_array(table, "decision_ids", &ctx)?,
-        expected_match_count: usize_field(table, "expected_match_count", &ctx)?,
+        min_match_count: usize_field(table, "min_match_count", &ctx)?,
     })
 }
 
@@ -2920,26 +2920,30 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
         ));
     }
     for (field, actual, expected) in [
-        ("bead_count", policy.bead_count, PINNED_BEAD_COUNT),
         (
-            "direct_owner_count",
-            policy.direct_owner_count,
-            PINNED_DIRECT_OWNER_COUNT,
+            "bead_count_floor",
+            policy.bead_count_floor,
+            PINNED_BEAD_COUNT_FLOOR,
         ),
         (
-            "bet_label_count",
-            policy.bet_label_count,
-            PINNED_BET_LABEL_COUNT,
+            "direct_owner_floor",
+            policy.direct_owner_floor,
+            PINNED_DIRECT_OWNER_FLOOR,
         ),
         (
-            "exact_override_count",
-            policy.exact_override_count,
-            PINNED_EXACT_OVERRIDE_COUNT,
+            "bet_label_floor",
+            policy.bet_label_floor,
+            PINNED_BET_LABEL_FLOOR,
         ),
         (
-            "family_rule_count",
-            policy.family_rule_count,
-            PINNED_FAMILY_RULE_COUNT,
+            "exact_override_floor",
+            policy.exact_override_floor,
+            PINNED_EXACT_OVERRIDE_FLOOR,
+        ),
+        (
+            "family_rule_floor",
+            policy.family_rule_floor,
+            PINNED_FAMILY_RULE_FLOOR,
         ),
     ] {
         if actual != expected {
@@ -2951,17 +2955,17 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
         }
     }
     let declared_total = policy
-        .direct_owner_count
-        .saturating_add(policy.bet_label_count)
-        .saturating_add(policy.exact_override_count)
-        .saturating_add(policy.family_rule_count);
-    if declared_total != policy.bead_count {
+        .direct_owner_floor
+        .saturating_add(policy.bet_label_floor)
+        .saturating_add(policy.exact_override_floor)
+        .saturating_add(policy.family_rule_floor);
+    if declared_total != policy.bead_count_floor {
         violations.push(Violation::global(
             "bead_class_count_total",
             "bead_provenance",
             format!(
-                "declared resolution class counts sum to {declared_total}, bead_count is {}",
-                policy.bead_count
+                "declared resolution class floors sum to {declared_total}, bead_count_floor is {}",
+                policy.bead_count_floor
             ),
         ));
     }
@@ -2985,19 +2989,19 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
             ),
         ));
     }
-    // Pin the per-family floor SPLIT, not just its sum.  `family_rule_count` is
+    // Pin the per-family floor SPLIT, not just its sum.  `family_rule_floor` is
     // pinned and the floors must sum to it, so a rebalance between two families
     // passes every aggregate check; see `PINNED_BEAD_FAMILY_FLOORS`.
     let pinned_floors: BTreeMap<&str, usize> = PINNED_BEAD_FAMILY_FLOORS.iter().copied().collect();
     for family in &registry.bead_families {
         match pinned_floors.get(family.id.as_str()) {
-            Some(&pinned) if pinned == family.expected_match_count => {}
+            Some(&pinned) if pinned == family.min_match_count => {}
             Some(&pinned) => violations.push(Violation::global(
                 "bead_family_floor_pin",
                 "bead_provenance",
                 format!(
-                    "bead family {:?} declares expected_match_count {}, independently pinned floor is {pinned}",
-                    family.id, family.expected_match_count
+                    "bead family {:?} declares min_match_count {}, independently pinned floor is {pinned}",
+                    family.id, family.min_match_count
                 ),
             )),
             // Completeness guard.  Without it the law fails OPEN: a newly added
@@ -3072,7 +3076,7 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
             }
             _ => {}
         }
-        expected_family_total = expected_family_total.saturating_add(family.expected_match_count);
+        expected_family_total = expected_family_total.saturating_add(family.min_match_count);
         if family.decision_ids.is_empty()
             || !blank_items(&family.decision_ids).is_empty()
             || !duplicates(&family.decision_ids).is_empty()
@@ -3110,13 +3114,13 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
             }
         }
     }
-    if expected_family_total != policy.family_rule_count {
+    if expected_family_total != policy.family_rule_floor {
         violations.push(Violation::global(
             "bead_family_expected_total",
             "bead_provenance",
             format!(
-                "bead_family expected_match_count values sum to {expected_family_total}, declared family_rule_count is {}",
-                policy.family_rule_count
+                "bead_family min_match_count values sum to {expected_family_total}, declared family_rule_floor is {}",
+                policy.family_rule_floor
             ),
         ));
     }
@@ -3203,15 +3207,17 @@ fn validate_bead_resolution(
     // of records (`br sync --import-only` deletes DB rows absent from the
     // JSONL). Raising a floor is a deliberate ratchet and is never required to
     // make the tree green.
-    if beads.len() < registry.bead_provenance.bead_count || beads.len() < PINNED_BEAD_COUNT {
+    if beads.len() < registry.bead_provenance.bead_count_floor
+        || beads.len() < PINNED_BEAD_COUNT_FLOOR
+    {
         violations.push(Violation::global(
             "bead_source_count_below_floor",
             "bead_provenance",
             format!(
-                "{} has {} distinct records, declared floor is {}, independently pinned floor is {PINNED_BEAD_COUNT}",
+                "{} has {} distinct records, declared floor is {}, independently pinned floor is {PINNED_BEAD_COUNT_FLOOR}",
                 registry.bead_provenance.source_path,
                 beads.len(),
-                registry.bead_provenance.bead_count
+                registry.bead_provenance.bead_count_floor
             ),
         ));
     }
@@ -3229,23 +3235,23 @@ fn validate_bead_resolution(
     for (class, declared, pinned) in [
         (
             "direct_owner",
-            registry.bead_provenance.direct_owner_count,
-            PINNED_DIRECT_OWNER_COUNT,
+            registry.bead_provenance.direct_owner_floor,
+            PINNED_DIRECT_OWNER_FLOOR,
         ),
         (
             "bet_label",
-            registry.bead_provenance.bet_label_count,
-            PINNED_BET_LABEL_COUNT,
+            registry.bead_provenance.bet_label_floor,
+            PINNED_BET_LABEL_FLOOR,
         ),
         (
             "exact_override",
-            registry.bead_provenance.exact_override_count,
-            PINNED_EXACT_OVERRIDE_COUNT,
+            registry.bead_provenance.exact_override_floor,
+            PINNED_EXACT_OVERRIDE_FLOOR,
         ),
         (
             "family_rule",
-            registry.bead_provenance.family_rule_count,
-            PINNED_FAMILY_RULE_COUNT,
+            registry.bead_provenance.family_rule_floor,
+            PINNED_FAMILY_RULE_FLOOR,
         ),
     ] {
         let actual = resolution.class_counts.get(class).copied().unwrap_or(0);
@@ -3265,13 +3271,13 @@ fn validate_bead_resolution(
             .get(&family.id)
             .copied()
             .unwrap_or(0);
-        if actual < family.expected_match_count {
+        if actual < family.min_match_count {
             violations.push(Violation::global(
                 "bead_family_match_count_below_floor",
                 "bead_provenance",
                 format!(
                     "family {:?} selected {actual} beads, floor is {}",
-                    family.id, family.expected_match_count
+                    family.id, family.min_match_count
                 ),
             ));
         }
@@ -3284,22 +3290,22 @@ fn validate_bead_resolution(
     // pinned here as a function of the rules alone, keyed by rule rather than
     // by bead. No pane's bead can move it; a rule edit still must.
     let rule_hash = recompute_rule_binding_hash(registry);
-    if registry.bead_provenance.binding_hash != rule_hash {
+    if registry.bead_provenance.rule_binding_hash != rule_hash {
         violations.push(Violation::global(
             "bead_rule_binding_hash_mismatch",
             "bead_provenance",
             format!(
                 "registry rule-binding hash {:?}, recomputed {rule_hash:?}",
-                registry.bead_provenance.binding_hash
+                registry.bead_provenance.rule_binding_hash
             ),
         ));
     }
-    if rule_hash != PINNED_BEAD_BINDING_HASH {
+    if rule_hash != PINNED_RULE_BINDING_HASH {
         violations.push(Violation::global(
             "independent_bead_rule_binding_hash_mismatch",
             "bead_provenance",
             format!(
-                "recomputed rule-binding hash {rule_hash:?} differs from code pin {PINNED_BEAD_BINDING_HASH:?}"
+                "recomputed rule-binding hash {rule_hash:?} differs from code pin {PINNED_RULE_BINDING_HASH:?}"
             ),
         ));
     }
@@ -6252,13 +6258,13 @@ pub fn generate_document(registry: &ArchitectureRegistry, root: &Path) -> Result
     table_head(&mut out, &["Resolution floor", "Declared minimum"]);
     table_row(
         &mut out,
-        &["records", &format!("≥ {}", provenance.bead_count)],
+        &["records", &format!("≥ {}", provenance.bead_count_floor)],
     );
     for (tier, floor) in [
-        ("direct_owner", provenance.direct_owner_count),
-        ("bet_label", provenance.bet_label_count),
-        ("exact_override", provenance.exact_override_count),
-        ("family_rule", provenance.family_rule_count),
+        ("direct_owner", provenance.direct_owner_floor),
+        ("bet_label", provenance.bet_label_floor),
+        ("exact_override", provenance.exact_override_floor),
+        ("family_rule", provenance.family_rule_floor),
     ] {
         table_row(&mut out, &[&format!("`{tier}`"), &format!("≥ {floor}")]);
     }
@@ -6279,7 +6285,7 @@ pub fn generate_document(registry: &ArchitectureRegistry, root: &Path) -> Result
             .map(|label| format!("`{label}`"))
             .collect::<Vec<_>>()
             .join(", "),
-        provenance.binding_hash,
+        provenance.rule_binding_hash,
     ));
 
     heading(&mut out, 2, "Frozen source blocks");

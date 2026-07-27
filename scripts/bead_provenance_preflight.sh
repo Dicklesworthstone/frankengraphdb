@@ -6,7 +6,7 @@
 # resolve to a direct owner, bet label, exact override, or `[[bead_family]]`
 # rule in `registries/architecture_decisions.toml`. That binding is what ties
 # beads to architecture decisions, so it is not a bug. Each family also carries
-# an `expected_match_count`, and five cardinality declarations are FLOORS.
+# a `min_match_count`, and five cardinality declarations are FLOORS.
 #
 # TWO EVENTS RED THE TREE, AND THIS SCRIPT NOW PREDICTS BOTH:
 #
@@ -211,7 +211,7 @@ to get them back (an import deletes DB rows absent from this file; check for an
 floor to match a loss makes the loss permanent and invisible.
 
 You do NOT need to re-freeze the floors after a `br create`: creation only
-raises the observed counts. If you find yourself editing bead_count after a
+raises the observed counts. If you find yourself editing bead_count_floor after a
 create, stop — that is the equality behaviour fgdb-lzol removed, and putting it
 back reds every other pane.
 MSG

@@ -5,11 +5,12 @@
 //! and asserts that the public validator rejects the resulting graph.
 
 use registry_check::architecture::{
-    self, ALLOWED_RELATIONSHIP_KINDS, ArchitectureRegistry, PINNED_BEAD_BINDING_HASH,
-    PINNED_BEAD_COUNT, PINNED_BET_LABEL_COUNT, PINNED_BIBLIOGRAPHY_COUNT,
-    PINNED_BIBLIOGRAPHY_ID_HASH, PINNED_DECISION_COUNT, PINNED_DECISION_ID_HASH,
-    PINNED_DIRECT_OWNER_COUNT, PINNED_EXACT_OVERRIDE_COUNT, PINNED_EXTERNAL_REVIEW_DECISION_COUNT,
-    PINNED_EXTERNAL_REVIEW_HISTORY_HASH, PINNED_FAMILY_RULE_COUNT, PINNED_SEMANTIC_CONTRACT_HASH,
+    self, ALLOWED_RELATIONSHIP_KINDS, ArchitectureRegistry, PINNED_BEAD_COUNT_FLOOR,
+    PINNED_BET_LABEL_FLOOR, PINNED_BIBLIOGRAPHY_COUNT, PINNED_BIBLIOGRAPHY_ID_HASH,
+    PINNED_DECISION_COUNT, PINNED_DECISION_ID_HASH, PINNED_DIRECT_OWNER_FLOOR,
+    PINNED_EXACT_OVERRIDE_FLOOR, PINNED_EXTERNAL_REVIEW_DECISION_COUNT,
+    PINNED_EXTERNAL_REVIEW_HISTORY_HASH, PINNED_FAMILY_RULE_FLOOR, PINNED_RULE_BINDING_HASH,
+    PINNED_SEMANTIC_CONTRACT_HASH,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -164,8 +165,8 @@ fn architecture_bead_provenance_is_total_pinned_and_bidirectional() {
     // A floor: another pane's `br create` may legitimately have grown the
     // corpus since this pin was frozen, and that must not fail the suite.
     assert!(
-        first.len() >= PINNED_BEAD_COUNT,
-        "resolved {} beads, floor is {PINNED_BEAD_COUNT}",
+        first.len() >= PINNED_BEAD_COUNT_FLOOR,
+        "resolved {} beads, floor is {PINNED_BEAD_COUNT_FLOOR}",
         first.len()
     );
     assert!(
@@ -228,10 +229,10 @@ fn architecture_bead_provenance_is_total_pinned_and_bidirectional() {
         }
     }
     for (class, floor) in [
-        ("bet_label", PINNED_BET_LABEL_COUNT),
-        ("direct_owner", PINNED_DIRECT_OWNER_COUNT),
-        ("exact_override", PINNED_EXACT_OVERRIDE_COUNT),
-        ("family_rule", PINNED_FAMILY_RULE_COUNT),
+        ("bet_label", PINNED_BET_LABEL_FLOOR),
+        ("direct_owner", PINNED_DIRECT_OWNER_FLOOR),
+        ("exact_override", PINNED_EXACT_OVERRIDE_FLOOR),
+        ("family_rule", PINNED_FAMILY_RULE_FLOOR),
     ] {
         let actual = class_counts.get(class).copied().unwrap_or(0);
         assert!(
@@ -243,11 +244,11 @@ fn architecture_bead_provenance_is_total_pinned_and_bidirectional() {
     // edit must. The corpus-wide binding hash below is a projection, not a pin.
     assert_eq!(
         architecture::recompute_rule_binding_hash(&registry),
-        PINNED_BEAD_BINDING_HASH
+        PINNED_RULE_BINDING_HASH
     );
     assert_eq!(
-        registry.bead_provenance.binding_hash,
-        PINNED_BEAD_BINDING_HASH
+        registry.bead_provenance.rule_binding_hash,
+        PINNED_RULE_BINDING_HASH
     );
     assert!(
         architecture::recompute_bead_binding_hash(&first).starts_with("fnv1a64:"),
@@ -478,7 +479,7 @@ fn architecture_neg_rule_tables_and_resolution_pins() {
     );
 
     let mut binding = real_registry();
-    binding.bead_provenance.binding_hash = "fnv1a64:0000000000000000".into();
+    binding.bead_provenance.rule_binding_hash = "fnv1a64:0000000000000000".into();
     assert_code(&binding, "bead_rule_binding_hash_mismatch");
 
     // Raising a floor ABOVE the observed corpus must still fire. This is the
@@ -503,13 +504,13 @@ fn architecture_neg_rule_tables_and_resolution_pins() {
         .count();
 
     let mut count = real_registry();
-    count.bead_provenance.bead_count = observed_total + 1;
+    count.bead_provenance.bead_count_floor = observed_total + 1;
     let codes = violation_codes(&count);
     assert!(codes.contains("bead_count_pin"));
     assert!(codes.contains("bead_source_count_below_floor"));
 
     let mut class_count = real_registry();
-    class_count.bead_provenance.direct_owner_count = observed_direct + 1;
+    class_count.bead_provenance.direct_owner_floor = observed_direct + 1;
     let codes = violation_codes(&class_count);
     assert!(codes.contains("bead_count_pin"));
     assert!(codes.contains("bead_resolution_class_count_below_floor"));
@@ -520,7 +521,7 @@ fn architecture_neg_rule_tables_and_resolution_pins() {
         .iter_mut()
         .find(|family| family.id == "risk-governance")
         .expect("risk family exists")
-        .expected_match_count = observed_risk + 1;
+        .min_match_count = observed_risk + 1;
     assert_code(&family_count, "bead_family_match_count_below_floor");
 }
 
@@ -550,18 +551,18 @@ fn architecture_neg_bead_family_floor_rebalance_is_pinned() {
             .find(|family| family.id == id)
             .expect("family exists");
         assert_eq!(
-            family.expected_match_count, from,
+            family.min_match_count, from,
             "{id} floor moved; re-derive this mutation"
         );
-        family.expected_match_count = to;
+        family.min_match_count = to;
     }
     let total: usize = rebalanced
         .bead_families
         .iter()
-        .map(|family| family.expected_match_count)
+        .map(|family| family.min_match_count)
         .sum();
     assert_eq!(
-        total, PINNED_FAMILY_RULE_COUNT,
+        total, PINNED_FAMILY_RULE_FLOOR,
         "the rebalance must preserve the pinned sum, or it proves the wrong law"
     );
     let codes = violation_codes(&rebalanced);
@@ -1054,7 +1055,7 @@ fn projected_facts(registry: &ArchitectureRegistry) -> Vec<String> {
     let mut facts = vec![
         format!("`{}*`", header.decision_id_prefix),
         provenance.source_path.clone(),
-        provenance.binding_hash.clone(),
+        provenance.rule_binding_hash.clone(),
     ];
     for category in &header.allowed_categories {
         facts.push(format!("| `{category}` |"));
@@ -1069,11 +1070,11 @@ fn projected_facts(registry: &ArchitectureRegistry) -> Vec<String> {
         facts.push(format!("`{label}`"));
     }
     for floor in [
-        provenance.bead_count,
-        provenance.direct_owner_count,
-        provenance.bet_label_count,
-        provenance.exact_override_count,
-        provenance.family_rule_count,
+        provenance.bead_count_floor,
+        provenance.direct_owner_floor,
+        provenance.bet_label_floor,
+        provenance.exact_override_floor,
+        provenance.family_rule_floor,
     ] {
         facts.push(format!("≥ {floor}"));
     }
@@ -1170,7 +1171,7 @@ fn architecture_document_numbers_are_derived_not_typed() {
     );
 
     // A typed number would survive this; a derived one cannot.
-    registry.bead_provenance.bead_count = 402;
+    registry.bead_provenance.bead_count_floor = 402;
     let after = architecture::generate_document(&registry, &root).expect("generate");
     assert!(
         after.contains("≥ 402") && !after.contains("≥ 401"),

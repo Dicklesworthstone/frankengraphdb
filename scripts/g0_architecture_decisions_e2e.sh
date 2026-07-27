@@ -51,13 +51,13 @@ bead_policy_value() {
     END { if (!found) { print "bead_provenance key " key " not found" > "/dev/stderr"; exit 42 } }
   ' "$ADR_TOML"
 }
-EXPECT_BEAD_FLOOR="$(bead_policy_value bead_count)"
-EXPECT_RULE_BINDING_HASH="$(bead_policy_value binding_hash)"
+EXPECT_BEAD_FLOOR="$(bead_policy_value bead_count_floor)"
+EXPECT_RULE_BINDING_HASH="$(bead_policy_value rule_binding_hash)"
 
 echo "==> assert deterministic event and provenance coverage"
 test "$(rg -c '"event":"architecture_decision_checked"' "$FIRST")" -eq 256
 test "$(rg -c '"event":"source_block_checked"' "$FIRST")" -eq 2
-# `-ge`, not `-eq`. `bead_count` is a FLOOR over a corpus every pane writes; an
+# `-ge`, not `-eq`. `bead_count_floor` is a FLOOR over a corpus every pane writes; an
 # equality here would be a second copy of the defect fgdb-lzol fixes, in a gate
 # rather than in the checker, and would red this script for every pane the
 # moment any pane ran `br create`. What must hold exactly is the RULE-keyed
@@ -105,12 +105,12 @@ def bead_policy(path):
                 key, _, value = line.partition(" = ")
                 policy[key.strip()] = value.strip().strip('"')
     for required in (
-        "bead_count",
-        "binding_hash",
-        "direct_owner_count",
-        "bet_label_count",
-        "exact_override_count",
-        "family_rule_count",
+        "bead_count_floor",
+        "rule_binding_hash",
+        "direct_owner_floor",
+        "bet_label_floor",
+        "exact_override_floor",
+        "family_rule_floor",
     ):
         assert required in policy, f"bead_provenance is missing {required}"
     return policy
@@ -133,22 +133,24 @@ assert counts["source_block_checked"] == 2, counts
 # Floors, not equalities: `.beads/issues.jsonl` has N writers, so any pane's
 # `br create` legitimately raises these. Only the rule-keyed binding hash is
 # exact, because it is a function of the registry alone.
-assert counts["architecture_bead_provenance_indexed"] >= int(POLICY["bead_count"]), counts
+assert counts["architecture_bead_provenance_indexed"] >= int(POLICY["bead_count_floor"]), counts
 assert counts["architecture_violation"] == 0, counts
 
 registry = next(event for event in events if event["event"] == "architecture_registry_checked")
 assert registry["decision_count"] == 256, registry
-assert registry["bead_count"] >= int(POLICY["bead_count"]), registry
-assert registry["bead_rule_binding_hash"] == POLICY["binding_hash"], registry
+# `registry[...]` keys are NDJSON fields carrying OBSERVED values, so they keep
+# their `_count` names; `POLICY[...]` keys are the declared FLOORS in the TOML.
+assert registry["bead_count"] >= int(POLICY["bead_count_floor"]), registry
+assert registry["bead_rule_binding_hash"] == POLICY["rule_binding_hash"], registry
 assert registry["violations"] == 0 and registry["outcome"] == "pass", registry
 
 beads = [event for event in events if event["event"] == "architecture_bead_provenance_indexed"]
 class_counts = collections.Counter(event["resolution_class"] for event in beads)
 for resolution_class, floor_key in (
-    ("direct_owner", "direct_owner_count"),
-    ("bet_label", "bet_label_count"),
-    ("exact_override", "exact_override_count"),
-    ("family_rule", "family_rule_count"),
+    ("direct_owner", "direct_owner_floor"),
+    ("bet_label", "bet_label_floor"),
+    ("exact_override", "exact_override_floor"),
+    ("family_rule", "family_rule_floor"),
 ):
     assert class_counts[resolution_class] >= int(POLICY[floor_key]), (
         resolution_class,
