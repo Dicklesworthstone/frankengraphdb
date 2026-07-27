@@ -175,6 +175,34 @@ has ever opened therefore reports exactly like one that passed everything.
 So: if you touched anything that is not `.rs`, run `scripts/check.sh` rather
 than the piecemeal list.
 
+### Reading a gate — use the exit code, never a grep
+
+**The exit code is the verdict.** Every gate script here exits `0` only when
+every expected check executed and passed. Read `$?`. Do not decide a gate is
+green by grepping its output:
+
+```bash
+bash scripts/check.sh > gate.log 2>&1; rc=$?      # rc is the answer
+```
+
+`grep '^FAIL' gate.log` is the habit to unlearn, and it is why this section
+exists. MEASURED 2026-07-27 across `scripts/check.sh` plus the nine live
+`kind = "script"` gates in `registries/checker_index.toml`: **no gate emitted a
+line beginning with `FAIL` at column 0**, so that grep returned `0` on a red run
+of all ten. Three different failure tokens are in use (`RED`, `FAIL`, `ERROR`),
+under two indentation conventions, and **seven of the ten wrote the failure to
+stderr only** — so `gate.sh > log` and then reading `log` yields a plausible,
+complete-looking, all-green transcript of a red run. A pane read
+`scripts/check.sh` that way and landed a commit on it.
+
+`scripts/check.sh` has since been fixed (`fgdb-checksh-red-not-fail-vbhd`): its
+whole verdict transcript is on **stdout**, stderr carries diagnostics only, and
+every failed gate emits both an anchored `RED`/`UNRUN` line and an anchored
+`FAIL` alias line, so `grep -c '^RED'`, `'^UNRUN'`, `'^FAIL'` and `'^PASS'` each
+count exactly one thing. The other nine gates still have their own token and
+stream — until that is uniform, **the exit code is the only instrument that is
+right about all of them.**
+
 ### The `cargo test` gate (green-bar requirement)
 
 `cargo test` is a **hard gate**: it MUST exit `0` before any change is handed off or a bead is closed. The convenience wrapper `scripts/check.sh` runs `cargo fmt --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in order and stops on the first failure. When CI is added, wire `scripts/check.sh` as the CI test step rather than duplicating the commands.

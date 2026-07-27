@@ -21,6 +21,48 @@
 # wrapper reports every verdict before exiting, and a green summary is possible
 # only when every registered live artifact was actually executed and passed.
 #
+# -----------------------------------------------------------------------------
+# THE REPORTING CONTRACT (bead fgdb-checksh-red-not-fail-vbhd)
+# -----------------------------------------------------------------------------
+# THE EXIT CODE IS AUTHORITATIVE. 0 means every expected gate executed and
+# passed; nonzero means it did not. No text-matching habit is required to learn
+# that, and none of the tokens below may be trusted over the exit status.
+#
+# THE TRANSCRIPT LIVES ON STDOUT. Every per-gate verdict and every summary line
+# is written to stdout; stderr carries only the diagnostics explaining WHY a
+# gate failed. So `check.sh > gate.log` captures a complete, honest verdict
+# transcript, and `check.sh 2>/dev/null | ...` does not hide a failure.
+#
+# Each verdict line is ANCHORED AT COLUMN 0 and each anchored token counts
+# exactly one thing:
+#
+#   ^PASS   a gate that executed and passed
+#   ^RED    a gate that executed and failed
+#   ^UNRUN  a gate that was expected but never executed
+#   ^FAIL   a gate that did not pass — the union of ^RED and ^UNRUN, emitted as
+#           an alias line beside each so that a reader who greps FAIL (the token
+#           the g0 e2e scripts use) and a reader who greps RED both get a true
+#           answer instead of a silent zero
+#
+#   grep -c '^RED'  == red gates      grep -c '^FAIL' == red + unrun
+#   grep -c '^UNRUN' == unrun gates   grep -c '^PASS' == passed gates
+#
+# The overall verdict is the line `QUALITY GATE RED` or `ALL GATES GREEN`, and
+# `QUALITY GATE RED` is written to BOTH streams because it is the one line that
+# must reach every reader.
+#
+# WHY THIS IS SPELLED OUT. MEASURED 2026-07-27 against the emission functions
+# below, before the fix: RED and UNRUN went to stderr while PASS went to stdout,
+# and the token was RED where every other gate script in this repo says FAIL. On
+# the stdout of a run with a red core gate, a red registered gate and an unrun
+# registered gate:
+#     grep -c '^FAIL' -> 0     grep -c '^RED' -> 0     grep -c 'RED' -> 1
+# and on the stdout of an all-green run, the SAME three greps returned 0, 0 and
+# 1. The single unanchored hit was the substring in "REGISTE-RED LIVE GATES", so
+# no grep of any kind distinguished a red run from a green one, and a redirected
+# log was a plausible, complete-looking, all-green transcript of a red run. A
+# pane read a red run that way on 2026-07-27 and landed a commit on it.
+#
 # When CI is added, wire this script as the CI test step rather than
 # duplicating the commands.
 # =============================================================================
@@ -66,7 +108,9 @@ run_core_gate() {
   else
     LAST_GATE_RC=$?
     CORE_RED=$((CORE_RED + 1))
-    echo "RED core: $label (exit $LAST_GATE_RC)" >&2
+    # Both tokens, both anchored, both on stdout. See THE REPORTING CONTRACT.
+    echo "RED core: $label (exit $LAST_GATE_RC)"
+    echo "FAIL core: $label (exit $LAST_GATE_RC)"
   fi
 }
 
@@ -357,11 +401,14 @@ record_registered_result() {
       REGISTERED_EXECUTED=$((REGISTERED_EXECUTED + 1))
       REGISTERED_RED=$((REGISTERED_RED + 1))
       increment_registered_kind_executed "$kind"
-      echo "RED registered $kind $artifact — $detail" >&2
+      # Both tokens, both anchored, both on stdout. See THE REPORTING CONTRACT.
+      echo "RED registered $kind $artifact — $detail"
+      echo "FAIL registered $kind $artifact — $detail"
       ;;
     unrun)
       REGISTERED_UNRUN=$((REGISTERED_UNRUN + 1))
-      echo "UNRUN registered $kind $artifact — $detail" >&2
+      echo "UNRUN registered $kind $artifact — $detail"
+      echo "FAIL registered $kind $artifact — $detail"
       ;;
     *)
       echo "internal error: unknown registered outcome $outcome" >&2
@@ -583,7 +630,7 @@ print_registered_summary() {
   fi
   if [ "$REGISTERED_RED" -ne 0 ] || [ "$REGISTERED_UNRUN" -ne 0 ] \
     || [ "$REGISTERED_EXECUTED" -ne "$REGISTERED_EXPECTED" ]; then
-    echo "GATES RED: a registered live gate failed or was not executed" >&2
+    echo "GATES RED: a registered live gate failed or was not executed"
     return 1
   fi
   return 0
@@ -603,6 +650,87 @@ reset_registered_counters() {
   REGISTERED_BINARY_EXECUTED=0
   REGISTERED_OTHER_EXPECTED=0
   REGISTERED_SEQ=0
+}
+
+# THE CONTROL FOR THE REPORTING CONTRACT (bead fgdb-checksh-red-not-fail-vbhd).
+#
+# WHY IT CAPTURES THE STREAMS SEPARATELY, AND WHY THAT IS THE WHOLE POINT. Every
+# other assertion in this self-test runs its fixture under `>"$log" 2>&1`, which
+# MERGES the streams — so all of them passed, for months, over emission code that
+# sent PASS to stdout and RED to stderr. A merged log cannot see the defect: it
+# is a control outside the law's domain. This one redirects stdout and stderr to
+# different files and asserts only against stdout, which is the stream a reader
+# who types `check.sh > gate.log` actually keeps.
+#
+# It asserts the property in BOTH directions. Asserting only that a red run's
+# stdout carries the tokens would pass against emission code that printed them
+# unconditionally; the green half pins that they are absent when nothing failed.
+# Together they say the tokens DISCRIMINATE, which is the thing a reader relies
+# on and the thing that was false.
+#
+# MUTATION-PROVEN 2026-07-27, on a scratchpad copy, each mutation applied alone:
+#   restore `>&2` on the core RED line      -> "red-run stdout has 0 ^RED lines"
+#   restore `>&2` on the registered lines   -> "red-run stdout has 0 ^UNRUN lines"
+#   drop the FAIL alias lines               -> "red-run stdout has 0 ^FAIL lines"
+#   emit the tokens unconditionally         -> "green-run stdout has 1 ^FAIL lines"
+# Four mutations, four distinct failures, so no assertion here is decoration.
+verdict_stream_control() {
+  local work="$1"
+  local red_out="$work/verdict-red.out"
+  local red_err="$work/verdict-red.err"
+  local green_out="$work/verdict-green.out"
+
+  # A red run: one core gate red, one registered gate red, one registered gate
+  # unrun. Subshells, so the fixture cannot move this run's real counters.
+  (
+    reset_registered_counters
+    run_core_gate "control: a core gate that fails" false
+    record_registered_result script scripts/control-red.sh red "exit 23"
+    record_registered_result binary tools/control-unrun.rs unrun "no runner"
+    print_registered_summary
+  ) >"$red_out" 2>"$red_err"
+
+  # The same shape, all green.
+  (
+    reset_registered_counters
+    run_core_gate "control: a core gate that passes" true
+    record_registered_result script scripts/control-green.sh pass "exit 0"
+    print_registered_summary
+  ) >"$green_out" 2>/dev/null
+
+  verdict_token_case() { # file expected-count pattern label
+    local got
+    got="$(grep -cE "$3" "$1")"
+    if [ "$got" -ne "$2" ]; then
+      echo "SELF-TEST RED: $4 stdout has $got $3 lines, expected $2" >&2
+      return 1
+    fi
+    return 0
+  }
+
+  # A red run's stdout must carry every verdict, under both tokens.
+  #   ^RED   1 red core gate + 1 red registered gate
+  #   ^UNRUN 1 unrun registered gate
+  #   ^FAIL  the union: 2 red + 1 unrun
+  verdict_token_case "$red_out" 2 '^RED ' "red-run" || return 1
+  verdict_token_case "$red_out" 1 '^UNRUN ' "red-run" || return 1
+  verdict_token_case "$red_out" 3 '^FAIL ' "red-run" || return 1
+  verdict_token_case "$red_out" 0 '^PASS ' "red-run" || return 1
+
+  # A green run's stdout must carry none of them.
+  verdict_token_case "$green_out" 0 '^RED ' "green-run" || return 1
+  verdict_token_case "$green_out" 0 '^UNRUN ' "green-run" || return 1
+  verdict_token_case "$green_out" 0 '^FAIL ' "green-run" || return 1
+  verdict_token_case "$green_out" 2 '^PASS ' "green-run" || return 1
+
+  # The failure must not live on stderr alone, which is where it used to live.
+  # This pins the contract against a future re-mirroring: the transcript is
+  # stdout, stderr is diagnostics.
+  if grep -qE '^(RED|FAIL|UNRUN|PASS) ' "$red_err"; then
+    echo "SELF-TEST RED: a per-gate verdict line was written to stderr" >&2
+    return 1
+  fi
+  return 0
 }
 
 run_mutation_self_test() {
@@ -752,11 +880,15 @@ EOF
     return 1
   fi
 
+  verdict_stream_control "$work" || return 1
+
   echo "CHECK.SH MUTATION SELF-TEST PASS"
   echo "  failing registered gate: RED"
   echo "  registered gate without a runner: UNRUN and nonzero"
   echo "  cargo-test attribution: pass / red / unrun / ambiguous all separated"
   echo "  unrun cargo-test artifact: UNRUN and nonzero"
+  echo "  reporting contract: every verdict on stdout, under both ^RED and ^FAIL,"
+  echo "    and absent from a green run's stdout (streams captured separately)"
   echo "  evidence retained at $work"
 }
 
@@ -800,6 +932,10 @@ REGISTERED_SUMMARY_RC=0
 print_registered_summary || REGISTERED_SUMMARY_RC=$?
 if [ "$CORE_RED" -ne 0 ] || [ "$CORE_EXECUTED" -ne "$CORE_EXPECTED" ] \
   || [ "$REGISTERED_SUMMARY_RC" -ne 0 ]; then
+  # The overall verdict goes to BOTH streams: it is the one line that must
+  # reach a reader who captured only one of them. Every per-gate verdict above
+  # is on stdout, so the stdout transcript is complete on its own.
+  echo "QUALITY GATE RED"
   echo "QUALITY GATE RED" >&2
   exit 1
 fi
