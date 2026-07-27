@@ -2091,7 +2091,26 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     // separated the two second definition heads that an earlier union in the
     // same sentence had swallowed. 1_236 -> 1_237: fgdb-3qqv made the
     // source-defined RootSlotGenerationPair a confirmed wire candidate.
-    assert_eq!(baseline.top_level_candidates.len(), 1_237);
+    // 1_237 -> 1_250: fgdb-2qb6 (30eb809) distributed a prose definition across
+    // its conjunction, so the census reader stopped dropping every conjunct
+    // after the first. Thirteen candidates the source has always declared became
+    // visible for the first time. This is a reader repair, not new source: the
+    // Appendix A byte range and its sha256 are unchanged by that commit. The
+    // thirteen, so the narrowing is auditable row by row rather than by count:
+    //   top|LocalReadWitnessRef
+    //   top|ResultLeaseRef
+    //   top|MetaCertificateLedger
+    //   top|MetaAuthorizationEvidence<Tag>
+    //   top|AuthorizedDeltaPublicProvenance
+    //   top|RestoreSourceLeaseAcquireReceipt
+    //   top|CanonicalBootstrapOpenersRef<Role>
+    //   top|PreBootstrapDispatchPublicationEvidence<Action>
+    //   top|LocalRestoreStateRef
+    //   top|OperationalRestoreTerminalPinBasisRef<Role>
+    //   top|ReservedReservationUseRef<Role>
+    //   top|RestoreReconciliationEvidenceRef<Role>
+    //   top|ExternalCasRestoreServicePromotionManifestRef
+    assert_eq!(baseline.top_level_candidates.len(), 1_250);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT
@@ -4967,9 +4986,25 @@ fn idr_a20_residue_hosts_fields_and_reference_orders_are_nonvacuous() {
     );
     let catalog = real_appendix_catalog();
 
-    for (name, code) in [
-        ("LocalRestoreServicePrepareSpec", 0x0578),
-        ("ServiceCatalogPromotionReservationReceipt", 0x0579),
+    // `expected_outbound` is per host, not shared. It froze at 0 for both while
+    // the A20 residue set had no reference edges wired at all; 3cce2b2 wired the
+    // first one, so a single shared 0 would now be asserting that a landed,
+    // checker-accepted row does not exist. MEASURED at that commit rather than
+    // read off the prose: `registry-check appendix` and `registry-check
+    // identity` both exit 0, and identity reports
+    // "LocalRestoreServicePrepareSpec#activation_certificate_ref" as
+    // "violations":0,"outcome":"pass" -- so the row is legal and it is this
+    // expectation that is stale. Its target LocalRestoreActivationCertificate
+    // already held reservation 0x031b at disposition "existing", so the
+    // reservation bijection law is not engaged (it forbids ADDING a reservation
+    // for a non-StrongRef family, not minting at one that exists), and the row's
+    // own retention rule carries the order proof: 20 <= 24, edge backward-only.
+    // ServiceCatalogPromotionReservationReceipt stays at 0 and still has zero
+    // durable_fields rows, so the control half of this assertion is intact and
+    // the pair is not vacuous. Inbound stays 0 for both: nothing targets either.
+    for (name, code, expected_outbound) in [
+        ("LocalRestoreServicePrepareSpec", 0x0578, 1),
+        ("ServiceCatalogPromotionReservationReceipt", 0x0579, 0),
     ] {
         let kind = base
             .logical
@@ -4996,8 +5031,8 @@ fn idr_a20_residue_hosts_fields_and_reference_orders_are_nonvacuous() {
                         && field.target_schema_id.is_some()
                 })
                 .count(),
-            0,
-            "{name} has zero resolved outbound reference edges"
+            expected_outbound,
+            "{name} resolved-outbound-reference-edge count moved"
         );
         assert_eq!(
             base.fields
@@ -9121,6 +9156,48 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "ShardRestoreServiceOpenSpec",
                     "locally_verified_promotion_receipt_ref"
                 )
+                // The six exact-StrongRef rows 3cce2b2 landed for
+                // fgdb-a20-restore-promotion-ivsp, unblocked by the five mints.
+                // Same cohort and same reason as every row above: the A20
+                // promotion sweep was released after the erratum, so these are
+                // not part of the pre-erratum namespace the historical witness
+                // reconstructs. Each is admitted on its own evidence, not on the
+                // cohort's reputation -- all six are `[[field]]` rows added by
+                // that one commit, each carries the a20:2603 source anchor, and
+                // `registry-check identity` reports every one of them
+                // "violations":0,"outcome":"pass", so what is being excluded
+                // here is a VALID row that is merely younger than the witness.
+                // Two of these hosts (RestoreShardOperationalAck,
+                // ShardRestoreReopenConfirmSpec) and the third
+                // (LocalRestoreServicePrepareSpec, via its
+                // expected_local_restore_state and
+                // promotion_authority_profile_recipe rows above) are already in
+                // this tranche, which is the independent check that the cohort
+                // boundary is drawn where the arc is, not where this repair is.
+                | (
+                    "GlobalRestoreServiceCompletionSpec",
+                    "meta_independent_reopen_proof_ref"
+                )
+                | (
+                    "LocalRestoreServicePrepareSpec",
+                    "activation_certificate_ref"
+                )
+                | (
+                    "LocalRestoreServicePromotionSpec",
+                    "prepare_certificate_ref"
+                )
+                | (
+                    "RestoreShardOperationalAck",
+                    "reopen_publication_certificate_ref"
+                )
+                | (
+                    "RestoreShardOperationalAck",
+                    "independent_reopen_proof_ref"
+                )
+                | (
+                    "ShardRestoreReopenConfirmSpec",
+                    "independent_reopen_proof_ref"
+                )
         )
     };
     // The l6xd owner ruling makes these ten embedded AuthorityBoundHeader
@@ -9731,7 +9808,15 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // field row is post-erratum via post_erratum_a12_exact_order_field (measured:
         // 11 rows in, 0 out), so the post-erratum cohort is one smaller. The
         // reconstruction is unchanged at 225 rows; only the cohort denominator moves.
-        pre_erratum.fields.len() + 750,
+        // 750 -> 756 (fgdb-a20-restore-promotion-ivsp, 3cce2b2): six exact-StrongRef
+        // field rows landed, all six admitted to post_erratum_a20_promotion_field_tranche
+        // and enumerated there. THE RECONSTRUCTION IS AGAIN UNCHANGED AT 225 ROWS, and
+        // that is the check on the narrowing rather than a restatement of it: if the
+        // filter had admitted one row too many the reconstruction would read 224, one
+        // too few and 226, and either way this assert fails instead of the hash
+        // silently moving. current_field_count carries all six (975 -> 981), so the
+        // denominator absorbs exactly what the filter removed and nothing else.
+        pre_erratum.fields.len() + 756,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
     );
@@ -15231,9 +15316,18 @@ fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
         })
         .flat_map(|row| row.affected_source_keys.iter().cloned())
         .collect();
+    // 202 -> 215: the same thirteen candidates fgdb-2qb6 (30eb809) recovered by
+    // distributing a prose definition across its conjunction, enumerated at the
+    // top_level_candidates assert in
+    // `appendix_a_catalog_reservation_and_source_census_is_exact`. Each is a
+    // definition head the source declares without a structural body, so each
+    // enters this control exactly once and the two deltas are the same thirteen
+    // rows, not two coincident counts. The control is still a control: it moved
+    // by a reader repair that made already-declared source visible, and the
+    // Appendix A byte range and sha256 are unchanged by that commit.
     assert_eq!(
         global_bodyless.len(),
-        202,
+        215,
         "the Appendix-wide definition-without-body control moved"
     );
     let a12_bodyless: BTreeSet<_> = a12
