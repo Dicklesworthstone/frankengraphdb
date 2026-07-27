@@ -28,10 +28,19 @@
 //! row ("every gate names its operation class in the operation-cost registry").
 //!
 //! Closure — the scan set is an allowlist and the exclude set is a denylist,
-//! and neither is self-validating. Two laws keep them honest: every prose file
-//! in the declared closure directories must be named by one of them, and every
-//! `presence = "required"` exclusion must still name a file that exists. An
-//! exclusion that no longer matches anything is deleted, not carried.
+//! and neither is self-validating. Three laws keep them honest: every prose
+//! file ANYWHERE under a declared closure root — the walk is recursive — must
+//! be named by one of them; every `presence = "required"` exclusion must still
+//! name a file that exists; and every `presence = "required"` closure prune
+//! must still name a directory that exists. A rule that no longer matches
+//! anything is deleted, not carried, whether it widens or narrows.
+//!
+//! The walk became recursive for fgdb-claims-lint-scan-set-not-total-nldg.
+//! Reading each root one level deep made the law total over the corpus as it
+//! stood and blind everywhere else: MEASURED 2026-07-26, all 11 tracked `.md`
+//! sat in `.` or `docs/`, while the repository had 50 tracked directories below
+//! depth 1 in which a `.md` drew no hit at all. A law that holds only because
+//! of where files happen to sit today is a coincidence, not a law.
 
 use crate::toml::{
     self, ReadError, get_opt_str, get_str, get_str_array, get_table, get_table_array,
@@ -62,6 +71,20 @@ pub struct Exclude {
     pub presence: Presence,
 }
 
+/// A directory the closure walk does not descend into.
+///
+/// The walk is recursive, so without this a build-output tree would drag every
+/// vendored `.md` of every dependency into the closure obligation. A prune is a
+/// narrowing of the law and is held to the same discipline as an exclusion: it
+/// carries a reason, and a `presence = "required"` prune whose directory does
+/// not exist is a dead rule that must be deleted rather than carried.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Prune {
+    pub dir: String,
+    pub reason: String,
+    pub presence: Presence,
+}
+
 /// A declared region where a bare number is a load-bearing claim: a markdown
 /// table under `heading` in `file`, every row of which must cite a resolvable
 /// claim marker. `unmarked_rows` is the ledger of rows that do not yet, keyed
@@ -79,6 +102,7 @@ pub struct LintConfig {
     pub scan: Vec<String>,
     pub excludes: Vec<Exclude>,
     pub closure_dirs: Vec<String>,
+    pub closure_prunes: Vec<Prune>,
     pub gate_tables: Vec<GateTable>,
 }
 
@@ -97,6 +121,9 @@ pub enum HitKind {
     UnclaimedProse,
     /// A `presence = "required"` exclusion names a path that does not exist.
     DeadExclude,
+    /// A `presence = "required"` closure prune names a directory that does not
+    /// exist: the walk is narrowed by a rule that no longer narrows anything.
+    DeadPrune,
 }
 
 impl HitKind {
@@ -107,6 +134,7 @@ impl HitKind {
             HitKind::DeadGateExemption => "dead_gate_exemption",
             HitKind::UnclaimedProse => "unclaimed_prose",
             HitKind::DeadExclude => "dead_exclude",
+            HitKind::DeadPrune => "dead_closure_prune",
         }
     }
 }
@@ -233,6 +261,52 @@ pub fn load_config(path: &Path) -> Result<LintConfig, LintError> {
         });
     }
 
+    let mut closure_prunes = Vec::new();
+    for (i, t) in get_table_array(&root, "closure_prune", "claims_lint.toml")?
+        .iter()
+        .enumerate()
+    {
+        let ctx = format!("claims_lint.toml.closure_prune[{i}]");
+        let dir = get_str(t, "dir", &ctx)?;
+        let reason = get_str(t, "reason", &ctx)?;
+        if reason.trim().is_empty() {
+            return Err(LintError {
+                msg: format!("{ctx}: a closure prune without a reason is a schema error"),
+            });
+        }
+        if dir.trim().is_empty() || dir.contains("..") {
+            return Err(LintError {
+                msg: format!("{ctx}: dir {dir:?} must be a non-empty relative directory"),
+            });
+        }
+        let presence = match get_opt_str(t, "presence", &ctx)?.as_deref() {
+            None | Some("required") => Presence::Required,
+            Some("optional") => Presence::Optional,
+            Some(other) => {
+                return Err(LintError {
+                    msg: format!(
+                        "{ctx}: presence {other:?} is not one of \"required\" | \"optional\""
+                    ),
+                });
+            }
+        };
+        if closure_dirs.contains(&dir) {
+            return Err(LintError {
+                msg: format!("{ctx}: {dir:?} is both a closure root and pruned from the walk"),
+            });
+        }
+        if closure_prunes.iter().any(|p: &Prune| p.dir == dir) {
+            return Err(LintError {
+                msg: format!("{ctx}: {dir:?} is pruned twice"),
+            });
+        }
+        closure_prunes.push(Prune {
+            dir,
+            reason,
+            presence,
+        });
+    }
+
     let mut gate_tables = Vec::new();
     for (i, t) in get_table_array(&root, "gate_table", "claims_lint.toml")?
         .iter()
@@ -275,6 +349,7 @@ pub fn load_config(path: &Path) -> Result<LintConfig, LintError> {
         scan,
         excludes,
         closure_dirs,
+        closure_prunes,
         gate_tables,
     })
 }
@@ -529,36 +604,77 @@ pub fn run(
         .map(String::as_str)
         .chain(config.excludes.iter().map(|e| e.path.as_str()))
         .collect();
+    // The walk is RECURSIVE. It used to read each closure directory one level
+    // deep, which made the law total over the directories that happened to hold
+    // prose and blind everywhere else. MEASURED 2026-07-26 at HEAD b77982e: all
+    // 11 tracked `.md` sit in `.` or `docs/`, so the one-level law was total
+    // over the corpus as it stood — but the repository has 50 tracked
+    // directories below depth 1, and a `.md` written into any of them was in
+    // neither list and drew no hit. A file with the exact text the lint exists
+    // to catch, written to `crates/fgdb-bigint/README.md`, left
+    // `registry-check all` at `failures: 0, outcome: pass`, exit 0.
+    let pruned: BTreeSet<&str> = config
+        .closure_prunes
+        .iter()
+        .map(|p| p.dir.as_str())
+        .collect();
+    // Deduplicated across roots: with a recursive walk, `docs` is reachable
+    // from `.`, and a file must be one closure obligation, not two.
+    let mut found = BTreeSet::new();
     for dir in &config.closure_dirs {
         let abs = if dir == "." {
             root.to_path_buf()
         } else {
             root.join(dir)
         };
-        let entries = std::fs::read_dir(&abs).map_err(|e| LintError {
-            msg: format!("{}: closure directory cannot be read: {e}", abs.display()),
-        })?;
-        let mut found = BTreeSet::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| LintError {
-                msg: format!("{}: {e}", abs.display()),
-            })?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // Hidden entries are not deliverables (this also drops the
-            // `._*.md` AppleDouble forks that sit beside the plan documents).
-            if name.starts_with('.') || !name.ends_with(".md") {
-                continue;
-            }
-            if !entry.path().is_file() {
-                continue;
-            }
-            found.insert(if dir == "." {
-                name
+        let mut found_here = BTreeSet::new();
+        let mut stack = vec![(
+            abs.clone(),
+            if dir == "." {
+                String::new()
             } else {
-                format!("{dir}/{name}")
-            });
+                format!("{dir}/")
+            },
+        )];
+        while let Some((cur, prefix)) = stack.pop() {
+            let entries = std::fs::read_dir(&cur).map_err(|e| LintError {
+                msg: format!("{}: closure directory cannot be read: {e}", cur.display()),
+            })?;
+            for entry in entries {
+                let entry = entry.map_err(|e| LintError {
+                    msg: format!("{}: {e}", cur.display()),
+                })?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                // Hidden entries are not deliverables (this also drops the
+                // `._*.md` AppleDouble forks that sit beside the plan documents).
+                if name.starts_with('.') {
+                    continue;
+                }
+                let rel = format!("{prefix}{name}");
+                let path = entry.path();
+                // file_type() describes the ENTRY, not its target, so a
+                // symlinked directory is neither descended into nor counted.
+                // A recursive walk that followed links could loop forever, and
+                // a linked-in document is not this repository's deliverable.
+                // There are no symlinks in the tree today (measured: 0 outside
+                // .git) — this is here so that stays true by construction.
+                let ft = entry.file_type().map_err(|e| LintError {
+                    msg: format!("{}: {e}", path.display()),
+                })?;
+                if ft.is_dir() {
+                    if pruned.contains(rel.as_str()) {
+                        continue;
+                    }
+                    stack.push((path, format!("{rel}/")));
+                    continue;
+                }
+                if !name.ends_with(".md") || !ft.is_file() {
+                    continue;
+                }
+                found_here.insert(rel);
+            }
         }
-        if found.is_empty() {
+        if found_here.is_empty() {
             return Err(LintError {
                 msg: format!(
                     "{}: closure directory holds no prose — the closure law would be vacuous here",
@@ -566,17 +682,18 @@ pub fn run(
                 ),
             });
         }
-        for rel in found {
-            census.prose_files_seen += 1;
-            if !claimed.contains(rel.as_str()) {
-                hits.push(LintHit {
-                    kind: HitKind::UnclaimedProse,
-                    file: rel.clone(),
-                    line: 0,
-                    subject: rel,
-                    text: "prose artifact is neither in claims_lint.toml lint.scan nor excluded with a reason".into(),
-                });
-            }
+        found.extend(found_here);
+    }
+    for rel in found {
+        census.prose_files_seen += 1;
+        if !claimed.contains(rel.as_str()) {
+            hits.push(LintHit {
+                kind: HitKind::UnclaimedProse,
+                file: rel.clone(),
+                line: 0,
+                subject: rel,
+                text: "prose artifact is neither in claims_lint.toml lint.scan nor excluded with a reason".into(),
+            });
         }
     }
 
@@ -589,6 +706,19 @@ pub fn run(
                 line: 0,
                 subject: ex.path.clone(),
                 text: "exclusion names a path that does not exist; delete it rather than carrying a rule that matches nothing".into(),
+            });
+        }
+    }
+
+    // ---- the prune list's own liveness, on the same terms as the denylist ----
+    for p in &config.closure_prunes {
+        if p.presence == Presence::Required && !root.join(&p.dir).is_dir() {
+            hits.push(LintHit {
+                kind: HitKind::DeadPrune,
+                file: "registries/claims_lint.toml".into(),
+                line: 0,
+                subject: p.dir.clone(),
+                text: "closure prune names a directory that does not exist; delete it rather than carrying a rule that narrows nothing".into(),
             });
         }
     }

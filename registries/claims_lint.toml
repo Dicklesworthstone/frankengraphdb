@@ -31,11 +31,14 @@
 # registry"), so it is the unit the lint uses.
 #
 # CLOSURE. `scan` is an allowlist and `[[exclude]]` is a denylist; neither
-# validates itself. Two laws keep them honest:
-#   * every non-hidden `*.md` in a `closure_dirs` directory must be named by
-#     `scan` or by an `[[exclude]]` — an unclaimed prose artifact fails;
+# validates itself. Three laws keep them honest:
+#   * every non-hidden `*.md` ANYWHERE under a `closure_dirs` root — the walk is
+#     recursive — must be named by `scan` or by an `[[exclude]]`; an unclaimed
+#     prose artifact fails;
 #   * every `presence = "required"` exclusion must still name a path that
-#     exists — an exclusion that matches nothing is deleted, not carried.
+#     exists — an exclusion that matches nothing is deleted, not carried;
+#   * every `presence = "required"` `[[closure_prune]]` must still name a
+#     directory that exists — a prune that narrows nothing is deleted too.
 # Adding an exclusion requires a reason string; an exclusion without a reason
 # is a schema error, and one that is also in `scan` is a contradiction.
 #
@@ -65,11 +68,37 @@ scan = [
 ]
 
 # Directories whose prose must be wholly accounted for by `scan` + `[[exclude]]`.
-# Non-recursive, and hidden entries are skipped (this is also what drops the
-# `._*.md` AppleDouble forks beside the plan documents). The tracked-file
-# closure over the whole repository is scripts/check.sh's file-coverage gate;
-# this one closes the hole in this lint's own aim.
-closure_dirs = [".", "docs"]
+# RECURSIVE from each root; hidden entries are skipped (this is also what drops
+# the `._*.md` AppleDouble forks beside the plan documents), and
+# `[[closure_prune]]` below declares the subtrees the walk does not enter.
+#
+# It used to be non-recursive over roots [".", "docs"], which made the law total
+# over the corpus as it stood and blind everywhere else. MEASURED 2026-07-26 at
+# b77982e: all 11 tracked `.md` are in `.` or `docs/`, so nothing was
+# unaccounted for -- but the repository has 50 tracked directories below depth 1,
+# and a `.md` written into any of them drew no hit at all.
+# `crates/fgdb-bigint/README.md` carrying the exact text this lint exists to
+# catch left `registry-check all` at `failures: 0, outcome: pass`, exit 0.
+# `docs` is no longer listed: the recursive walk from `.` reaches it, and
+# listing it as well would only make its files a closure obligation twice.
+#
+# The tracked-file closure over the whole repository is still scripts/check.sh's
+# file-coverage gate; this one closes the hole in this lint's own aim, in the
+# checker, where it fires without anyone running the wrapper.
+closure_dirs = ["."]
+
+# ---------------------------------------------------------------------------
+# Subtrees the recursive closure walk does not enter. A prune is a NARROWING of
+# the law, so it is held to the denylist's discipline: it carries a reason, and
+# a `presence = "required"` prune whose directory is gone is a dead rule that
+# fails rather than being carried. A directory cannot be both a closure root and
+# pruned.
+# ---------------------------------------------------------------------------
+
+[[closure_prune]]
+dir = "target"
+presence = "optional"
+reason = "Cargo build output. It is gitignored and normally lives outside the repository (CARGO_TARGET_DIR=/data/tmp/cargo-target), but a plain `cargo build` puts it here, and it then holds every vendored dependency's own prose. presence=optional because it is absent in a clean checkout and in the swarm's usual configuration."
 
 # ---------------------------------------------------------------------------
 # Direction 2: regions where a bare number is the claim.

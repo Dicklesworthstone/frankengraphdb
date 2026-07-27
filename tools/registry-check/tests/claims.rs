@@ -823,6 +823,105 @@ fn claims_neg_unclaimed_prose() {
 }
 
 #[test]
+fn claims_neg_unclaimed_prose_below_the_closure_root() {
+    // THE DEPTH OF THE LAW, which is what fgdb-claims-lint-scan-set-not-total-nldg
+    // is actually about. The closure walk used to read each root one level deep.
+    // MEASURED 2026-07-26 at b77982e that made it total over the corpus as it
+    // stood -- all 11 tracked `.md` sit in `.` or `docs/` -- and blind
+    // everywhere else: the repository has 50 tracked directories below depth 1,
+    // and `crates/fgdb-bigint/README.md` carrying the exact text this lint
+    // exists to catch left `registry-check all` at `failures: 0, outcome: pass`,
+    // exit 0. A law that is total only by where files happen to sit today is a
+    // coincidence, not a law.
+    let f = LintFixture::build("unclaimed-deep");
+    std::fs::create_dir_all(f.root.join("crates/demo/notes")).expect("nested dirs");
+    std::fs::write(
+        f.root.join("crates/demo/notes/DESIGN.md"),
+        "This guarantees FG-INV-01 and is proven correct.\n",
+    )
+    .expect("add nested prose");
+    let (hits, census) = f.run().expect("lint runs");
+    // 3 prose files -> 4, 0 hits -> 1, and the hit names the nested path.
+    assert_eq!(census.prose_files_seen, 4, "{census:?}");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].kind, lint::HitKind::UnclaimedProse);
+    assert_eq!(hits[0].subject, "crates/demo/notes/DESIGN.md");
+
+    // Naming it settles it, exactly as it does at the root: the file becomes a
+    // scanned artifact and the corpus is accounted for again.
+    f.write_config(
+        &["README.md", "docs/GUIDE.md", "crates/demo/notes/DESIGN.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    let (hits, census) = f.run().expect("lint runs");
+    assert_eq!(census.prose_files_seen, 4, "{census:?}");
+    assert_eq!(census.files_scanned, 3, "{census:?}");
+    assert!(
+        hits.iter().all(|h| h.kind != lint::HitKind::UnclaimedProse),
+        "{hits:?}"
+    );
+}
+
+#[test]
+fn claims_closure_prune_narrows_the_walk_and_must_stay_live() {
+    // A recursive walk needs one declared escape or a build-output tree drags
+    // every vendored dependency's prose into the obligation. `[[closure_prune]]`
+    // is that escape, and it is held to the denylist's discipline: it carries a
+    // reason, and a `presence = "required"` prune whose directory is gone is a
+    // dead rule. Both halves are proven here off the SAME fixture, so the flag
+    // is the whole difference.
+    let f = LintFixture::build("closure-prune");
+    std::fs::create_dir_all(f.root.join("build/doc")).expect("build dir");
+    std::fs::write(
+        f.root.join("build/doc/VENDORED.md"),
+        "Vendored dependency prose that guarantees FG-INV-01.\n",
+    )
+    .expect("add vendored prose");
+
+    // Without a prune the walk reaches it and it is unclaimed: 3 -> 4, 0 -> 1.
+    let (hits, census) = f.run().expect("lint runs");
+    assert_eq!(census.prose_files_seen, 4, "{census:?}");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].subject, "build/doc/VENDORED.md");
+
+    // With it, the subtree is not walked at all: back to 3 prose files, 0 hits.
+    f.write_config(
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n\n\
+         [[closure_prune]]\ndir = \"build\"\nreason = \"build output\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    let (hits, census) = f.run().expect("lint runs");
+    assert_eq!(census.prose_files_seen, 3, "{census:?}");
+    assert!(hits.is_empty(), "{hits:?}");
+
+    // A required prune that names nothing narrows nothing, and says so.
+    f.write_config(
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n\n\
+         [[closure_prune]]\ndir = \"build\"\nreason = \"build output\"\n\n\
+         [[closure_prune]]\ndir = \"vanished\"\nreason = \"a directory that is gone\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    let hits = f.hits_of(lint::HitKind::DeadPrune);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].subject, "vanished");
+    assert_eq!(hits[0].kind.code(), "dead_closure_prune");
+
+    // presence = "optional" is the declared escape, same absent path.
+    f.write_config(
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n\n\
+         [[closure_prune]]\ndir = \"build\"\nreason = \"build output\"\n\n\
+         [[closure_prune]]\ndir = \"vanished\"\npresence = \"optional\"\n\
+         reason = \"absent in a clean checkout\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    assert!(f.hits_of(lint::HitKind::DeadPrune).is_empty());
+}
+
+#[test]
 fn claims_neg_dead_exclude() {
     // The denylist's own liveness. An exclusion is a narrowing of the lint;
     // one that matches nothing narrows it invisibly, which is how an allowlist
