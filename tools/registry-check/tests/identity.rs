@@ -13215,6 +13215,31 @@ fn idr_a21_silent_member_bearing_records_are_wire_envelopes() {
 }
 
 #[test]
+fn idr_a21_audit_ticket_admission_spec_is_wire_envelope() {
+    let r = real_identity();
+    let expected = [("AuditTicketAdmissionSpec", 0x0540)];
+    for (name, wire_type_id) in expected {
+        let wire = r
+            .wire
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("missing ruled a21 wire record {name}"));
+        assert_eq!(wire.wire_type_id, wire_type_id, "{name} code drift");
+        assert_eq!(wire.kind, "record", "{name} must remain a record envelope");
+        assert_eq!(wire.status, "reserved");
+        assert_eq!(
+            wire.allowed_containing_schemas,
+            [name],
+            "{name} must keep its exact self-only closure"
+        );
+        assert!(
+            r.logical.iter().all(|row| row.name != name),
+            "{name} must not spend a logical object-kind code"
+        );
+    }
+}
+
+#[test]
 fn idr_wire_tag_declares_reference_semantics() {
     let base = real_identity();
     let base_codes = codes_without_assignment_drift(&base);

@@ -5548,3 +5548,12 @@ status = "reserved"
 encoding_context = "a21:2657 source-confirmed 5-member record; the complete structural body is committed by this wire envelope, no StrongRef targets the family, and no member is promoted to an independent tagged union"
 allowed_containing_schemas = ["DurableCapabilityRetentionResolutionBasis"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0540
+name = "AuditTicketAdmissionSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "a21:2713 source-confirmed 5-member record; the complete structural body is committed by this wire envelope, no StrongRef targets the family, and no member is promoted to an independent tagged union"
+allowed_containing_schemas = ["AuditTicketAdmissionSpec"]
+max_size_bytes = 16777216

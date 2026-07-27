@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
 
 [target_manifest]
-target_count = 3380
+target_count = 3381
 projection_fallback_count = 111
-target_source_assignment_sha256 = "38a3c91702820d28ec2cabb86ef12dd8e3350d8f2fb3050cc37701d506236768"
+target_source_assignment_sha256 = "fd92bb750dcd1514be8debba7e84bec7c63c4653fff6a06905cfced4a49035fd"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -49196,7 +49196,7 @@ symbol = "AuditTicketAdmissionSpec"
 generic_signature = ""
 source_key = "top|AuditTicketAdmissionSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2713"]
 
 [[top_level_candidate]]
@@ -104756,6 +104756,17 @@ encoding_context = "a21:2657 source-confirmed 5-member record; the complete stru
 allowed_containing_schemas = ["DurableCapabilityRetentionResolutionBasis"]
 max_size_bytes = 16777216
 
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:audit-ticket-admission-spec"
+wire_type_id = 0x0540
+name = "AuditTicketAdmissionSpec"
+kind = "record"
+status = "reserved"
+encoding_context = "a21:2713 source-confirmed 5-member record; the complete structural body is committed by this wire envelope, no StrongRef targets the family, and no member is promoted to an independent tagged union"
+allowed_containing_schemas = ["AuditTicketAdmissionSpec"]
+max_size_bytes = 16777216
+
 [[union]]
 slice_id = "a12"
 row_id = "a12:union:local-constraint-reservation-record-state-7357ce85cf25236e"
@@ -105507,5 +105518,13 @@ row_id = "a21:target:wire-type-durable-capability-retention-resolution-basis"
 target_row_id = "a21:wire-type:durable-capability-retention-resolution-basis"
 slice_id = "a21"
 source_key = "top|DurableCapabilityRetentionResolutionBasis"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-audit-ticket-admission-spec"
+target_row_id = "a21:wire-type:audit-ticket-admission-spec"
+slice_id = "a21"
+source_key = "top|AuditTicketAdmissionSpec"
 target_kind = "wire-type"
 definition_status = "declared"
