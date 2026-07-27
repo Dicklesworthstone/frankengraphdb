@@ -1164,6 +1164,12 @@ fn starts_with_word(value: &str, word: &str) -> bool {
             .is_none_or(|byte| !is_identifier_continue(*byte))
 }
 
+/// The one connector across which a prose definition distributes to an earlier
+/// conjunct.  Deliberately exact: measured over all 13 conjunction definition
+/// sites in Appendix A, the trailing text of the first conjunct is " and " in
+/// 13 of 13.  A looser predicate would start claiming list separators.
+const CONJUNCTION_CONNECTOR: &str = "and";
+
 fn has_definition_cue(value: &str) -> bool {
     const CUES: [&str; 22] = [
         "is",
@@ -1486,6 +1492,44 @@ fn prose_schema_links(
                     }
                     scan += 1;
                 }
+            }
+            // A conjunction distributes the definition.  In "`A` and `B` are
+            // <definition>" only B's trailing text carries the cue, so
+            // `prose_definition_head` never sees A as a head and A is dropped
+            // from the census entirely (measured 13 of 13 such sites).  Walk
+            // back from a CONFIRMED head across pure " and " connectors and give
+            // every co-named conjunct the same right-hand side.
+            //
+            // Fail-closed by construction: this pass is anchored to a head that
+            // was already confirmed by the unchanged reader above, so it can only
+            // ATTACH names to an existing definition and can never invent one.
+            // It stops at the first fragment that is not a bare type display, is
+            // already a head in its own right, or is joined by anything other
+            // than the bare conjunction.
+            let mut co_heads = Vec::new();
+            let mut back = position;
+            while back > 0 {
+                let previous_index = indexes[back - 1];
+                let previous = &fragments[previous_index];
+                if normalize_whitespace(&previous.after) != CONJUNCTION_CONNECTOR {
+                    break;
+                }
+                if prose_definition_head(previous).is_some() {
+                    break;
+                }
+                let Some(co_name) = simple_type_display(&previous.text) else {
+                    break;
+                };
+                co_heads.push((co_name, previous_index));
+                back -= 1;
+            }
+            for (co_name, co_index) in co_heads.into_iter().rev() {
+                links.push(ProseLink {
+                    display_name: co_name,
+                    owner_fragment: co_index,
+                    rhs_fragments: rhs_fragments.clone(),
+                    cue: cue.clone(),
+                });
             }
             links.push(ProseLink {
                 display_name,

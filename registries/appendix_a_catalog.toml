@@ -162,16 +162,16 @@ predecessor = "a02"
 successor = "a04"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 89
-top_level_candidate_ids_sha256 = "afb3e8e0274c5192fe6de05504e4ba2355e9ff797bb4ed853a23e3ae3ac7920c"
+top_level_candidate_count = 91
+top_level_candidate_ids_sha256 = "1d64220f3ab2b7405c61126d4db586399a1ad0dbc34896cc4ce18742516679e4"
 field_candidate_count = 732
 field_candidate_ids_sha256 = "021ee818d79404870457a16e423c987c2b3e904ed69c4bcc82acde85e566dc1f"
 union_candidate_count = 49
 union_candidate_ids_sha256 = "65e427afafb289ecfd92449f4f73381f84ea574f8f905560a2432372d79be485"
 arm_candidate_count = 129
 arm_candidate_ids_sha256 = "6c40ce7f70b31633b96fc946cfd8759e34b5ed1efad53239b69f7f76d9b09e24"
-ambiguity_count = 488
-ambiguity_ids_sha256 = "94fd91a41f3059a500aef9ff7113e8c6ce7e4317326850b93570741848a0e3da"
+ambiguity_count = 490
+ambiguity_ids_sha256 = "a982fa21771e8e41b3829560decab030b1e80a3d368f8f822b257e882575310a"
 
 [[slice]]
 ordinal = 4
@@ -237,16 +237,16 @@ predecessor = "a05"
 successor = "a07"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 42
-top_level_candidate_ids_sha256 = "6f6b0b6f4d2ed2fcf71cce3a005e185b1251893f50d6a0846484ae287b984d71"
+top_level_candidate_count = 43
+top_level_candidate_ids_sha256 = "ab5044213e0459aa370618f08058cae37e6aa6b419c3dfd8e6fc671253c7ac7e"
 field_candidate_count = 438
 field_candidate_ids_sha256 = "61fedc9643997810c7d42d8c5c396e7e4272aa95292a74be16271f826309b17f"
 union_candidate_count = 15
 union_candidate_ids_sha256 = "29e8e8f834cf4ddc73eb5faa5fbf76a72bd8a33cb9368cd85192c28e0ae2b724"
 arm_candidate_count = 51
 arm_candidate_ids_sha256 = "26ed5557dfe99c18410d1992312ffc09e1e9369113fbe87f9119d76251760bc6"
-ambiguity_count = 261
-ambiguity_ids_sha256 = "7a42e92bdc8f70771f395610a7aaf585e66edd3a698aeeebaa8305b4ecd43cef"
+ambiguity_count = 262
+ambiguity_ids_sha256 = "c3078adb95af1951df353b5f9f50148e496f98ffcf6a919ba65885ddf0996133"
 
 [[slice]]
 ordinal = 7
@@ -287,16 +287,16 @@ predecessor = "a07"
 successor = "a09"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 111
-top_level_candidate_ids_sha256 = "3f997c3bcd5078b287868ffe3fca5a8a2b9197b140d070f3c4a60c25a439150e"
+top_level_candidate_count = 112
+top_level_candidate_ids_sha256 = "8891ad276c2be5ac38d4dbfc7d3786acfb7c76539c689bb8070a60b5655e7433"
 field_candidate_count = 1101
 field_candidate_ids_sha256 = "c3f79afe39a37d095525eadd362ed4c596d876895199ad22c1eea015c8757ea0"
 union_candidate_count = 42
 union_candidate_ids_sha256 = "867a6dc2f093d342e80d0dc5e1a4fd6597a97b94ec6353a08ac250ae04da2fd8"
 arm_candidate_count = 142
 arm_candidate_ids_sha256 = "dbaca4cd29c32a02c0aec03ab339767c83e9e485eeaaae7719e646971e9fb5c1"
-ambiguity_count = 709
-ambiguity_ids_sha256 = "7e15a56d6e0801197399fed72fce6ceb7c9bd1f29672d2ef69c860635dc649e1"
+ambiguity_count = 710
+ambiguity_ids_sha256 = "93e3c660fc3903d789c9c804ccad92b5ed99fdd45d5c33f3d531c8aa48262b69"
 
 [[slice]]
 ordinal = 9
@@ -362,16 +362,16 @@ predecessor = "a10"
 successor = "a12"
 expected_projection_classes = ["logical_object_kinds", "physical_record_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 15
-top_level_candidate_ids_sha256 = "2885021619d4502489d9832a00669e168a3f1812ce83f2cd558288e86f160f3f"
+top_level_candidate_count = 16
+top_level_candidate_ids_sha256 = "c7a68920e210a2ba8af05bf4df6b77f882d16942f1778ea022146056a5ba2959"
 field_candidate_count = 89
 field_candidate_ids_sha256 = "48a6147b6e5f51aa353a76d19aeb7fa43276714ebdced7e9f81799ca2e0368c2"
 union_candidate_count = 6
 union_candidate_ids_sha256 = "1df066c06046b9a288d8bcc5f64caa6d7574c4e6e5c2138c3a7ccc07d4165574"
 arm_candidate_count = 28
 arm_candidate_ids_sha256 = "8ea9a13576028bc8fc66e22aba9ffaf8f02b1b5aa70867f86f5142426d1afd4b"
-ambiguity_count = 70
-ambiguity_ids_sha256 = "516e324777eaa692c467ae7db60430492d949aded999e22e5bdb0f7e2fcdc09e"
+ambiguity_count = 71
+ambiguity_ids_sha256 = "e3bf37c046ab4d69d05f9f3f7b21842b23365afc0ceb72bcaeebfc4832130367"
 
 [[slice]]
 ordinal = 12
@@ -487,16 +487,16 @@ predecessor = "a15"
 successor = "a17"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 94
-top_level_candidate_ids_sha256 = "4bb1be27c98bc73190b0aef537789ac881da9fdc817ea7fa73e2caada1aa6376"
+top_level_candidate_count = 95
+top_level_candidate_ids_sha256 = "ccf3068b6f7710ef28cce46bd79f230c607aaff334b4dfab2726769370cdcf48"
 field_candidate_count = 1066
 field_candidate_ids_sha256 = "76894eec3baeabfcdf65b285cc0c1e72b0fee8ee3001dc06a5b7c27af3c6b419"
 union_candidate_count = 32
 union_candidate_ids_sha256 = "607b6608ad46705470d526951c6a95c5e0fad3b37df576a6a13b69c1abe8a234"
 arm_candidate_count = 85
 arm_candidate_ids_sha256 = "4c48c8511f5d6e6d121cfd77a4b3d5ad0b1a40c1b9ebbd9dff78f03e50fc5f23"
-ambiguity_count = 826
-ambiguity_ids_sha256 = "62953c94d9d8952b8097bb524efa99cae16386d617294d0b246dfb6063cae4fa"
+ambiguity_count = 827
+ambiguity_ids_sha256 = "7d3f6782b5061c4922eba5918cbf2f1f1d458e51e30801bff5f5abb2ab8b0896"
 
 [[slice]]
 ordinal = 17
@@ -512,16 +512,16 @@ predecessor = "a16"
 successor = "a18"
 expected_projection_classes = ["logical_object_kinds", "prebootstrap_artifact_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 67
-top_level_candidate_ids_sha256 = "504079c82a10349ec152cc7d5cdee95101bbc1867b21041c1a1f003a0adda8d9"
+top_level_candidate_count = 69
+top_level_candidate_ids_sha256 = "edb6a78d2c538b2cfd427c483ab00cf6e32186eb0aba17328ae4affd64982165"
 field_candidate_count = 777
 field_candidate_ids_sha256 = "3e81cd4c1044cb659265d2174333b8f23056c50a4433cb8a944f2bd1b005676d"
 union_candidate_count = 30
 union_candidate_ids_sha256 = "6be970c7ace5683babf2d496844f3edc401e3af6730612f31457836185fb91a8"
 arm_candidate_count = 90
 arm_candidate_ids_sha256 = "b1d4a5eeeb726f3507f450387bb4e97b044a615263978cd41bb14cd826133bfa"
-ambiguity_count = 702
-ambiguity_ids_sha256 = "15617d55bce1ccf15d592180e7e1d325eb13ce1cf311dfa07243528e08368afa"
+ambiguity_count = 704
+ambiguity_ids_sha256 = "db1781264d00ec43f7bef3a1b0d3c255055bffe172f67c1d8d1c721f4a19647f"
 
 [[slice]]
 ordinal = 18
@@ -537,16 +537,16 @@ predecessor = "a17"
 successor = "a19"
 expected_projection_classes = ["logical_object_kinds", "prebootstrap_artifact_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 107
-top_level_candidate_ids_sha256 = "54d56f32cf3bfde55be6d8ec6a0fcf3441d7f81a64b5e0bfb515aa3b5231d147"
+top_level_candidate_count = 109
+top_level_candidate_ids_sha256 = "d5882e79c10e0dc176276d4fa863e0279b39401640fa19ffbaee0ea3e3327858"
 field_candidate_count = 1218
 field_candidate_ids_sha256 = "d186017817b1a14b4d1947fd7855e2ac655dae4781e9ddc85327bb414764b73d"
 union_candidate_count = 57
 union_candidate_ids_sha256 = "52ae2f44f362406390ea8ebcd99e03f879b44717778c9dcf4c01bcee08078862"
 arm_candidate_count = 163
 arm_candidate_ids_sha256 = "b4187eb43e8a76d0d0d08df571cdb8764198926e0e1a26cd7843287a39d0ea04"
-ambiguity_count = 890
-ambiguity_ids_sha256 = "2816e7307075a33cb220609ae80e3f2b0ff408954cbb019efdf11171425c33b7"
+ambiguity_count = 892
+ambiguity_ids_sha256 = "cf3e0436c557d63b08048a5a2a237be69dd34e08f1603b4d42615a299c3338b7"
 
 [[slice]]
 ordinal = 19
@@ -562,16 +562,16 @@ predecessor = "a18"
 successor = "a20"
 expected_projection_classes = ["logical_object_kinds", "prebootstrap_artifact_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 105
-top_level_candidate_ids_sha256 = "020db13f680aa9aa65dddd4bf8deebd295af16fb8808d9e451af4538a6e187e6"
+top_level_candidate_count = 107
+top_level_candidate_ids_sha256 = "162ead58f1d9903409bd76826b0b697f7616e66b55b08def961d368975b31f26"
 field_candidate_count = 1008
 field_candidate_ids_sha256 = "86d7880ba7256c1b6532a573b851c576ebae1d1f27cf6f3bb2efebc5d44220c3"
 union_candidate_count = 38
 union_candidate_ids_sha256 = "20a21cfefd0e9140d915d2bf9563d14b6edf382e3fd5821ed6bc586f496b362c"
 arm_candidate_count = 108
 arm_candidate_ids_sha256 = "0399aa0964847c7930ded7fb06b27e5df73b8848bf4c3b5ebb1fcfca52b5b5c7"
-ambiguity_count = 775
-ambiguity_ids_sha256 = "3f481991f57e9fb993b3b60abfa7d00f8c5a61bef5d26b1c7d1464274bcbd5ba"
+ambiguity_count = 777
+ambiguity_ids_sha256 = "fc5e96dee44353e0fcd50ad5dd4ebb5bf1ddff0143098965073b1215bafdd2b3"
 
 [[slice]]
 ordinal = 20
@@ -587,16 +587,16 @@ predecessor = "a19"
 successor = "a21"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 25
-top_level_candidate_ids_sha256 = "607bfde9a44feecdfef6e5718d07c360938b36b30ee231d3da7dd296be44729c"
+top_level_candidate_count = 26
+top_level_candidate_ids_sha256 = "8e5e1fb12aa6580058f29fc03136d543dcf495f65065262d585ba22e88edc09b"
 field_candidate_count = 182
 field_candidate_ids_sha256 = "2e7bd1beaa5e9977a203b14172d55f6282184160dfcb257020f39bb298fb0a9b"
 union_candidate_count = 6
 union_candidate_ids_sha256 = "133b529dcba2dedc03e4e6e216c37903010c95647579c1968161d898ffde7382"
 arm_candidate_count = 17
 arm_candidate_ids_sha256 = "99315207439758d8e55f2147719cb82a0118197282e95f1018e524afdc403121"
-ambiguity_count = 145
-ambiguity_ids_sha256 = "15f87f1ec6bea346e8ada63602a0b8e777bcef6d3a308120c541f594ce6f00e9"
+ambiguity_count = 146
+ambiguity_ids_sha256 = "28a06724af32174b8367ac3eac7da9def38a61d294f8d57faa05248fe7c964c7"
 
 [[slice]]
 ordinal = 21
@@ -87966,7 +87966,7 @@ source_locations = ["plan:1027"]
 row_id = "a16:source-symbol-disposition:restore-source-lease-acquire-receipt"
 slice_id = "a16"
 symbol = "RestoreSourceLeaseAcquireReceipt"
-disposition = "reference-only"
+disposition = "appendix-name-only"
 source_locations = ["a16:2237"]
 
 [[source_symbol_disposition]]
@@ -111439,3 +111439,133 @@ source_key = "arm|ConfigurationTransitionSpec|ConfigurationTransitionSpec.phase|
 target_kind = "union-arm"
 definition_status = "declared"
 
+
+[[top_level_candidate]]
+row_id = "a03:top-level-candidate:local-read-witness-ref-4a4c0b82e09b793a"
+slice_id = "a03"
+symbol = "LocalReadWitnessRef"
+generic_signature = ""
+source_key = "top|LocalReadWitnessRef"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a03:1488"]
+
+[[top_level_candidate]]
+row_id = "a03:top-level-candidate:result-lease-ref-6ce9de8b3ca64f34"
+slice_id = "a03"
+symbol = "ResultLeaseRef"
+generic_signature = ""
+source_key = "top|ResultLeaseRef"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a03:1510"]
+
+[[top_level_candidate]]
+row_id = "a06:top-level-candidate:meta-certificate-ledger-f9bfd546d40955c8"
+slice_id = "a06"
+symbol = "MetaCertificateLedger"
+generic_signature = ""
+source_key = "top|MetaCertificateLedger"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a06:1692"]
+
+[[top_level_candidate]]
+row_id = "a08:top-level-candidate:meta-authorization-evidence-tag-3a46afc1437f24a5"
+slice_id = "a08"
+symbol = "MetaAuthorizationEvidence"
+generic_signature = "<Tag>"
+source_key = "top|MetaAuthorizationEvidence<Tag>"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a08:1880"]
+
+[[top_level_candidate]]
+row_id = "a11:top-level-candidate:authorized-delta-public-provenance-42ee59b68d9f7925"
+slice_id = "a11"
+symbol = "AuthorizedDeltaPublicProvenance"
+generic_signature = ""
+source_key = "top|AuthorizedDeltaPublicProvenance"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a11:1934"]
+
+[[top_level_candidate]]
+row_id = "a16:top-level-candidate:restore-source-lease-acquire-receipt-eb6f0c56ab23d927"
+slice_id = "a16"
+symbol = "RestoreSourceLeaseAcquireReceipt"
+generic_signature = ""
+source_key = "top|RestoreSourceLeaseAcquireReceipt"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a16:2231"]
+
+[[top_level_candidate]]
+row_id = "a17:top-level-candidate:canonical-bootstrap-openers-ref-role-3b0579e93ba17123"
+slice_id = "a17"
+symbol = "CanonicalBootstrapOpenersRef"
+generic_signature = "<Role>"
+source_key = "top|CanonicalBootstrapOpenersRef<Role>"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a17:2287"]
+
+[[top_level_candidate]]
+row_id = "a17:top-level-candidate:pre-bootstrap-dispatch-publication-evidence-action-d78306265d0b17a5"
+slice_id = "a17"
+symbol = "PreBootstrapDispatchPublicationEvidence"
+generic_signature = "<Action>"
+source_key = "top|PreBootstrapDispatchPublicationEvidence<Action>"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a17:2327"]
+
+[[top_level_candidate]]
+row_id = "a18:top-level-candidate:local-restore-state-ref-9959c6f1458d7dd8"
+slice_id = "a18"
+symbol = "LocalRestoreStateRef"
+generic_signature = ""
+source_key = "top|LocalRestoreStateRef"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a18:2381"]
+
+[[top_level_candidate]]
+row_id = "a18:top-level-candidate:operational-restore-terminal-pin-basis-ref-role-ab67b3b8b4d4ab1c"
+slice_id = "a18"
+symbol = "OperationalRestoreTerminalPinBasisRef"
+generic_signature = "<Role>"
+source_key = "top|OperationalRestoreTerminalPinBasisRef<Role>"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a18:2373"]
+
+[[top_level_candidate]]
+row_id = "a19:top-level-candidate:reserved-reservation-use-ref-role-101a7c95718e3c46"
+slice_id = "a19"
+symbol = "ReservedReservationUseRef"
+generic_signature = "<Role>"
+source_key = "top|ReservedReservationUseRef<Role>"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a19:2513"]
+
+[[top_level_candidate]]
+row_id = "a19:top-level-candidate:restore-reconciliation-evidence-ref-role-8f40edff7aa1db85"
+slice_id = "a19"
+symbol = "RestoreReconciliationEvidenceRef"
+generic_signature = "<Role>"
+source_key = "top|RestoreReconciliationEvidenceRef<Role>"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a19:2547"]
+
+[[top_level_candidate]]
+row_id = "a20:top-level-candidate:external-cas-restore-service-promotion-manifest-ref-67c614169dce0923"
+slice_id = "a20"
+symbol = "ExternalCasRestoreServicePromotionManifestRef"
+generic_signature = ""
+source_key = "top|ExternalCasRestoreServicePromotionManifestRef"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a20:2593"]
