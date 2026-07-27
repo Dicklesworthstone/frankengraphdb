@@ -280,6 +280,8 @@ fn topology_header_witnesses() -> Vec<TopologyWitness> {
     TopologyWitness { code: "replay_command_drift", fact: "registry.replay_command is rewritten", mutate: |r| r.registry.replay_command = "cargo run -p registry-check --bin something-else".into() },
     TopologyWitness { code: "id_table_hash_drift", fact: "registry.id_table_hash is repinned", mutate: |r| r.registry.id_table_hash = "0000000000000000".into() },
     TopologyWitness { code: "embedded_block_unresolved", fact: "embedded_source_blocks names a block that does not exist", mutate: |r| r.registry.embedded_source_blocks.push("plan-no-such-block-v1".into()) },
+    TopologyWitness { code: "required_edge_floor_vacuous", fact: "the monotone live-edge floor is emptied", mutate: |r| r.registry.required_dependency_live_floor.clear() },
+    TopologyWitness { code: "required_edge_floor_regression", fact: "the live-edge floor is repointed at an edge that is still deferred", mutate: |r| r.registry.required_dependency_live_floor = vec!["txn-over-chronicle".into()] },
     TopologyWitness { code: "toolchain_channel_drift", fact: "registry.toolchain_channel is repinned", mutate: |r| r.registry.toolchain_channel = "nightly-1999-01-01".into() },
     TopologyWitness { code: "layer_order_not_dense", fact: "one layer's source_order leaves the dense range", mutate: |r| layer_mut(r, "foundation").source_order = 99 },
     TopologyWitness { code: "layer_edge_unresolved", fact: "allowed_outgoing_layers names an unknown layer", mutate: |r| layer_mut(r, "chronicle").allowed_outgoing_layers.push("no_such_layer".into()) },
@@ -819,7 +821,7 @@ fn every_witness_row_names_a_distinct_law() {
     codes.extend(threat_witnesses().iter().map(|row| row.code));
     codes.extend(registry_witnesses().iter().map(|row| row.code));
 
-    assert_eq!(codes.len(), 105, "table row count moved");
+    assert_eq!(codes.len(), 107, "table row count moved");
     let distinct: BTreeSet<&str> = codes.iter().copied().collect();
     // `active_not_a_member`/`active_manifest_missing` and
     // `island_inherits_forbid`/`island_root_missing_deny` are two laws each

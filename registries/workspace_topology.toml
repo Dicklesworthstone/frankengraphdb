@@ -119,13 +119,17 @@ consume_from_count = 19
 design_only_count = 9
 residue_allowance_count = 4
 required_dependency_count = 8
+# Monotone SET floor over named edges that have already been evaluated live.
+# Adding a newly live edge is optional and never needed merely to keep the tree
+# green; once appended, an id must never be removed or return to deferred.
+required_dependency_live_floor = ["calibrate-over-asupersync"]
 asset_evidence_gap_count = 1
 forbidden_dependency_count = 3
 dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
 id_table_hash = "fnv1a64:b422bc59c3da23ca"
-semantic_contract_hash = "fnv1a64:30c7df0533e976dd"
+semantic_contract_hash = "fnv1a64:bf2acabde6c032d0"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges

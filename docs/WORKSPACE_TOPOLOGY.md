@@ -219,6 +219,8 @@ A posture closure is the transitive dependency set of its entry crate over the L
 | `python-over-fnx-python` | crate `fgdb-python` | foundation `franken_networkx` | allowed fnx-python packaging boundary only | The binding runtime is reached transitively through fnx-python, never by a direct PyO3 dependency. |
 | `calibrate-over-asupersync` | crate `fgdb-calibrate` | foundation `asupersync` | wraps the runtime's e-process/conformal machinery rather than reimplementing it | Live today: the one required edge both of whose endpoints are already active, which is what keeps this law from being vacuous at G0. |
 
+The evaluated-edge ratchet is the monotone set-floor ["calibrate-over-asupersync"]. New live edges may be observed without changing this floor; raising it is a deliberate append-only ratchet and is never required merely to keep another pane green. Once an edge is in the floor, moving it back to `deferred` fails even if another edge becomes live in the same change.
+
 **Narrowing — `fgdb-reference`.** Layers ["foundation"], plus crates ["fgdb-gql", "fgdb-cypher"], plus foundation projects [] (§15.2). Importing any engine crate is a CI-rejected boundary violation in the unsafe-boundary-ledger style, so the differential cannot be quietly gutted by code sharing. The parser is the one recorded sharing exception.
 
 ## Build here, or consume from a foundation
@@ -381,4 +383,4 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 ## Pins
 
 * `id_table_hash` = `fnv1a64:b422bc59c3da23ca` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:30c7df0533e976dd` — every normative decision, prose excluded.
+* `semantic_contract_hash` = `fnv1a64:bf2acabde6c032d0` — every normative decision, prose excluded.

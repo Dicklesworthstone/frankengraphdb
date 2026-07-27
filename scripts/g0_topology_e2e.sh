@@ -6,7 +6,7 @@
 # Builds topology-check, validates the frozen map twice for determinism, proves
 # the published document is generated rather than hand-authored, asserts the
 # structured event stream is complete against the registry's own declared
-# cardinalities, and then seeds four deliberate violations into a scratch copy —
+# cardinalities, and then seeds six deliberate violations into a scratch copy —
 # each of which must fail with its exact violation code.
 #
 # The seeded fixtures are the point. A checker that has only ever been green is
@@ -89,13 +89,14 @@ if grep -q '"event":"topology_violation"' "$FIRST"; then
 fi
 
 echo "==> report what is deferred rather than letting a green bar imply coverage"
-# No composition crate is active, so every posture closure is deferred and seven
-# of the eight named edges cannot be evaluated. That is legitimate at G0 and it
-# is NOT the same as "checked and clean", so the gate prints it.
+# No composition crate is active, so every posture closure is deferred. Named
+# edges may advance independently, so the Rust reader owns their live/deferred
+# partition and the monotone set-floor. This shell gate checks the event schema
+# and non-vacuous verdict, not a second hand-copied count.
 grep '"event":"required_edge_coverage"' "$FIRST"
 grep '"event":"posture_closure_checked"' "$FIRST" | grep -c '"outcome":"deferred"'
-if ! grep -q '"event":"required_edge_coverage".*"evaluated_live":1' "$FIRST"; then
-  echo "ERROR: the named-edge law is vacuous — no edge has both endpoints active" >&2
+if ! grep -Eq '^\{"event":"required_edge_coverage","declared":[0-9]+,"evaluated_live":[0-9]+,"deferred":[0-9]+,"ratcheted_live_floor":[1-9][0-9]*,"unratcheted_live":[0-9]+,"outcome":"pass"\}$' "$FIRST"; then
+  echo "ERROR: the named-edge ratchet event is absent, malformed, vacuous, or red" >&2
   exit 1
 fi
 
@@ -188,6 +189,29 @@ allowed_outgoing_layers = ["foundation", "unsafe_islands", "chronicle", "loom"]'
 # 4. An inventory row deleted: coverage must catch it as residue.
 seed_fixture dropped-capability inventory_coverage_incomplete \
   'source_phrase = "persistent union-find"=>source_phrase = "persistent union find"'
+
+# 5. The one ratcheted live edge moves back to deferred. Other topology laws
+#    also reject this fixture, but this exact code proves the set-floor itself
+#    fired rather than borrowing their failure.
+seed_fixture live-edge-redeferred required_edge_floor_regression \
+  'name = "fgdb-calibrate"
+layer = "foundation"
+layer_position = 12
+role = "Identity-bound calibration wrappers over the runtime'\''s e-process/conformal machinery."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "active"=>name = "fgdb-calibrate"
+layer = "foundation"
+layer_position = 12
+role = "Identity-bound calibration wrappers over the runtime'\''s e-process/conformal machinery."
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "planned"'
+
+# 6. A ratchet with no members rejects nothing. This is the vacuity control,
+#    and it must fire independently of the backwards-transition fixture.
+seed_fixture empty-live-edge-floor required_edge_floor_vacuous \
+  'required_dependency_live_floor = ["calibrate-over-asupersync"]=>required_dependency_live_floor = []'
 
 echo "==> evidence retained at $EVIDENCE_DIR"
 echo "PASS: g0_topology_e2e"

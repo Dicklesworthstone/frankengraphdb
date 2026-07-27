@@ -27,13 +27,14 @@ use registry_check::topology::{
     self, AssetEvidenceGap, Capability, ManifestDependency, ScannedCrate, TopologyRegistry,
     WorkspaceScan, crate_graph_cycle, decompose_inventory, design_bijection, load_from_repo,
     parse_layer_table, posture_closures, recompute_id_table_hash, recompute_semantic_contract_hash,
-    required_edge_statuses, scan_manifest, scan_workspace, source_block_text, validate_topology,
+    required_edge_coverage, required_edge_floor_violations, scan_manifest, scan_workspace,
+    source_block_text, validate_topology,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:30c7df0533e976dd";
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:bf2acabde6c032d0";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -760,9 +761,20 @@ fn topology_crate_graph_cycle_detection() {
 fn topology_required_edges_report_deferred_not_pass() {
     let registry = registry();
     let scan = scan_workspace(&repo_root()).expect("workspace scans");
-    let statuses = required_edge_statuses(&registry, &scan);
-    assert_eq!(statuses.len(), 8);
-    let live: Vec<&str> = statuses
+    let coverage = required_edge_coverage(&registry, &scan);
+    assert_eq!(
+        (
+            coverage.declared,
+            coverage.evaluated_live,
+            coverage.deferred,
+            coverage.ratcheted_live_floor,
+            coverage.unratcheted_live,
+        ),
+        (8, 1, 7, 1, 0),
+        "the full named-edge population and its ratcheted partition"
+    );
+    let live: Vec<&str> = coverage
+        .statuses
         .iter()
         .filter(|status| status.status != "deferred")
         .map(|status| status.id.as_str())
@@ -775,8 +787,113 @@ fn topology_required_edges_report_deferred_not_pass() {
         "the live/deferred split is part of the contract"
     );
     assert!(
-        statuses.iter().all(|status| status.status != "fail"),
-        "{statuses:#?}"
+        coverage
+            .statuses
+            .iter()
+            .all(|status| status.status != "fail"),
+        "{:#?}",
+        coverage.statuses
+    );
+}
+
+#[test]
+fn topology_required_edge_floor_allows_forward_and_rejects_backward() {
+    let base = registry();
+
+    // FORWARD: 1 -> 2 evaluated edges is legal while the monotone floor stays
+    // at the one edge this commit owns. A floor is a lower bound, not a global
+    // equality over a graph another pane may advance.
+    let mut forward = base.clone();
+    forward
+        .crates
+        .iter_mut()
+        .find(|row| row.name == "fgdb-prism")
+        .expect("fgdb-prism row")
+        .activation_status = "active".into();
+    let forward_scan = synthetic_scan(vec![
+        synthetic_crate("fgdb-calibrate", &["asupersync"]),
+        synthetic_crate("fgdb-prism", &["fnx-core"]),
+    ]);
+    let forward_coverage = required_edge_coverage(&forward, &forward_scan);
+    assert_eq!(
+        (
+            forward_coverage.declared,
+            forward_coverage.evaluated_live,
+            forward_coverage.deferred,
+            forward_coverage.ratcheted_live_floor,
+            forward_coverage.unratcheted_live,
+        ),
+        (8, 2, 6, 1, 1),
+        "named forward mutation: 1 -> 2 evaluated, 7 -> 6 deferred"
+    );
+    assert!(
+        required_edge_floor_violations(&forward, &forward_coverage).is_empty(),
+        "forward progress above a set-floor must remain legal"
+    );
+
+    // BACKWARD: 1 -> 0 is rejected because the exact floor member, not merely
+    // the aggregate count, moved back to deferred.
+    let mut backward = base.clone();
+    backward
+        .crates
+        .iter_mut()
+        .find(|row| row.name == "fgdb-calibrate")
+        .expect("fgdb-calibrate row")
+        .activation_status = "planned".into();
+    let backward_coverage = required_edge_coverage(&backward, &synthetic_scan(Vec::new()));
+    assert_eq!(
+        (
+            backward_coverage.declared,
+            backward_coverage.evaluated_live,
+            backward_coverage.deferred,
+        ),
+        (8, 0, 8),
+        "named backward mutation: 1 -> 0 evaluated, 7 -> 8 deferred"
+    );
+    let backward_codes: BTreeSet<String> =
+        required_edge_floor_violations(&backward, &backward_coverage)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect();
+    assert!(
+        backward_codes.contains("required_edge_floor_regression"),
+        "the backward control must fire: {backward_codes:?}"
+    );
+
+    // BYPASS CONTROL: the old aggregate literal accepted a one-for-one swap.
+    // Keep Prism live while re-deferring calibrate; the total remains one, but
+    // the set-floor still rejects the exact regression.
+    let mut substitution = forward;
+    substitution
+        .crates
+        .iter_mut()
+        .find(|row| row.name == "fgdb-calibrate")
+        .expect("fgdb-calibrate row")
+        .activation_status = "planned".into();
+    let substitution_scan = synthetic_scan(vec![synthetic_crate("fgdb-prism", &["fnx-core"])]);
+    let substitution_coverage = required_edge_coverage(&substitution, &substitution_scan);
+    assert_eq!(
+        substitution_coverage.evaluated_live, 1,
+        "the aggregate stays at one"
+    );
+    assert!(
+        required_edge_floor_violations(&substitution, &substitution_coverage)
+            .iter()
+            .any(|violation| violation.code == "required_edge_floor_regression"),
+        "one live edge may not substitute for the ratcheted edge"
+    );
+
+    // VACUITY CONTROL: an empty set-floor would reject nothing, so it is itself
+    // a violation. This control must fire independently of the backward case.
+    let mut vacuous = base;
+    vacuous.registry.required_dependency_live_floor.clear();
+    let vacuous_scan = scan_workspace(&repo_root()).expect("workspace scans");
+    let vacuous_coverage = required_edge_coverage(&vacuous, &vacuous_scan);
+    assert!(
+        required_edge_floor_violations(&vacuous, &vacuous_coverage)
+            .iter()
+            .any(|violation| violation.code == "required_edge_floor_vacuous"),
+        "the empty-floor control must fire"
     );
 }
 

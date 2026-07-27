@@ -123,6 +123,7 @@ pub struct RegistryHeader {
     pub design_only_count: usize,
     pub residue_allowance_count: usize,
     pub required_dependency_count: usize,
+    pub required_dependency_live_floor: Vec<String>,
     pub asset_evidence_gap_count: usize,
     pub forbidden_dependency_count: usize,
     pub dependency_narrowing_count: usize,
@@ -424,6 +425,7 @@ fn header_from(table: &Table) -> Result<RegistryHeader, ReadError> {
             "design_only_count",
             "residue_allowance_count",
             "required_dependency_count",
+            "required_dependency_live_floor",
             "asset_evidence_gap_count",
             "forbidden_dependency_count",
             "dependency_narrowing_count",
@@ -458,6 +460,11 @@ fn header_from(table: &Table) -> Result<RegistryHeader, ReadError> {
         design_only_count: usize_field(table, "design_only_count", ctx)?,
         residue_allowance_count: usize_field(table, "residue_allowance_count", ctx)?,
         required_dependency_count: usize_field(table, "required_dependency_count", ctx)?,
+        required_dependency_live_floor: get_str_array(
+            table,
+            "required_dependency_live_floor",
+            ctx,
+        )?,
         asset_evidence_gap_count: usize_field(table, "asset_evidence_gap_count", ctx)?,
         forbidden_dependency_count: usize_field(table, "forbidden_dependency_count", ctx)?,
         dependency_narrowing_count: usize_field(table, "dependency_narrowing_count", ctx)?,
@@ -1823,6 +1830,16 @@ pub struct RequiredEdgeStatus {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredEdgeCoverage {
+    pub statuses: Vec<RequiredEdgeStatus>,
+    pub declared: usize,
+    pub evaluated_live: usize,
+    pub deferred: usize,
+    pub ratcheted_live_floor: usize,
+    pub unratcheted_live: usize,
+}
+
 /// Evaluate every named crate-level edge against the live graph. A row whose
 /// endpoints are not both active is `deferred`, never `pass`.
 pub fn required_edge_statuses(
@@ -1899,6 +1916,90 @@ pub fn required_edge_statuses(
             }
         })
         .collect()
+}
+
+/// Read the named-edge population once and derive every coverage projection
+/// from that one result. The registered floor is a monotone SET, not an exact
+/// census: a newly evaluated edge may raise coverage without invalidating a
+/// neighbouring pane, while every edge already admitted to the floor must
+/// remain evaluated even if another edge could replace it in the aggregate.
+pub fn required_edge_coverage(
+    registry: &TopologyRegistry,
+    scan: &WorkspaceScan,
+) -> RequiredEdgeCoverage {
+    let statuses = required_edge_statuses(registry, scan);
+    let evaluated: BTreeSet<&str> = statuses
+        .iter()
+        .filter(|status| status.status != "deferred")
+        .map(|status| status.id.as_str())
+        .collect();
+    let live_floor: BTreeSet<&str> = registry
+        .registry
+        .required_dependency_live_floor
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let declared = statuses.len();
+    let evaluated_live = evaluated.len();
+    let ratcheted_live_floor = live_floor.len();
+    let unratcheted_live = evaluated.difference(&live_floor).count();
+    RequiredEdgeCoverage {
+        statuses,
+        declared,
+        evaluated_live,
+        deferred: declared.saturating_sub(evaluated_live),
+        ratcheted_live_floor,
+        unratcheted_live,
+    }
+}
+
+/// Enforce the monotone set-floor over the already evaluated named edges.
+///
+/// This is deliberately separate from `required_edge_missing`: the latter
+/// rejects an evaluated edge whose dependency is absent, while this law rejects
+/// moving a previously evaluated edge back into `deferred`. The identity of the
+/// edge matters, so a one-for-one substitution cannot hide a regression.
+pub fn required_edge_floor_violations(
+    registry: &TopologyRegistry,
+    coverage: &RequiredEdgeCoverage,
+) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    if registry.registry.required_dependency_live_floor.is_empty() {
+        violations.push(Violation::new(
+            "required_edge_floor_vacuous",
+            "registry.required_dependency_live_floor",
+            "§18.1",
+            "the named-edge ratchet must retain at least one evaluated edge; an empty floor rejects nothing",
+        ));
+        return violations;
+    }
+
+    let status_by_id: BTreeMap<&str, &RequiredEdgeStatus> = coverage
+        .statuses
+        .iter()
+        .map(|status| (status.id.as_str(), status))
+        .collect();
+    for edge_id in &registry.registry.required_dependency_live_floor {
+        match status_by_id.get(edge_id.as_str()) {
+            Some(status) if status.status != "deferred" => {}
+            Some(status) => violations.push(Violation::new(
+                "required_edge_floor_regression",
+                edge_id,
+                "§18.1",
+                format!(
+                    "the monotone live-edge floor names this edge, but it moved back to deferred ({})",
+                    status.detail
+                ),
+            )),
+            None => violations.push(Violation::new(
+                "required_edge_floor_regression",
+                edge_id,
+                "§18.1",
+                "the monotone live-edge floor names an edge absent from the required-dependency population",
+            )),
+        }
+    }
+    violations
 }
 
 // -----------------------------------------------------------------------------
@@ -2064,6 +2165,9 @@ pub fn recompute_semantic_contract_hash(registry: &TopologyRegistry) -> String {
             edge.id, edge.from_kind, edge.from, edge.to_kind, edge.to
         ));
     }
+    let mut live_floor = registry.registry.required_dependency_live_floor.clone();
+    live_floor.sort();
+    lines.push(format!("required_live_floor|{}", live_floor.join(",")));
     for row in &registry.dependency_narrowings {
         lines.push(format!(
             "narrowing|{}|{}|{}|{}",
@@ -3550,7 +3654,8 @@ fn validate_live_tree(registry: &TopologyRegistry, root: &Path, violations: &mut
             "the live crate graph is not acyclic; the one reciprocal LAYER pair is only sound while this holds",
         ));
     }
-    for status in required_edge_statuses(registry, &scan) {
+    let edge_coverage = required_edge_coverage(registry, &scan);
+    for status in &edge_coverage.statuses {
         if status.status == "fail" {
             let anchor = registry
                 .required_dependencies
@@ -3569,6 +3674,7 @@ fn validate_live_tree(registry: &TopologyRegistry, root: &Path, violations: &mut
             ));
         }
     }
+    violations.extend(required_edge_floor_violations(registry, &edge_coverage));
     for closure in posture_closures(registry, &scan) {
         for illegal in &closure.illegal {
             violations.push(Violation::new(
@@ -3827,6 +3933,13 @@ the closure evaluator is proved against synthetic graphs in the suite instead.\n
         ));
     }
     out.push('\n');
+    out.push_str(&format!(
+        "The evaluated-edge ratchet is the monotone set-floor {:?}. New live edges may be \
+observed without changing this floor; raising it is a deliberate append-only ratchet and is \
+never required merely to keep another pane green. Once an edge is in the floor, moving it back \
+to `deferred` fails even if another edge becomes live in the same change.\n\n",
+        registry.registry.required_dependency_live_floor
+    ));
     for row in &registry.dependency_narrowings {
         out.push_str(&format!(
             "**Narrowing — `{}`.** Layers {:?}, plus crates {:?}, plus foundation projects {:?} ({}). {}\n\n",

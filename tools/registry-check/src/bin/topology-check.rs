@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use topology::{
     TopologyRegistry, Violation, check_source_blocks, generate_document, load_from_repo,
     load_topology, posture_closures, recompute_id_table_hash, recompute_semantic_contract_hash,
-    required_edge_statuses, scan_workspace,
+    required_edge_coverage, required_edge_floor_violations, scan_workspace,
 };
 
 fn usage() -> String {
@@ -238,12 +238,8 @@ fn emit_edges_and_postures(registry: &TopologyRegistry, root: &Path) {
     let Ok(scan) = scan_workspace(root) else {
         return;
     };
-    let statuses = required_edge_statuses(registry, &scan);
-    let live = statuses
-        .iter()
-        .filter(|status| status.status != "deferred")
-        .count();
-    for status in &statuses {
+    let coverage = required_edge_coverage(registry, &scan);
+    for status in &coverage.statuses {
         println!(
             "{}",
             event(&[
@@ -265,10 +261,24 @@ fn emit_edges_and_postures(registry: &TopologyRegistry, root: &Path) {
         "{}",
         event(&[
             ("event", s("required_edge_coverage")),
-            ("declared", n(statuses.len() as i64)),
-            ("evaluated_live", n(live as i64)),
-            ("deferred", n((statuses.len().saturating_sub(live)) as i64)),
-            ("outcome", s("pass")),
+            ("declared", n(coverage.declared as i64)),
+            ("evaluated_live", n(coverage.evaluated_live as i64)),
+            ("deferred", n(coverage.deferred as i64)),
+            (
+                "ratcheted_live_floor",
+                n(coverage.ratcheted_live_floor as i64)
+            ),
+            ("unratcheted_live", n(coverage.unratcheted_live as i64)),
+            (
+                "outcome",
+                s(
+                    if required_edge_floor_violations(registry, &coverage).is_empty() {
+                        "pass"
+                    } else {
+                        "fail"
+                    }
+                )
+            ),
         ])
     );
     for closure in posture_closures(registry, &scan) {
