@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "d9a3dfad58deaf2a82796d6c4cc867f2ec33ec7273dcc0f533dbaa99e46a8a7d";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3638;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3644;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "7c045a50fc7dbce295e00c29601aabb13311061185de49ddff4e8f9eb1732ff7";
+    "ba893926a06489c848b974d6a1a9f94ee77acf2aad6a1030e3b592ad3351551f";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 133;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "3d9db24a0045849533e3ec9f49b0166b7e21b3ef75c5a79fc07b03f345a747c0";
+    "a9d37d3fbe7cbbe12acb1ca12a5775a620eaf1de999d70e1763ef40f72cf580d";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -13463,12 +13463,18 @@ fn validate_annotation_reference_shape(
 pub(crate) fn registered_reference_definition_semantics(family: &str) -> Option<&'static str> {
     match family {
         "AbandonedRestoreTerminalPinBasisRef"
+        | "CanonicalBootstrapOpenersRef"
+        | "CanonicalVerifiedObjectInventoryRef"
         | "CertifiedRemoteStrongRef"
+        | "ClaimedReservationUseRef"
         | "ExternalCasRestoreServicePromotionManifestRef"
         | "ExternalCasRestoreServicePromotionReceiptRef"
+        | "LocalRestoreStateRef"
+        | "MetaRestoreStateRef"
         | "OperationalRestoreTerminalPinBasisRef"
         | "RegisteredStrongRef"
         | "RemoteConfigurationRef"
+        | "ReservedReservationUseRef"
         | "StrongCiphertextRef"
         | "StrongCommandRef"
         | "StrongGlobalCommandRef"

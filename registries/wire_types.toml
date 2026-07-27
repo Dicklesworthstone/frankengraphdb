@@ -5741,3 +5741,57 @@ status = "reserved"
 encoding_context = "generated tag-refined strong reference whose validator admits only the Abandoned arm (arm_tag 0x0002) of the RestoreTerminalPinBasis<Role> union; the abandoned arm is constructed only after the abandonment root is durable and the activation ledger is Active (a18:2373)"
 allowed_containing_schemas = ["LocalRestoreCompletionEvidence", "LocalRestorePhase", "MetaRestoreCompletionEvidence", "RestoreShardAbandonAck", "ShardRestoreRegistryValue"]
 max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0553
+name = "LocalRestoreStateRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated role-refined strong reference whose validator admits only the Local arm (arm_tag 0x0001) of the RestoreState union (a18:2381)"
+allowed_containing_schemas = ["LocalRestorePhase"]
+max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0554
+name = "MetaRestoreStateRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated role-refined strong reference whose validator admits only the Meta arm (arm_tag 0x0002) of the RestoreState union; co-defined with LocalRestoreStateRef in one sentence and carried by the generated corresponding MetaRestorePhase union (a18:2381)"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0555
+name = "CanonicalBootstrapOpenersRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated strong reference to the role's CanonicalBootstrapOpenersCopy refinement; distinct from CanonicalVerifiedObjectInventoryRef and cannot cross-decode (a17:2287)"
+allowed_containing_schemas = ["CanonicalVerifiedObjectInventoryCopy", "RestoreCanonicalAcquisitionWorkingSet", "RestoreSourceAcquisitionPlanImportRecord", "SealedPreBootstrapDispatchJournalImport"]
+max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0556
+name = "CanonicalVerifiedObjectInventoryRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated strong reference to the role's CanonicalVerifiedObjectInventoryCopy refinement; distinct from CanonicalBootstrapOpenersRef and cannot cross-decode (a17:2287)"
+allowed_containing_schemas = ["RestoreCanonicalAcquisitionWorkingSet", "RestoreSourceAcquisitionPlanImportRecord", "SealedPreBootstrapDispatchJournalImport"]
+max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0557
+name = "ReservedReservationUseRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated tag-refined strong reference admitting only the ReservedAvailable use record (a19:2513)"
+allowed_containing_schemas = ["ReservationBurnSource"]
+max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0558
+name = "ClaimedReservationUseRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated tag-refined strong reference admitting only the ClaimedAvailable use record (a19:2513)"
+allowed_containing_schemas = ["ReservationBurnSource"]
+max_size_bytes = 40
