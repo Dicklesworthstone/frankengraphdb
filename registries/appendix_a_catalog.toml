@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
 
 [target_manifest]
-target_count = 3328
+target_count = 3338
 projection_fallback_count = 111
-target_source_assignment_sha256 = "eaeeca820dad1051bc8e672468cc161a37b3e0b9941c250229f4b93e542e460f"
+target_source_assignment_sha256 = "7af5a57459bb74e2743aed4b6683003fd94405c3b661720018c8d41f3132714c"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "33e8d9c5f6eb7447608290da8112ba21e20f826b19faaf36b098b2e3
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 57
+registry_epoch = 58
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 39
+registry_epoch = 40
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 74
+registry_epoch = 75
 
 [[logical_kind]]
 slice_id = "a03"
@@ -50746,7 +50746,7 @@ symbol = "ConstraintDefinition"
 generic_signature = ""
 source_key = "top|ConstraintDefinition"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a12:1976"]
 
 [[top_level_candidate]]
@@ -50826,7 +50826,7 @@ symbol = "ConstraintStateTransition"
 generic_signature = ""
 source_key = "top|ConstraintStateTransition"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1980"]
 
 [[top_level_candidate]]
@@ -50846,7 +50846,7 @@ symbol = "ConstraintValidationEvidence"
 generic_signature = ""
 source_key = "top|ConstraintValidationEvidence"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1980"]
 
 [[top_level_candidate]]
@@ -53406,7 +53406,7 @@ symbol = "LocalConstraintReservationRecord"
 generic_signature = ""
 source_key = "top|LocalConstraintReservationRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1982"]
 
 [[top_level_candidate]]
@@ -56626,7 +56626,7 @@ symbol = "ResourceLedgerAppliedRecord"
 generic_signature = ""
 source_key = "top|ResourceLedgerAppliedRecord"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1996"]
 
 [[top_level_candidate]]
@@ -56686,7 +56686,7 @@ symbol = "ResourceRequest"
 generic_signature = ""
 source_key = "top|ResourceRequest"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a12:1986"]
 
 [[top_level_candidate]]
@@ -104415,4 +104415,207 @@ target_row_id = "a15:field:key-destroy-proposal-expected-prospective-configurati
 slice_id = "a15"
 source_key = "field|KeyDestroyProposal|KeyDestroyProposal.expected_prospective_configuration_set_digest|expected_prospective_configuration_set_digest"
 target_kind = "field"
+definition_status = "declared"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:constraint-state-transition"
+object_kind = 0x056b
+name = "ConstraintStateTransition"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_state_transition/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:constraint-validation-evidence"
+object_kind = 0x056c
+name = "ConstraintValidationEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_validation_evidence/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:local-constraint-reservation-record"
+object_kind = 0x056d
+name = "LocalConstraintReservationRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_constraint_reservation_record/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:resource-ledger-applied-record"
+object_kind = 0x056e
+name = "ResourceLedgerAppliedRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local || role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_ledger_applied_record/"
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:constraint-definition"
+wire_type_id = 0x0528
+name = "ConstraintDefinition"
+kind = "record"
+status = "reserved"
+encoding_context = "a12:1976 exact definition value embedded by ConstraintDefinitionSet; the set owns its identity and no independent retaining reference targets the member"
+allowed_containing_schemas = ["ConstraintDefinitionSet"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a12"
+row_id = "a12:wire-type:resource-request"
+wire_type_id = 0x0529
+name = "ResourceRequest"
+kind = "record"
+status = "reserved"
+encoding_context = "a12:1986 transient resource request value; EphemeralResourceBudget is enforced by runtime obligations and is never canonical state"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:local-constraint-reservation-record-state-7357ce85cf25236e"
+union_name = "LocalConstraintReservationRecordState"
+containing_schema = "LocalConstraintReservationRecord"
+union_path = "LocalConstraintReservationRecord.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalConstraintReservationRecord"]
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:local-constraint-reservation-record-state-held-cb68e5439e049b4f"
+union_name = "LocalConstraintReservationRecordState"
+containing_schema = "LocalConstraintReservationRecord"
+union_path = "LocalConstraintReservationRecord.state"
+arm_tag = 0x0001
+source_arm_name = "Held"
+stable_name = "held"
+payload_kind = "unit"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:local-constraint-reservation-record-state-consumed-abb8d6eda015f15d"
+union_name = "LocalConstraintReservationRecordState"
+containing_schema = "LocalConstraintReservationRecord"
+union_path = "LocalConstraintReservationRecord.state"
+arm_tag = 0x0002
+source_arm_name = "Consumed"
+stable_name = "consumed"
+payload_kind = "inline-record"
+payload_sha256 = "ea0f6ce01e30c0682adf7e181720cf4a6570d55e2b4d2cfd0f5f54a5f5f5570b"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:local-constraint-reservation-record-state-released-bde346b08423bb65"
+union_name = "LocalConstraintReservationRecordState"
+containing_schema = "LocalConstraintReservationRecord"
+union_path = "LocalConstraintReservationRecord.state"
+arm_tag = 0x0003
+source_arm_name = "Released"
+stable_name = "released"
+payload_kind = "inline-record"
+payload_sha256 = "4e309e62fe0318dfcc0b0bd50e69f2259b21cdf5a767b9ba9dc573ab3eb97336"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[target]]
+row_id = "a12:target:logical-kind-constraint-state-transition"
+target_row_id = "a12:logical-kind:constraint-state-transition"
+slice_id = "a12"
+source_key = "top|ConstraintStateTransition"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-constraint-validation-evidence"
+target_row_id = "a12:logical-kind:constraint-validation-evidence"
+slice_id = "a12"
+source_key = "top|ConstraintValidationEvidence"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-local-constraint-reservation-record"
+target_row_id = "a12:logical-kind:local-constraint-reservation-record"
+slice_id = "a12"
+source_key = "top|LocalConstraintReservationRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-resource-ledger-applied-record"
+target_row_id = "a12:logical-kind:resource-ledger-applied-record"
+slice_id = "a12"
+source_key = "top|ResourceLedgerAppliedRecord"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-constraint-definition"
+target_row_id = "a12:wire-type:constraint-definition"
+slice_id = "a12"
+source_key = "top|ConstraintDefinition"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:wire-type-resource-request"
+target_row_id = "a12:wire-type:resource-request"
+slice_id = "a12"
+source_key = "top|ResourceRequest"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-local-constraint-reservation-record-state-7357ce85cf25236e"
+target_row_id = "a12:union:local-constraint-reservation-record-state-7357ce85cf25236e"
+slice_id = "a12"
+source_key = "union|LocalConstraintReservationRecord|LocalConstraintReservationRecord.state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-local-constraint-reservation-record-state-held-cb68e5439e049b4f"
+target_row_id = "a12:union-arm:local-constraint-reservation-record-state-held-cb68e5439e049b4f"
+slice_id = "a12"
+source_key = "arm|LocalConstraintReservationRecord|LocalConstraintReservationRecord.state|Held"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-local-constraint-reservation-record-state-consumed-abb8d6eda015f15d"
+target_row_id = "a12:union-arm:local-constraint-reservation-record-state-consumed-abb8d6eda015f15d"
+slice_id = "a12"
+source_key = "arm|LocalConstraintReservationRecord|LocalConstraintReservationRecord.state|Consumed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-local-constraint-reservation-record-state-released-bde346b08423bb65"
+target_row_id = "a12:union-arm:local-constraint-reservation-record-state-released-bde346b08423bb65"
+slice_id = "a12"
+source_key = "arm|LocalConstraintReservationRecord|LocalConstraintReservationRecord.state|Released"
+target_kind = "union-arm"
 definition_status = "declared"

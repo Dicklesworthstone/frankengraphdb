@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 57
+registry_epoch = 58
 
 [[kind]]
 object_kind = 0x0001
@@ -4750,3 +4750,39 @@ construction_order = 15
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/resource_charge_effect/"
+
+[[kind]]
+object_kind = 0x056b
+name = "ConstraintStateTransition"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_state_transition/"
+
+[[kind]]
+object_kind = 0x056c
+name = "ConstraintValidationEvidence"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_validation_evidence/"
+
+[[kind]]
+object_kind = 0x056d
+name = "LocalConstraintReservationRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_constraint_reservation_record/"
+
+[[kind]]
+object_kind = 0x056e
+name = "ResourceLedgerAppliedRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local || role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_ledger_applied_record/"

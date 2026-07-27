@@ -13271,3 +13271,211 @@ fn idr_field_identity_class_domain_is_wire_shape_independent() {
         "among top-level durable identity classes, fields admit logical, physical, and inline while rejecting wire and prebootstrap"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A12 genuine-residue owner rulings (fgdb-a12-genuine-residue-hm6l).
+//
+// The source reader found zero retaining and zero typed-by-value uses for all
+// seven candidates.  That makes the class choice an owner decision, but it
+// does not make either directional law vacuous: the controlled mutations below
+// prove that a retaining use forces logical and a by-value use forces wire.
+// ResourceLedgerTransitionSpec remains deliberately unminted because its two
+// source directions require an empty construction-order interval.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn idr_a12_genuine_residue_class_rulings_and_order_blocker_are_nonvacuous() {
+    let base = real_identity();
+    assert!(
+        identity::validate_identity(&base).is_empty(),
+        "the real identity registry is the control"
+    );
+
+    let logical_names: BTreeSet<&str> = base.logical.iter().map(|row| row.name.as_str()).collect();
+    let wire_names: BTreeSet<&str> = base.wire.iter().map(|row| row.name.as_str()).collect();
+    for name in [
+        "ConstraintStateTransition",
+        "ConstraintValidationEvidence",
+        "LocalConstraintReservationRecord",
+        "ResourceLedgerAppliedRecord",
+    ] {
+        assert!(
+            logical_names.contains(name) && !wire_names.contains(name),
+            "{name} must resolve only as the A12 owner-ruled logical class"
+        );
+    }
+    for name in ["ConstraintDefinition", "ResourceRequest"] {
+        assert!(
+            wire_names.contains(name) && !logical_names.contains(name),
+            "{name} must resolve only as the A12 owner-ruled wire class"
+        );
+    }
+    assert!(
+        !logical_names.contains("ResourceLedgerTransitionSpec")
+            && !wire_names.contains("ResourceLedgerTransitionSpec"),
+        "the construction-order-blocked spec must remain unminted"
+    );
+
+    let state_union = base
+        .ordinary_unions
+        .iter()
+        .find(|row| row.union_name == "LocalConstraintReservationRecordState")
+        .expect("the Local reservation state union is registered");
+    let state_arms: Vec<(&str, i64)> = state_union
+        .arms
+        .iter()
+        .map(|arm| (arm.source_arm_name.as_str(), arm.arm_tag))
+        .collect();
+    assert_eq!(
+        state_arms,
+        vec![("Held", 1), ("Consumed", 2), ("Released", 3)],
+        "arm tags come from source spelling order"
+    );
+
+    let next_logical_code = base
+        .logical
+        .iter()
+        .map(|row| row.object_kind)
+        .max()
+        .expect("logical registry is nonempty")
+        + 1;
+    let next_wire_code = base
+        .wire
+        .iter()
+        .map(|row| row.wire_type_id)
+        .max()
+        .expect("wire registry is nonempty")
+        + 1;
+    let direction_target = "Hm6lDirectionTarget";
+    let direction_kind = kind(next_logical_code, direction_target, "reserved", 15);
+    let direction_wire = WireType {
+        wire_type_id: next_wire_code,
+        name: direction_target.into(),
+        kind: "record".into(),
+        status: "reserved".into(),
+        containing_union: None,
+        wire_tag: None,
+        encoding_context: "hm6l directional class control".into(),
+        allowed_containing_schemas: vec!["ResourceChargeEffect".into()],
+        max_size_bytes: 40,
+    };
+
+    let mut retaining_logical = base.clone();
+    retaining_logical.logical.push(direction_kind.clone());
+    let mut retaining_field = field(
+        "ResourceChargeEffect",
+        0x7ffe,
+        "hm6l_retaining_direction",
+        15,
+    );
+    retaining_field.target_schema_id = Some(direction_target.into());
+    retaining_logical.fields.push(retaining_field.clone());
+    assert!(
+        codes_without_assignment_drift(&retaining_logical).is_empty(),
+        "named retaining direction must accept a logical target at order 15"
+    );
+
+    let mut retaining_wire = base.clone();
+    retaining_wire.wire.push(direction_wire.clone());
+    retaining_wire.fields.push(retaining_field);
+    let retaining_wire_codes = codes_without_assignment_drift(&retaining_wire);
+    assert!(
+        retaining_wire_codes.contains(&"ref_target_unresolved".to_string()),
+        "named retaining direction must reject a wire target: {retaining_wire_codes:?}"
+    );
+
+    let mut by_value_field = field(
+        "ResourceChargeEffect",
+        0x7ffe,
+        "hm6l_by_value_direction",
+        15,
+    );
+    by_value_field.exact_wire_type = direction_target.into();
+    by_value_field.identity_class = "inline".into();
+    by_value_field.reference_semantics = "none".into();
+    by_value_field.target_schema_id = None;
+
+    let mut by_value_wire = base.clone();
+    by_value_wire.wire.push(direction_wire);
+    by_value_wire.fields.push(by_value_field.clone());
+    assert!(
+        codes_without_assignment_drift(&by_value_wire).is_empty(),
+        "named by-value direction must accept a wire target"
+    );
+
+    let mut by_value_logical = base.clone();
+    by_value_logical.logical.push(direction_kind);
+    by_value_logical.fields.push(by_value_field);
+    let by_value_logical_codes = codes_without_assignment_drift(&by_value_logical);
+    assert!(
+        by_value_logical_codes.contains(&"field_unresolved_wire_type".to_string()),
+        "named by-value direction must reject a logical target: {by_value_logical_codes:?}"
+    );
+
+    let mut wire_host = base.clone();
+    let mut illegal_wire_host_field =
+        field("ResourceRequest", 0x7ffe, "hm6l_wire_host_vacuity", 10);
+    illegal_wire_host_field.exact_wire_type = "u64".into();
+    illegal_wire_host_field.identity_class = "inline".into();
+    illegal_wire_host_field.reference_semantics = "none".into();
+    illegal_wire_host_field.target_schema_id = None;
+    wire_host.fields.push(illegal_wire_host_field);
+    let wire_host_codes = codes_without_assignment_drift(&wire_host);
+    assert!(
+        wire_host_codes.contains(&"field_unresolved_schema".to_string()),
+        "wire-host vacuity control must fire: {wire_host_codes:?}"
+    );
+
+    let transition_order = base
+        .logical
+        .iter()
+        .find(|row| row.name == "ResourceLedgerTransition")
+        .expect("ResourceLedgerTransition is registered")
+        .construction_order;
+    let control_order = base
+        .logical
+        .iter()
+        .find(|row| row.name == "ControlCommand")
+        .expect("ControlCommand is registered")
+        .construction_order;
+    assert_eq!(transition_order, 15, "named outbound target order moved");
+    assert_eq!(control_order, 10, "named inbound owner order moved");
+
+    let spec_at = |order: i64| {
+        let mut probe = base.clone();
+        probe.logical.push(kind(
+            next_logical_code,
+            "ResourceLedgerTransitionSpec",
+            "reserved",
+            order,
+        ));
+        let mut outbound = field(
+            "ResourceLedgerTransitionSpec",
+            0x0002,
+            "sorted_transition_refs",
+            order,
+        );
+        outbound.cardinality = "many".into();
+        outbound.target_schema_id = Some("ResourceLedgerTransition".into());
+        probe.fields.push(outbound);
+        let mut inbound = field(
+            "ControlCommand",
+            0x7ffd,
+            "hm6l_resource_ledger_transition_spec_ref",
+            control_order,
+        );
+        inbound.target_schema_id = Some("ResourceLedgerTransitionSpec".into());
+        probe.fields.push(inbound);
+        codes_without_assignment_drift(&probe)
+    };
+    let at_inbound_ceiling = spec_at(control_order);
+    assert!(
+        at_inbound_ceiling.contains(&"dag_future_result".to_string()),
+        "order 10 must fire on outbound target order 15: {at_inbound_ceiling:?}"
+    );
+    let at_outbound_floor = spec_at(transition_order);
+    assert!(
+        at_outbound_floor.contains(&"dag_future_result".to_string()),
+        "order 15 must fire on inbound owner order 10: {at_outbound_floor:?}"
+    );
+}

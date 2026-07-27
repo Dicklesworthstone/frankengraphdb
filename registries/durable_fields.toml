@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 74
+registry_epoch = 75
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -13310,6 +13310,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "LocalConstraintReservationRecordState"
+containing_schema = "LocalConstraintReservationRecord"
+union_path = "LocalConstraintReservationRecord.state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalConstraintReservationRecord"]
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "LocalFinalCertificationReservationSelection"
 containing_schema = "LocalFinalCertificationReservation"
 union_path = "LocalFinalCertificationReservation.selection"
@@ -21178,6 +21189,44 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+union_name = "LocalConstraintReservationRecordState"
+containing_schema = "LocalConstraintReservationRecord"
+union_path = "LocalConstraintReservationRecord.state"
+arm_tag = 0x0001
+source_arm_name = "Held"
+stable_name = "held"
+payload_kind = "unit"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "LocalConstraintReservationRecordState"
+containing_schema = "LocalConstraintReservationRecord"
+union_path = "LocalConstraintReservationRecord.state"
+arm_tag = 0x0002
+source_arm_name = "Consumed"
+stable_name = "consumed"
+payload_kind = "inline-record"
+payload_sha256 = "ea0f6ce01e30c0682adf7e181720cf4a6570d55e2b4d2cfd0f5f54a5f5f5570b"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[union_arm]]
+union_name = "LocalConstraintReservationRecordState"
+containing_schema = "LocalConstraintReservationRecord"
+union_path = "LocalConstraintReservationRecord.state"
+arm_tag = 0x0003
+source_arm_name = "Released"
+stable_name = "released"
+payload_kind = "inline-record"
+payload_sha256 = "4e309e62fe0318dfcc0b0bd50e69f2259b21cdf5a767b9ba9dc573ab3eb97336"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 32
 
 [[union_arm]]
 union_name = "LocalFinalCertificationReservationSelection"
