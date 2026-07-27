@@ -48,6 +48,21 @@ log() { printf '[g0-spine-e2e] %s\n' "$*"; }
 ok()  { PASS=$((PASS + 1)); log "PASS: $*"; }
 die() { FAIL=$((FAIL + 1)); log "FAIL: $*"; }
 
+# This gate already records an assertion failure and keeps going, so its verdict
+# can say "3 failed". What it could not say is that it never got there: under
+# `set -e` any unguarded command ends the run before the tally at the bottom, and
+# MEASURED 2026-07-26 the output then carries ZERO tally lines -- the last thing a
+# reader sees is a PASS line and a raw shell error, with nothing stating that the
+# remaining assertions did not run. A truncated log read exactly like a whole one.
+VERDICT_REACHED=0
+report_partial_tally() {
+  local rc=$?
+  [ "$VERDICT_REACHED" -eq 1 ] && return 0
+  log "ABORTED before the verdict (exit $rc): $PASS passed, $FAIL failed so far; every assertion after this point did not run"
+  return 0
+}
+trap report_partial_tally EXIT
+
 log "work directory: $WORK"
 mkdir -p "$WORK/bin"
 
@@ -308,6 +323,7 @@ grep -q '"event":"capability_absent","capability":"mvcc-visibility"' "$WORK/spin
 
 # --- Verdict -----------------------------------------------------------------
 log "evidence: $WORK/{spine-baseline,spine-neg-21,spine-closure-probe,spine-closure-control,spine-closure-hot}.jsonl"
+VERDICT_REACHED=1
 log "result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 log "G0 spine e2e: ALL GREEN"
