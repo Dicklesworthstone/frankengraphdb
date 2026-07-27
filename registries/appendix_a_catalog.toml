@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "c715512f6adf746157692028a3fdf001dd5ce4f5dfb54b4d87a2f1957d92298a"
 
 [target_manifest]
-target_count = 3317
+target_count = 3318
 projection_fallback_count = 111
-target_source_assignment_sha256 = "8108179df11b32e82575b3a2aaa7e2bdadfe6131225f18ff9fda61b9acb00562"
+target_source_assignment_sha256 = "ea4bb314b26e1d35f71869223c3efb7d60c2fcbb3a454699beda45e8bb80440a"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 38
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 70
+registry_epoch = 71
 
 [[logical_kind]]
 slice_id = "a03"
@@ -103184,6 +103184,22 @@ max_size_bytes = 256
 
 [[field]]
 slice_id = "a03"
+row_id = "a03:field:local-prepare-admission-spec-expected-conflict-index-basis"
+containing_schema = "LocalPrepareAdmissionSpec"
+field_tag = 0x0014
+stable_name = "expected_conflict_index_basis"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only Local WeakStateIdentity embedded by value as the prepare admission's expected conflict-index basis; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the admission spec (a03:1528)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a03"
 row_id = "a03:field:local-audit-ticket-claim-record-owner"
 containing_schema = "LocalAuditTicketClaimRecord"
 field_tag = 0x0002
@@ -103323,6 +103339,14 @@ row_id = "a03:target:field-admitted-txn-abort-command-authority-bound-header"
 target_row_id = "a03:field:admitted-txn-abort-command-authority-bound-header"
 slice_id = "a03"
 source_key = "field|AdmittedTxnAbortCommand|AdmittedTxnAbortCommand.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-local-prepare-admission-spec-expected-conflict-index-basis"
+target_row_id = "a03:field:local-prepare-admission-spec-expected-conflict-index-basis"
+slice_id = "a03"
+source_key = "field|LocalPrepareAdmissionSpec|LocalPrepareAdmissionSpec.expected_conflict_index_basis|expected_conflict_index_basis"
 target_kind = "field"
 definition_status = "declared"
 

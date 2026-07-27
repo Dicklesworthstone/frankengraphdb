@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 70
+registry_epoch = 71
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -4296,6 +4296,20 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the ConfigurationState this LocalOrderAttemptInput names; retained while the referrer is retained, and the acyclic order 5 <= 20 keeps the reference backward-only (a07:1758)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalPrepareAdmissionSpec"
+field_tag = 0x0014
+stable_name = "expected_conflict_index_basis"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only Local WeakStateIdentity embedded by value as the prepare admission's expected conflict-index basis; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the admission spec (a03:1528)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "LocalRestoreActivationSpec"

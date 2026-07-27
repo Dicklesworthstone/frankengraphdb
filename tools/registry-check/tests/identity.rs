@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 70
+registry_epoch = 71
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 70);
+    assert_eq!(epoch, 71);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -8216,6 +8216,16 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | ("LocalBeginReservationRecord", "applied_control_ref")
             )
     };
+    // The a03 flat-field residue re-measurement lands one further source-forced
+    // inline field. Like every tranche here it postdates the erratum, so it is
+    // filtered OUT of the historical witness rather than re-pinning the witness
+    // constant -- the constant is a frozen historical fact, not a live pin.
+    let post_erratum_a03_flat_residue_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("LocalPrepareAdmissionSpec", "expected_conflict_index_basis")
+        )
+    };
     // yenh opens five exact A03 wire/ordinary-union consumer closures and
     // lands their source-forced inline fields. They postdate the erratum and
     // therefore stay out of its historical assignment witness.
@@ -8273,6 +8283,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 &field.stable_name,
             )
             && !post_erratum_a03_inline_fields(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a03_flat_residue_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a03_wire_consumer_fields(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
@@ -8281,7 +8292,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 571,
+        pre_erratum.fields.len() + 572,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A12 residue tranche"
     );
