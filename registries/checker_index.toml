@@ -630,6 +630,34 @@ artifact = "scripts/g0_proof_lanes_e2e.sh"
 status = "live"
 unit = "artifact"
 
+# --- The gate that guards the tree-stability tripwire (fgdb-mt2b, residue of
+# --- fgdb-49ng). 49ng landed the tripwire in scripts/lib/gate_verdict.sh: a gate
+# --- whose subject moved underneath it reports UNRUN carrying both shas rather
+# --- than a PASS certifying a tree never wholly tested, or a FAIL blaming
+# --- whichever pane's code was resident. Nothing guarded the guard. Neuter
+# --- gate_check_tree_stable and every gate in this repo stays green — measured,
+# --- and now measured by this row: with it neutered this gate reports 7 failures,
+# --- and with the trap's `exit` regressed to an `rc=` assignment it reports the
+# --- original defect verbatim (token=UNRUN, rc=0 — "did not run" and "success" in
+# --- one breath), caught by exactly one case.
+# --- Six directions, because a tripwire that only fires is as useless as one that
+# --- never does: still+green -> PASS, still+RED -> FAIL with zero UNRUN (the third
+# --- state must not swallow a real failure), a landing mid-run -> UNRUN with two
+# --- differing shas, an UNCOMMITTED tracked edit -> UNRUN with HEAD equal at both
+# --- ends (the case that kills a HEAD-only fingerprint), the EXIT-trap window, and
+# --- a mutation control asserting the UNRUNs come from the tripwire itself.
+# --- Its subject is a synthetic few-KB git repo, not a clone of this one: it costs
+# --- no build slot, cannot race, and never commits in the live worktree — doing
+# --- that to prove this would void whatever check.sh is in flight, which is the
+# --- harm fgdb-49ng exists to remove.
+
+[[checker]]
+symbol = "g0_tree_stability_e2e"
+kind = "script"
+artifact = "scripts/g0_tree_stability_e2e.sh"
+status = "live"
+unit = "artifact"
+
 # =============================================================================
 # script_disposition — the FILE -> ROW direction (fgdb-orphan-w1-e2e-gates-
 # unregistered-unrun-vuq8).
