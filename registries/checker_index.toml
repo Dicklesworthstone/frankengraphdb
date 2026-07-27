@@ -613,6 +613,23 @@ artifact = "scripts/g0_negative_evidence_e2e.sh"
 status = "live"
 unit = "artifact"
 
+# --- The gate that actually runs the provers (fgdb-dkrc, residue of
+# --- fgdb-proof-lane-checked-is-only-file-existence-0f1l). 0f1l made
+# --- `status = "checked"` mean something but deliberately ran nothing: there was
+# --- no `lean`, `lake` or TLC invocation anywhere in the repository, so a lane's
+# --- `checked_by` had no gate it could name. This row is that gate. It refuses
+# --- to be vacuous in both directions — zero checked lanes is a failure, and a
+# --- missing prover is a failure rather than a skip. It also fails a proof that
+# --- Lean ACCEPTS while admitting itself: `lean` exits 0 on `sorry` (a warning,
+# --- not an error), measured by red-proof.
+
+[[checker]]
+symbol = "g0_proof_lanes_e2e"
+kind = "script"
+artifact = "scripts/g0_proof_lanes_e2e.sh"
+status = "live"
+unit = "artifact"
+
 # =============================================================================
 # script_disposition — the FILE -> ROW direction (fgdb-orphan-w1-e2e-gates-
 # unregistered-unrun-vuq8).
