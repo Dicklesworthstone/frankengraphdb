@@ -10067,7 +10067,7 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
     assert_eq!(backlink.construction_order, 44);
     assert_eq!(
         backlink.construction_relation.as_deref(),
-        Some("prior_object")
+        Some(identity::PRIOR_OBJECT_CONSTRUCTION_RELATION)
     );
     assert!(backlink.retention_and_cut_rule.contains("PriorObject"));
     assert!(backlink.retention_and_cut_rule.contains("already-known"));
@@ -10120,6 +10120,23 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
     assert!(
         component_codes(&restored).contains(&"dag_cycle".to_owned()),
         "restoring the GlobalLogicalDeltaBatch@44 -> GlobalTxnRecord@44 schema edge must fire dag_cycle"
+    );
+
+    let mut misspelled = component.clone();
+    misspelled
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "GlobalLogicalDeltaBatch"
+                && field.stable_name == "global_txn_record_ref"
+        })
+        .expect("backlink")
+        .construction_relation = Some("same_generation".into());
+    let misspelled_codes = component_codes(&misspelled);
+    assert!(
+        misspelled_codes.contains(&"bad_field".to_owned())
+            && misspelled_codes.contains(&"dag_cycle".to_owned()),
+        "an unregistered construction relation must be rejected and must not cut the all-44 cycle: {misspelled_codes:?}"
     );
 
     // Both reference directions constrain GlobalStatePayload@44. Lowering it

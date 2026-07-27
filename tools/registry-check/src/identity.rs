@@ -76,6 +76,13 @@ pub const BUILTIN_WIRE_TYPES: [&str; 11] = [
     "oid256",
 ];
 
+/// The sole typed refinement that can cut a co-phased schema edge.
+///
+/// Keep this vocabulary in one reader: the loader, validator, DAG builder, and
+/// robot output all consume `FieldRow::construction_relation`; no second
+/// allowlist is permitted to decide which edges are instance-prior.
+pub const PRIOR_OBJECT_CONSTRUCTION_RELATION: &str = "prior_object";
+
 /// The `reference_semantics` a field row MUST carry, given its `exact_wire_type`.
 ///
 /// LAW: **the wire tag declares the reference strength.** Appendix A: "Every
@@ -1904,7 +1911,7 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             ));
         }
         if let Some(relation) = f.construction_relation.as_deref()
-            && (relation != "prior_object"
+            && (relation != PRIOR_OBJECT_CONSTRUCTION_RELATION
                 || !matches!(
                     f.reference_semantics.as_str(),
                     "strong" | "conditional" | "weak_digest"
@@ -3068,7 +3075,8 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             // cut only a co-phased, non-self schema edge whose row carries the
             // explicit source-backed contract checked above. Invalid uses stay
             // in the schema graph and therefore fail closed.
-            let valid_prior_object = f.construction_relation.as_deref() == Some("prior_object")
+            let valid_prior_object = f.construction_relation.as_deref()
+                == Some(PRIOR_OBJECT_CONSTRUCTION_RELATION)
                 && target_kind.construction_order == containing.construction_order
                 && target != containing_family
                 && matches!(
