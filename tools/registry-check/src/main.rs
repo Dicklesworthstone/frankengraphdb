@@ -87,7 +87,12 @@ fn appendix_violation_message(violation: &appendix_a::Violation) -> String {
         "catalog_read" => "cannot read the canonical Appendix A catalog".to_string(),
         "source_read" => "cannot read the canonical Appendix A plan source".to_string(),
         "projection_read" => "cannot read a checked-in Appendix A projection".to_string(),
-        _ => "Appendix A contract check failed".to_string(),
+        // Every other appendix violation carries its own measured message, and for
+        // the pin/count families that message is the ONLY place the recomputed value
+        // appears. Collapsing it to a fixed string made every appendix violation in
+        // the repo unreadable from the binary, and forced the pin cycle to re-derive
+        // by hand what the checker had already computed (fgdb-jkvc).
+        _ => violation.msg.clone(),
     }
 }
 
