@@ -7641,6 +7641,59 @@ fn undo_e55p_id256_retype(identity: &mut IdentityRegistries) {
     }
 }
 
+/// The eleven collection-element member rows that increment (iii) of the
+/// fgdb-k3sa B2 ruling RE-KEYED off their historical owner and onto the minted
+/// element kind.  These rows are pre-erratum — they were in the namespace long
+/// before 8a704c2 — so a filter is the wrong instrument: this is CONTENT drift
+/// on a retained row, exactly the class `undo_e55p_id256_retype` exists for.
+/// Only `containing_schema` moved; `field_tag`, `construction_order` and every
+/// other column are byte-identical, and `rows_pin` sorts, so restoring the
+/// owner restores both the line and its transcript position.
+///
+/// Licensed by accounting, denominator 11 — the complete `.record.` cohort:
+///   2  KeyEnvelopeNodeInheritedRootsRecord
+///   3  LocalConstraintReservationRecordOwnerRecord
+///   1  NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord
+///   2  PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord
+///   1  PriorIncarnationLeaseBarrierBootstrapImportSortedIssuerFenceImportsRecord
+///   1  PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord
+///   1  RemoteGrantRetirementPlanSortedEntriesRecord
+/// The seven repeated field rows those kinds hang off are a separate cohort and
+/// are removed by `post_erratum_k3sa_collection_field`, not by this undo.
+/// The schema a k3sa (iii) collection-element kind was re-keyed OFF — i.e. the
+/// owner this member still sits under in the frozen source census.
+///
+/// Shared deliberately by the two consumers that need it, rather than spelled
+/// twice: `undo_k3sa_rekey` below, and the mn8i source-position join in
+/// `idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous`,
+/// which resolves a landed identity row back to its source leaf. Both ask the
+/// same question — "where does the source say this member lives?" — and a
+/// second copy of the table is how the two answers drift apart.
+fn k3sa_source_owner(containing_schema: &str) -> Option<&'static str> {
+    Some(match containing_schema {
+        "KeyEnvelopeNodeInheritedRootsRecord" => "KeyEnvelopeNode",
+        "LocalConstraintReservationRecordOwnerRecord" => "LocalConstraintReservationRecord",
+        "NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord" => {
+            "NoTerminalSignatureOrOrderProof"
+        }
+        "PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord"
+        | "PriorIncarnationLeaseBarrierBootstrapImportSortedIssuerFenceImportsRecord"
+        | "PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord" => {
+            "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+        }
+        "RemoteGrantRetirementPlanSortedEntriesRecord" => "RemoteGrantRetirementPlan",
+        _ => return None,
+    })
+}
+
+fn undo_k3sa_rekey(identity: &mut IdentityRegistries) {
+    for field in identity.fields.iter_mut() {
+        if let Some(owner) = k3sa_source_owner(&field.containing_schema) {
+            field.containing_schema = owner.to_owned();
+        }
+    }
+}
+
 #[test]
 fn idr_assignment_history_and_epoch_are_frozen() {
     let r = real_identity();
@@ -7657,6 +7710,16 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the A10 CommandRef forward-drift baseline must remain explicit"
     );
     let mut pre_erratum = r.clone();
+    // BEFORE the retain, not after: the k3sa (iii) re-key moved 11 rows onto a
+    // minted element kind, and 8 of them were previously REMOVED by existing
+    // post-erratum filters keyed on their old owner (measured: the field cohort
+    // assert read left 972 / right 964 with this call placed after the retain).
+    // Restoring the historical owner first makes the re-key invisible to every
+    // filter and to the transcript alike, which is the correct semantics for a
+    // witness that reconstructs history — in history these rows hung off their
+    // owners. Running it later would silently change cohort MEMBERSHIP as well
+    // as content and would need eight filter extensions to compensate.
+    undo_k3sa_rekey(&mut pre_erratum);
     let current_union_count = pre_erratum.ordinary_unions.len();
     let current_reference_union_count = pre_erratum.unions.len();
     let current_reference_arm_count: usize = pre_erratum.unions.iter().map(|u| u.arms.len()).sum();
@@ -11366,8 +11429,10 @@ fn idr_oicl_cycle_backlinks_are_nonretaining_target_digests() {
             "a08",
             "NoTerminalSignatureOrOrderProof.freeze_digest",
         ),
+        // Re-keyed onto the minted element kind by k3sa (iii); the census path
+        // is unchanged because the source still spells them under the owner.
         (
-            "KeyEnvelopeNode",
+            "KeyEnvelopeNodeInheritedRootsRecord",
             "source_root_digest",
             0x0016,
             50,
@@ -11375,7 +11440,7 @@ fn idr_oicl_cycle_backlinks_are_nonretaining_target_digests() {
             "KeyEnvelopeNode.inherited_roots.record.source_root_digest",
         ),
         (
-            "KeyEnvelopeNode",
+            "KeyEnvelopeNodeInheritedRootsRecord",
             "source_root_ciphertext_digest",
             0x0017,
             50,
@@ -11403,7 +11468,16 @@ fn idr_oicl_cycle_backlinks_are_nonretaining_target_digests() {
         assert!(row.retention_and_cut_rule.contains("comparison-only"));
         assert!(row.retention_and_cut_rule.contains("never traversed"));
 
-        let source_key = format!("field|{schema}|{source_path}|{stable_name}");
+        // A k3sa (iii) re-keyed row carries the PROJECTION FALLBACK, not a census
+        // `field|` key: its owner is a minted element kind with no source symbol
+        // at all, so `source_target_key_missing` rejects any `field|<element>|…`
+        // spelling and the fallback is the only admissible carrier. Branching
+        // here rather than relaxing the assertion keeps both shapes checked.
+        let source_key = if k3sa_source_owner(schema).is_some() {
+            format!("projection|durable_fields|{schema}.{stable_name}")
+        } else {
+            format!("field|{schema}|{source_path}|{stable_name}")
+        };
         let target = catalog
             .targets
             .iter()
@@ -15161,7 +15235,14 @@ fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
         .collect();
     assert_eq!(landed.len(), 80, "the mn8i landed field tranche moved");
     for row in &landed {
-        let key = (row.containing_schema.clone(), row.stable_name.clone());
+        // A k3sa (iii) collection-element member is OWNED by its minted element
+        // kind but still SPELLED under the original schema in the source census,
+        // so the source-position join must resolve back through that owner. The
+        // identity row is the thing that moved; the source leaf did not.
+        let source_owner = k3sa_source_owner(&row.containing_schema)
+            .map(str::to_owned)
+            .unwrap_or_else(|| row.containing_schema.clone());
+        let key = (source_owner, row.stable_name.clone());
         let expected = inferred_tags
             .get(&key)
             .unwrap_or_else(|| panic!("source leaf missing for {}.{}", key.0, key.1));
@@ -15327,7 +15408,10 @@ fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
         .fields
         .iter_mut()
         .find(|row| {
-            row.containing_schema == "LocalConstraintReservationRecord"
+            // Re-keyed onto its element kind by k3sa (iii). The control is
+            // undamaged: the element kind's construction_order is also 30, so
+            // 29 still trips the field-order equality law.
+            row.containing_schema == "LocalConstraintReservationRecordOwnerRecord"
                 && row.stable_name == "admission_generation"
         })
         .expect("named source-order field exists")

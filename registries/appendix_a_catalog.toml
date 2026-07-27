@@ -40,8 +40,8 @@ occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51
 
 [target_manifest]
 target_count = 3605
-projection_fallback_count = 118
-target_source_assignment_sha256 = "de8d4ed337b1040ec8e883bbb18f5ae6835cff28a912fb8b8db8188d89ab64eb"
+projection_fallback_count = 129
+target_source_assignment_sha256 = "f767156ddbbfba1fc2fd9653722b6b557fc41f626fa6f7fa09ef6bfc90533cf5"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -19127,8 +19127,8 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a19"
-row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-fence-receipt-ref"
-containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-sorted-issuer-fence-imports-record-fence-receipt-ref"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImportSortedIssuerFenceImportsRecord"
 field_tag = 0x000d
 stable_name = "fence_receipt_ref"
 exact_wire_type = "StrongRef"
@@ -19144,8 +19144,8 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a19"
-row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-cohort-window-ref"
-containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-sorted-expired-cohort-imports-record-cohort-window-ref"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord"
 field_tag = 0x0011
 stable_name = "cohort_window_ref"
 exact_wire_type = "StrongRef"
@@ -19161,8 +19161,8 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a19"
-row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-prebootstrap-portable-expiry-attestation-ref"
-containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-sorted-expired-cohort-imports-record-prebootstrap-portable-expiry-attestation-ref"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord"
 field_tag = 0x0013
 stable_name = "prebootstrap_portable_expiry_attestation_ref"
 exact_wire_type = "StrongRef"
@@ -19178,8 +19178,8 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a19"
-row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-revocation-receipt-ref"
-containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-sorted-revoked-cohort-imports-record-revocation-receipt-ref"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord"
 field_tag = 0x0019
 stable_name = "revocation_receipt_ref"
 exact_wire_type = "StrongRef"
@@ -83548,34 +83548,34 @@ target_kind = "field"
 definition_status = "declared"
 
 [[target]]
-row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-fence-receipt-ref"
-target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-fence-receipt-ref"
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-sorted-issuer-fence-imports-record-fence-receipt-ref"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-sorted-issuer-fence-imports-record-fence-receipt-ref"
 slice_id = "a19"
-source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.sorted_issuer_fence_imports.record.fence_receipt_ref|fence_receipt_ref"
+source_key = "projection|durable_fields|PriorIncarnationLeaseBarrierBootstrapImportSortedIssuerFenceImportsRecord.fence_receipt_ref"
 target_kind = "field"
 definition_status = "declared"
 
 [[target]]
-row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-cohort-window-ref"
-target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-cohort-window-ref"
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-sorted-expired-cohort-imports-record-cohort-window-ref"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-sorted-expired-cohort-imports-record-cohort-window-ref"
 slice_id = "a19"
-source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.sorted_expired_cohort_imports.record.cohort_window_ref|cohort_window_ref"
+source_key = "projection|durable_fields|PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord.cohort_window_ref"
 target_kind = "field"
 definition_status = "declared"
 
 [[target]]
-row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-prebootstrap-portable-expiry-attestation-ref"
-target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-prebootstrap-portable-expiry-attestation-ref"
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-sorted-expired-cohort-imports-record-prebootstrap-portable-expiry-attestation-ref"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-sorted-expired-cohort-imports-record-prebootstrap-portable-expiry-attestation-ref"
 slice_id = "a19"
-source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.sorted_expired_cohort_imports.record.prebootstrap_portable_expiry_attestation_ref|prebootstrap_portable_expiry_attestation_ref"
+source_key = "projection|durable_fields|PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord.prebootstrap_portable_expiry_attestation_ref"
 target_kind = "field"
 definition_status = "declared"
 
 [[target]]
-row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-revocation-receipt-ref"
-target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-revocation-receipt-ref"
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-sorted-revoked-cohort-imports-record-revocation-receipt-ref"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-sorted-revoked-cohort-imports-record-revocation-receipt-ref"
 slice_id = "a19"
-source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.sorted_revoked_cohort_imports.record.revocation_receipt_ref|revocation_receipt_ref"
+source_key = "projection|durable_fields|PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord.revocation_receipt_ref"
 target_kind = "field"
 definition_status = "declared"
 
@@ -96037,8 +96037,8 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a08"
-row_id = "a08:field:no-terminal-signature-or-order-proof-configuration-ref"
-containing_schema = "NoTerminalSignatureOrOrderProof"
+row_id = "a08:field:no-terminal-signature-or-order-proof-raft-nonorder-evidence-record-configuration-ref"
+containing_schema = "NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord"
 field_tag = 0x0015
 stable_name = "configuration_ref"
 exact_wire_type = "StrongRef"
@@ -96156,8 +96156,8 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a08"
-row_id = "a08:field:remote-grant-retirement-plan-old-grant-evidence-ref"
-containing_schema = "RemoteGrantRetirementPlan"
+row_id = "a08:field:remote-grant-retirement-plan-sorted-entries-record-old-grant-evidence-ref"
+containing_schema = "RemoteGrantRetirementPlanSortedEntriesRecord"
 field_tag = 0x0009
 stable_name = "old_grant_evidence_ref"
 exact_wire_type = "StrongRef"
@@ -98345,10 +98345,10 @@ target_kind = "field"
 definition_status = "declared"
 
 [[target]]
-row_id = "a08:target:field-no-terminal-signature-or-order-proof-configuration-ref"
-target_row_id = "a08:field:no-terminal-signature-or-order-proof-configuration-ref"
+row_id = "a08:target:field-no-terminal-signature-or-order-proof-raft-nonorder-evidence-record-configuration-ref"
+target_row_id = "a08:field:no-terminal-signature-or-order-proof-raft-nonorder-evidence-record-configuration-ref"
 slice_id = "a08"
-source_key = "field|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.raft_nonorder_evidence.record.configuration_ref|configuration_ref"
+source_key = "projection|durable_fields|NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord.configuration_ref"
 target_kind = "field"
 definition_status = "declared"
 
@@ -98401,10 +98401,10 @@ target_kind = "field"
 definition_status = "declared"
 
 [[target]]
-row_id = "a08:target:field-remote-grant-retirement-plan-old-grant-evidence-ref"
-target_row_id = "a08:field:remote-grant-retirement-plan-old-grant-evidence-ref"
+row_id = "a08:target:field-remote-grant-retirement-plan-sorted-entries-record-old-grant-evidence-ref"
+target_row_id = "a08:field:remote-grant-retirement-plan-sorted-entries-record-old-grant-evidence-ref"
 slice_id = "a08"
-source_key = "field|RemoteGrantRetirementPlan|RemoteGrantRetirementPlan.sorted_entries.record.old_grant_evidence_ref|old_grant_evidence_ref"
+source_key = "projection|durable_fields|RemoteGrantRetirementPlanSortedEntriesRecord.old_grant_evidence_ref"
 target_kind = "field"
 definition_status = "declared"
 
@@ -104179,8 +104179,8 @@ digest_class = "target"
 
 [[field]]
 slice_id = "a13"
-row_id = "a13:field:key-envelope-node-source-root-digest"
-containing_schema = "KeyEnvelopeNode"
+row_id = "a13:field:key-envelope-node-inherited-roots-record-source-root-digest"
+containing_schema = "KeyEnvelopeNodeInheritedRootsRecord"
 field_tag = 0x0016
 stable_name = "source_root_digest"
 exact_wire_type = "digest256"
@@ -104196,8 +104196,8 @@ digest_class = "target"
 
 [[field]]
 slice_id = "a13"
-row_id = "a13:field:key-envelope-node-source-root-ciphertext-digest"
-containing_schema = "KeyEnvelopeNode"
+row_id = "a13:field:key-envelope-node-inherited-roots-record-source-root-ciphertext-digest"
+containing_schema = "KeyEnvelopeNodeInheritedRootsRecord"
 field_tag = 0x0017
 stable_name = "source_root_ciphertext_digest"
 exact_wire_type = "digest256"
@@ -104264,18 +104264,18 @@ target_kind = "field"
 definition_status = "declared"
 
 [[target]]
-row_id = "a13:target:field-key-envelope-node-source-root-digest"
-target_row_id = "a13:field:key-envelope-node-source-root-digest"
+row_id = "a13:target:field-key-envelope-node-inherited-roots-record-source-root-digest"
+target_row_id = "a13:field:key-envelope-node-inherited-roots-record-source-root-digest"
 slice_id = "a13"
-source_key = "field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_digest|source_root_digest"
+source_key = "projection|durable_fields|KeyEnvelopeNodeInheritedRootsRecord.source_root_digest"
 target_kind = "field"
 definition_status = "declared"
 
 [[target]]
-row_id = "a13:target:field-key-envelope-node-source-root-ciphertext-digest"
-target_row_id = "a13:field:key-envelope-node-source-root-ciphertext-digest"
+row_id = "a13:target:field-key-envelope-node-inherited-roots-record-source-root-ciphertext-digest"
+target_row_id = "a13:field:key-envelope-node-inherited-roots-record-source-root-ciphertext-digest"
 slice_id = "a13"
-source_key = "field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_ciphertext_digest|source_root_ciphertext_digest"
+source_key = "projection|durable_fields|KeyEnvelopeNodeInheritedRootsRecord.source_root_ciphertext_digest"
 target_kind = "field"
 definition_status = "declared"
 
@@ -106153,8 +106153,8 @@ max_size_bytes = 32
 
 [[field]]
 slice_id = "a12"
-row_id = "a12:field:local-constraint-reservation-record-registration-ref"
-containing_schema = "LocalConstraintReservationRecord"
+row_id = "a12:field:local-constraint-reservation-record-owner-record-registration-ref"
+containing_schema = "LocalConstraintReservationRecordOwnerRecord"
 field_tag = 0x0002
 stable_name = "registration_ref"
 exact_wire_type = "StrongRef"
@@ -106170,8 +106170,8 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a12"
-row_id = "a12:field:local-constraint-reservation-record-prepare-admission-ref"
-containing_schema = "LocalConstraintReservationRecord"
+row_id = "a12:field:local-constraint-reservation-record-owner-record-prepare-admission-ref"
+containing_schema = "LocalConstraintReservationRecordOwnerRecord"
 field_tag = 0x0003
 stable_name = "prepare_admission_ref"
 exact_wire_type = "StrongRef"
@@ -106187,8 +106187,8 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a12"
-row_id = "a12:field:local-constraint-reservation-record-admission-generation"
-containing_schema = "LocalConstraintReservationRecord"
+row_id = "a12:field:local-constraint-reservation-record-owner-record-admission-generation"
+containing_schema = "LocalConstraintReservationRecordOwnerRecord"
 field_tag = 0x0004
 stable_name = "admission_generation"
 exact_wire_type = "u64"
@@ -108094,26 +108094,26 @@ target_kind = "field"
 definition_status = "declared"
 
 [[target]]
-row_id = "a12:target:field-local-constraint-reservation-record-registration-ref"
-target_row_id = "a12:field:local-constraint-reservation-record-registration-ref"
+row_id = "a12:target:field-local-constraint-reservation-record-owner-record-registration-ref"
+target_row_id = "a12:field:local-constraint-reservation-record-owner-record-registration-ref"
 slice_id = "a12"
-source_key = "field|LocalConstraintReservationRecord|LocalConstraintReservationRecord.owner.record.registration_ref|registration_ref"
+source_key = "projection|durable_fields|LocalConstraintReservationRecordOwnerRecord.registration_ref"
 target_kind = "field"
 definition_status = "declared"
 
 [[target]]
-row_id = "a12:target:field-local-constraint-reservation-record-prepare-admission-ref"
-target_row_id = "a12:field:local-constraint-reservation-record-prepare-admission-ref"
+row_id = "a12:target:field-local-constraint-reservation-record-owner-record-prepare-admission-ref"
+target_row_id = "a12:field:local-constraint-reservation-record-owner-record-prepare-admission-ref"
 slice_id = "a12"
-source_key = "field|LocalConstraintReservationRecord|LocalConstraintReservationRecord.owner.record.prepare_admission_ref|prepare_admission_ref"
+source_key = "projection|durable_fields|LocalConstraintReservationRecordOwnerRecord.prepare_admission_ref"
 target_kind = "field"
 definition_status = "declared"
 
 [[target]]
-row_id = "a12:target:field-local-constraint-reservation-record-admission-generation"
-target_row_id = "a12:field:local-constraint-reservation-record-admission-generation"
+row_id = "a12:target:field-local-constraint-reservation-record-owner-record-admission-generation"
+target_row_id = "a12:field:local-constraint-reservation-record-owner-record-admission-generation"
 slice_id = "a12"
-source_key = "field|LocalConstraintReservationRecord|LocalConstraintReservationRecord.owner.record.admission_generation|admission_generation"
+source_key = "projection|durable_fields|LocalConstraintReservationRecordOwnerRecord.admission_generation"
 target_kind = "field"
 definition_status = "declared"
 

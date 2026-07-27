@@ -40,10 +40,10 @@ pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (no
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
 pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3605;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "432e0d87d0a0627f9b55c951fd18ba9c6b20ffbb680c3e97e5d3c390cf787555";
-pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 118;
+    "546b04d5818b931bcb4c6175be51e881e49c9922b63e236199be762261366fd5";
+pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 129;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "de8d4ed337b1040ec8e883bbb18f5ae6835cff28a912fb8b8db8188d89ab64eb";
+    "f767156ddbbfba1fc2fd9653722b6b557fc41f626fa6f7fa09ef6bfc90533cf5";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -7965,8 +7965,44 @@ fn covered_interior_keys(catalog: &Catalog, census: &AppendixSourceCensus) -> Co
         .filter(|row| row.row_kind == "wire-type" && targeted_row_ids.contains(row.row_id.as_str()))
         .map(|row| row.canonical_symbol.as_str())
         .collect();
+    // Collection-element interiors (fgdb-k3sa).  A repeated field's elements are
+    // spelled `<owner>.<field>.record.<member>` in the census, and those member
+    // fields are projected through the repeated field's own contract exactly as
+    // an arm payload is projected through its arm.  Before this, a collection
+    // element was a THIRD carrier shape that neither the arm nor the wire branch
+    // knew, so re-keying an element member onto its minted element kind dropped
+    // its census key out of `projected_source_keys` entirely.
+    //
+    // Built by RECONSTRUCTION from the typed identity row, never by parsing the
+    // source key: `|` is the key separator and is also legal inside a generic
+    // signature (fgdb-tfow), so a `split('|')` with a fixed part count silently
+    // skips a generic owner — a fail-open in a coverage set.
+    //
+    // Deliberately narrower than the arm branch: only census FIELDS are covered
+    // this way.  A union or arm nested under `.record.` still needs its own
+    // contract, which is the fail-closed direction.
+    let mut record_prefixes: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for field in &catalog.identity.fields {
+        if field.cardinality != "many" {
+            continue;
+        }
+        record_prefixes
+            .entry(field.containing_schema.as_str())
+            .or_default()
+            .push(format!(
+                "{}.{}.record.",
+                field.containing_schema, field.stable_name
+            ));
+    }
     let arm_prefix_covers = |owner: &str, container_path: &str| {
         arm_prefixes.get(owner).is_some_and(|prefixes| {
+            prefixes
+                .iter()
+                .any(|prefix| container_path.starts_with(prefix.as_str()))
+        })
+    };
+    let record_prefix_covers = |owner: &str, container_path: &str| {
+        record_prefixes.get(owner).is_some_and(|prefixes| {
             prefixes
                 .iter()
                 .any(|prefix| container_path.starts_with(prefix.as_str()))
@@ -7979,6 +8015,7 @@ fn covered_interior_keys(catalog: &Catalog, census: &AppendixSourceCensus) -> Co
     };
     for field in &census.fields {
         if arm_prefix_covers(field.key.schema_owner.as_str(), &field.key.path)
+            || record_prefix_covers(field.key.schema_owner.as_str(), &field.key.path)
             || wire_symbols.contains(field.key.schema_family.as_str())
         {
             covered.fields.insert(field.key.source_key());

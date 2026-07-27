@@ -5012,6 +5012,21 @@ digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "KeyEnvelopeNode"
+field_tag = 0x0018
+stable_name = "inherited_roots"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeNodeInheritedRootsRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the KeyEnvelopeNodeInheritedRootsRecord elements this record carries; retained while the owner is retained, and order 50 <= 50 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "KeyEnvelopeNodeInheritedRootsRecord"
 field_tag = 0x0016
 stable_name = "source_root_digest"
 exact_wire_type = "digest256"
@@ -5026,7 +5041,7 @@ max_size_bytes = 32
 digest_class = "target"
 
 [[field]]
-containing_schema = "KeyEnvelopeNode"
+containing_schema = "KeyEnvelopeNodeInheritedRootsRecord"
 field_tag = 0x0017
 stable_name = "source_root_ciphertext_digest"
 exact_wire_type = "digest256"
@@ -5039,21 +5054,6 @@ retention_and_cut_rule = "target digest of the selected inherited-root ciphertex
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
-
-[[field]]
-containing_schema = "KeyEnvelopeNode"
-field_tag = 0x0018
-stable_name = "inherited_roots"
-exact_wire_type = "StrongRef"
-cardinality = "many"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "KeyEnvelopeNodeInheritedRootsRecord"
-construction_order = 50
-role_predicate = "true"
-retention_and_cut_rule = "repeated strong reference to the KeyEnvelopeNodeInheritedRootsRecord elements this record carries; retained while the owner is retained, and order 50 <= 50 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
-version_status = "reserved"
-max_size_bytes = 40
 
 [[field]]
 containing_schema = "LegacyRetentionAuthorityTransferCertificate"
@@ -5301,50 +5301,6 @@ max_size_bytes = 32
 
 [[field]]
 containing_schema = "LocalConstraintReservationRecord"
-field_tag = 0x0002
-stable_name = "registration_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "LocalAttemptRegistration"
-construction_order = 30
-role_predicate = "role-local"
-retention_and_cut_rule = "a12:1982 source-position tag 2; owner registration leaf from the anonymous owner body; retained while LocalConstraintReservationRecord is retained, with target LocalAttemptRegistration constructed no later than owner order 30"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "LocalConstraintReservationRecord"
-field_tag = 0x0003
-stable_name = "prepare_admission_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "LocalPrepareAdmissionSpec"
-construction_order = 30
-role_predicate = "role-local"
-retention_and_cut_rule = "a12:1982 source-position tag 3; owner prepare-admission leaf from the anonymous owner body; retained while LocalConstraintReservationRecord is retained, with target LocalPrepareAdmissionSpec constructed no later than owner order 30"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "LocalConstraintReservationRecord"
-field_tag = 0x0004
-stable_name = "admission_generation"
-exact_wire_type = "u64"
-cardinality = "one"
-identity_class = "inline"
-reference_semantics = "none"
-construction_order = 30
-role_predicate = "role-local"
-retention_and_cut_rule = "a12:1982 source-position tag 4; owner admission generation leaf from the anonymous owner body; embedded by value and retained/cut with LocalConstraintReservationRecord, with no independent reachability edge"
-version_status = "reserved"
-max_size_bytes = 8
-
-[[field]]
-containing_schema = "LocalConstraintReservationRecord"
 field_tag = 0x0005
 stable_name = "sorted_domain_keys_and_ranges"
 exact_wire_type = "bytes"
@@ -5414,6 +5370,50 @@ role_predicate = "role-local"
 retention_and_cut_rule = "repeated strong reference to the LocalConstraintReservationRecordOwnerRecord elements this record carries; retained while the owner is retained, and order 30 <= 30 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecordOwnerRecord"
+field_tag = 0x0002
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalAttemptRegistration"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1982 source-position tag 2; owner registration leaf from the anonymous owner body; retained while LocalConstraintReservationRecord is retained, with target LocalAttemptRegistration constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecordOwnerRecord"
+field_tag = 0x0003
+stable_name = "prepare_admission_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalPrepareAdmissionSpec"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1982 source-position tag 3; owner prepare-admission leaf from the anonymous owner body; retained while LocalConstraintReservationRecord is retained, with target LocalPrepareAdmissionSpec constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecordOwnerRecord"
+field_tag = 0x0004
+stable_name = "admission_generation"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1982 source-position tag 4; owner admission generation leaf from the anonymous owner body; embedded by value and retained/cut with LocalConstraintReservationRecord, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "LocalFinalCertificationReservation"
@@ -6564,21 +6564,6 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "NoTerminalSignatureOrOrderProof"
-field_tag = 0x0015
-stable_name = "configuration_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "ConfigurationState"
-construction_order = 6
-role_predicate = "true"
-retention_and_cut_rule = "strong reference to the ConfigurationState this NoTerminalSignatureOrOrderProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1838)"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "NoTerminalSignatureOrOrderProof"
 field_tag = 0x0016
 stable_name = "raft_nonorder_evidence"
 exact_wire_type = "StrongRef"
@@ -6589,6 +6574,21 @@ target_schema_id = "NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord"
 construction_order = 6
 role_predicate = "true"
 retention_and_cut_rule = "repeated strong reference to the NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord elements this record carries; retained while the owner is retained, and order 6 <= 6 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord"
+field_tag = 0x0015
+stable_name = "configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the ConfigurationState this NoTerminalSignatureOrOrderProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1838)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -6828,66 +6828,6 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
-field_tag = 0x000d
-stable_name = "fence_receipt_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "PriorIncarnationLeaseIssuerFenceReceipt"
-construction_order = 30
-role_predicate = "true"
-retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseIssuerFenceReceipt this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
-field_tag = 0x0011
-stable_name = "cohort_window_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "PriorIncarnationLeaseCohortWindow"
-construction_order = 30
-role_predicate = "true"
-retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseCohortWindow this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 17 <= 30 keeps the reference backward-only (a19:2477)"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
-field_tag = 0x0013
-stable_name = "prebootstrap_portable_expiry_attestation_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "PreBootstrapPortableTimeExpiryAttestation"
-construction_order = 30
-role_predicate = "true"
-retention_and_cut_rule = "strong reference to the PreBootstrapPortableTimeExpiryAttestation this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a19:2477)"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
-field_tag = 0x0019
-stable_name = "revocation_receipt_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "PriorIncarnationLeaseCohortRevocationReceipt"
-construction_order = 30
-role_predicate = "true"
-retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseCohortRevocationReceipt this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
 field_tag = 0x001a
 stable_name = "sorted_expired_cohort_imports"
 exact_wire_type = "StrongRef"
@@ -6928,6 +6868,66 @@ target_schema_id = "PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCoho
 construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "repeated strong reference to the PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord elements this record carries; retained while the owner is retained, and order 30 <= 30 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord"
+field_tag = 0x0011
+stable_name = "cohort_window_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseCohortWindow"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseCohortWindow this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 17 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord"
+field_tag = 0x0013
+stable_name = "prebootstrap_portable_expiry_attestation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PreBootstrapPortableTimeExpiryAttestation"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PreBootstrapPortableTimeExpiryAttestation this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImportSortedIssuerFenceImportsRecord"
+field_tag = 0x000d
+stable_name = "fence_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseIssuerFenceReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseIssuerFenceReceipt this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord"
+field_tag = 0x0019
+stable_name = "revocation_receipt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseCohortRevocationReceipt"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseCohortRevocationReceipt this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -7668,21 +7668,6 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "RemoteGrantRetirementPlan"
-field_tag = 0x0009
-stable_name = "old_grant_evidence_ref"
-exact_wire_type = "StrongRef"
-cardinality = "one"
-identity_class = "logical"
-reference_semantics = "strong"
-target_schema_id = "RemoteRetentionGrantEvidence"
-construction_order = 40
-role_predicate = "true"
-retention_and_cut_rule = "strong reference to the RemoteRetentionGrantEvidence this RemoteGrantRetirementPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1808)"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[field]]
-containing_schema = "RemoteGrantRetirementPlan"
 field_tag = 0x000a
 stable_name = "sorted_entries"
 exact_wire_type = "StrongRef"
@@ -7693,6 +7678,21 @@ target_schema_id = "RemoteGrantRetirementPlanSortedEntriesRecord"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "repeated strong reference to the RemoteGrantRetirementPlanSortedEntriesRecord elements this record carries; retained while the owner is retained, and order 40 <= 40 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RemoteGrantRetirementPlanSortedEntriesRecord"
+field_tag = 0x0009
+stable_name = "old_grant_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantEvidence"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the RemoteRetentionGrantEvidence this RemoteGrantRetirementPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1808)"
 version_status = "reserved"
 max_size_bytes = 40
 
