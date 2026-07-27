@@ -7251,6 +7251,33 @@ fn idr_code_space_retired_reuse_fails() {
     assert!(codes_of(&boundary).contains(&"code_invalid".to_string()));
 }
 
+
+/// The seven repeated field rows landed by the fgdb-k3sa B2 ruling
+/// (`feat(k3sa)`), which record collections the durable format previously did
+/// not carry at all. Post-erratum, so the historical witness must not see them.
+fn post_erratum_k3sa_collection_field(schema: &str, name: &str) -> bool {
+    let family = schema.split('<').next().unwrap_or(schema);
+    matches!(
+        (family, name),
+        ("KeyEnvelopeNode", "inherited_roots")
+            | ("LocalConstraintReservationRecord", "owner")
+            | ("NoTerminalSignatureOrOrderProof", "raft_nonorder_evidence")
+            | (
+                "PriorIncarnationLeaseBarrierBootstrapImport",
+                "sorted_expired_cohort_imports"
+            )
+            | (
+                "PriorIncarnationLeaseBarrierBootstrapImport",
+                "sorted_issuer_fence_imports"
+            )
+            | (
+                "PriorIncarnationLeaseBarrierBootstrapImport",
+                "sorted_revoked_cohort_imports"
+            )
+            | ("RemoteGrantRetirementPlan", "sorted_entries")
+    )
+}
+
 #[test]
 fn idr_assignment_history_and_epoch_are_frozen() {
     let r = real_identity();
@@ -9108,6 +9135,16 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a03_flat_residue_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a03_wire_consumer_fields(&field.containing_schema, &field.stable_name)
             && !post_erratum_a12_exact_order_field(&field.retention_and_cut_rule)
+            // The fgdb-k3sa B2 ruling recorded seven collections that the durable
+            // format did not carry at all: their repeated field rows are
+            // post-erratum, so keep them out of the historical namespace exactly
+            // as every other post-erratum cohort is kept out. Extending the
+            // filter, never re-pinning — the pin was re-pinned once at 8a704c2
+            // and that is why this assertion recurred.
+            && !post_erratum_k3sa_collection_field(
+                &field.containing_schema,
+                &field.stable_name,
+            )
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 377,
@@ -9130,7 +9167,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 711,
+        pre_erratum.fields.len() + 718,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
     );

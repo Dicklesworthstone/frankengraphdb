@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3557
+target_count = 3564
 projection_fallback_count = 118
-target_source_assignment_sha256 = "b770e6c67012ecc1174f2824893f04eebf436be1f1650469249feba648e353f2"
+target_source_assignment_sha256 = "5b98f90cff407e28662e859cc55855d3bbe5aedc93a77bc3c60d5db18686a844"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -109827,3 +109827,178 @@ source_locations = ["a13:2027"]
 resolution = "maps-to-source"
 resolved_source_keys = ["field|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.nonretaining_predecessor_digest|nonretaining_predecessor_digest"]
 rationale = "a13:2027: the bare nonretaining predecessor spelling is fixed to one WeakDigest; it authenticates generation adjacency but is comparison-only and never contributes a traversal edge."
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:key-envelope-node-inherited-roots"
+containing_schema = "KeyEnvelopeNode"
+field_tag = 0x0018
+stable_name = "inherited_roots"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeNodeInheritedRootsRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the KeyEnvelopeNodeInheritedRootsRecord elements this record carries; retained while the owner is retained, and order 50 <= 50 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:local-constraint-reservation-record-owner"
+containing_schema = "LocalConstraintReservationRecord"
+field_tag = 0x0009
+stable_name = "owner"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalConstraintReservationRecordOwnerRecord"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "repeated strong reference to the LocalConstraintReservationRecordOwnerRecord elements this record carries; retained while the owner is retained, and order 30 <= 30 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:no-terminal-signature-or-order-proof-raft-nonorder-evidence"
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x0016
+stable_name = "raft_nonorder_evidence"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord elements this record carries; retained while the owner is retained, and order 6 <= 6 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-sorted-expired-cohort-imports"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x001a
+stable_name = "sorted_expired_cohort_imports"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord elements this record carries; retained while the owner is retained, and order 30 <= 30 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-sorted-issuer-fence-imports"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x001b
+stable_name = "sorted_issuer_fence_imports"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseBarrierBootstrapImportSortedIssuerFenceImportsRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the PriorIncarnationLeaseBarrierBootstrapImportSortedIssuerFenceImportsRecord elements this record carries; retained while the owner is retained, and order 30 <= 30 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a19"
+row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-sorted-revoked-cohort-imports"
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x001c
+stable_name = "sorted_revoked_cohort_imports"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord elements this record carries; retained while the owner is retained, and order 30 <= 30 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:remote-grant-retirement-plan-sorted-entries"
+containing_schema = "RemoteGrantRetirementPlan"
+field_tag = 0x000a
+stable_name = "sorted_entries"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteGrantRetirementPlanSortedEntriesRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the RemoteGrantRetirementPlanSortedEntriesRecord elements this record carries; retained while the owner is retained, and order 40 <= 40 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[target]]
+row_id = "a13:target:field-key-envelope-node-inherited-roots"
+target_row_id = "a13:field:key-envelope-node-inherited-roots"
+slice_id = "a13"
+source_key = "field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots|inherited_roots"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-local-constraint-reservation-record-owner"
+target_row_id = "a12:field:local-constraint-reservation-record-owner"
+slice_id = "a12"
+source_key = "field|LocalConstraintReservationRecord|LocalConstraintReservationRecord.owner|owner"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-no-terminal-signature-or-order-proof-raft-nonorder-evidence"
+target_row_id = "a08:field:no-terminal-signature-or-order-proof-raft-nonorder-evidence"
+slice_id = "a08"
+source_key = "field|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.raft_nonorder_evidence|raft_nonorder_evidence"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-sorted-expired-cohort-imports"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-sorted-expired-cohort-imports"
+slice_id = "a19"
+source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.sorted_expired_cohort_imports|sorted_expired_cohort_imports"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-sorted-issuer-fence-imports"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-sorted-issuer-fence-imports"
+slice_id = "a19"
+source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.sorted_issuer_fence_imports|sorted_issuer_fence_imports"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a19:target:field-prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-sorted-revoked-cohort-imports"
+target_row_id = "a19:field:prior-incarnation-lease-barrier-bootstrap-import-role-authority-owning-role-sorted-revoked-cohort-imports"
+slice_id = "a19"
+source_key = "field|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>|PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>.sorted_revoked_cohort_imports|sorted_revoked_cohort_imports"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-remote-grant-retirement-plan-sorted-entries"
+target_row_id = "a08:field:remote-grant-retirement-plan-sorted-entries"
+slice_id = "a08"
+source_key = "field|RemoteGrantRetirementPlan|RemoteGrantRetirementPlan.sorted_entries|sorted_entries"
+target_kind = "field"
+definition_status = "declared"

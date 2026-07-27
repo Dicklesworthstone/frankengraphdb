@@ -4908,6 +4908,21 @@ max_size_bytes = 32
 digest_class = "target"
 
 [[field]]
+containing_schema = "KeyEnvelopeNode"
+field_tag = 0x0018
+stable_name = "inherited_roots"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeNodeInheritedRootsRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the KeyEnvelopeNodeInheritedRootsRecord elements this record carries; retained while the owner is retained, and order 50 <= 50 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "LegacyRetentionAuthorityTransferCertificate"
 field_tag = 0x0001
 stable_name = "evidence_ref"
@@ -5251,6 +5266,21 @@ role_predicate = "role-local"
 retention_and_cut_rule = "a12:1982 source-position tag 8; closed Held=1 | Consumed=2 | Released=3 state union; embedded by value and retained/cut with LocalConstraintReservationRecord, with no independent reachability edge"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecord"
+field_tag = 0x0009
+stable_name = "owner"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalConstraintReservationRecordOwnerRecord"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "repeated strong reference to the LocalConstraintReservationRecordOwnerRecord elements this record carries; retained while the owner is retained, and order 30 <= 30 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "LocalFinalCertificationReservation"
@@ -6328,6 +6358,21 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x0016
+stable_name = "raft_nonorder_evidence"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord elements this record carries; retained while the owner is retained, and order 6 <= 6 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "OfflineMacaroonIssuerEpochFenceReceipt"
 field_tag = 0x0009
 stable_name = "issuer_epoch_state"
@@ -6618,6 +6663,51 @@ target_schema_id = "PriorIncarnationLeaseCohortRevocationReceipt"
 construction_order = 30
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the PriorIncarnationLeaseCohortRevocationReceipt this PriorIncarnationLeaseBarrierBootstrapImport names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a19:2477)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x001a
+stable_name = "sorted_expired_cohort_imports"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord elements this record carries; retained while the owner is retained, and order 30 <= 30 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x001b
+stable_name = "sorted_issuer_fence_imports"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseBarrierBootstrapImportSortedIssuerFenceImportsRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the PriorIncarnationLeaseBarrierBootstrapImportSortedIssuerFenceImportsRecord elements this record carries; retained while the owner is retained, and order 30 <= 30 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "PriorIncarnationLeaseBarrierBootstrapImport<Role:AuthorityOwningRole>"
+field_tag = 0x001c
+stable_name = "sorted_revoked_cohort_imports"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord elements this record carries; retained while the owner is retained, and order 30 <= 30 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -7368,6 +7458,21 @@ target_schema_id = "RemoteRetentionGrantEvidence"
 construction_order = 40
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the RemoteRetentionGrantEvidence this RemoteGrantRetirementPlan names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1808)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RemoteGrantRetirementPlan"
+field_tag = 0x000a
+stable_name = "sorted_entries"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteGrantRetirementPlanSortedEntriesRecord"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the RemoteGrantRetirementPlanSortedEntriesRecord elements this record carries; retained while the owner is retained, and order 40 <= 40 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
 version_status = "reserved"
 max_size_bytes = 40
 
