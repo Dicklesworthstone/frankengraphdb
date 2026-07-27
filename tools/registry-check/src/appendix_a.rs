@@ -7540,19 +7540,18 @@ struct CensusDagWaiver {
 /// population went to zero once arm-path references were excluded, because an arm
 /// payload member can never legally become an enforced field row.
 const CENSUS_DAG_WAIVERS: &[CensusDagWaiver] = &[
-    CensusDagWaiver {
-        owner: "CommitCommand",
-        stable_name: "capsule_ref",
-        target: "CommittedEffectCapsule",
-        verdict: CensusDagVerdict::Erratum,
-        evidence: "owner pinned <= 10 by CommitCapsule@10 through a landed reference-union arm, \
-                   so it cannot rise to 30; but the TARGET is free to fall — it retains only \
-                   AuthorizationDecisionRecord@10 (needs >= 10) and is retained only by \
-                   CommitMarker@30 (needs <= 30), so order 10 satisfies both bounds with no cascade",
-        repair: "re-order CommittedEffectCapsule 30 -> 10; construction_order is not pinned, so \
-                 this is a mechanical catalog repair and retires this waiver",
-        owning_bead: "fgdb-dbta",
-    },
+    // The Erratum waiver that lived here — CommitCommand.capsule_ref ->
+    // CommittedEffectCapsule — is RETIRED (fgdb-dbta). Its repair landed: the
+    // target moved 30 -> 10, which is the single value its window admits.
+    // Constraints, all three, so the window is checkable at a glance:
+    //     CommitCommand@10 -> CEC                    =>  CEC <= 10
+    //     CommitMarker@30  -> CEC                    =>  CEC <= 30
+    //     CEC -> AuthorizationDecisionRecord@10      =>  CEC >= 10
+    //     window = [10, 10]
+    // The upper bound comes from CommitCommand through a landed REFERENCE-UNION
+    // ARM, not from a plain field target_schema_id — a reader that walks only
+    // [[field]] rows sees CommitMarker@30 alone, computes [10, 30], and concludes
+    // 30 is legal. It is not, and that misreading is what kept this waiver alive.
     CensusDagWaiver {
         owner: "CommitCommand",
         stable_name: "final_certification_reservation_ref",
@@ -15191,16 +15190,21 @@ name = "Probe"
     }
 
     /// CONTROL, firing direction: an edge the waiver table does NOT cover must be
-    /// named. CommitCommand@10 retaining CommittedEffectCapsule@30 is the real
-    /// shape; spelled under a different field name it is outside the waiver and
-    /// must be reported.
+    /// named.
+    ///
+    /// The probe used to retain CommittedEffectCapsule, which worked only while
+    /// CEC sat at 30 above CommitCommand@10 — i.e. the fixture depended on the
+    /// very erratum fgdb-dbta repaired. With CEC now at 10 that edge is legal and
+    /// the control had nothing to find, which is a fixture that decayed into a
+    /// pass rather than a law that changed. It now retains CommitMarker@30, which
+    /// is above CommitCommand@10 for a reason no repair is going to remove.
     #[test]
     fn census_dag_names_a_future_result_the_waiver_does_not_cover() {
         let codes = census_dag_codes(vec![typed_field_candidate(
             "CommitCommand",
             "CommitCommand.unwaived_probe_ref",
             "unwaived_probe_ref",
-            "StrongRef<CommittedEffectCapsule>",
+            "StrongRef<CommitMarker>",
         )]);
         assert!(
             codes.contains(&"census_dag_future_result".to_owned()),
