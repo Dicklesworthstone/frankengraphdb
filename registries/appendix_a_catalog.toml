@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3592
+target_count = 3603
 projection_fallback_count = 118
-target_source_assignment_sha256 = "53f2b9cd66bee3420b41f8b30227bab129200234d3674921ba04249c14aeb5cc"
+target_source_assignment_sha256 = "7f2143d67113800c237fb1a481e9934043fb496bf6bdfef739ef1e0c21e12787"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -110226,6 +110226,189 @@ retention_and_cut_rule = "tag-refined strong reference to the locally verified E
 version_status = "reserved"
 max_size_bytes = 40
 
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:attempt-compaction-attestation-visibility-certificate-ref"
+containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x0001
+stable_name = "visibility_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableSemanticVisibilityCertificate"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact PortableSemanticVisibilityCertificate named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-resolution-signer-lock-event-ref"
+containing_schema = "AuditResolutionSignerLock"
+field_tag = 0x0003
+stable_name = "event_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditEventRecord"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditEventRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-resolution-signing-attempt-plan-event-ref"
+containing_schema = "AuditResolutionSigningAttemptPlan"
+field_tag = 0x0001
+stable_name = "event_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditEventRecord"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditEventRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:audit-terminal-signing-plan-ticket-ref"
+containing_schema = "AuditTerminalSigningPlan"
+field_tag = 0x0001
+stable_name = "ticket_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTicket"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditTicket named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1842)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:closed-attempt-compaction-spec-basis-global-state"
+containing_schema = "ClosedAttemptCompactionSpec"
+field_tag = 0x0001
+stable_name = "basis_global_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakStateIdentity value committed by the owning record; retained with the record and carries no reachability edge (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 64
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:distributed-serialization-certificate-conflict-index-basis"
+containing_schema = "DistributedSerializationCertificate"
+field_tag = 0x0001
+stable_name = "conflict_index_basis"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakStateIdentity value committed by the owning record; retained with the record and carries no reachability edge (a08:1860)"
+version_status = "reserved"
+max_size_bytes = 64
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:never-registered-floor-spec-basis-global-state"
+containing_schema = "NeverRegisteredFloorSpec"
+field_tag = 0x0001
+stable_name = "basis_global_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakStateIdentity value committed by the owning record; retained with the record and carries no reachability edge (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 64
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:no-terminal-signature-or-order-proof-ticket-ref"
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x0001
+stable_name = "ticket_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTicket"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditTicket named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1838)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:sequence-neutral-audit-event-body-ticket-ref"
+containing_schema = "SequenceNeutralAuditEventBody"
+field_tag = 0x0001
+stable_name = "ticket_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTicket"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditTicket named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1842)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:sequence-neutral-audit-resolution-body-ticket-ref"
+containing_schema = "SequenceNeutralAuditResolutionBody"
+field_tag = 0x0001
+stable_name = "ticket_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTicket"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditTicket named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1842)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:shard-gc-preflight-spec-basis-shard-state"
+containing_schema = "ShardGcPreflightSpec"
+field_tag = 0x0001
+stable_name = "basis_shard_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakStateIdentity value committed by the owning record; retained with the record and carries no reachability edge (a08:1810)"
+version_status = "reserved"
+max_size_bytes = 64
+
 [[union]]
 slice_id = "a20"
 row_id = "a20:union:local-restore-service-prepare-promotion-authority-profile-recipe-e99f7f83f019841d"
@@ -110635,4 +110818,92 @@ target_row_id = "a10:union-arm:prepared-commit-record-status-abandoned-a7918b6bb
 slice_id = "a10"
 source_key = "arm|PreparedCommitRecord|PreparedCommitRecord.status|Abandoned"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-attempt-compaction-attestation-visibility-certificate-ref"
+target_row_id = "a08:field:attempt-compaction-attestation-visibility-certificate-ref"
+slice_id = "a08"
+source_key = "field|AttemptCompactionAttestation|AttemptCompactionAttestation.visibility_certificate_ref|visibility_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-resolution-signer-lock-event-ref"
+target_row_id = "a08:field:audit-resolution-signer-lock-event-ref"
+slice_id = "a08"
+source_key = "field|AuditResolutionSignerLock|AuditResolutionSignerLock.event_ref|event_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-resolution-signing-attempt-plan-event-ref"
+target_row_id = "a08:field:audit-resolution-signing-attempt-plan-event-ref"
+slice_id = "a08"
+source_key = "field|AuditResolutionSigningAttemptPlan|AuditResolutionSigningAttemptPlan.event_ref|event_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-audit-terminal-signing-plan-ticket-ref"
+target_row_id = "a08:field:audit-terminal-signing-plan-ticket-ref"
+slice_id = "a08"
+source_key = "field|AuditTerminalSigningPlan|AuditTerminalSigningPlan.ticket_ref|ticket_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-closed-attempt-compaction-spec-basis-global-state"
+target_row_id = "a08:field:closed-attempt-compaction-spec-basis-global-state"
+slice_id = "a08"
+source_key = "field|ClosedAttemptCompactionSpec|ClosedAttemptCompactionSpec.basis_global_state|basis_global_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-distributed-serialization-certificate-conflict-index-basis"
+target_row_id = "a08:field:distributed-serialization-certificate-conflict-index-basis"
+slice_id = "a08"
+source_key = "field|DistributedSerializationCertificate|DistributedSerializationCertificate.conflict_index_basis|conflict_index_basis"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-never-registered-floor-spec-basis-global-state"
+target_row_id = "a08:field:never-registered-floor-spec-basis-global-state"
+slice_id = "a08"
+source_key = "field|NeverRegisteredFloorSpec|NeverRegisteredFloorSpec.basis_global_state|basis_global_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-no-terminal-signature-or-order-proof-ticket-ref"
+target_row_id = "a08:field:no-terminal-signature-or-order-proof-ticket-ref"
+slice_id = "a08"
+source_key = "field|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.ticket_ref|ticket_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-sequence-neutral-audit-event-body-ticket-ref"
+target_row_id = "a08:field:sequence-neutral-audit-event-body-ticket-ref"
+slice_id = "a08"
+source_key = "field|SequenceNeutralAuditEventBody|SequenceNeutralAuditEventBody.ticket_ref|ticket_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-sequence-neutral-audit-resolution-body-ticket-ref"
+target_row_id = "a08:field:sequence-neutral-audit-resolution-body-ticket-ref"
+slice_id = "a08"
+source_key = "field|SequenceNeutralAuditResolutionBody|SequenceNeutralAuditResolutionBody.ticket_ref|ticket_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-shard-gc-preflight-spec-basis-shard-state"
+target_row_id = "a08:field:shard-gc-preflight-spec-basis-shard-state"
+slice_id = "a08"
+source_key = "field|ShardGcPreflightSpec|ShardGcPreflightSpec.basis_shard_state|basis_shard_state"
+target_kind = "field"
 definition_status = "declared"

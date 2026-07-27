@@ -7578,7 +7578,6 @@ fn idr_code_space_retired_reuse_fails() {
     assert!(codes_of(&boundary).contains(&"code_invalid".to_string()));
 }
 
-
 /// The seven repeated field rows landed by the fgdb-k3sa B2 ruling
 /// (`feat(k3sa)`), which record collections the durable format previously did
 /// not carry at all. Post-erratum, so the historical witness must not see them.
@@ -9360,6 +9359,29 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         }
         _ => false,
     };
+    // The a08 W12 lifecycle landable subset [fgdb-a08-w12-lifecycle-residue-7nrq]:
+    // 11 rows the settled laws already determine — 7 equal-order retaining
+    // references and 4 inline members. Its cohort is REMOVED from the pre-erratum
+    // reconstruction; the erratum pin itself is never re-pinned.
+    let post_erratum_a08_lifecycle_tranche = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("AttemptCompactionAttestation", "visibility_certificate_ref")
+                | ("AuditResolutionSignerLock", "event_ref")
+                | ("AuditResolutionSigningAttemptPlan", "event_ref")
+                | ("AuditTerminalSigningPlan", "ticket_ref")
+                | ("ClosedAttemptCompactionSpec", "basis_global_state")
+                | (
+                    "DistributedSerializationCertificate",
+                    "conflict_index_basis"
+                )
+                | ("NeverRegisteredFloorSpec", "basis_global_state")
+                | ("NoTerminalSignatureOrOrderProof", "ticket_ref")
+                | ("SequenceNeutralAuditEventBody", "ticket_ref")
+                | ("SequenceNeutralAuditResolutionBody", "ticket_ref")
+                | ("ShardGcPreflightSpec", "basis_shard_state")
+        )
+    };
     // The a09 storage-identity field cohort: IdentityContinuityRecord,
     // IdRangeLease<Role:AuthorityOwningRole>, and TxnAllocationBindingRoot each
     // had ZERO field rows before this landing, so the whole schema is a
@@ -9482,6 +9504,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a07_strong_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_weak_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a08_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a08_lifecycle_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a09_field(&field.containing_schema)
             && !post_erratum_a16_inline_authority_headers(
                 &field.containing_schema,
@@ -9518,9 +9541,17 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     );
     let mut reference_control = pre_erratum.unions.clone();
     reference_control.push(reference_control[0].clone());
-    assert_ne!(reference_control.len(), expected_reference_unions, "reference-union control must fire");
+    assert_ne!(
+        reference_control.len(),
+        expected_reference_unions,
+        "reference-union control must fire"
+    );
     assert_eq!(
-        pre_erratum.unions.iter().map(|u| u.arms.len()).sum::<usize>(),
+        pre_erratum
+            .unions
+            .iter()
+            .map(|u| u.arms.len())
+            .sum::<usize>(),
         current_reference_arm_count,
         "historical witness reference-union arm cohort drift (unrecognised arm)"
     );
@@ -9535,7 +9566,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 728,
+        pre_erratum.fields.len() + 739,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
     );

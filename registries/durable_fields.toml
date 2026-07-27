@@ -96,6 +96,21 @@ max_size_bytes = 256
 
 [[field]]
 containing_schema = "AttemptCompactionAttestation"
+field_tag = 0x0001
+stable_name = "visibility_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PortableSemanticVisibilityCertificate"
+construction_order = 12
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact PortableSemanticVisibilityCertificate named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1802)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AttemptCompactionAttestation"
 field_tag = 0x0002
 stable_name = "floor_record_identity"
 exact_wire_type = "WeakDigest"
@@ -289,6 +304,36 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "AuditResolutionSignerLock"
+field_tag = 0x0003
+stable_name = "event_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditEventRecord"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditEventRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditResolutionSigningAttemptPlan"
+field_tag = 0x0001
+stable_name = "event_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditEventRecord"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditEventRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1846)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "AuditResolutionSigningAttemptPlan"
 field_tag = 0x0002
 stable_name = "terminal_plan_ref"
@@ -449,6 +494,21 @@ role_predicate = "true"
 retention_and_cut_rule = "inline AppliedControlRef embedded by value in AuditTerminalFreezeRecord; retained with the containing object and creates no reachability edge (a08:1832)"
 version_status = "reserved"
 max_size_bytes = 49
+
+[[field]]
+containing_schema = "AuditTerminalSigningPlan"
+field_tag = 0x0001
+stable_name = "ticket_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTicket"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditTicket named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1842)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "AuditTerminalSigningPlan"
@@ -1287,6 +1347,20 @@ retention_and_cut_rule = "comparison-only weak identity carried by ClosedAttempt
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "ClosedAttemptCompactionSpec"
+field_tag = 0x0001
+stable_name = "basis_global_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakStateIdentity value committed by the owning record; retained with the record and carries no reachability edge (a08:1800)"
+version_status = "reserved"
+max_size_bytes = 64
 
 [[field]]
 containing_schema = "ClosedAttemptCompactionSpec"
@@ -2212,6 +2286,20 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the PreBootstrapReservationClaimCanonicalImportRecord<Role,AllocationEpoch> this DirectoryBoundCreationEvidence names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a19:2531)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "DistributedSerializationCertificate"
+field_tag = 0x0001
+stable_name = "conflict_index_basis"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakStateIdentity value committed by the owning record; retained with the record and carries no reachability edge (a08:1860)"
+version_status = "reserved"
+max_size_bytes = 64
 
 [[field]]
 containing_schema = "DistributedSerializationCertificate"
@@ -6357,6 +6445,20 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "NeverRegisteredFloorSpec"
+field_tag = 0x0001
+stable_name = "basis_global_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakStateIdentity value committed by the owning record; retained with the record and carries no reachability edge (a08:1796)"
+version_status = "reserved"
+max_size_bytes = 64
+
+[[field]]
+containing_schema = "NeverRegisteredFloorSpec"
 field_tag = 0x0009
 stable_name = "expected_prior_summary_root_ref"
 exact_wire_type = "StrongRef"
@@ -6399,6 +6501,21 @@ retention_and_cut_rule = "weak identity of the originating reservation; comparis
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x0001
+stable_name = "ticket_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTicket"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditTicket named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1838)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "NoTerminalSignatureOrOrderProof"
@@ -12225,6 +12342,36 @@ version_status = "active"
 max_size_bytes = 32
 
 [[field]]
+containing_schema = "SequenceNeutralAuditEventBody"
+field_tag = 0x0001
+stable_name = "ticket_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTicket"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditTicket named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1842)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "SequenceNeutralAuditResolutionBody"
+field_tag = 0x0001
+stable_name = "ticket_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "AuditTicket"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact AuditTicket named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a08:1842)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "ShardAppliedAck"
 field_tag = 0x0008
 stable_name = "resulting_post_visibility_shard_state_root_ref"
@@ -12373,6 +12520,20 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the ShardGcPreflightSpec this ShardGcPreflightRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1810)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardGcPreflightSpec"
+field_tag = 0x0001
+stable_name = "basis_shard_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "inline WeakStateIdentity value committed by the owning record; retained with the record and carries no reachability edge (a08:1810)"
+version_status = "reserved"
+max_size_bytes = 64
 
 [[field]]
 containing_schema = "ShardGcPreflightSpec"
