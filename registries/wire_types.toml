@@ -1,12 +1,12 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=2c2c119c8b627601933c73c60a161dcca041119034a1b657a6a44c1dbd10d06b.
+# Appendix A lines 1388-2728; sha256=b04701610581f864d42f59362411b8863512b2d75d00f59fabf1b2a7b195b302.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 38
+registry_epoch = 39
 
 [[type]]
 wire_type_id = 0x0001
@@ -5262,3 +5262,12 @@ status = "reserved"
 encoding_context = "a21:2619 generated inline singleton {spec_tag,system_authority_class,compatibility_row_id}; AuthorizationAuditGate and TerminalAuditGate embed it by value, no reference wrapper immediately targets it, and the record path therefore owns no field rows"
 allowed_containing_schemas = ["AuthorizationAuditGate", "TerminalAuditGate"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0524
+name = "RootSlotGenerationPair"
+kind = "record"
+status = "reserved"
+encoding_context = "fixed-width 16-byte record: source tag 0x0001 slot0_generation:u64 little-endian at offsets 0..8, then source tag 0x0002 slot1_generation:u64 little-endian at offsets 8..16; no count, slot-index field, framing, padding, sorting, or trailing bytes (a15:2059)"
+allowed_containing_schemas = ["KeyDestroyProposal"]
+max_size_bytes = 16

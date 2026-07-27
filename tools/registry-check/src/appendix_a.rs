@@ -33,17 +33,17 @@ pub const HASH_ALGORITHM: &str = "sha256";
 pub const APPENDIX_START_LINE: i64 = 1388;
 pub const APPENDIX_END_LINE: i64 = 2728;
 pub const APPENDIX_LINE_COUNT: i64 = 1341;
-pub const APPENDIX_BYTE_COUNT: i64 = 1_022_462;
+pub const APPENDIX_BYTE_COUNT: i64 = 1_023_235;
 pub const APPENDIX_SHA256: &str =
-    "2c2c119c8b627601933c73c60a161dcca041119034a1b657a6a44c1dbd10d06b";
+    "b04701610581f864d42f59362411b8863512b2d75d00f59fabf1b2a7b195b302";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3319;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3321;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "ae85fb3235595df85af0d090c6900b0c91fc9551c8f37e2b2afd09d788f33a31";
+    "43ad4b39368ec393812c52bf0e58801b0ee37f97b148a0e19031771abee94f13";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 111;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "fc6cdd2a77bba32e4840757e4f17b22b18c75b006dfba91530b18c36d7867eb2";
+    "7551ba613d8667ad73d98e43003a3e6c1cfbc603bbb3ed717aea6efa9d99ca42";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -73,7 +73,7 @@ pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
 pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_455;
 pub const EXPECTED_REFERENCE_OCCURRENCE_SHA256: &str =
-    "c715512f6adf746157692028a3fdf001dd5ce4f5dfb54b4d87a2f1957d92298a";
+    "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044";
 pub const EXPECTED_G0_PROJECTION_ROW_COUNT: usize = 35;
 pub const EXPECTED_G0_PROJECTION_ROW_IDS_SHA256: &str =
     "ff344794c0f061e83016f9f4844591a75d07bff597d439258d2b2632fc810d61";
@@ -5689,8 +5689,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 2057,
         end_line: 2156,
         line_count: 100,
-        byte_count: 80_209,
-        sha256: "f781cb54e7df62ad8d695ec62cefa43aeff86d7b91d4e4e21d308d0b07cfa325",
+        byte_count: 80_982,
+        sha256: "98978263199392f940c0c64afc073aca367a309ce2d52910019c6be3ba6e3e14",
     },
     SlicePin {
         ordinal: 16,

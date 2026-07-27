@@ -27,8 +27,8 @@ plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 start_line = 1388
 end_line = 2728
 line_count = 1341
-byte_count = 1022462
-sha256 = "2c2c119c8b627601933c73c60a161dcca041119034a1b657a6a44c1dbd10d06b"
+byte_count = 1023235
+sha256 = "b04701610581f864d42f59362411b8863512b2d75d00f59fabf1b2a7b195b302"
 heading = "## Appendix A — On-Disk Object Formats (normative contract)"
 next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 
@@ -36,12 +36,12 @@ next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 target_count = 813
 target_ids_sha256 = "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"
 occurrence_count = 2455
-occurrence_transcript_sha256 = "c715512f6adf746157692028a3fdf001dd5ce4f5dfb54b4d87a2f1957d92298a"
+occurrence_transcript_sha256 = "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
 
 [target_manifest]
-target_count = 3319
+target_count = 3321
 projection_fallback_count = 111
-target_source_assignment_sha256 = "fc6cdd2a77bba32e4840757e4f17b22b18c75b006dfba91530b18c36d7867eb2"
+target_source_assignment_sha256 = "7551ba613d8667ad73d98e43003a3e6c1cfbc603bbb3ed717aea6efa9d99ca42"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -456,22 +456,22 @@ title = "Appendix A exact catalog: Key destruction, backup, publication, and rel
 start_line = 2057
 end_line = 2156
 line_count = 100
-byte_count = 80209
-sha256 = "f781cb54e7df62ad8d695ec62cefa43aeff86d7b91d4e4e21d308d0b07cfa325"
+byte_count = 80982
+sha256 = "98978263199392f940c0c64afc073aca367a309ce2d52910019c6be3ba6e3e14"
 predecessor = "a14"
 successor = "a16"
 expected_projection_classes = ["logical_object_kinds", "prebootstrap_artifact_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 98
-top_level_candidate_ids_sha256 = "c3805c5790222090b347800b2bc722f09156c46e219ab438dbec4e98968937a2"
-field_candidate_count = 1035
-field_candidate_ids_sha256 = "74d93fca9051adf3362236c49bb06b88988bd5144bac13002152dcad744b0417"
+top_level_candidate_count = 99
+top_level_candidate_ids_sha256 = "fa41629df7e0f3230f88a0ae3b1cbeec1d1c2f5f003f4c44b141fd6c7d1b5e92"
+field_candidate_count = 1037
+field_candidate_ids_sha256 = "531bf0e419b78ab1d4edb281da5e452f879a5a83ee60e2c50a03e91439e70867"
 union_candidate_count = 51
 union_candidate_ids_sha256 = "7ae8c34a227cf7241c420848692817ab58f1052869af7470c1f788a1c1805a98"
 arm_candidate_count = 162
 arm_candidate_ids_sha256 = "51becf54c432a95fac5e4cb79fc7245f373904d7f97f629645619b10729ad798"
-ambiguity_count = 806
-ambiguity_ids_sha256 = "9b2913fc590e419a4593facc5fa5d6c9a16c57680f63ce61785cabe65442863b"
+ambiguity_count = 805
+ambiguity_ids_sha256 = "2afe0666561aa053e8eebc67536b9f9204f469285ba0aec12a8f12b54ced4276"
 
 [[slice]]
 ordinal = 16
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 38
+registry_epoch = 39
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 72
+registry_epoch = 73
 
 [[logical_kind]]
 slice_id = "a03"
@@ -17190,6 +17190,22 @@ role_predicate = "role-local"
 retention_and_cut_rule = "strong reference to the exact current ConfigurationState expected by the proposal; retained with the proposal, and the acyclic order 5 <= 80 keeps the reference backward-only (a15:2059)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-exact-root-slot-generations"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x0006
+stable_name = "exact_root_slot_generations"
+exact_wire_type = "RootSlotGenerationPair"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "one fixed 16-byte source-ordered pair for physical manifest.root slots 0 then 1; both u64 values must byte-match one immediate authenticated two-slot reread before scan or apply; inline and nonretaining, retained and cut with the proposal (a15:2059)"
+version_status = "reserved"
+max_size_bytes = 16
 
 [[field]]
 slice_id = "a15"
@@ -58474,6 +58490,16 @@ source_key = "top|RootSlot"
 source_kind = "confirmed"
 identity_class = "bootstrap"
 source_locations = ["a01:1417"]
+
+[[top_level_candidate]]
+row_id = "a15:top-level-candidate:root-slot-generation-pair-171a712c3963a88f"
+slice_id = "a15"
+symbol = "RootSlotGenerationPair"
+generic_signature = ""
+source_key = "top|RootSlotGenerationPair"
+source_kind = "confirmed"
+identity_class = "wire"
+source_locations = ["a15:2059"]
 
 [[top_level_candidate]]
 row_id = "a17:top-level-candidate:sealed-pre-bootstrap-dispatch-journal-import-role-691de5e34f0ce59b"
@@ -102909,6 +102935,17 @@ encoding_context = "a21:2619 generated inline singleton {spec_tag,system_authori
 allowed_containing_schemas = ["AuthorizationAuditGate", "TerminalAuditGate"]
 max_size_bytes = 16777216
 
+[[wire_type]]
+slice_id = "a15"
+row_id = "a15:wire-type:root-slot-generation-pair"
+wire_type_id = 0x0524
+name = "RootSlotGenerationPair"
+kind = "record"
+status = "reserved"
+encoding_context = "fixed-width 16-byte record: source tag 0x0001 slot0_generation:u64 little-endian at offsets 0..8, then source tag 0x0002 slot1_generation:u64 little-endian at offsets 8..16; no count, slot-index field, framing, padding, sorting, or trailing bytes (a15:2059)"
+allowed_containing_schemas = ["KeyDestroyProposal"]
+max_size_bytes = 16
+
 [[union]]
 slice_id = "a02"
 row_id = "a02:union:location-form-aaca262488997d87"
@@ -104201,4 +104238,20 @@ target_row_id = "a21:wire-type:structural-audit-exemption"
 slice_id = "a21"
 source_key = "top|StructuralAuditExemption"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:wire-type-root-slot-generation-pair"
+target_row_id = "a15:wire-type:root-slot-generation-pair"
+slice_id = "a15"
+source_key = "top|RootSlotGenerationPair"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-exact-root-slot-generations"
+target_row_id = "a15:field:key-destroy-proposal-exact-root-slot-generations"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.exact_root_slot_generations|exact_root_slot_generations"
+target_kind = "field"
 definition_status = "declared"

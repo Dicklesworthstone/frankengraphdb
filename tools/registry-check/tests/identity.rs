@@ -1930,8 +1930,9 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     // for the first time (CommitCommand already had a row, name-only, and was
     // promoted to confirmed rather than added). 1_234 -> 1_236: fgdb-801o
     // separated the two second definition heads that an earlier union in the
-    // same sentence had swallowed.
-    assert_eq!(baseline.top_level_candidates.len(), 1_236);
+    // same sentence had swallowed. 1_236 -> 1_237: fgdb-3qqv made the
+    // source-defined RootSlotGenerationPair a confirmed wire candidate.
+    assert_eq!(baseline.top_level_candidates.len(), 1_237);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT
@@ -4899,6 +4900,17 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "5 <= 80",
         ),
         (
+            0x0006,
+            "exact_root_slot_generations",
+            "RootSlotGenerationPair",
+            "one",
+            "inline",
+            "none",
+            None,
+            16,
+            "physical manifest.root slots 0 then 1",
+        ),
+        (
             0x0007,
             "checkpoint_and_configuration_floor_refs",
             "KeyDestroyFloorRef",
@@ -5114,6 +5126,10 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         (
             "field|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|complete_target_set_digest",
             "a15:field:key-destroy-proposal-complete-target-set-digest",
+        ),
+        (
+            "field|KeyDestroyProposal|KeyDestroyProposal.exact_root_slot_generations|exact_root_slot_generations",
+            "a15:field:key-destroy-proposal-exact-root-slot-generations",
         ),
         (
             "field|KeyDestroyProposal|KeyDestroyProposal.expected_current_configuration_ref|expected_current_configuration_ref",
@@ -5338,10 +5354,7 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         ],
         "only the four source-forced shorthand fields may be adjudicated"
     );
-    for unresolved in [
-        "expected_prospective_configuration_set_digest",
-        "exact_root_slot_generations",
-    ] {
+    for unresolved in ["expected_prospective_configuration_set_digest"] {
         assert!(
             !identity.fields.iter().any(|field| {
                 field.containing_schema == "KeyDestroyProposal" && field.stable_name == unresolved
@@ -5358,7 +5371,9 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         );
     }
 
-    use registry_check::appendix_source::{SourceSliceSpec, census_appendix_source};
+    use registry_check::appendix_source::{
+        DefinitionKind, SchemaOwnerStatus, SourceSliceSpec, census_appendix_source,
+    };
 
     let plan = real_plan_source();
     let appendix = source_range(
@@ -5381,6 +5396,77 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         &specs,
     )
     .expect("source census");
+
+    let pair_schema = census
+        .schemas
+        .iter()
+        .find(|schema| schema.key.source_key() == "top|RootSlotGenerationPair")
+        .expect("RootSlotGenerationPair source schema exists");
+    assert_eq!(
+        pair_schema.owner_statuses,
+        vec![SchemaOwnerStatus::ConfirmedTopLevel]
+    );
+    assert_eq!(
+        pair_schema.definition_kinds,
+        vec![DefinitionKind::ProseLinkedStructural]
+    );
+    assert!(!pair_schema.body_conflict);
+    assert_eq!(pair_schema.locations.len(), 1);
+    assert_eq!(pair_schema.locations[0].start.line, 2059);
+    assert_eq!(pair_schema.locations[0].start.column, 2);
+    assert_eq!(pair_schema.locations[0].end.line, 2059);
+    assert_eq!(pair_schema.locations[0].end.column, 24);
+
+    for (source_key, exact_type, start_column, end_column) in [
+        (
+            "field|RootSlotGenerationPair|RootSlotGenerationPair.slot0_generation|slot0_generation",
+            "u64",
+            61,
+            81,
+        ),
+        (
+            "field|RootSlotGenerationPair|RootSlotGenerationPair.slot1_generation|slot1_generation",
+            "u64",
+            82,
+            102,
+        ),
+        (
+            "field|KeyDestroyProposal|KeyDestroyProposal.exact_root_slot_generations|exact_root_slot_generations",
+            "RootSlotGenerationPair",
+            972,
+            1022,
+        ),
+    ] {
+        let field = census
+            .fields
+            .iter()
+            .find(|field| field.key.source_key() == source_key)
+            .unwrap_or_else(|| panic!("{source_key} source field exists"));
+        assert_eq!(field.exact_types, vec![exact_type]);
+        assert_eq!(
+            field
+                .cardinalities
+                .iter()
+                .map(|cardinality| cardinality.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one"]
+        );
+        assert!(!field.type_conflict);
+        assert!(!field.ambiguous);
+        assert_eq!(field.locations.len(), 1);
+        assert_eq!(field.locations[0].start.line, 2059);
+        assert_eq!(field.locations[0].start.column, start_column);
+        assert_eq!(field.locations[0].end.line, 2059);
+        assert_eq!(field.locations[0].end.column, end_column);
+        assert!(
+            !census.ambiguities.iter().any(|ambiguity| ambiguity
+                .affected_source_keys
+                .iter()
+                .any(|key| key == source_key)),
+            "{source_key} must not require an ambiguity adjudication"
+        );
+    }
+
     let source_field = census
         .fields
         .iter()
@@ -5402,9 +5488,9 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     assert!(!source_field.ambiguous);
     assert_eq!(source_field.locations.len(), 1);
     assert_eq!(source_field.locations[0].start.line, 2059);
-    assert_eq!(source_field.locations[0].start.column, 59);
+    assert_eq!(source_field.locations[0].start.column, 809);
     assert_eq!(source_field.locations[0].end.line, 2059);
-    assert_eq!(source_field.locations[0].end.column, 80);
+    assert_eq!(source_field.locations[0].end.column, 830);
     assert!(
         !census.ambiguities.iter().any(|ambiguity| ambiguity
             .affected_source_keys
@@ -5414,6 +5500,39 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     );
 
     let plan = String::from_utf8(plan).expect("plan is UTF-8");
+    let root_slot_pair_law = |source: &str| {
+        source.contains(
+            "`RootSlotGenerationPair` is the fixed-width inline record \
+             `{slot0_generation:u64,slot1_generation:u64}`.",
+        ) && source.contains(
+            "Its canonical body is exactly 16 bytes with source tag 0x0001 \
+             `slot0_generation` as a little-endian fixed u64 at offsets 0 through 7 \
+             followed by source tag 0x0002 `slot1_generation` as a little-endian fixed \
+             u64 at offsets 8 through 15; it has no count, slot-index field, duplicate \
+             representation, length prefix, padding, or trailing bytes.",
+        ) && source.contains(
+            "Slot order is the two physical `manifest.root` slot indices, never \
+             winner-first or generation-sorted.",
+        ) && source.contains(
+            "A reader captures both values from the same authenticated two-slot observation \
+             and rejects a proposal before scanning or applying it unless an immediate \
+             reread of both fixed slots byte-matches the pair.",
+        )
+    };
+    assert!(
+        root_slot_pair_law(&plan),
+        "the plan must pin the pair width, source tags/order, framing exclusion, physical slot order, and authenticated reread"
+    );
+    let winner_first = plan.replacen(
+        "Slot order is the two physical `manifest.root` slot indices, never winner-first or generation-sorted.",
+        "Slot order is winner-first.",
+        1,
+    );
+    assert!(
+        !root_slot_pair_law(&winner_first),
+        "negative control: changing physical slot order to winner-first must fire"
+    );
+
     let lifecycle_law = |source: &str| {
         source.contains(
             "The one-byte key-lifecycle discriminant table is closed and source-ordered: \
@@ -5504,6 +5623,125 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         codes_without_assignment_drift(&invented_lifecycle_producer)
             .contains(&"field_unresolved_wire_type".to_owned()),
         "negative control: an invented RetainedDecryptOnly producer must fire"
+    );
+
+    let pair = identity
+        .wire
+        .iter()
+        .find(|wire| wire.name == "RootSlotGenerationPair")
+        .expect("RootSlotGenerationPair wire producer exists");
+    assert_eq!(pair.wire_type_id, 0x0524);
+    assert_eq!(pair.kind, "record");
+    assert_eq!(pair.status, "reserved");
+    assert_eq!(pair.containing_union, None);
+    assert_eq!(pair.wire_tag, None);
+    assert_eq!(
+        pair.allowed_containing_schemas,
+        vec!["KeyDestroyProposal".to_owned()]
+    );
+    assert_eq!(pair.max_size_bytes, 16);
+    for fragment in [
+        "fixed-width 16-byte record",
+        "source tag 0x0001 slot0_generation:u64 little-endian at offsets 0..8",
+        "source tag 0x0002 slot1_generation:u64 little-endian at offsets 8..16",
+        "no count, slot-index field, framing, padding, sorting, or trailing bytes",
+    ] {
+        assert!(
+            pair.encoding_context.contains(fragment),
+            "RootSlotGenerationPair lost encoding law {fragment:?}"
+        );
+    }
+
+    let pair_candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.source_key == "top|RootSlotGenerationPair")
+        .expect("RootSlotGenerationPair top-level candidate exists");
+    assert_eq!(pair_candidate.source_kind, "confirmed");
+    assert_eq!(pair_candidate.identity_class, "wire");
+    let pair_targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key == "top|RootSlotGenerationPair")
+        .collect::<Vec<_>>();
+    assert_eq!(pair_targets.len(), 1);
+    assert_eq!(
+        pair_targets[0].target_row_id,
+        "a15:wire-type:root-slot-generation-pair"
+    );
+    assert_eq!(pair_targets[0].target_kind, "wire-type");
+    assert_eq!(pair_targets[0].definition_status, "declared");
+    assert!(
+        identity
+            .fields
+            .iter()
+            .all(|field| field.containing_schema != "RootSlotGenerationPair"),
+        "the two wire-interior members are covered by the fixed envelope and cannot hang off a wire-only host"
+    );
+    assert!(
+        !identity
+            .logical
+            .iter()
+            .any(|row| row.name == "RootSlotGenerationPair")
+            && !catalog
+                .reservations
+                .iter()
+                .any(|row| row.symbol == "RootSlotGenerationPair"),
+        "an unreserved non-StrongRef wire family must not mint a logical kind or reservation"
+    );
+
+    let mut wrong_pair_class = identity.clone();
+    wrong_pair_class
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "exact_root_slot_generations"
+        })
+        .expect("RootSlotGenerationPair carrying field exists")
+        .identity_class = "wire".to_owned();
+    assert!(
+        codes_without_assignment_drift(&wrong_pair_class)
+            .contains(&"field_identity_class_not_a_field_class".to_owned()),
+        "negative control: wire is not one of the five field identity classes"
+    );
+
+    let mut wrong_pair_order = identity.clone();
+    wrong_pair_order
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "exact_root_slot_generations"
+        })
+        .expect("RootSlotGenerationPair carrying field exists")
+        .construction_order = 79;
+    assert!(
+        codes_without_assignment_drift(&wrong_pair_order)
+            .contains(&"field_construction_order_mismatch".to_owned()),
+        "negative control: the field order must equal its containing kind"
+    );
+
+    let mut wire_only_member = identity.clone();
+    let mut slot0 = wire_only_member
+        .fields
+        .iter()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "exact_root_slot_generations"
+        })
+        .expect("RootSlotGenerationPair carrying field exists")
+        .clone();
+    slot0.containing_schema = "RootSlotGenerationPair".to_owned();
+    slot0.field_tag = 0x0001;
+    slot0.stable_name = "slot0_generation".to_owned();
+    slot0.exact_wire_type = "u64".to_owned();
+    slot0.max_size_bytes = 8;
+    wire_only_member.fields.push(slot0);
+    assert!(
+        codes_without_assignment_drift(&wire_only_member)
+            .contains(&"field_unresolved_schema".to_owned()),
+        "negative control: a member field on the wire-only pair host must fire"
     );
 
     let key_identity = identity
@@ -7273,8 +7511,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     };
     // A15 adds the first seven fully resolved KeyDestroyProposal members, the
     // source-forced WeakStateIdentity basis, n45i's opaque key identity,
-    // wh81's closed one-byte expected lifecycle-state tag, and re18's
-    // carrying target-set transcript digest.
+    // wh81's closed one-byte expected lifecycle-state tag, re18's carrying
+    // target-set transcript digest, and 3qqv's exact physical RootSlot
+    // generation pair.
     // The two shared-union consumer fields are already removed through
     // `post_erratum_union`. Remove the remaining cohort so the historical witness still
     // reconstructs the exact namespace predating every post-erratum field
@@ -7288,6 +7527,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "expected_key_state"
                     | "basis_state"
                     | "expected_current_configuration_ref"
+                    | "exact_root_slot_generations"
                     | "checkpoint_and_configuration_floor_refs"
                     | "generated_scanned_root_inventory_ref"
                     | "zero_reference_proof_ref"
@@ -8438,7 +8678,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 573,
+        pre_erratum.fields.len() + 574,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A12 residue tranche"
     );
