@@ -65,16 +65,22 @@ fn every_registered_anchor_resolves_in_the_plan() {
     let registry = registry();
     let mut checked = 0usize;
     for law in registry.laws.iter().filter(|l| l.status == "registered") {
-        let (_slice, line_no) = law
-            .source_location
-            .split_once(':')
-            .unwrap_or_else(|| panic!("{} has no anchor", law.id));
-        let line_no: usize = line_no
-            .parse()
-            .unwrap_or_else(|_| panic!("{} anchor line is not a number", law.id));
-        let text = lines
-            .get(line_no - 1)
-            .unwrap_or_else(|| panic!("{} cites line {line_no}, past the end of the plan", law.id));
+        let anchor = law.source_location.split_once(':');
+        assert!(anchor.is_some(), "{} has no aNN:LINE anchor", law.id);
+        let (_slice, digits) = anchor.expect("anchor presence asserted above");
+        assert!(
+            !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()),
+            "{} anchor line {digits:?} is not a number",
+            law.id
+        );
+        let line_no: usize = digits.parse().expect("digits asserted above");
+        assert!(
+            line_no >= 1 && line_no <= lines.len(),
+            "{} cites line {line_no}, past the end of the plan ({} lines)",
+            law.id,
+            lines.len()
+        );
+        let text = lines[line_no - 1];
         assert!(
             !text.trim().is_empty(),
             "{} cites plan line {line_no}, which is blank",
