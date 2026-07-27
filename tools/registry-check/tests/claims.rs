@@ -539,11 +539,410 @@ fn claims_lint_shipped_prose_is_clean() {
     let r = real_registries();
     let config = lint::load_config(&root.join("registries/claims_lint.toml")).expect("config");
     let registered = lint::registered_markers(&r);
-    let hits = lint::run(&root, &config, &registered).expect("lint runs");
+    let (hits, census) = lint::run(&root, &config, &registered).expect("lint runs");
     assert!(
         hits.is_empty(),
-        "normative prose cites unregistered claim markers: {hits:?}"
+        "claims-lint hits on the shipped prose: {hits:?}"
     );
+
+    // A green lint proves nothing until it says what it opened; every number
+    // below was measured on this tree (6 scanned files, 117 markers, 12 prose
+    // artifacts, 13 gate rows). They are FLOORS, not pins: another pane adding
+    // a citation or a document must not turn this suite red.
+    assert!(
+        census.files_scanned >= 6,
+        "scan set shrank below the measured six artifacts: {census:?}"
+    );
+    assert!(
+        census.markers_seen >= 100,
+        "marker scan collapsed — 117 markers were measured on this tree: {census:?}"
+    );
+    assert!(
+        census.prose_files_seen >= 12,
+        "closure walk collapsed — 12 prose artifacts were measured: {census:?}"
+    );
+    assert!(
+        census.gate_rows_read >= 13,
+        "the README gate table lost rows — 13 were measured: {census:?}"
+    );
+    assert_eq!(
+        census.gate_rows_read,
+        census.gate_rows_marked + census.gate_rows_unmarked,
+        "every gate row is marked or unmarked: {census:?}"
+    );
+
+    // The measured gap, as a CEILING that can only close. slo.toml holds zero
+    // `slo`/`benchmark` rows today, so all thirteen README gate rows cite no
+    // marker (fgdb-claims-lint-one-directional-unmarked-budgets-sdpv). Minting
+    // a row and citing it lowers this number; nothing can raise it without
+    // failing here, and adding a fourteenth unmarked row fails in the lint
+    // itself rather than here.
+    assert!(
+        census.gate_rows_unmarked <= 13,
+        "unmarked gate budgets grew past the measured thirteen: {census:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// claims-lint direction 2 and the closure laws
+// (bead fgdb-claims-lint-one-directional-unmarked-budgets-sdpv).
+//
+// Every negative below is a MUTATION of one fixture whose base is green, so a
+// hit is attributable to the mutation and to nothing else. The base itself is
+// asserted for content, not just emptiness: an equivalence over two vacuous
+// runs proves nothing, which is the exact defect this direction exists to fix.
+// ---------------------------------------------------------------------------
+
+const LINT_FIXTURE_README: &str = "\
+# Fixture
+
+## Performance
+
+Numbers below are provisional CI gates on the reference machine (32-core, 256 GB RAM).
+
+| Domain | Gate |
+|---|---|
+| Cold bulk load | ≥ 40M edges/s sustained |
+| Point reads | ≥ 8M lookups/s; p99 < 15 µs warm |
+| Branch create | O(1), < 100 µs (FG-SLO-01) |
+
+## Determinism
+
+Everything here is prose, and prose is not a gate table.
+";
+
+const LINT_FIXTURE_GUIDE: &str = "A scanned guide that cites FG-SLO-01.\n";
+const LINT_FIXTURE_HISTORY: &str = "A historical draft citing FG-INV-27, which was never minted.\n";
+
+/// One fixture tree + config. Mutations are applied by the caller between
+/// `build` and `run`, so the base is provably the only difference.
+struct LintFixture {
+    root: PathBuf,
+}
+
+impl LintFixture {
+    /// `tag` must be unique per test: `cargo test` runs these in parallel and
+    /// the builder opens a fixture by destroying it.
+    fn build(tag: &str) -> LintFixture {
+        let root =
+            std::env::temp_dir().join(format!("fgdb-claims-lint-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("docs")).expect("fixture docs dir");
+        std::fs::create_dir_all(root.join("registries")).expect("fixture registries dir");
+        std::fs::write(root.join("README.md"), LINT_FIXTURE_README).expect("fixture README");
+        std::fs::write(root.join("docs/GUIDE.md"), LINT_FIXTURE_GUIDE).expect("fixture guide");
+        std::fs::write(root.join("HISTORY.md"), LINT_FIXTURE_HISTORY).expect("fixture history");
+        let f = LintFixture { root };
+        f.write_config(
+            &["README.md", "docs/GUIDE.md"],
+            "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n",
+            &["Cold bulk load", "Point reads"],
+        );
+        f
+    }
+
+    fn write_config(&self, scan: &[&str], excludes: &str, unmarked_rows: &[&str]) {
+        let quoted = |v: &[&str]| {
+            v.iter()
+                .map(|s| format!("  {:?},\n", s))
+                .collect::<String>()
+        };
+        let text = format!(
+            "schema_version = 1\n\n[lint]\nmarker_pattern = \"{}\"\nscan = [\n{}]\nclosure_dirs = [\".\", \"docs\"]\n\n[[gate_table]]\nfile = \"README.md\"\nheading = \"## Performance\"\nowner_bead = \"fgdb-fixture\"\nunmarked_rows = [\n{}]\n\n{excludes}",
+            lint::SUPPORTED_MARKER_PATTERN,
+            quoted(scan),
+            quoted(unmarked_rows),
+        );
+        std::fs::write(self.root.join("registries/claims_lint.toml"), text)
+            .expect("fixture config");
+    }
+
+    fn config(&self) -> Result<lint::LintConfig, lint::LintError> {
+        lint::load_config(&self.root.join("registries/claims_lint.toml"))
+    }
+
+    fn run(&self) -> Result<(Vec<lint::LintHit>, lint::LintCensus), lint::LintError> {
+        let registered: std::collections::BTreeSet<String> =
+            ["FG-SLO-01".to_string()].into_iter().collect();
+        lint::run(
+            &self.root,
+            &self.config().expect("fixture config"),
+            &registered,
+        )
+    }
+
+    fn hits_of(&self, kind: lint::HitKind) -> Vec<lint::LintHit> {
+        let (hits, _) = self.run().expect("fixture lint runs");
+        hits.into_iter().filter(|h| h.kind == kind).collect()
+    }
+}
+
+#[test]
+fn claims_lint_fixture_base_is_green_and_not_vacuous() {
+    let f = LintFixture::build("base");
+    let (hits, census) = f.run().expect("base lint runs");
+    assert!(hits.is_empty(), "base fixture is not green: {hits:?}");
+    // Named base numbers. Every negative below is stated as a delta from these.
+    assert_eq!(census.files_scanned, 2, "{census:?}");
+    assert_eq!(census.gate_rows_read, 3, "{census:?}");
+    assert_eq!(census.gate_rows_marked, 1, "{census:?}");
+    assert_eq!(census.gate_rows_unmarked, 2, "{census:?}");
+    assert_eq!(census.prose_files_seen, 3, "{census:?}");
+}
+
+#[test]
+fn claims_neg_lint_region_that_examines_nothing_is_a_hard_error() {
+    // THE VACUITY CONTROL. The failure mode this whole direction exists to
+    // catch is a check that passes because it examined nothing, so the reader
+    // losing its region must be a loud error and never a clean pass. Two
+    // mutations, both meaning "the gate table is gone".
+    let f = LintFixture::build("vacuous");
+
+    // (a) heading present, table deleted.
+    std::fs::write(
+        f.root.join("README.md"),
+        "# Fixture\n\n## Performance\n\nNo table here at all.\n\n## Determinism\n\nProse.\n",
+    )
+    .expect("mutate README");
+    let err = f.run().expect_err("a region with no table must not pass");
+    assert!(
+        err.to_string().contains("no table between them"),
+        "unexpected error: {err}"
+    );
+
+    // (b) heading present, table present, zero data rows.
+    std::fs::write(
+        f.root.join("README.md"),
+        "# Fixture\n\n## Performance\n\n| Domain | Gate |\n|---|---|\n\n## Determinism\n",
+    )
+    .expect("mutate README");
+    let err = f.run().expect_err("an empty gate table must not pass");
+    assert!(
+        err.to_string().contains("would examine nothing"),
+        "unexpected error: {err}"
+    );
+
+    // (c) the heading itself moved.
+    std::fs::write(
+        f.root.join("README.md"),
+        "# Fixture\n\n## Speed\n\nProse.\n",
+    )
+    .expect("mutate README");
+    let err = f.run().expect_err("a missing region must not pass");
+    assert!(
+        err.to_string().contains("does not exist"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn claims_neg_unmarked_gate_row() {
+    // Direction 2. A fourth gate row states a budget and cites nothing: 3 rows
+    // → 4, 0 hits → 1, and the hit names the row.
+    let f = LintFixture::build("unmarked-row");
+    let mutated = LINT_FIXTURE_README.replace(
+        "| Branch create |",
+        "| Recovery | < 30 s to first query |\n| Branch create |",
+    );
+    std::fs::write(f.root.join("README.md"), &mutated).expect("mutate README");
+    let (hits, census) = f.run().expect("lint runs");
+    assert_eq!(census.gate_rows_read, 4, "{census:?}");
+    assert_eq!(census.gate_rows_unmarked, 3, "{census:?}");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].kind, lint::HitKind::UnmarkedGateRow);
+    assert_eq!(hits[0].subject, "Recovery");
+    assert_eq!(hits[0].file, "README.md");
+    assert_eq!(
+        hits[0].line, 11,
+        "the hit must carry the source line: {hits:?}"
+    );
+}
+
+#[test]
+fn claims_neg_dead_gate_exemption_when_the_row_is_gone() {
+    // The ledger's converse, half one: an entry naming a row that no longer
+    // exists is stale, and a stale entry is a free pass waiting for a row of
+    // the same name.
+    let f = LintFixture::build("dead-exemption");
+    f.write_config(
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n",
+        &["Cold bulk load", "Point reads", "Vector search"],
+    );
+    let hits = f.hits_of(lint::HitKind::DeadGateExemption);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].subject, "Vector search");
+    assert!(hits[0].text.contains("no such row"), "{hits:?}");
+}
+
+#[test]
+fn claims_neg_dead_gate_exemption_when_the_row_is_now_marked() {
+    // The ledger's converse, half two — and the direction that makes progress
+    // visible. Citing a marker on a ledgered row without deleting its entry
+    // must fail, so the measured gap can only move deliberately.
+    let f = LintFixture::build("now-marked");
+    let mutated = LINT_FIXTURE_README.replace(
+        "| Cold bulk load | ≥ 40M edges/s sustained |",
+        "| Cold bulk load | ≥ 40M edges/s sustained (FG-SLO-01) |",
+    );
+    std::fs::write(f.root.join("README.md"), &mutated).expect("mutate README");
+    let (hits, census) = f.run().expect("lint runs");
+    assert_eq!(census.gate_rows_marked, 2, "{census:?}");
+    assert_eq!(census.gate_rows_unmarked, 1, "{census:?}");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].kind, lint::HitKind::DeadGateExemption);
+    assert_eq!(hits[0].subject, "Cold bulk load");
+    assert!(hits[0].text.contains("FG-SLO-01"), "{hits:?}");
+}
+
+#[test]
+fn claims_neg_unclaimed_prose() {
+    // The closure law. A new artifact in a closure directory that neither list
+    // names is unclaimed: 3 prose files → 4, 0 hits → 1.
+    let f = LintFixture::build("unclaimed");
+    std::fs::write(
+        f.root.join("docs/NEW_NOTE.md"),
+        "A new normative-looking document nobody pointed the lint at.\n",
+    )
+    .expect("add prose");
+    let (hits, census) = f.run().expect("lint runs");
+    assert_eq!(census.prose_files_seen, 4, "{census:?}");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].kind, lint::HitKind::UnclaimedProse);
+    assert_eq!(hits[0].subject, "docs/NEW_NOTE.md");
+
+    // Hidden entries are not deliverables, and the `._*.md` AppleDouble forks
+    // beside the real plan documents must not become closure obligations.
+    std::fs::write(f.root.join("._SHADOW.md"), "resource fork\n").expect("add fork");
+    let (hits, census2) = f.run().expect("lint runs");
+    assert_eq!(
+        census2.prose_files_seen, 4,
+        "hidden entries are skipped: {census2:?}"
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn claims_neg_dead_exclude() {
+    // The denylist's own liveness. An exclusion is a narrowing of the lint;
+    // one that matches nothing narrows it invisibly, which is how an allowlist
+    // rots. `presence = "optional"` is the one declared escape, and this test
+    // proves the flag is the whole difference: same absent path, both verdicts.
+    let f = LintFixture::build("dead-exclude");
+    f.write_config(
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n\n\
+         [[exclude]]\npath = \"DELETED_REVIEW.md\"\nreason = \"a review that was removed\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    let hits = f.hits_of(lint::HitKind::DeadExclude);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].subject, "DELETED_REVIEW.md");
+
+    f.write_config(
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n\n\
+         [[exclude]]\npath = \"DELETED_REVIEW.md\"\npresence = \"optional\"\nreason = \"gitignored working document\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    let (hits, _) = f.run().expect("lint runs");
+    assert!(
+        hits.is_empty(),
+        "presence = optional must be the only thing that changed: {hits:?}"
+    );
+}
+
+#[test]
+fn claims_neg_unregistered_marker_survives_the_second_direction() {
+    // Direction 1 regression guard: adding direction 2 must not cost the
+    // direction that already worked.
+    let f = LintFixture::build("unregistered");
+    let mutated = LINT_FIXTURE_README.replace("(FG-SLO-01)", "(FG-SLO-99)");
+    std::fs::write(f.root.join("README.md"), &mutated).expect("mutate README");
+    let (hits, _) = f.run().expect("lint runs");
+    let unregistered: Vec<_> = hits
+        .iter()
+        .filter(|h| h.kind == lint::HitKind::UnregisteredMarker)
+        .collect();
+    assert_eq!(unregistered.len(), 1, "{hits:?}");
+    assert_eq!(unregistered[0].subject, "FG-SLO-99");
+    assert_eq!(unregistered[0].file, "README.md");
+    assert_eq!(unregistered[0].line, 11, "{hits:?}");
+}
+
+#[test]
+fn claims_neg_lint_config_cannot_declare_a_vacuous_scope() {
+    // A config that disarms the lint must be rejected at load, not obeyed. Each
+    // mutation below is a different way to make the check examine nothing.
+    let f = LintFixture::build("vacuous-config");
+    let base = std::fs::read_to_string(f.root.join("registries/claims_lint.toml")).expect("read");
+    let cfg = f.root.join("registries/claims_lint.toml");
+
+    for (mutation, expect) in [
+        (
+            base.replace(
+                "scan = [\n  \"README.md\",\n  \"docs/GUIDE.md\",\n]",
+                "scan = []",
+            ),
+            "scans nothing",
+        ),
+        (
+            base.replace("closure_dirs = [\".\", \"docs\"]", "closure_dirs = []"),
+            "closure_dirs is empty",
+        ),
+        (
+            base.replace("[[gate_table]]", "[[unused_table]]"),
+            "declares no [[gate_table]]",
+        ),
+        (
+            base.replace(
+                "path = \"HISTORY.md\"\nreason",
+                "path = \"README.md\"\nreason",
+            ),
+            "both scanned and excluded",
+        ),
+        (
+            base.replace(
+                "path = \"HISTORY.md\"\nreason",
+                "path = \"HISTORY.md\"\npresence = \"whenever\"\nreason",
+            ),
+            "not one of",
+        ),
+        (
+            base.replace(
+                "\"Cold bulk load\",\n  \"Point reads\",\n",
+                "\"Cold bulk load\",\n  \"Cold bulk load\",\n",
+            ),
+            "is listed twice",
+        ),
+        (
+            base.replace(
+                "  \"docs/GUIDE.md\",\n",
+                "  \"docs/GUIDE.md\",\n  \"docs/GUIDE.md\",\n",
+            ),
+            "twice, which would double every count",
+        ),
+        (
+            base.replace(
+                "[[exclude]]\npath = \"HISTORY.md\"",
+                "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"first\"\n\n[[exclude]]\npath = \"HISTORY.md\"",
+            ),
+            "excluded twice",
+        ),
+    ] {
+        assert_ne!(
+            mutation, base,
+            "mutation {expect:?} did not change the config"
+        );
+        std::fs::write(&cfg, &mutation).expect("write mutated config");
+        let err = f
+            .config()
+            .expect_err(&format!("config must be rejected: {expect}"));
+        assert!(
+            err.to_string().contains(expect),
+            "expected {expect:?} in: {err}"
+        );
+    }
 }
 
 #[test]

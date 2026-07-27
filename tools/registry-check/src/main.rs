@@ -1677,28 +1677,40 @@ fn run_lint(r: &Registries, root: &Path) -> Result<usize, String> {
     let config =
         lint::load_config(&root.join("registries/claims_lint.toml")).map_err(|e| e.to_string())?;
     let registered = lint::registered_markers(r);
-    let hits = lint::run(root, &config, &registered).map_err(|e| e.to_string())?;
+    let (hits, census) = lint::run(root, &config, &registered).map_err(|e| e.to_string())?;
     for hit in &hits {
         println!(
             "{}",
             event(&[
                 ("event", s("lint_hit")),
+                ("kind", s(hit.kind.code())),
                 ("file", s(&hit.file)),
                 ("line", n(hit.line as i64)),
-                ("marker", s(&hit.marker)),
+                ("subject", s(&hit.subject)),
                 ("text", s(&hit.text)),
             ])
         );
         eprintln!(
-            "{}:{}: unregistered claim marker {} in: {}",
-            hit.file, hit.line, hit.marker, hit.text
+            "{}:{}: {}: {}: {}",
+            hit.file,
+            hit.line,
+            hit.kind.code(),
+            hit.subject,
+            hit.text
         );
     }
+    // The census is printed on pass as well as fail: a lint that examines
+    // nothing passes, so "green" must always say what it opened.
     println!(
         "{}",
         event(&[
             ("event", s("lint_completed")),
-            ("files_scanned", n(config.scan.len() as i64)),
+            ("files_scanned", n(census.files_scanned as i64)),
+            ("markers_seen", n(census.markers_seen as i64)),
+            ("prose_files_seen", n(census.prose_files_seen as i64)),
+            ("gate_rows_read", n(census.gate_rows_read as i64)),
+            ("gate_rows_marked", n(census.gate_rows_marked as i64)),
+            ("gate_rows_unmarked", n(census.gate_rows_unmarked as i64)),
             ("hits", n(hits.len() as i64)),
             ("outcome", s(if hits.is_empty() { "pass" } else { "fail" })),
         ])

@@ -6,17 +6,42 @@
 # claims-lint CI job that greps merged prose artifacts for unregistered
 # load-bearing claim markers and fails with file/line").
 #
-# claims-lint scans the NORMATIVE merged prose artifacts for claim markers
-# (FG-<NAMESPACE>-<NN>) and fails the build if any marker does not resolve to
-# a registered row in invariants.toml / evidence.toml / slo.toml /
-# constitution.toml. Wildcard namespace references (FG-INV-*, FG-EVID-*, …)
-# are not claim citations and are ignored by the marker pattern.
+# claims-lint runs in BOTH directions over the normative merged prose:
+#
+#   1. Every claim marker (FG-<NAMESPACE>-<NN>) written in a scanned artifact
+#      must resolve to a registered row in invariants.toml / evidence.toml /
+#      slo.toml / constitution.toml. Wildcard namespace references (FG-INV-*,
+#      FG-EVID-*, …) are not claim citations and are ignored by the pattern.
+#
+#   2. Every load-bearing claim must CARRY a marker. Direction 1 is vacuous on
+#      a claim that cites nothing — a throughput budget written with no
+#      FG-SLO-nn beside it is not an unresolved marker, it is not a marker at
+#      all. `[[gate_table]]` below declares the regions where a bare number IS
+#      the claim, and every row of such a region must cite a resolvable marker.
+#      Rows that do not yet are enumerated per table with an owner bead.
+#
+# Direction 2 is scoped to declared regions rather than "any number anywhere"
+# on purpose. README's own §Performance paragraph states both "≥ 40M edges/s
+# sustained" (a claim about this system) and "32-core/64-thread, 256 GB RAM,
+# PCIe-4 NVMe at 7 GB/s" (a description of the reference machine). No numeric
+# pattern separates those, so a corpus-wide number scan would need an exemption
+# list larger than the set of real claims — and an exemption list that large is
+# precisely the instrument that goes quietly dead. The gate row is the unit the
+# plan itself uses ("every gate names its operation class in the operation-cost
+# registry"), so it is the unit the lint uses.
+#
+# CLOSURE. `scan` is an allowlist and `[[exclude]]` is a denylist; neither
+# validates itself. Two laws keep them honest:
+#   * every non-hidden `*.md` in a `closure_dirs` directory must be named by
+#     `scan` or by an `[[exclude]]` — an unclaimed prose artifact fails;
+#   * every `presence = "required"` exclusion must still name a path that
+#     exists — an exclusion that matches nothing is deleted, not carried.
+# Adding an exclusion requires a reason string; an exclusion without a reason
+# is a schema error, and one that is also in `scan` is a contradiction.
 #
 # Historical review artifacts are excluded WITH RECORDED REASONS: they quote
 # superseded drafts (e.g. FG-INV-21…28 from a pre-adjudication proposal
-# numbering) and are preserved as history, not as load-bearing claims. Adding
-# an exclusion requires a reason string; an exclusion without a reason is a
-# schema error.
+# numbering) and are preserved as history, not as load-bearing claims.
 # =============================================================================
 
 schema_version = 1
@@ -27,11 +52,61 @@ schema_version = 1
 marker_pattern = "FG-[A-Z]{2,5}-[0-9]{2}"
 
 # Normative merged prose artifacts (load-bearing claim markers must resolve).
+# The three generated/checked documents under docs/ are scanned too: their
+# markers are emitted from the registries, so an unresolvable one there is a
+# generator defect, and scanning them costs nothing.
 scan = [
   "README.md",
   "AGENTS.md",
   "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md",
+  "docs/ARCHITECTURE_DECISION_RECORD.md",
+  "docs/THREAT_AND_TRUST_MODEL.md",
+  "docs/WORKSPACE_TOPOLOGY.md",
 ]
+
+# Directories whose prose must be wholly accounted for by `scan` + `[[exclude]]`.
+# Non-recursive, and hidden entries are skipped (this is also what drops the
+# `._*.md` AppleDouble forks beside the plan documents). The tracked-file
+# closure over the whole repository is scripts/check.sh's file-coverage gate;
+# this one closes the hole in this lint's own aim.
+closure_dirs = [".", "docs"]
+
+# ---------------------------------------------------------------------------
+# Direction 2: regions where a bare number is the claim.
+# ---------------------------------------------------------------------------
+
+[[gate_table]]
+file = "README.md"
+heading = "## Performance"
+owner_bead = "fgdb-g0-cost-registry-idt"
+# Every row below states a numeric budget and cites no claim marker, while
+# slo.toml holds zero `claim_class = "slo"` and zero `claim_class = "benchmark"`
+# rows (its four rows are all `bounded_model`, FG-CFG-01..04). That gap is the
+# subject of fgdb-claims-lint-one-directional-unmarked-budgets-sdpv; minting the
+# rows is fgdb-g0-cost-registry-idt / fgdb-perf-cost-ci-02p.
+#
+# This list is not a waiver, it is the measurement: the count is exact, a
+# fourteenth unmarked row fails the build, and marking one of these WITHOUT
+# deleting its line here also fails. The gap can only be moved deliberately.
+unmarked_rows = [
+  "Cold bulk load (CSV/Parquet-lite → sealed runs)",
+  "Transactional ingest (small txns, honest group-commit fsync)",
+  "Point reads (vertex by key, 1-hop existence; `SnapshotQuery` class)",
+  "Neighbor scans, sealed runs (decoded-cache path)",
+  "2-hop factorized count (10⁸-flat-row equivalent)",
+  "Triangle count (WCOJ over compressed runs)",
+  "LDBC SNB Interactive SF-100",
+  "LDBC Graphalytics (BFS/PR/WCC/CDLP/LCC/SSSP)",
+  "Time-travel overhead (KEEP ALL, recent `AS OF`)",
+  "Vector: 10M × 768-d f32 HNSW",
+  "Ripple view maintenance",
+  "Branch create / snapshot open",
+  "Recovery (crash @ 1 TB)",
+]
+
+# ---------------------------------------------------------------------------
+# Denylist. Every entry must still match a path that exists (see CLOSURE).
+# ---------------------------------------------------------------------------
 
 [[exclude]]
 path = "COMPREHENSIVE_PLAN_REVIEW_BY_KIMI_K3.md"
@@ -47,7 +122,8 @@ reason = "Historical audit; references pre-adjudication invariant numbering (FG-
 
 [[exclude]]
 path = "ENHANCEMENT_PROPOSALS_FOR_THE_COMPREHENSIVE_PLAN.md"
-reason = "Historical proposal document (gitignored); proposed FG-INV-21+ IDs were absorbed into the twenty-ID spine's clauses, not minted as new IDs."
+presence = "optional"
+reason = "Historical proposal document; proposed FG-INV-21+ IDs were absorbed into the twenty-ID spine's clauses, not minted as new IDs. presence=optional because it is gitignored: present in the authoring tree, absent in a clean checkout, so requiring it would fail a fresh clone."
 
 [[exclude]]
 path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB__FABLE.md"

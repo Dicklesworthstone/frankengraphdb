@@ -105,7 +105,8 @@ coverage_of() {
     docs/WORKSPACE_TOPOLOGY.md)          echo "topology-check (generated document)" ;;
     COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md)
                                          echo "registry-check (source_block pins + claims-lint)" ;;
-    README.md|AGENTS.md)                 echo "registry-check lint (claim markers only, not content)" ;;
+    README.md)                           echo "registry-check lint (claim markers, + every §Performance gate row must cite one)" ;;
+    AGENTS.md)                           echo "registry-check lint (claim markers only, not content)" ;;
     *)                                   echo "" ;;
   esac
 }

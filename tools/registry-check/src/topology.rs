@@ -1383,12 +1383,7 @@ pub fn parse_layer_table(block: &str) -> Result<Vec<ParsedLayerRow>, String> {
         if !line.starts_with('|') {
             return Err(format!("§18.1 block line {} is not a table row", index + 1));
         }
-        let cells: Vec<&str> = line
-            .trim_start_matches('|')
-            .trim_end_matches('|')
-            .split('|')
-            .map(str::trim)
-            .collect();
+        let cells = crate::lint::table_cells(line);
         if cells.len() != 2 {
             return Err(format!(
                 "§18.1 block line {} has {} cells, expected 2",

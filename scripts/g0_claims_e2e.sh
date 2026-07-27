@@ -79,27 +79,97 @@ grep -q '"event":"closure_computed".*"outcome":"pass"' "$WORK/shipped.jsonl" \
   && ok "activation closure computed for the sample capability manifest" \
   || die "activation closure missing or failed"
 
-# --- Phase 2: planted unregistered claim marker (claims-lint, file/line) -----
-log "phase 2: planted unregistered claim marker"
+# --- Phase 2: planted claim defects, BOTH directions (claims-lint) -----------
+# claims-lint answers two questions and a seeded corpus must plant one defect
+# for each. Direction 1 — a marker that resolves to nothing. Direction 2 — a
+# numeric budget that carries no marker at all, which direction 1 cannot see
+# because an absent marker is not an unresolved one (bead
+# fgdb-claims-lint-one-directional-unmarked-budgets-sdpv).
+log "phase 2: planted claim defects in both lint directions"
 STAGE="$WORK/lint-stage"
 mkdir -p "$STAGE/registries"
 cp "$ROOT"/registries/*.toml "$STAGE/registries/"
-# Seeded prose corpus: README plus one planted defect on a known line.
-{
-  echo "# Seeded corpus"
-  echo "This paragraph cites the registered invariant FG-INV-04 legitimately."
-  echo "This paragraph plants the unregistered claim FG-INV-77 as load-bearing."
-} > "$STAGE/README.md"
-: > "$STAGE/AGENTS.md"
-: > "$STAGE/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+
+# The stage gets its own lint config: the shipped one points at six artifacts
+# and at README's real thirteen-row gate table, none of which exist here.
+write_stage_lint_config() {  # $1 = unmarked_rows body
+  cat > "$STAGE/registries/claims_lint.toml" <<EOF
+schema_version = 1
+
+[lint]
+marker_pattern = "FG-[A-Z]{2,5}-[0-9]{2}"
+scan = ["README.md"]
+closure_dirs = ["."]
+
+[[gate_table]]
+file = "README.md"
+heading = "## Performance"
+owner_bead = "g0-claims-e2e"
+unmarked_rows = [$1]
+EOF
+}
+
+# Seeded prose corpus. Line numbers below are asserted verbatim, so this block
+# is the fixture: line 3 plants the unresolvable marker, line 10 plants the
+# budget with no marker, and line 9 is the control row that cites a registered
+# one (FG-INV-04 is a real registry row — the lint asks only that the citation
+# resolve, not that the namespace suit the claim).
+write_stage_readme() {
+  {
+    echo "# Seeded corpus"
+    echo "This paragraph cites the registered invariant FG-INV-04 legitimately."
+    echo "This paragraph plants the unregistered claim FG-INV-77 as load-bearing."
+    echo ""
+    echo "## Performance"
+    echo ""
+    echo "| Domain | Gate |"
+    echo "|---|---|"
+    echo "| Registered gate | < 50 ms (FG-INV-04) |"
+    echo "| Planted budget | >= 40M edges/s sustained; p99 < 15 us |"
+  } > "$STAGE/README.md"
+}
+
+write_stage_lint_config ""
+write_stage_readme
 if "$BIN" lint --root "$STAGE" >"$WORK/lint.jsonl" 2>/dev/null; then
-  die "lint passed despite planted FG-INV-77"
+  die "lint passed despite planted FG-INV-77 and an unmarked budget row"
 else
-  ok "lint failed as required on planted marker"
+  ok "lint failed as required on the planted defects"
 fi
-grep -q '"event":"lint_hit","file":"README.md","line":3,"marker":"FG-INV-77"' "$WORK/lint.jsonl" \
-  && ok "lint hit names exact file/line/marker (README.md:3 FG-INV-77)" \
-  || die "lint hit missing exact file/line/marker (see $WORK/lint.jsonl)"
+grep -q '"event":"lint_hit","kind":"unregistered_marker","file":"README.md","line":3,"subject":"FG-INV-77"' "$WORK/lint.jsonl" \
+  && ok "direction 1: hit names exact file/line/marker (README.md:3 FG-INV-77)" \
+  || die "direction 1: hit missing exact file/line/marker (see $WORK/lint.jsonl)"
+grep -q '"event":"lint_hit","kind":"unmarked_gate_row","file":"README.md","line":10,"subject":"Planted budget"' "$WORK/lint.jsonl" \
+  && ok "direction 2: hit names the unmarked budget row (README.md:10 Planted budget)" \
+  || die "direction 2: unmarked budget row not caught (see $WORK/lint.jsonl)"
+grep -q '"event":"lint_completed","files_scanned":1,"markers_seen":3,"prose_files_seen":1,"gate_rows_read":2,"gate_rows_marked":1,"gate_rows_unmarked":1' "$WORK/lint.jsonl" \
+  && ok "census reports what was opened (1 file, 3 markers, 2 gate rows, 1 marked)" \
+  || die "census missing or wrong — a lint that examines nothing passes (see $WORK/lint.jsonl)"
+
+# CONTROL. Both failures above must come from the plants and from nothing else
+# in the staging: remove the unresolvable marker, register the budget row in the
+# ledger, change nothing else, and the same corpus must pass clean. Without this
+# the phase proves only that the lint fails on SOMETHING.
+write_stage_lint_config '"Planted budget"'
+sed '3d' "$STAGE/README.md" > "$STAGE/README.clean" && mv "$STAGE/README.clean" "$STAGE/README.md"
+if "$BIN" lint --root "$STAGE" >"$WORK/lint-control.jsonl" 2>/dev/null; then
+  ok "control: the same staged corpus passes once both plants are removed"
+else
+  die "control: staged corpus fails for a reason other than the plants (see $WORK/lint-control.jsonl)"
+fi
+# ... and the ledger entry that licensed the budget row is itself checked: mark
+# that row without deleting its ledger line and the lint must fail again, so the
+# gap between claimed and registered budgets can only move deliberately.
+sed 's/| Planted budget | >= 40M/| Planted budget | (FG-INV-04) >= 40M/' "$STAGE/README.md" > "$STAGE/README.marked" \
+  && mv "$STAGE/README.marked" "$STAGE/README.md"
+if "$BIN" lint --root "$STAGE" >"$WORK/lint-stale.jsonl" 2>/dev/null; then
+  die "a stale unmarked_rows entry passed after its row was marked (see $WORK/lint-stale.jsonl)"
+else
+  ok "a ledger entry whose row is now marked fails as required"
+fi
+grep -q '"kind":"dead_gate_exemption","file":"README.md","line":9,"subject":"Planted budget"' "$WORK/lint-stale.jsonl" \
+  && ok "stale ledger entry named with file/line (README.md:9 Planted budget)" \
+  || die "stale ledger entry not named (see $WORK/lint-stale.jsonl)"
 
 # --- Phase 3: planted cross-class escalation ---------------------------------
 log "phase 3: planted cross-class escalation (slo justifying an invariant)"
