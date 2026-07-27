@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3634
+target_count = 3636
 projection_fallback_count = 133
-target_source_assignment_sha256 = "b9ace92bf8a4e98e90c30d01690625850d19c864e4a9c62553c59bb299e030c0"
+target_source_assignment_sha256 = "31be673449be0221cf51998dfb1084a7c9fd7e028180af780a1d0043af28c6de"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -1679,6 +1679,28 @@ construction_order = 36
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_time_bound_subject_retirement_proof/"
+
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:restore-source-lease-acquire-receipt"
+object_kind = 0x03f6
+name = "RestoreSourceLeaseAcquireReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_acquire_receipt/"
+
+[[logical_kind]]
+slice_id = "a16"
+row_id = "a16:logical-kind:restore-source-lease-renew-receipt"
+object_kind = 0x03fd
+name = "RestoreSourceLeaseRenewReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_renew_receipt/"
 
 [[logical_kind]]
 slice_id = "a16"
@@ -46416,7 +46438,7 @@ symbol = "RestoreSourceLeaseAcquireReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03f6"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-source-lease-authority-observation-import"
@@ -46479,7 +46501,7 @@ symbol = "RestoreSourceLeaseRenewReceipt"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03fd"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-source-lease-renewal-close-record"
@@ -57780,7 +57802,7 @@ symbol = "RestoreSourceLeaseRenewReceipt"
 generic_signature = ""
 source_key = "top|RestoreSourceLeaseRenewReceipt"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2231"]
 
 [[top_level_candidate]]
@@ -66570,6 +66592,22 @@ row_id = "a16:target:logical-kind-shard-time-bound-subject-retirement-proof"
 target_row_id = "a16:logical-kind:shard-time-bound-subject-retirement-proof"
 slice_id = "a16"
 source_key = "top|ShardTimeBoundSubjectRetirementProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:logical-kind-restore-source-lease-acquire-receipt"
+target_row_id = "a16:logical-kind:restore-source-lease-acquire-receipt"
+slice_id = "a16"
+source_key = "top|RestoreSourceLeaseAcquireReceipt"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a16:target:logical-kind-restore-source-lease-renew-receipt"
+target_row_id = "a16:logical-kind:restore-source-lease-renew-receipt"
+slice_id = "a16"
+source_key = "top|RestoreSourceLeaseRenewReceipt"
 target_kind = "logical-kind"
 definition_status = "declared"
 
@@ -111497,7 +111535,7 @@ symbol = "RestoreSourceLeaseAcquireReceipt"
 generic_signature = ""
 source_key = "top|RestoreSourceLeaseAcquireReceipt"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a16:2231"]
 
 [[top_level_candidate]]

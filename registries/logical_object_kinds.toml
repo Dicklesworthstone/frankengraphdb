@@ -2952,6 +2952,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_source_key_access_inventory/"
 
 [[kind]]
+object_kind = 0x03f6
+name = "RestoreSourceLeaseAcquireReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_acquire_receipt/"
+
+[[kind]]
 object_kind = 0x03f7
 name = "RestoreSourceLeaseAuthorityObservationImport"
 status = "reserved"
@@ -2995,6 +3004,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_source_lease_renew_operation_record/"
+
+[[kind]]
+object_kind = 0x03fd
+name = "RestoreSourceLeaseRenewReceipt"
+status = "reserved"
+construction_order = 27
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_source_lease_renew_receipt/"
 
 [[kind]]
 object_kind = 0x03fe
