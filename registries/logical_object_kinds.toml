@@ -4921,3 +4921,12 @@ construction_order = 15
 role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_gc_cancellation_authorize_spec/"
+
+[[kind]]
+object_kind = 0x057c
+name = "ConfigurationTransitionSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/configuration_transition_spec/"

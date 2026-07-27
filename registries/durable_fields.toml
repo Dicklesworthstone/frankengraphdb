@@ -1524,6 +1524,179 @@ max_size_bytes = 32
 digest_class = "weak_identity"
 
 [[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0001
+stable_name = "phase"
+exact_wire_type = "ConfigurationTransitionSpecPhase"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 1; source-ordered closed configuration-transition phase embedded by value, retained and cut with ConfigurationTransitionSpec, and never traversed as a reachability edge"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0002
+stable_name = "basis_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 2; comparison-only WeakStateIdentity embedded by value, retained and cut with ConfigurationTransitionSpec, and never traversed as a reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0003
+stable_name = "basis_logical_command_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 3; exact covered logical-command prefix under the Appendix A u64 sequence law, embedded by value and retained and cut with ConfigurationTransitionSpec"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0004
+stable_name = "basis_commit_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 4; exact covered committed-transaction prefix under the Appendix A u64 sequence law, embedded by value and retained and cut with ConfigurationTransitionSpec"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0005
+stable_name = "basis_raft_index"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 5; exact covered Raft-log position under the Appendix A u64 index law, embedded by value and retained and cut with ConfigurationTransitionSpec"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0006
+stable_name = "current_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 6; strong reference to the exact current ConfigurationState, retained while ConfigurationTransitionSpec is retained, with target order 5 no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0007
+stable_name = "prospective_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 7; strong reference to the exact prospective ConfigurationState, retained while ConfigurationTransitionSpec is retained, with target order 5 no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0008
+stable_name = "candidate_closure_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PayloadAvailabilityCertificate"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 8 and a10:1912 D1 closure law; strong reference to the candidate PayloadAvailabilityCertificate, retained while ConfigurationTransitionSpec is retained, with target order 10 no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0009
+stable_name = "paired_checkpoint_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryCheckpoint"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 9; optional strong reference to the phase-paired RecoveryCheckpoint, retained while present and ConfigurationTransitionSpec is retained, with target order 30 no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x000a
+stable_name = "paired_config_payload_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigPayloadFloor"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 10; strong reference to the phase-paired ConfigPayloadFloor, retained while ConfigurationTransitionSpec is retained, with target order 30 no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x000b
+stable_name = "required_prepared"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 11; required prepared/certificate/remote/key/audit/backup obligation floor under the Appendix A u64 floor law, embedded by value and retained and cut with ConfigurationTransitionSpec"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x000c
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 12; the one source-required TerminalAuditGate under the SequenceNeutralSpec law, embedded by value and retained and cut with ConfigurationTransitionSpec; the Required arm carries its separately registered retaining edges"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "ConstraintMutationBatch"
 field_tag = 0x0001
 stable_name = "coordinate"
@@ -14683,6 +14856,18 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ConfigurationTransitionSpecPhase"
+containing_schema = "ConfigurationTransitionSpec"
+union_path = "ConfigurationTransitionSpec.phase"
+field_tag = 0x0001
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConfigurationTransitionSpec"]
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
 union_name = "ConstraintOwnerAssignment"
 containing_schema = "ConstraintOwnerAssignment"
 union_path = "ConstraintOwnerAssignment"
@@ -18070,7 +18255,7 @@ containing_schema = "TerminalAuditGate"
 union_path = "TerminalAuditGate"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["ConfigurationTransitionSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -20114,6 +20299,54 @@ payload_sha256 = "b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34a
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ConfigurationTransitionSpecPhase"
+containing_schema = "ConfigurationTransitionSpec"
+union_path = "ConfigurationTransitionSpec.phase"
+arm_tag = 0x0001
+source_arm_name = "ProposeJoint"
+stable_name = "propose_joint"
+payload_kind = "unit"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConfigurationTransitionSpecPhase"
+containing_schema = "ConfigurationTransitionSpec"
+union_path = "ConfigurationTransitionSpec.phase"
+arm_tag = 0x0002
+source_arm_name = "CommitJoint"
+stable_name = "commit_joint"
+payload_kind = "unit"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConfigurationTransitionSpecPhase"
+containing_schema = "ConfigurationTransitionSpec"
+union_path = "ConfigurationTransitionSpec.phase"
+arm_tag = 0x0003
+source_arm_name = "CommitNew"
+stable_name = "commit_new"
+payload_kind = "unit"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ConfigurationTransitionSpecPhase"
+containing_schema = "ConfigurationTransitionSpec"
+union_path = "ConfigurationTransitionSpec.phase"
+arm_tag = 0x0004
+source_arm_name = "CommitRetirementFloor"
+stable_name = "commit_retirement_floor"
+payload_kind = "unit"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "ConstraintOwnerAssignment"

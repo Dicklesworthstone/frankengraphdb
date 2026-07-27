@@ -5779,6 +5779,7 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     assert_shared_union(
         "TerminalAuditGate",
         &[
+            "ConfigurationTransitionSpec",
             "HistoryCutActivationSpec",
             "InitialConfigFloorInstallSpec",
             "KeyDestroyProposal",
@@ -7615,6 +7616,17 @@ fn post_erratum_e55p_union(union_name: &str) -> bool {
         union_name,
         "ControlCommandPayloadAvailabilityCertificateRef" | "PreparedCommitRecordStatus"
     )
+}
+
+/// The one ordinary union landed by fgdb-i1rx: ConfigurationTransitionSpec.phase,
+/// embedded, four arms in a10:1920 source order. Post-erratum, so it must not appear
+/// in the pre-erratum namespace. Filtered SEPARATELY from post_erratum_e55p_union
+/// because that function's accounting is licensed at exactly nine transcript lines;
+/// folding a further cohort in would silently falsify a published denominator.
+/// ACCOUNTING: 5 transcript lines -- 1 union line plus 4 arm lines. Neither cohort
+/// assert can see it, so it moved the pin through its arm lines alone.
+fn post_erratum_i1rx_union(union_name: &str) -> bool {
+    matches!(union_name, "ConfigurationTransitionSpecPhase")
 }
 
 /// Five retained field rows whose `exact_wire_type` was re-spelled after
@@ -9673,7 +9685,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 739,
+        pre_erratum.fields.len() + 751,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
     );
@@ -9684,7 +9696,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     undo_e55p_id256_retype(&mut pre_erratum);
     pre_erratum
         .ordinary_unions
-        .retain(|union| !post_erratum_e55p_union(&union.union_name));
+        .retain(|union| {
+            !post_erratum_e55p_union(&union.union_name)
+                && !post_erratum_i1rx_union(&union.union_name)
+        });
     // A one-element `for` is a clippy::single_element_loop error under -D warnings.
     // Destructured rather than looped: there is exactly one pre-ymqm arm to restore,
     // and if a second is ever needed this should become a real slice with more than
@@ -15257,7 +15272,10 @@ fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
     let landed: Vec<_> = base
         .fields
         .iter()
-        .filter(|row| row.retention_and_cut_rule.contains("source-position tag"))
+        .filter(|row| {
+            row.retention_and_cut_rule.starts_with("a12:")
+                && row.retention_and_cut_rule.contains("source-position tag")
+        })
         .collect();
     assert_eq!(landed.len(), 80, "the mn8i landed field tranche moved");
     for row in &landed {

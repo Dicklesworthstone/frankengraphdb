@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3605
+target_count = 3623
 projection_fallback_count = 129
-target_source_assignment_sha256 = "f767156ddbbfba1fc2fd9653722b6b557fc41f626fa6f7fa09ef6bfc90533cf5"
+target_source_assignment_sha256 = "8ca832486284fc40539176604dd9c4300901a450bca5023d3d8b8035464bcafb"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -11522,7 +11522,7 @@ name = "TerminalAuditGate"
 kind = "union"
 status = "reserved"
 encoding_context = "shared closed u8-tagged terminal audit union StructurallyInapplicable | NotRequired | Required in source order; the Required payload carries the exact ticket, event, and terminal-resolution strong-reference triple (a21:2699)"
-allowed_containing_schemas = ["HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["ConfigurationTransitionSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 max_size_bytes = 16777216
 
 [[wire_type]]
@@ -39131,7 +39131,7 @@ containing_schema = "TerminalAuditGate"
 union_path = "TerminalAuditGate"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["ConfigurationTransitionSpec", "HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -50725,7 +50725,7 @@ symbol = "ConfigurationTransitionSpec"
 generic_signature = ""
 source_key = "top|ConfigurationTransitionSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a10:1920"]
 
 [[top_level_candidate]]
@@ -110945,3 +110945,426 @@ slice_id = "a14"
 source_key = "top|LocalGcCancellationAuthorizeSpec"
 target_kind = "logical-kind"
 definition_status = "declared"
+
+[[logical_kind]]
+slice_id = "a10"
+row_id = "a10:logical-kind:configuration-transition-spec"
+object_kind = 0x057c
+name = "ConfigurationTransitionSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/configuration_transition_spec/"
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-phase"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0001
+stable_name = "phase"
+exact_wire_type = "ConfigurationTransitionSpecPhase"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 1; source-ordered closed configuration-transition phase embedded by value, retained and cut with ConfigurationTransitionSpec, and never traversed as a reachability edge"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-basis-state"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0002
+stable_name = "basis_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 2; comparison-only WeakStateIdentity embedded by value, retained and cut with ConfigurationTransitionSpec, and never traversed as a reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-basis-logical-command-seq"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0003
+stable_name = "basis_logical_command_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 3; exact covered logical-command prefix under the Appendix A u64 sequence law, embedded by value and retained and cut with ConfigurationTransitionSpec"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-basis-commit-seq"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0004
+stable_name = "basis_commit_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 4; exact covered committed-transaction prefix under the Appendix A u64 sequence law, embedded by value and retained and cut with ConfigurationTransitionSpec"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-basis-raft-index"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0005
+stable_name = "basis_raft_index"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 5; exact covered Raft-log position under the Appendix A u64 index law, embedded by value and retained and cut with ConfigurationTransitionSpec"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-current-configuration-ref"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0006
+stable_name = "current_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 6; strong reference to the exact current ConfigurationState, retained while ConfigurationTransitionSpec is retained, with target order 5 no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-prospective-configuration-ref"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0007
+stable_name = "prospective_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 7; strong reference to the exact prospective ConfigurationState, retained while ConfigurationTransitionSpec is retained, with target order 5 no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-candidate-closure-proof-ref"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0008
+stable_name = "candidate_closure_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PayloadAvailabilityCertificate"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 8 and a10:1912 D1 closure law; strong reference to the candidate PayloadAvailabilityCertificate, retained while ConfigurationTransitionSpec is retained, with target order 10 no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-paired-checkpoint-ref"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x0009
+stable_name = "paired_checkpoint_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryCheckpoint"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 9; optional strong reference to the phase-paired RecoveryCheckpoint, retained while present and ConfigurationTransitionSpec is retained, with target order 30 no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-paired-config-payload-floor-ref"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x000a
+stable_name = "paired_config_payload_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigPayloadFloor"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 10; strong reference to the phase-paired ConfigPayloadFloor, retained while ConfigurationTransitionSpec is retained, with target order 30 no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-required-prepared"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x000b
+stable_name = "required_prepared"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 11; required prepared/certificate/remote/key/audit/backup obligation floor under the Appendix A u64 floor law, embedded by value and retained and cut with ConfigurationTransitionSpec"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:configuration-transition-spec-terminal-audit-gate"
+containing_schema = "ConfigurationTransitionSpec"
+field_tag = 0x000c
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1920 source-position tag 12; the one source-required TerminalAuditGate under the SequenceNeutralSpec law, embedded by value and retained and cut with ConfigurationTransitionSpec; the Required arm carries its separately registered retaining edges"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a10"
+row_id = "a10:union:configuration-transition-spec-phase-5474856cedf9efa4"
+union_name = "ConfigurationTransitionSpecPhase"
+containing_schema = "ConfigurationTransitionSpec"
+union_path = "ConfigurationTransitionSpec.phase"
+field_tag = 0x0001
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ConfigurationTransitionSpec"]
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:configuration-transition-spec-phase-propose-joint-4819e95a684b0b3d"
+union_name = "ConfigurationTransitionSpecPhase"
+containing_schema = "ConfigurationTransitionSpec"
+union_path = "ConfigurationTransitionSpec.phase"
+arm_tag = 0x0001
+source_arm_name = "ProposeJoint"
+stable_name = "propose_joint"
+payload_kind = "unit"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:configuration-transition-spec-phase-commit-joint-a0f9abfd5830b894"
+union_name = "ConfigurationTransitionSpecPhase"
+containing_schema = "ConfigurationTransitionSpec"
+union_path = "ConfigurationTransitionSpec.phase"
+arm_tag = 0x0002
+source_arm_name = "CommitJoint"
+stable_name = "commit_joint"
+payload_kind = "unit"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:configuration-transition-spec-phase-commit-new-9eb4be1d62873489"
+union_name = "ConfigurationTransitionSpecPhase"
+containing_schema = "ConfigurationTransitionSpec"
+union_path = "ConfigurationTransitionSpec.phase"
+arm_tag = 0x0003
+source_arm_name = "CommitNew"
+stable_name = "commit_new"
+payload_kind = "unit"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:configuration-transition-spec-phase-commit-retirement-floor-f4dbb8d600088585"
+union_name = "ConfigurationTransitionSpecPhase"
+containing_schema = "ConfigurationTransitionSpec"
+union_path = "ConfigurationTransitionSpec.phase"
+arm_tag = 0x0004
+source_arm_name = "CommitRetirementFloor"
+stable_name = "commit_retirement_floor"
+payload_kind = "unit"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[target]]
+row_id = "a10:target:logical-kind-configuration-transition-spec"
+target_row_id = "a10:logical-kind:configuration-transition-spec"
+slice_id = "a10"
+source_key = "top|ConfigurationTransitionSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-phase"
+target_row_id = "a10:field:configuration-transition-spec-phase"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.phase|phase"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-basis-state"
+target_row_id = "a10:field:configuration-transition-spec-basis-state"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.basis_state|basis_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-basis-logical-command-seq"
+target_row_id = "a10:field:configuration-transition-spec-basis-logical-command-seq"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.basis_logical_command_seq|basis_logical_command_seq"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-basis-commit-seq"
+target_row_id = "a10:field:configuration-transition-spec-basis-commit-seq"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.basis_commit_seq|basis_commit_seq"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-basis-raft-index"
+target_row_id = "a10:field:configuration-transition-spec-basis-raft-index"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.basis_raft_index|basis_raft_index"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-current-configuration-ref"
+target_row_id = "a10:field:configuration-transition-spec-current-configuration-ref"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.current_configuration_ref|current_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-prospective-configuration-ref"
+target_row_id = "a10:field:configuration-transition-spec-prospective-configuration-ref"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.prospective_configuration_ref|prospective_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-candidate-closure-proof-ref"
+target_row_id = "a10:field:configuration-transition-spec-candidate-closure-proof-ref"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.candidate_closure_proof_ref|candidate_closure_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-paired-checkpoint-ref"
+target_row_id = "a10:field:configuration-transition-spec-paired-checkpoint-ref"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.paired_checkpoint_ref|paired_checkpoint_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-paired-config-payload-floor-ref"
+target_row_id = "a10:field:configuration-transition-spec-paired-config-payload-floor-ref"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.paired_config_payload_floor_ref|paired_config_payload_floor_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-required-prepared"
+target_row_id = "a10:field:configuration-transition-spec-required-prepared"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.required_prepared|required_prepared"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-configuration-transition-spec-terminal-audit-gate"
+target_row_id = "a10:field:configuration-transition-spec-terminal-audit-gate"
+slice_id = "a10"
+source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.terminal_audit_gate|terminal_audit_gate"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-configuration-transition-spec-phase-5474856cedf9efa4"
+target_row_id = "a10:union:configuration-transition-spec-phase-5474856cedf9efa4"
+slice_id = "a10"
+source_key = "union|ConfigurationTransitionSpec|ConfigurationTransitionSpec.phase"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-configuration-transition-spec-phase-propose-joint-4819e95a684b0b3d"
+target_row_id = "a10:union-arm:configuration-transition-spec-phase-propose-joint-4819e95a684b0b3d"
+slice_id = "a10"
+source_key = "arm|ConfigurationTransitionSpec|ConfigurationTransitionSpec.phase|ProposeJoint"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-configuration-transition-spec-phase-commit-joint-a0f9abfd5830b894"
+target_row_id = "a10:union-arm:configuration-transition-spec-phase-commit-joint-a0f9abfd5830b894"
+slice_id = "a10"
+source_key = "arm|ConfigurationTransitionSpec|ConfigurationTransitionSpec.phase|CommitJoint"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-configuration-transition-spec-phase-commit-new-9eb4be1d62873489"
+target_row_id = "a10:union-arm:configuration-transition-spec-phase-commit-new-9eb4be1d62873489"
+slice_id = "a10"
+source_key = "arm|ConfigurationTransitionSpec|ConfigurationTransitionSpec.phase|CommitNew"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-configuration-transition-spec-phase-commit-retirement-floor-f4dbb8d600088585"
+target_row_id = "a10:union-arm:configuration-transition-spec-phase-commit-retirement-floor-f4dbb8d600088585"
+slice_id = "a10"
+source_key = "arm|ConfigurationTransitionSpec|ConfigurationTransitionSpec.phase|CommitRetirementFloor"
+target_kind = "union-arm"
+definition_status = "declared"
+
