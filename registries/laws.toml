@@ -1,0 +1,145 @@
+# =============================================================================
+# laws.toml — the named-law registry (G0)
+# =============================================================================
+# Bead: fgdb-law-citation-sweep-uzzh
+# Provenance: plan Appendix F preamble ("resolvable enforcement and negative-
+# test entrypoints"), the same shape invariants.toml uses for FG-INV-01..20 —
+# every law declared once with a stable ID, a statement, and the mechanism that
+# enforces it.
+#
+# WHY THIS FILE EXISTS. Catalog prose cites named laws. MEASURED 2026-07-27 at
+# HEAD 1d19f02: 93 such citations across 10 distinct law names, and not one of
+# those names was declared anywhere in the repository. A citation is a reference
+# with no referent unless something declares the referent, and a fabricated
+# citation is indistinguishable from a real one when nothing resolves either.
+# That is how "the Appendix A u64 floor law" — a rule that exists nowhere —
+# survived every gate: appendix exit 0, identity exit 0, suite 130/130. The
+# defect was never the citation. It was the missing registry.
+#
+# THE DISCRIMINATOR THAT DECIDED EVERY ROW BELOW. A cited law that carries a
+# source location resolves; a cited law that carries none does not. That held
+# for 10 of 10 names without exception:
+#
+#   flattened-rendering       a01:1412   real, stated verbatim at that line
+#   compact-phrase            a01:1412   real, stated verbatim at that line
+#   shorthand                 a01:1396   real, stated verbatim at that line
+#   SequenceNeutralSpec       a10:1914   real, stated verbatim at that line
+#   D1 closure                a10:1912   location real, LAW NOT STATED THERE
+#   arm-payload-shape         (none)     unlocatable
+#   Appendix A u64 sequence   (none)     unlocatable
+#   Appendix A u64 index      (none)     unlocatable
+#   Appendix A u64 floor      (none)     unlocatable
+#
+# So `source_location` is REQUIRED on a registered row. It is the field that
+# makes a law falsifiable: a reader can open the line and check.
+#
+# STATUS IS WHAT A FUTURE GUARD KEYS ON, and the three values are not
+# decorative:
+#   registered           the plan states this rule at source_location. A
+#                        citation resolving here is licensed.
+#   unadjudicated        cited, and something real is being pointed at, but its
+#                        legal status is not established. A citation resolving
+#                        here is NOT yet licensed; it is owner-facing work.
+#   fabrication-candidate cited, with no locatable referent. A citation
+#                        resolving here must FAIL once the guard lands.
+#
+# NOTHING HAS BEEN STRUCK. The fabrication candidates are recorded here rather
+# than deleted from the catalog, because the citations are the demand signal for
+# this file and destroying them would destroy the only record of what the
+# catalog believes its own rules are.
+#
+# Row schema:
+#   [[law]]
+#   id              = "FG-LAW-NN"        # stable, permanent, never reused
+#   name            = "..."              # the phrase catalog prose cites
+#   source_location = "aNN:LINE"         # REQUIRED when status = "registered"
+#   statement       = "..."              # what the rule actually says
+#   enforcement     = "..."              # REQUIRED when status = "registered"
+#   status          = "registered" | "unadjudicated" | "fabrication-candidate"
+#   note            = "..."              # optional adjudication record
+#
+# Unknown keys are REJECTED, not ignored: a future field added to some rows and
+# silently dropped on others is the same failure mode this registry exists to
+# end.
+# =============================================================================
+
+[[law]]
+id = "FG-LAW-01"
+name = "flattened-rendering"
+source_location = "a01:1412"
+statement = "Appendix A schema bodies use a flattened prose rendering, and names and suffixes never imply reference strength. Every field's exact type, cardinality, identity class, target, role/posture predicate, retention and cut behavior, and PriorObject construction annotation come from the generated durable_fields.toml row rather than from the source spelling."
+enforcement = "The rendering checker rejects any brace field that lacks or disagrees with its durable_fields.toml row; exercised by `registry-check appendix` over the Appendix A census."
+status = "registered"
+note = "The most-cited law in the catalog. Its citations carry the a01:1412 anchor inline, which is why it was verifiable at all."
+
+[[law]]
+id = "FG-LAW-02"
+name = "compact-phrase"
+source_location = "a01:1412"
+statement = "A compact phrase appearing in a schema body, such as \"typed mandatory inventory\", names a closed sub-schema. It is never an open bag and never a slash-separated set of ambient refs."
+enforcement = "Appendix A census classification: a compact phrase resolves to a named closed sub-schema or the slice fails G0; exercised by `registry-check appendix`."
+status = "registered"
+note = "Stated on the same plan line as FG-LAW-01. Directly relevant to fgdb-census-slash-token-truncation-avex: this law already forbids reading a slash-separated token as an ambient set."
+
+[[law]]
+id = "FG-LAW-03"
+name = "shorthand"
+source_location = "a01:1396"
+statement = "A shorthand authority_group_id, consumer_group_id, or group_id in a cross-group schema means the corresponding full ConsensusDomain; wire encoders never serialize the scalar alone."
+enforcement = "Appendix A census expands the shorthand to ConsensusDomain when classifying a cross-group schema member; exercised by `registry-check appendix`."
+status = "registered"
+note = "Cited as \"the shorthand law\" with the a01:1396 anchor carried after the phrase rather than before it, which is why a location-prefix reader missed it."
+
+[[law]]
+id = "FG-LAW-04"
+name = "SequenceNeutralSpec"
+source_location = "a10:1914"
+statement = "Every typed sequence-neutral spec is canonically encoded once as SequenceNeutralSpec<Tag> {wire_tag, schema_version, body, terminal_audit_freeze, terminal_audit_gate}. Appendix prose flattens the body fields into the surrounding braces for readability, so a shown audit field is a wrapper field and not a field inside the body."
+enforcement = "Appendix A census attributes wrapper fields to the wrapper rather than to the body; exercised by `registry-check appendix`."
+status = "registered"
+note = "Cited both as \"the SequenceNeutralSpec law\" and \"the SequenceNeutralSpec wrapper law\"; both name this rule."
+
+[[law]]
+id = "FG-LAW-05"
+name = "D1 closure"
+source_location = "a10:1912"
+statement = ""
+enforcement = ""
+status = "unadjudicated"
+note = "The citation carries the a10:1912 anchor and that line is real, but it defines the CommitCommand/ControlCommand/LogicalCommandRecord/PreparedCommitRecord transaction order unit and states no closure law. The token D1 is real elsewhere in the plan (28 occurrences: the D1/D2/Raft path, the D1 boundary), so this names something that exists whose legal status is not established. OWNER DECISION NEEDED: promote to a registered law with a correct anchor, or demote the phrase to a description."
+
+[[law]]
+id = "FG-LAW-06"
+name = "StrongRef-only arm-payload-shape"
+source_location = ""
+statement = ""
+enforcement = ""
+status = "unadjudicated"
+note = "Two citations, both describing an arm payload committed byte-exactly by the covering arm payload digest and registered on the wire path with no field row. That is a coherent and probably real rule — it agrees with the landed fact that a field row may not hang off a wire-only schema — but no anchor is cited and none was found. OWNER DECISION NEEDED: locate and register, or reclassify."
+
+[[law]]
+id = "FG-LAW-07"
+name = "Appendix A u64 sequence"
+source_location = ""
+statement = ""
+enforcement = ""
+status = "fabrication-candidate"
+note = "Two citations, both in ConfigurationTransitionSpec (a10:1920 source-position tags 3 and 4), both landed by mint 3c1c936. No anchor, no referent under any spelling tried. NOT STRUCK — owner permission required."
+
+[[law]]
+id = "FG-LAW-08"
+name = "Appendix A u64 index"
+source_location = ""
+statement = ""
+enforcement = ""
+status = "fabrication-candidate"
+note = "One citation, ConfigurationTransitionSpec a10:1920 source-position tag 5, mint 3c1c936. No anchor, no referent. NOT STRUCK — owner permission required."
+
+[[law]]
+id = "FG-LAW-09"
+name = "Appendix A u64 floor"
+source_location = ""
+statement = ""
+enforcement = ""
+status = "fabrication-candidate"
+note = "One citation, ConfigurationTransitionSpec a10:1920 source-position tag 11, mint 3c1c936 — the row fgdb-hvfn exists to repair. This is the citation that exposed the whole class. All three u64 rows are the same mint inventing a law name for \"this member is a u64\". NOT STRUCK — owner permission required, and fgdb-hvfn's repair removes this citation, so the positive-control fixture is banked at /data/tmp/fgdb_swarm/pane2_uzzh_control_fixture.txt."

@@ -99,6 +99,10 @@ coverage_of() {
     registries/threat_model.toml)        echo "threat-check" ;;
     registries/workspace_topology.toml)  echo "topology-check" ;;
     registries/unsafe_boundary_ledger.toml) echo "topology-check" ;;
+    # EXACT, not the `registries/*.toml` glob below. laws.toml is validated by
+    # a cargo test, not by `registry-check all`, so the glob would claim a gate
+    # that never opens the file -- the fail-open this row's own comment names.
+    registries/laws.toml)                echo "cargo test --workspace (tools/registry-check/tests/laws.rs: schema, plan-anchor resolution, 12 mutation fixtures)" ;;
     registries/*.toml)                   echo "registry-check all" ;;
     .beads/issues.jsonl)                 echo "architecture-check (parses every record; malformed line fails file:line)" ;;
     docs/ARCHITECTURE_DECISION_RECORD.md) echo "architecture-check (generated document)" ;;
