@@ -1358,6 +1358,23 @@ fn validate_active_logical_kind_arms(root: &Path, out: &mut Vec<Violation>) {
         return;
     }
 
+    // The foundation crate consumes this projection as raw bytes and requires
+    // each active row's object_kind/name/status fields to be adjacent and in
+    // that order.  The generator byte-compare alone cannot see a generator
+    // change that preserves its own output, so keep the consumer contract
+    // load-bearing here as well.
+    for (code, name) in &active {
+        let needle = format!("object_kind = 0x{code:04x}\nname = \"{name}\"\nstatus = \"active\"");
+        if !toml_src.contains(&needle) {
+            out.push(Violation::new(
+                "logical_kind_projection_layout",
+                reg,
+                name,
+                "active logical kind projection must keep object_kind, name, and status adjacent in that order for fgdb-types raw-byte consumers",
+            ));
+        }
+    }
+
     for (c, n) in &active {
         match arms.get(c) {
             Some(arm_name) if arm_name == n => {}
