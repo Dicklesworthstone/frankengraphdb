@@ -7190,6 +7190,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         matches!(
             name,
             "KeyDestroyExternalAckRef"
+                | "AuditReceiptValidationResolution"
+                | "ThroughCapabilityMigrationIndexTerminal"
+                | "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
                 | "CapabilityMigrationRetrySelector"
                 | "DurableCapabilityTimeValidationBasis"
                 | "ReadyChannelSurface"
@@ -8871,7 +8874,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a12_exact_order_field(&field.retention_and_cut_rule)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 372,
+        pre_erratum.ordinary_unions.len() + 375,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
@@ -13301,6 +13304,103 @@ fn idr_a21_audit_ticket_admission_spec_is_wire_envelope() {
             r.logical.iter().all(|row| row.name != name),
             "{name} must not spend a logical object-kind code"
         );
+    }
+}
+
+#[test]
+fn idr_a21_silent_resolution_unions_are_wire_envelopes() {
+    let r = real_identity();
+    let catalog = real_appendix_catalog();
+    let expected = [
+        (
+            "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal",
+            0x0541,
+            &[
+                (0x0001, "0x0001 ConsumerTerminalWithoutSuccessor", 0x0542),
+                (0x0002, "0x0002 InstalledSuccessorAcknowledged", 0x0543),
+                (0x0003, "0x0003 SubjectTerminal", 0x0544),
+            ][..],
+        ),
+        (
+            "ThroughCapabilityMigrationIndexTerminal",
+            0x0545,
+            &[
+                (
+                    0x0001,
+                    "0x0001 ConsumerTerminalWithoutIndexSelection",
+                    0x0546,
+                ),
+                (0x0002, "0x0002 LiveSuccessorEntrySelected", 0x0547),
+            ][..],
+        ),
+        (
+            "AuditReceiptValidationResolution",
+            0x0548,
+            &[
+                (0x0001, "0x0001 LocalTerminalReceiptIndex", 0x0549),
+                (0x0002, "0x0002 MetaTerminalReceiptIndex", 0x054a),
+                (0x0003, "0x0003 LocalFrameCompleted", 0x054b),
+                (0x0004, "0x0004 MetaFrameCompleted", 0x054c),
+                (0x0005, "0x0005 LocalCancelledBeforeWrite", 0x054d),
+                (0x0006, "0x0006 MetaCancelledBeforeWrite", 0x054e),
+            ][..],
+        ),
+    ];
+    for (name, parent_code, expected_arms) in expected {
+        let parent = r
+            .wire
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("missing ruled a21 wire union {name}"));
+        assert_eq!(parent.wire_type_id, parent_code, "{name} code drift");
+        assert_eq!(parent.kind, "union", "{name} must remain a wire union");
+        assert_eq!(parent.status, "reserved");
+        assert_eq!(
+            parent.allowed_containing_schemas,
+            [name],
+            "{name} must keep its exact self-only closure"
+        );
+        assert!(
+            r.logical.iter().all(|row| row.name != name),
+            "{name} must not spend a logical object-kind code"
+        );
+        assert!(
+            catalog.reservations.iter().all(|row| row.symbol != name),
+            "{name} is not a StrongRef family and must not gain a reservation"
+        );
+
+        let union = r
+            .ordinary_unions
+            .iter()
+            .find(|row| row.union_name == name)
+            .unwrap_or_else(|| panic!("missing ruled a21 ordinary union {name}"));
+        assert_eq!(union.containing_schema, name);
+        assert_eq!(union.union_path, name);
+        assert_eq!(union.tag_wire_type, "u16");
+        assert_eq!(union.allowed_containing_schemas, [name]);
+        assert_eq!(union.arms.len(), expected_arms.len());
+        for &(arm_tag, source_arm_name, variant_code) in expected_arms {
+            let arm = union
+                .arms
+                .iter()
+                .find(|row| row.arm_tag == arm_tag)
+                .unwrap_or_else(|| panic!("missing ruled a21 arm {name} tag {arm_tag:#06x}"));
+            assert_eq!(arm.source_arm_name, source_arm_name);
+            let variant_name = format!("{name}.{}", arm.stable_name);
+            let variant = r
+                .wire
+                .iter()
+                .find(|row| row.name == variant_name)
+                .unwrap_or_else(|| panic!("missing ruled a21 wire variant {variant_name}"));
+            assert_eq!(
+                variant.wire_type_id, variant_code,
+                "{variant_name} code drift"
+            );
+            assert_eq!(variant.kind, "union_variant");
+            assert_eq!(variant.containing_union.as_deref(), Some(name));
+            assert_eq!(variant.wire_tag, Some(arm_tag));
+            assert_eq!(variant.allowed_containing_schemas, [name]);
+        }
     }
 }
 

@@ -5557,3 +5557,151 @@ status = "reserved"
 encoding_context = "a21:2713 source-confirmed 5-member record; the complete structural body is committed by this wire envelope, no StrongRef targets the family, and no member is promoted to an independent tagged union"
 allowed_containing_schemas = ["AuditTicketAdmissionSpec"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0541
+name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2657 source definition; the arm set is the exact source bijection 0x0001 ConsumerTerminalWithoutSuccessor | 0x0002 InstalledSuccessorAcknowledged | 0x0003 SubjectTerminal in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0542
+name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal.0x0001_consumer_terminal_without_successor"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 ConsumerTerminalWithoutSuccessor of closed union ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0543
+name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal.0x0002_installed_successor_acknowledged"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 InstalledSuccessorAcknowledged of closed union ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0544
+name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal.0x0003_subject_terminal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 SubjectTerminal of closed union ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0545
+name = "ThroughCapabilityMigrationIndexTerminal"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2657 source definition; the arm set is the exact source bijection 0x0001 ConsumerTerminalWithoutIndexSelection | 0x0002 LiveSuccessorEntrySelected in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughCapabilityMigrationIndexTerminal"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0546
+name = "ThroughCapabilityMigrationIndexTerminal.0x0001_consumer_terminal_without_index_selection"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ThroughCapabilityMigrationIndexTerminal"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 ConsumerTerminalWithoutIndexSelection of closed union ThroughCapabilityMigrationIndexTerminal (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughCapabilityMigrationIndexTerminal"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0547
+name = "ThroughCapabilityMigrationIndexTerminal.0x0002_live_successor_entry_selected"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ThroughCapabilityMigrationIndexTerminal"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 LiveSuccessorEntrySelected of closed union ThroughCapabilityMigrationIndexTerminal (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughCapabilityMigrationIndexTerminal"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0548
+name = "AuditReceiptValidationResolution"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2657 source definition; the arm set is the exact source bijection 0x0001 LocalTerminalReceiptIndex | 0x0002 MetaTerminalReceiptIndex | 0x0003 LocalFrameCompleted | 0x0004 MetaFrameCompleted | 0x0005 LocalCancelledBeforeWrite | 0x0006 MetaCancelledBeforeWrite in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0549
+name = "AuditReceiptValidationResolution.0x0001_local_terminal_receipt_index"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 LocalTerminalReceiptIndex of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x054a
+name = "AuditReceiptValidationResolution.0x0002_meta_terminal_receipt_index"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 MetaTerminalReceiptIndex of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x054b
+name = "AuditReceiptValidationResolution.0x0003_local_frame_completed"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 LocalFrameCompleted of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x054c
+name = "AuditReceiptValidationResolution.0x0004_meta_frame_completed"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0004
+encoding_context = "arm 0x0004 MetaFrameCompleted of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x054d
+name = "AuditReceiptValidationResolution.0x0005_local_cancelled_before_write"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0005
+encoding_context = "arm 0x0005 LocalCancelledBeforeWrite of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x054e
+name = "AuditReceiptValidationResolution.0x0006_meta_cancelled_before_write"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0006
+encoding_context = "arm 0x0006 MetaCancelledBeforeWrite of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216

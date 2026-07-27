@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
 
 [target_manifest]
-target_count = 3462
+target_count = 3490
 projection_fallback_count = 111
-target_source_assignment_sha256 = "acd6ab8962388cf6400b6e8c86badd8f6125c2eec0ccc07ac00f080a915768ae"
+target_source_assignment_sha256 = "b9d055f1d9cc2c9c21cf8fb1c9210b586965b69fdca4a6bfbba52e3629e2f09b"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -49016,7 +49016,7 @@ symbol = "AuditReceiptValidationResolution"
 generic_signature = ""
 source_key = "top|AuditReceiptValidationResolution"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2657"]
 
 [[top_level_candidate]]
@@ -59986,7 +59986,7 @@ symbol = "ThroughCapabilityMigrationIndexTerminal"
 generic_signature = ""
 source_key = "top|ThroughCapabilityMigrationIndexTerminal"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2657"]
 
 [[top_level_candidate]]
@@ -60006,7 +60006,7 @@ symbol = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
 generic_signature = ""
 source_key = "top|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2657"]
 
 [[top_level_candidate]]
@@ -104767,6 +104767,182 @@ encoding_context = "a21:2713 source-confirmed 5-member record; the complete stru
 allowed_containing_schemas = ["AuditTicketAdmissionSpec"]
 max_size_bytes = 16777216
 
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:through-installed-successor-acknowledged-or-subject-terminal"
+wire_type_id = 0x0541
+name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2657 source definition; the arm set is the exact source bijection 0x0001 ConsumerTerminalWithoutSuccessor | 0x0002 InstalledSuccessorAcknowledged | 0x0003 SubjectTerminal in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:through-installed-successor-acknowledged-or-subject-terminal-0x0001-consumer-terminal-without-successor"
+wire_type_id = 0x0542
+name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal.0x0001_consumer_terminal_without_successor"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 ConsumerTerminalWithoutSuccessor of closed union ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:through-installed-successor-acknowledged-or-subject-terminal-0x0002-installed-successor-acknowledged"
+wire_type_id = 0x0543
+name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal.0x0002_installed_successor_acknowledged"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 InstalledSuccessorAcknowledged of closed union ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:through-installed-successor-acknowledged-or-subject-terminal-0x0003-subject-terminal"
+wire_type_id = 0x0544
+name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal.0x0003_subject_terminal"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 SubjectTerminal of closed union ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:through-capability-migration-index-terminal"
+wire_type_id = 0x0545
+name = "ThroughCapabilityMigrationIndexTerminal"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2657 source definition; the arm set is the exact source bijection 0x0001 ConsumerTerminalWithoutIndexSelection | 0x0002 LiveSuccessorEntrySelected in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughCapabilityMigrationIndexTerminal"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:through-capability-migration-index-terminal-0x0001-consumer-terminal-without-index-selection"
+wire_type_id = 0x0546
+name = "ThroughCapabilityMigrationIndexTerminal.0x0001_consumer_terminal_without_index_selection"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ThroughCapabilityMigrationIndexTerminal"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 ConsumerTerminalWithoutIndexSelection of closed union ThroughCapabilityMigrationIndexTerminal (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughCapabilityMigrationIndexTerminal"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:through-capability-migration-index-terminal-0x0002-live-successor-entry-selected"
+wire_type_id = 0x0547
+name = "ThroughCapabilityMigrationIndexTerminal.0x0002_live_successor_entry_selected"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ThroughCapabilityMigrationIndexTerminal"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 LiveSuccessorEntrySelected of closed union ThroughCapabilityMigrationIndexTerminal (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ThroughCapabilityMigrationIndexTerminal"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:audit-receipt-validation-resolution"
+wire_type_id = 0x0548
+name = "AuditReceiptValidationResolution"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2657 source definition; the arm set is the exact source bijection 0x0001 LocalTerminalReceiptIndex | 0x0002 MetaTerminalReceiptIndex | 0x0003 LocalFrameCompleted | 0x0004 MetaFrameCompleted | 0x0005 LocalCancelledBeforeWrite | 0x0006 MetaCancelledBeforeWrite in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0001-local-terminal-receipt-index"
+wire_type_id = 0x0549
+name = "AuditReceiptValidationResolution.0x0001_local_terminal_receipt_index"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 LocalTerminalReceiptIndex of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0002-meta-terminal-receipt-index"
+wire_type_id = 0x054a
+name = "AuditReceiptValidationResolution.0x0002_meta_terminal_receipt_index"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 MetaTerminalReceiptIndex of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0003-local-frame-completed"
+wire_type_id = 0x054b
+name = "AuditReceiptValidationResolution.0x0003_local_frame_completed"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 LocalFrameCompleted of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0004-meta-frame-completed"
+wire_type_id = 0x054c
+name = "AuditReceiptValidationResolution.0x0004_meta_frame_completed"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0004
+encoding_context = "arm 0x0004 MetaFrameCompleted of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0005-local-cancelled-before-write"
+wire_type_id = 0x054d
+name = "AuditReceiptValidationResolution.0x0005_local_cancelled_before_write"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0005
+encoding_context = "arm 0x0005 LocalCancelledBeforeWrite of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0006-meta-cancelled-before-write"
+wire_type_id = 0x054e
+name = "AuditReceiptValidationResolution.0x0006_meta_cancelled_before_write"
+kind = "union_variant"
+status = "reserved"
+containing_union = "AuditReceiptValidationResolution"
+wire_tag = 0x0006
+encoding_context = "arm 0x0006 MetaCancelledBeforeWrite of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+max_size_bytes = 16777216
+
 [[union]]
 slice_id = "a12"
 row_id = "a12:union:local-constraint-reservation-record-state-7357ce85cf25236e"
@@ -104842,6 +105018,45 @@ union_path = "CapabilityMigrationRetrySelector"
 tag_wire_type = "u16"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["CapabilityMigrationRetrySelector"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a21"
+row_id = "a21:union:through-installed-successor-acknowledged-or-subject-terminal-7cf3fde7d7e9569f"
+union_name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+containing_schema = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+union_path = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a21"
+row_id = "a21:union:through-capability-migration-index-terminal-7e3419e94a4864f8"
+union_name = "ThroughCapabilityMigrationIndexTerminal"
+containing_schema = "ThroughCapabilityMigrationIndexTerminal"
+union_path = "ThroughCapabilityMigrationIndexTerminal"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ThroughCapabilityMigrationIndexTerminal"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a21"
+row_id = "a21:union:audit-receipt-validation-resolution-9216747055d81750"
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -105102,6 +105317,171 @@ source_arm_name = "0x0002 ExactLiveSuccessorRetry"
 stable_name = "0x0002_exact_live_successor_retry"
 payload_kind = "inline-record"
 payload_sha256 = "2df8500933992369cd19dc1d9fb96200571d1aa70e0bf254d1dfd68d6022a66e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:through-installed-successor-acknowledged-or-subject-terminal-0x0001-consumer-terminal-without-successor-25a733bd671ed67c"
+union_name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+containing_schema = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+union_path = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+arm_tag = 0x0001
+source_arm_name = "0x0001 ConsumerTerminalWithoutSuccessor"
+stable_name = "0x0001_consumer_terminal_without_successor"
+payload_kind = "inline-record"
+payload_sha256 = "f659eac20e06100d512c2c24eed1f5b2909ebda11cf839cfad48446d1b57e5a5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:through-installed-successor-acknowledged-or-subject-terminal-0x0002-installed-successor-acknowledged-99427e106ae1a31f"
+union_name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+containing_schema = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+union_path = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+arm_tag = 0x0002
+source_arm_name = "0x0002 InstalledSuccessorAcknowledged"
+stable_name = "0x0002_installed_successor_acknowledged"
+payload_kind = "inline-record"
+payload_sha256 = "ce8978110535309953dc0a035d70a22120e36d94a3ff21d794e3815706e769b8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:through-installed-successor-acknowledged-or-subject-terminal-0x0003-subject-terminal-1e6611fd78459c7b"
+union_name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+containing_schema = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+union_path = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+arm_tag = 0x0003
+source_arm_name = "0x0003 SubjectTerminal"
+stable_name = "0x0003_subject_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "9b96ec0377e817ca80c15d9f9acb04c58eea8e7749ebc6764a1ba0dfca9e746b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:through-capability-migration-index-terminal-0x0001-consumer-terminal-without-index-selection-b81defd9f92478e0"
+union_name = "ThroughCapabilityMigrationIndexTerminal"
+containing_schema = "ThroughCapabilityMigrationIndexTerminal"
+union_path = "ThroughCapabilityMigrationIndexTerminal"
+arm_tag = 0x0001
+source_arm_name = "0x0001 ConsumerTerminalWithoutIndexSelection"
+stable_name = "0x0001_consumer_terminal_without_index_selection"
+payload_kind = "inline-record"
+payload_sha256 = "f659eac20e06100d512c2c24eed1f5b2909ebda11cf839cfad48446d1b57e5a5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:through-capability-migration-index-terminal-0x0002-live-successor-entry-selected-c84210d89c4e52d2"
+union_name = "ThroughCapabilityMigrationIndexTerminal"
+containing_schema = "ThroughCapabilityMigrationIndexTerminal"
+union_path = "ThroughCapabilityMigrationIndexTerminal"
+arm_tag = 0x0002
+source_arm_name = "0x0002 LiveSuccessorEntrySelected"
+stable_name = "0x0002_live_successor_entry_selected"
+payload_kind = "inline-record"
+payload_sha256 = "059244a6efdb6192f58e2978f99bd6d7ea8865798b41e6ed34404c857198bd24"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0001-local-terminal-receipt-index-e8aea656d175397c"
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0001
+source_arm_name = "0x0001 LocalTerminalReceiptIndex"
+stable_name = "0x0001_local_terminal_receipt_index"
+payload_kind = "inline-record"
+payload_sha256 = "d5c983c56a555d626383bee3e0854c403f1b12dd2c3151a36caf32d8f8ad0bf1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0002-meta-terminal-receipt-index-5f2901c1f8785345"
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0002
+source_arm_name = "0x0002 MetaTerminalReceiptIndex"
+stable_name = "0x0002_meta_terminal_receipt_index"
+payload_kind = "inline-record"
+payload_sha256 = "6f656c76ce4cb36989bb811eb8a6702d33486c4b0500d8cf1a816db4ca35f31d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0003-local-frame-completed-14c02a2e9db1cb8c"
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0003
+source_arm_name = "0x0003 LocalFrameCompleted"
+stable_name = "0x0003_local_frame_completed"
+payload_kind = "inline-record"
+payload_sha256 = "f4af406e2c8c6e8cb09c8ce9e04c220628582166d0e2713111e3dcd18cca63da"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0004-meta-frame-completed-5c5e19a42920ebfd"
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0004
+source_arm_name = "0x0004 MetaFrameCompleted"
+stable_name = "0x0004_meta_frame_completed"
+payload_kind = "inline-record"
+payload_sha256 = "cce7d611a5f4a29471f8ea39255dd410aa0b77063ae5b6062a67d28c9435f3fd"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0005-local-cancelled-before-write-2786bf38397158c9"
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0005
+source_arm_name = "0x0005 LocalCancelledBeforeWrite"
+stable_name = "0x0005_local_cancelled_before_write"
+payload_kind = "inline-record"
+payload_sha256 = "d1ceb91de470e7a8dc66a5ad285a66d04f9d0b470780e8bc73ae1db9b2ab1dd1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0006-meta-cancelled-before-write-5d7945eebbe232a8"
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0006
+source_arm_name = "0x0006 MetaCancelledBeforeWrite"
+stable_name = "0x0006_meta_cancelled_before_write"
+payload_kind = "inline-record"
+payload_sha256 = "976c001d0e2ede77dcc4e7af714ab9e01cc969521765e7c344dac8ba98194e10"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -107514,4 +107894,228 @@ target_row_id = "a12:field:retention-cut-body-completeness-digest"
 slice_id = "a12"
 source_key = "field|RetentionCutBody|RetentionCutBody.completeness_digest|completeness_digest"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-through-installed-successor-acknowledged-or-subject-terminal"
+target_row_id = "a21:wire-type:through-installed-successor-acknowledged-or-subject-terminal"
+slice_id = "a21"
+source_key = "top|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-through-installed-successor-acknowledged-or-subject-terminal-7cf3fde7d7e9569f"
+target_row_id = "a21:union:through-installed-successor-acknowledged-or-subject-terminal-7cf3fde7d7e9569f"
+slice_id = "a21"
+source_key = "union|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-through-installed-successor-acknowledged-or-subject-terminal-0x0001-consumer-terminal-without-successor"
+target_row_id = "a21:wire-type:through-installed-successor-acknowledged-or-subject-terminal-0x0001-consumer-terminal-without-successor"
+slice_id = "a21"
+source_key = "arm|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|0x0001 ConsumerTerminalWithoutSuccessor"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-through-installed-successor-acknowledged-or-subject-terminal-0x0001-consumer-terminal-without-successor-25a733bd671ed67c"
+target_row_id = "a21:union-arm:through-installed-successor-acknowledged-or-subject-terminal-0x0001-consumer-terminal-without-successor-25a733bd671ed67c"
+slice_id = "a21"
+source_key = "arm|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|0x0001 ConsumerTerminalWithoutSuccessor"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-through-installed-successor-acknowledged-or-subject-terminal-0x0002-installed-successor-acknowledged"
+target_row_id = "a21:wire-type:through-installed-successor-acknowledged-or-subject-terminal-0x0002-installed-successor-acknowledged"
+slice_id = "a21"
+source_key = "arm|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|0x0002 InstalledSuccessorAcknowledged"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-through-installed-successor-acknowledged-or-subject-terminal-0x0002-installed-successor-acknowledged-99427e106ae1a31f"
+target_row_id = "a21:union-arm:through-installed-successor-acknowledged-or-subject-terminal-0x0002-installed-successor-acknowledged-99427e106ae1a31f"
+slice_id = "a21"
+source_key = "arm|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|0x0002 InstalledSuccessorAcknowledged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-through-installed-successor-acknowledged-or-subject-terminal-0x0003-subject-terminal"
+target_row_id = "a21:wire-type:through-installed-successor-acknowledged-or-subject-terminal-0x0003-subject-terminal"
+slice_id = "a21"
+source_key = "arm|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|0x0003 SubjectTerminal"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-through-installed-successor-acknowledged-or-subject-terminal-0x0003-subject-terminal-1e6611fd78459c7b"
+target_row_id = "a21:union-arm:through-installed-successor-acknowledged-or-subject-terminal-0x0003-subject-terminal-1e6611fd78459c7b"
+slice_id = "a21"
+source_key = "arm|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal|0x0003 SubjectTerminal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-through-capability-migration-index-terminal"
+target_row_id = "a21:wire-type:through-capability-migration-index-terminal"
+slice_id = "a21"
+source_key = "top|ThroughCapabilityMigrationIndexTerminal"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-through-capability-migration-index-terminal-7e3419e94a4864f8"
+target_row_id = "a21:union:through-capability-migration-index-terminal-7e3419e94a4864f8"
+slice_id = "a21"
+source_key = "union|ThroughCapabilityMigrationIndexTerminal|ThroughCapabilityMigrationIndexTerminal"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-through-capability-migration-index-terminal-0x0001-consumer-terminal-without-index-selection"
+target_row_id = "a21:wire-type:through-capability-migration-index-terminal-0x0001-consumer-terminal-without-index-selection"
+slice_id = "a21"
+source_key = "arm|ThroughCapabilityMigrationIndexTerminal|ThroughCapabilityMigrationIndexTerminal|0x0001 ConsumerTerminalWithoutIndexSelection"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-through-capability-migration-index-terminal-0x0001-consumer-terminal-without-index-selection-b81defd9f92478e0"
+target_row_id = "a21:union-arm:through-capability-migration-index-terminal-0x0001-consumer-terminal-without-index-selection-b81defd9f92478e0"
+slice_id = "a21"
+source_key = "arm|ThroughCapabilityMigrationIndexTerminal|ThroughCapabilityMigrationIndexTerminal|0x0001 ConsumerTerminalWithoutIndexSelection"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-through-capability-migration-index-terminal-0x0002-live-successor-entry-selected"
+target_row_id = "a21:wire-type:through-capability-migration-index-terminal-0x0002-live-successor-entry-selected"
+slice_id = "a21"
+source_key = "arm|ThroughCapabilityMigrationIndexTerminal|ThroughCapabilityMigrationIndexTerminal|0x0002 LiveSuccessorEntrySelected"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-through-capability-migration-index-terminal-0x0002-live-successor-entry-selected-c84210d89c4e52d2"
+target_row_id = "a21:union-arm:through-capability-migration-index-terminal-0x0002-live-successor-entry-selected-c84210d89c4e52d2"
+slice_id = "a21"
+source_key = "arm|ThroughCapabilityMigrationIndexTerminal|ThroughCapabilityMigrationIndexTerminal|0x0002 LiveSuccessorEntrySelected"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-audit-receipt-validation-resolution"
+target_row_id = "a21:wire-type:audit-receipt-validation-resolution"
+slice_id = "a21"
+source_key = "top|AuditReceiptValidationResolution"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-audit-receipt-validation-resolution-9216747055d81750"
+target_row_id = "a21:union:audit-receipt-validation-resolution-9216747055d81750"
+slice_id = "a21"
+source_key = "union|AuditReceiptValidationResolution|AuditReceiptValidationResolution"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-audit-receipt-validation-resolution-0x0001-local-terminal-receipt-index"
+target_row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0001-local-terminal-receipt-index"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0001 LocalTerminalReceiptIndex"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-audit-receipt-validation-resolution-0x0001-local-terminal-receipt-index-e8aea656d175397c"
+target_row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0001-local-terminal-receipt-index-e8aea656d175397c"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0001 LocalTerminalReceiptIndex"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-audit-receipt-validation-resolution-0x0002-meta-terminal-receipt-index"
+target_row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0002-meta-terminal-receipt-index"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0002 MetaTerminalReceiptIndex"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-audit-receipt-validation-resolution-0x0002-meta-terminal-receipt-index-5f2901c1f8785345"
+target_row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0002-meta-terminal-receipt-index-5f2901c1f8785345"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0002 MetaTerminalReceiptIndex"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-audit-receipt-validation-resolution-0x0003-local-frame-completed"
+target_row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0003-local-frame-completed"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0003 LocalFrameCompleted"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-audit-receipt-validation-resolution-0x0003-local-frame-completed-14c02a2e9db1cb8c"
+target_row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0003-local-frame-completed-14c02a2e9db1cb8c"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0003 LocalFrameCompleted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-audit-receipt-validation-resolution-0x0004-meta-frame-completed"
+target_row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0004-meta-frame-completed"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0004 MetaFrameCompleted"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-audit-receipt-validation-resolution-0x0004-meta-frame-completed-5c5e19a42920ebfd"
+target_row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0004-meta-frame-completed-5c5e19a42920ebfd"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0004 MetaFrameCompleted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-audit-receipt-validation-resolution-0x0005-local-cancelled-before-write"
+target_row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0005-local-cancelled-before-write"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0005 LocalCancelledBeforeWrite"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-audit-receipt-validation-resolution-0x0005-local-cancelled-before-write-2786bf38397158c9"
+target_row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0005-local-cancelled-before-write-2786bf38397158c9"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0005 LocalCancelledBeforeWrite"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-audit-receipt-validation-resolution-0x0006-meta-cancelled-before-write"
+target_row_id = "a21:wire-type:audit-receipt-validation-resolution-0x0006-meta-cancelled-before-write"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0006 MetaCancelledBeforeWrite"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-audit-receipt-validation-resolution-0x0006-meta-cancelled-before-write-5d7945eebbe232a8"
+target_row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0006-meta-cancelled-before-write-5d7945eebbe232a8"
+slice_id = "a21"
+source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0006 MetaCancelledBeforeWrite"
+target_kind = "union-arm"
 definition_status = "declared"

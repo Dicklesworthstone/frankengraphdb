@@ -13023,6 +13023,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuditReceiptValidationResolution"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "AuditResolutionOrigin"
 containing_schema = "AuditResolutionOrigin"
 union_path = "AuditResolutionOrigin"
@@ -16823,6 +16834,28 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ThroughCapabilityMigrationIndexTerminal"
+containing_schema = "ThroughCapabilityMigrationIndexTerminal"
+union_path = "ThroughCapabilityMigrationIndexTerminal"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ThroughCapabilityMigrationIndexTerminal"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+containing_schema = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+union_path = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "TimeAuthorityObservationImport"
 containing_schema = "TimeAuthorityObservationImport"
 union_path = "TimeAuthorityObservationImport"
@@ -17346,6 +17379,84 @@ source_arm_name = "Meta"
 stable_name = "meta"
 payload_kind = "inline-record"
 payload_sha256 = "92193765cb4950c73e1bf3f4a19cd0d9d7529d9cefcf11750410d47d2069b98b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0001
+source_arm_name = "0x0001 LocalTerminalReceiptIndex"
+stable_name = "0x0001_local_terminal_receipt_index"
+payload_kind = "inline-record"
+payload_sha256 = "d5c983c56a555d626383bee3e0854c403f1b12dd2c3151a36caf32d8f8ad0bf1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0002
+source_arm_name = "0x0002 MetaTerminalReceiptIndex"
+stable_name = "0x0002_meta_terminal_receipt_index"
+payload_kind = "inline-record"
+payload_sha256 = "6f656c76ce4cb36989bb811eb8a6702d33486c4b0500d8cf1a816db4ca35f31d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0003
+source_arm_name = "0x0003 LocalFrameCompleted"
+stable_name = "0x0003_local_frame_completed"
+payload_kind = "inline-record"
+payload_sha256 = "f4af406e2c8c6e8cb09c8ce9e04c220628582166d0e2713111e3dcd18cca63da"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0004
+source_arm_name = "0x0004 MetaFrameCompleted"
+stable_name = "0x0004_meta_frame_completed"
+payload_kind = "inline-record"
+payload_sha256 = "cce7d611a5f4a29471f8ea39255dd410aa0b77063ae5b6062a67d28c9435f3fd"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0005
+source_arm_name = "0x0005 LocalCancelledBeforeWrite"
+stable_name = "0x0005_local_cancelled_before_write"
+payload_kind = "inline-record"
+payload_sha256 = "d1ceb91de470e7a8dc66a5ad285a66d04f9d0b470780e8bc73ae1db9b2ab1dd1"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditReceiptValidationResolution"
+containing_schema = "AuditReceiptValidationResolution"
+union_path = "AuditReceiptValidationResolution"
+arm_tag = 0x0006
+source_arm_name = "0x0006 MetaCancelledBeforeWrite"
+stable_name = "0x0006_meta_cancelled_before_write"
+payload_kind = "inline-record"
+payload_sha256 = "976c001d0e2ede77dcc4e7af714ab9e01cc969521765e7c344dac8ba98194e10"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -30105,6 +30216,71 @@ source_arm_name = "Sharded"
 stable_name = "sharded"
 payload_kind = "inline-record"
 payload_sha256 = "5278527e9b8eb82b0e099c22ae0f3bc3a181cb59cd5a7d0f94f956e8e3c22727"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ThroughCapabilityMigrationIndexTerminal"
+containing_schema = "ThroughCapabilityMigrationIndexTerminal"
+union_path = "ThroughCapabilityMigrationIndexTerminal"
+arm_tag = 0x0001
+source_arm_name = "0x0001 ConsumerTerminalWithoutIndexSelection"
+stable_name = "0x0001_consumer_terminal_without_index_selection"
+payload_kind = "inline-record"
+payload_sha256 = "f659eac20e06100d512c2c24eed1f5b2909ebda11cf839cfad48446d1b57e5a5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ThroughCapabilityMigrationIndexTerminal"
+containing_schema = "ThroughCapabilityMigrationIndexTerminal"
+union_path = "ThroughCapabilityMigrationIndexTerminal"
+arm_tag = 0x0002
+source_arm_name = "0x0002 LiveSuccessorEntrySelected"
+stable_name = "0x0002_live_successor_entry_selected"
+payload_kind = "inline-record"
+payload_sha256 = "059244a6efdb6192f58e2978f99bd6d7ea8865798b41e6ed34404c857198bd24"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+containing_schema = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+union_path = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+arm_tag = 0x0001
+source_arm_name = "0x0001 ConsumerTerminalWithoutSuccessor"
+stable_name = "0x0001_consumer_terminal_without_successor"
+payload_kind = "inline-record"
+payload_sha256 = "f659eac20e06100d512c2c24eed1f5b2909ebda11cf839cfad48446d1b57e5a5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+containing_schema = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+union_path = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+arm_tag = 0x0002
+source_arm_name = "0x0002 InstalledSuccessorAcknowledged"
+stable_name = "0x0002_installed_successor_acknowledged"
+payload_kind = "inline-record"
+payload_sha256 = "ce8978110535309953dc0a035d70a22120e36d94a3ff21d794e3815706e769b8"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+containing_schema = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+union_path = "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
+arm_tag = 0x0003
+source_arm_name = "0x0003 SubjectTerminal"
+stable_name = "0x0003_subject_terminal"
+payload_kind = "inline-record"
+payload_sha256 = "9b96ec0377e817ca80c15d9f9acb04c58eea8e7749ebc6764a1ba0dfca9e746b"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
