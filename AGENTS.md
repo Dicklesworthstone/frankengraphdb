@@ -250,7 +250,7 @@ Conventions: use the bead ID (e.g. `br-123`) as the Agent-Mail `thread_id` and p
 
 ## bv — Graph-Aware Triage
 
-`bv` computes PageRank/betweenness/critical-path/cycles over `.beads/beads.jsonl`. **Use ONLY `--robot-*` flags — bare `bv` launches a blocking TUI.** Start with `bv --robot-triage` (counts + top picks + quick wins + blockers). `bv --robot-plan` for parallel tracks; `bv --robot-insights` for full metrics (check `.Cycles` — must be empty).
+`bv` computes PageRank/betweenness/critical-path/cycles over `.beads/`. **Use ONLY `--robot-*` flags — bare `bv` launches a blocking TUI.** Start with `bv --robot-triage` (counts + top picks + quick wins + blockers). `bv --robot-plan` for parallel tracks; `bv --robot-insights` for full metrics (check `.Cycles` — must be empty).
 
 ---
 

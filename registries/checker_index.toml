@@ -595,6 +595,24 @@ artifact = "scripts/g0_topology_e2e.sh"
 status = "live"
 unit = "artifact"
 
+# --- The doctrine memorial AGENTS.md designates (fgdb-negative-evidence-ledger-
+# --- does-not-exist-m172). AGENTS.md says a doctrine violation is "memorialized
+# --- in docs/NEGATIVE_EVIDENCE.md"; that file did not exist and was referenced by
+# --- nothing but the sentence itself, so the doctrine's enforcement clause was
+# --- decorative. This gate carries four laws: AGENTS.md self-containment (every
+# --- repository path it names resolves, and the three it names under "NEVER
+# --- create" must NOT), ledger well-formedness, referential integrity of every
+# --- doctrine/bead/commit citation, and a disposition for every revert-semantics
+# --- commit. It reports the unclassified closed-bead residue rather than failing
+# --- on it, and says so, so the gap is measured rather than mistaken for cover.
+
+[[checker]]
+symbol = "g0_negative_evidence_e2e"
+kind = "script"
+artifact = "scripts/g0_negative_evidence_e2e.sh"
+status = "live"
+unit = "artifact"
+
 # =============================================================================
 # script_disposition — the FILE -> ROW direction (fgdb-orphan-w1-e2e-gates-
 # unregistered-unrun-vuq8).

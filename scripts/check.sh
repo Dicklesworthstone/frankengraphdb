@@ -104,6 +104,7 @@ coverage_of() {
     docs/ARCHITECTURE_DECISION_RECORD.md) echo "architecture-check (generated document)" ;;
     docs/THREAT_AND_TRUST_MODEL.md)      echo "threat-check (generated document)" ;;
     docs/WORKSPACE_TOPOLOGY.md)          echo "topology-check (generated document)" ;;
+    docs/NEGATIVE_EVIDENCE.md)           echo "g0_negative_evidence_e2e (parses every entry; each doctrine id, bead and repair commit must resolve)" ;;
     COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md)
                                          echo "registry-check (source_block pins + claims-lint)" ;;
     README.md)                           echo "registry-check lint (claim markers, + every §Performance gate row must cite one)" ;;
