@@ -5320,3 +5320,213 @@ status = "reserved"
 encoding_context = "a12:1986 transient resource request value; EphemeralResourceBudget is enforced by runtime obligations and is never canonical state"
 allowed_containing_schemas = ["*"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x052a
+name = "ReplayCompleteness"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged discriminant registered from the a21:2609 source definition; the arm set is the exact source bijection Replayable | StructuralReplay | VerifiableIfArtifactsSupplied | AuditOnly in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayCompleteness"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x052b
+name = "ReplayCompleteness.replayable"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReplayCompleteness"
+wire_tag = 0x0001
+encoding_context = "arm Replayable of closed discriminant ReplayCompleteness (a21:2609); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayCompleteness"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x052c
+name = "ReplayCompleteness.structural_replay"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReplayCompleteness"
+wire_tag = 0x0002
+encoding_context = "arm StructuralReplay of closed discriminant ReplayCompleteness (a21:2609); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayCompleteness"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x052d
+name = "ReplayCompleteness.verifiable_if_artifacts_supplied"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReplayCompleteness"
+wire_tag = 0x0003
+encoding_context = "arm VerifiableIfArtifactsSupplied of closed discriminant ReplayCompleteness (a21:2609); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayCompleteness"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x052e
+name = "ReplayCompleteness.audit_only"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReplayCompleteness"
+wire_tag = 0x0004
+encoding_context = "arm AuditOnly of closed discriminant ReplayCompleteness (a21:2609); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayCompleteness"]
+max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x052f
+name = "DurableCapabilityTimeValidationBasis"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2641 source definition; the arm set is the exact source bijection 0x0001 CurrentLocal | 0x0002 CurrentMeta | 0x0003 LegacyLocalToMetaMigration in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityTimeValidationBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0530
+name = "DurableCapabilityTimeValidationBasis.0x0001_current_local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityTimeValidationBasis"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 CurrentLocal of closed union DurableCapabilityTimeValidationBasis (a21:2641); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityTimeValidationBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0531
+name = "DurableCapabilityTimeValidationBasis.0x0002_current_meta"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityTimeValidationBasis"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 CurrentMeta of closed union DurableCapabilityTimeValidationBasis (a21:2641); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityTimeValidationBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0532
+name = "DurableCapabilityTimeValidationBasis.0x0003_legacy_local_to_meta_migration"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityTimeValidationBasis"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 LegacyLocalToMetaMigration of closed union DurableCapabilityTimeValidationBasis (a21:2641); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityTimeValidationBasis"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0533
+name = "ReadyChannelSurface"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged discriminant registered from the a21:2645 source definition; the arm set is the exact source bijection 0x0001 NativeFgp | 0x0002 Http2 | 0x0003 Grpc | 0x0004 WebSocket in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+max_size_bytes = 2
+
+[[type]]
+wire_type_id = 0x0534
+name = "ReadyChannelSurface.0x0001_native_fgp"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReadyChannelSurface"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 NativeFgp of closed discriminant ReadyChannelSurface (a21:2645); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+max_size_bytes = 2
+
+[[type]]
+wire_type_id = 0x0535
+name = "ReadyChannelSurface.0x0002_http2"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReadyChannelSurface"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 Http2 of closed discriminant ReadyChannelSurface (a21:2645); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+max_size_bytes = 2
+
+[[type]]
+wire_type_id = 0x0536
+name = "ReadyChannelSurface.0x0003_grpc"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReadyChannelSurface"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 Grpc of closed discriminant ReadyChannelSurface (a21:2645); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+max_size_bytes = 2
+
+[[type]]
+wire_type_id = 0x0537
+name = "ReadyChannelSurface.0x0004_web_socket"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReadyChannelSurface"
+wire_tag = 0x0004
+encoding_context = "arm 0x0004 WebSocket of closed discriminant ReadyChannelSurface (a21:2645); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+max_size_bytes = 2
+
+[[type]]
+wire_type_id = 0x0538
+name = "SubscriptionClosePrecondition"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2651 source definition; the arm set is the exact source bijection 0x0001 NoOutstanding | 0x0002 Outstanding in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["SubscriptionClosePrecondition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0539
+name = "SubscriptionClosePrecondition.0x0001_no_outstanding"
+kind = "union_variant"
+status = "reserved"
+containing_union = "SubscriptionClosePrecondition"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 NoOutstanding of closed union SubscriptionClosePrecondition (a21:2651); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["SubscriptionClosePrecondition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x053a
+name = "SubscriptionClosePrecondition.0x0002_outstanding"
+kind = "union_variant"
+status = "reserved"
+containing_union = "SubscriptionClosePrecondition"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 Outstanding of closed union SubscriptionClosePrecondition (a21:2651); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["SubscriptionClosePrecondition"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x053b
+name = "CapabilityMigrationRetrySelector"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2651 source definition; the arm set is the exact source bijection 0x0001 Initial | 0x0002 ExactLiveSuccessorRetry in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["CapabilityMigrationRetrySelector"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x053c
+name = "CapabilityMigrationRetrySelector.0x0001_initial"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CapabilityMigrationRetrySelector"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 Initial of closed union CapabilityMigrationRetrySelector (a21:2651); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["CapabilityMigrationRetrySelector"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x053d
+name = "CapabilityMigrationRetrySelector.0x0002_exact_live_successor_retry"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CapabilityMigrationRetrySelector"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 ExactLiveSuccessorRetry of closed union CapabilityMigrationRetrySelector (a21:2651); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["CapabilityMigrationRetrySelector"]
+max_size_bytes = 16777216

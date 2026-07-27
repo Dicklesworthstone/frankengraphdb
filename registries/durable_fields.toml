@@ -12108,6 +12108,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "CapabilityMigrationRetrySelector"
+containing_schema = "CapabilityMigrationRetrySelector"
+union_path = "CapabilityMigrationRetrySelector"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CapabilityMigrationRetrySelector"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "CatalogAbandonPredecessor"
 containing_schema = "CatalogAbandonPredecessor"
 union_path = "CatalogAbandonPredecessor"
@@ -12545,6 +12556,17 @@ union_path = "DurableCapabilityStatusPresentedReplayRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["DurableCapabilityStatusPresentedReplayRef"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "DurableCapabilityTimeValidationBasis"
+containing_schema = "DurableCapabilityTimeValidationBasis"
+union_path = "DurableCapabilityTimeValidationBasis"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["DurableCapabilityTimeValidationBasis"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -14185,6 +14207,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ReadyChannelSurface"
+containing_schema = "ReadyChannelSurface"
+union_path = "ReadyChannelSurface"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union]]
 union_name = "RecoveryAllocationEpochAuthority<Role>"
 containing_schema = "RecoveryAllocationEpochAuthority<Role>"
 union_path = "RecoveryAllocationEpochAuthority<Role>"
@@ -14338,6 +14371,17 @@ allowed_containing_schemas = ["RemoteRetentionObligationRoot"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union]]
+union_name = "ReplayCompleteness"
+containing_schema = "ReplayCompleteness"
+union_path = "ReplayCompleteness"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReplayCompleteness"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union]]
 union_name = "ReplayEvidenceRef<T>"
@@ -15506,6 +15550,17 @@ union_path = "StatementPublishedOutput"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["StatementPublishedOutput"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "SubscriptionClosePrecondition"
+containing_schema = "SubscriptionClosePrecondition"
+union_path = "SubscriptionClosePrecondition"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["SubscriptionClosePrecondition"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -17036,6 +17091,31 @@ source_arm_name = "Temporal"
 stable_name = "temporal"
 payload_kind = "inline-record"
 payload_sha256 = "dbcdaa4718bfca3bdd208e2f6b0b0a3f41185e01900f7f8125e8780b5b7157bf"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CapabilityMigrationRetrySelector"
+containing_schema = "CapabilityMigrationRetrySelector"
+union_path = "CapabilityMigrationRetrySelector"
+arm_tag = 0x0001
+source_arm_name = "0x0001 Initial"
+stable_name = "0x0001_initial"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "CapabilityMigrationRetrySelector"
+containing_schema = "CapabilityMigrationRetrySelector"
+union_path = "CapabilityMigrationRetrySelector"
+arm_tag = 0x0002
+source_arm_name = "0x0002 ExactLiveSuccessorRetry"
+stable_name = "0x0002_exact_live_successor_retry"
+payload_kind = "inline-record"
+payload_sha256 = "2df8500933992369cd19dc1d9fb96200571d1aa70e0bf254d1dfd68d6022a66e"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -18666,6 +18746,45 @@ source_arm_name = "0x0004 MetaMergeOutcome"
 stable_name = "0x0004_meta_merge_outcome"
 payload_kind = "inline-record"
 payload_sha256 = "83d2b9e690e1874817957c0a5a78fd16b9d769a0bd4f1fe7b6a4827b426b8c41"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "DurableCapabilityTimeValidationBasis"
+containing_schema = "DurableCapabilityTimeValidationBasis"
+union_path = "DurableCapabilityTimeValidationBasis"
+arm_tag = 0x0001
+source_arm_name = "0x0001 CurrentLocal"
+stable_name = "0x0001_current_local"
+payload_kind = "inline-record"
+payload_sha256 = "2572f3d2827e5e807b39c6fd0c7a6800afcdf6906253e8e024060f7ca5cf4818"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "DurableCapabilityTimeValidationBasis"
+containing_schema = "DurableCapabilityTimeValidationBasis"
+union_path = "DurableCapabilityTimeValidationBasis"
+arm_tag = 0x0002
+source_arm_name = "0x0002 CurrentMeta"
+stable_name = "0x0002_current_meta"
+payload_kind = "inline-record"
+payload_sha256 = "949eca7774dc8bae06e34c2a7de21bd6dccfe6851a2c22c0be04ed19ba1dca47"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "DurableCapabilityTimeValidationBasis"
+containing_schema = "DurableCapabilityTimeValidationBasis"
+union_path = "DurableCapabilityTimeValidationBasis"
+arm_tag = 0x0003
+source_arm_name = "0x0003 LegacyLocalToMetaMigration"
+stable_name = "0x0003_legacy_local_to_meta_migration"
+payload_kind = "inline-record"
+payload_sha256 = "1eb6b7aa04ee3f1daa29bc639ded2abad750c367c871196ba1fc1b1124460ffa"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -23855,6 +23974,54 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union_arm]]
+union_name = "ReadyChannelSurface"
+containing_schema = "ReadyChannelSurface"
+union_path = "ReadyChannelSurface"
+arm_tag = 0x0001
+source_arm_name = "0x0001 NativeFgp"
+stable_name = "0x0001_native_fgp"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union_arm]]
+union_name = "ReadyChannelSurface"
+containing_schema = "ReadyChannelSurface"
+union_path = "ReadyChannelSurface"
+arm_tag = 0x0002
+source_arm_name = "0x0002 Http2"
+stable_name = "0x0002_http2"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union_arm]]
+union_name = "ReadyChannelSurface"
+containing_schema = "ReadyChannelSurface"
+union_path = "ReadyChannelSurface"
+arm_tag = 0x0003
+source_arm_name = "0x0003 Grpc"
+stable_name = "0x0003_grpc"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union_arm]]
+union_name = "ReadyChannelSurface"
+containing_schema = "ReadyChannelSurface"
+union_path = "ReadyChannelSurface"
+arm_tag = 0x0004
+source_arm_name = "0x0004 WebSocket"
+stable_name = "0x0004_web_socket"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union_arm]]
 union_name = "RecoveryAllocationEpochAuthority<Role>"
 containing_schema = "RecoveryAllocationEpochAuthority<Role>"
 union_path = "RecoveryAllocationEpochAuthority<Role>"
@@ -24460,6 +24627,54 @@ payload_sha256 = "b5d323871f332a24d4c3a7532ec505b5a300c0eb51a4e25463eaccd8a99bef
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ReplayCompleteness"
+containing_schema = "ReplayCompleteness"
+union_path = "ReplayCompleteness"
+arm_tag = 0x0001
+source_arm_name = "Replayable"
+stable_name = "replayable"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReplayCompleteness"
+containing_schema = "ReplayCompleteness"
+union_path = "ReplayCompleteness"
+arm_tag = 0x0002
+source_arm_name = "StructuralReplay"
+stable_name = "structural_replay"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReplayCompleteness"
+containing_schema = "ReplayCompleteness"
+union_path = "ReplayCompleteness"
+arm_tag = 0x0003
+source_arm_name = "VerifiableIfArtifactsSupplied"
+stable_name = "verifiable_if_artifacts_supplied"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ReplayCompleteness"
+containing_schema = "ReplayCompleteness"
+union_path = "ReplayCompleteness"
+arm_tag = 0x0004
+source_arm_name = "AuditOnly"
+stable_name = "audit_only"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[union_arm]]
 union_name = "ReplayEvidenceRef<T>"
@@ -28394,6 +28609,32 @@ source_arm_name = "Buffered"
 stable_name = "buffered"
 payload_kind = "inline-record"
 payload_sha256 = "6c7e2a63d26210679a50ef2706185326efa0da011cd5ba2f5448596ef87c8e31"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "SubscriptionClosePrecondition"
+containing_schema = "SubscriptionClosePrecondition"
+union_path = "SubscriptionClosePrecondition"
+arm_tag = 0x0001
+source_arm_name = "0x0001 NoOutstanding"
+stable_name = "0x0001_no_outstanding"
+payload_kind = "inline-record"
+payload_sha256 = "dcdf190deb6fe2a0faca224778722f601190550d50ba5f7fdaa682fb1d9b380a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "SubscriptionClosePrecondition"
+containing_schema = "SubscriptionClosePrecondition"
+union_path = "SubscriptionClosePrecondition"
+arm_tag = 0x0002
+source_arm_name = "0x0002 Outstanding"
+stable_name = "0x0002_outstanding"
+payload_kind = "inline-record"
+payload_sha256 = "7a265b1970f0666df4091bcecedb4b93251a07dd1c45a8f85223f42f22e484f9"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

@@ -7137,6 +7137,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         matches!(
             name,
             "KeyDestroyExternalAckRef"
+                | "CapabilityMigrationRetrySelector"
+                | "DurableCapabilityTimeValidationBasis"
+                | "ReadyChannelSurface"
+                | "ReplayCompleteness"
+                | "SubscriptionClosePrecondition"
                 | "TimeAuthorityRegistryProfileState"
                 | "LocationForm"
                 | "BoltBookmarkRequestKind"
@@ -8806,7 +8811,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a03_wire_consumer_fields(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 367,
+        pre_erratum.ordinary_unions.len() + 372,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );

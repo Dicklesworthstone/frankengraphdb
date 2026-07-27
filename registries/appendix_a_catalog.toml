@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
 
 [target_manifest]
-target_count = 3338
+target_count = 3378
 projection_fallback_count = 111
-target_source_assignment_sha256 = "7af5a57459bb74e2743aed4b6683003fd94405c3b661720018c8d41f3132714c"
+target_source_assignment_sha256 = "61d044f75e283f71f1372db4f3f4849db3fdb9b7d9af46ad0d40af4deca17ec3"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -50196,7 +50196,7 @@ symbol = "CapabilityMigrationRetrySelector"
 generic_signature = ""
 source_key = "top|CapabilityMigrationRetrySelector"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2651"]
 
 [[top_level_candidate]]
@@ -51276,7 +51276,7 @@ symbol = "DurableCapabilityTimeValidationBasis"
 generic_signature = ""
 source_key = "top|DurableCapabilityTimeValidationBasis"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2641"]
 
 [[top_level_candidate]]
@@ -55956,7 +55956,7 @@ symbol = "ReadyChannelSurface"
 generic_signature = ""
 source_key = "top|ReadyChannelSurface"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2645"]
 
 [[top_level_candidate]]
@@ -56356,7 +56356,7 @@ symbol = "ReplayCompleteness"
 generic_signature = ""
 source_key = "top|ReplayCompleteness"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2609"]
 
 [[top_level_candidate]]
@@ -59796,7 +59796,7 @@ symbol = "SubscriptionClosePrecondition"
 generic_signature = ""
 source_key = "top|SubscriptionClosePrecondition"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2651"]
 
 [[top_level_candidate]]
@@ -104483,6 +104483,256 @@ encoding_context = "a12:1986 transient resource request value; EphemeralResource
 allowed_containing_schemas = ["*"]
 max_size_bytes = 16777216
 
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:replay-completeness"
+wire_type_id = 0x052a
+name = "ReplayCompleteness"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "reserved closed u8-tagged discriminant registered from the a21:2609 source definition; the arm set is the exact source bijection Replayable | StructuralReplay | VerifiableIfArtifactsSupplied | AuditOnly in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayCompleteness"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:replay-completeness-replayable"
+wire_type_id = 0x052b
+name = "ReplayCompleteness.replayable"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReplayCompleteness"
+wire_tag = 0x0001
+encoding_context = "arm Replayable of closed discriminant ReplayCompleteness (a21:2609); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayCompleteness"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:replay-completeness-structural-replay"
+wire_type_id = 0x052c
+name = "ReplayCompleteness.structural_replay"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReplayCompleteness"
+wire_tag = 0x0002
+encoding_context = "arm StructuralReplay of closed discriminant ReplayCompleteness (a21:2609); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayCompleteness"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:replay-completeness-verifiable-if-artifacts-supplied"
+wire_type_id = 0x052d
+name = "ReplayCompleteness.verifiable_if_artifacts_supplied"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReplayCompleteness"
+wire_tag = 0x0003
+encoding_context = "arm VerifiableIfArtifactsSupplied of closed discriminant ReplayCompleteness (a21:2609); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayCompleteness"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:replay-completeness-audit-only"
+wire_type_id = 0x052e
+name = "ReplayCompleteness.audit_only"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReplayCompleteness"
+wire_tag = 0x0004
+encoding_context = "arm AuditOnly of closed discriminant ReplayCompleteness (a21:2609); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReplayCompleteness"]
+max_size_bytes = 1
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:durable-capability-time-validation-basis"
+wire_type_id = 0x052f
+name = "DurableCapabilityTimeValidationBasis"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2641 source definition; the arm set is the exact source bijection 0x0001 CurrentLocal | 0x0002 CurrentMeta | 0x0003 LegacyLocalToMetaMigration in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityTimeValidationBasis"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:durable-capability-time-validation-basis-0x0001-current-local"
+wire_type_id = 0x0530
+name = "DurableCapabilityTimeValidationBasis.0x0001_current_local"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityTimeValidationBasis"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 CurrentLocal of closed union DurableCapabilityTimeValidationBasis (a21:2641); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityTimeValidationBasis"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:durable-capability-time-validation-basis-0x0002-current-meta"
+wire_type_id = 0x0531
+name = "DurableCapabilityTimeValidationBasis.0x0002_current_meta"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityTimeValidationBasis"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 CurrentMeta of closed union DurableCapabilityTimeValidationBasis (a21:2641); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityTimeValidationBasis"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:durable-capability-time-validation-basis-0x0003-legacy-local-to-meta-migration"
+wire_type_id = 0x0532
+name = "DurableCapabilityTimeValidationBasis.0x0003_legacy_local_to_meta_migration"
+kind = "union_variant"
+status = "reserved"
+containing_union = "DurableCapabilityTimeValidationBasis"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 LegacyLocalToMetaMigration of closed union DurableCapabilityTimeValidationBasis (a21:2641); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["DurableCapabilityTimeValidationBasis"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:ready-channel-surface"
+wire_type_id = 0x0533
+name = "ReadyChannelSurface"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged discriminant registered from the a21:2645 source definition; the arm set is the exact source bijection 0x0001 NativeFgp | 0x0002 Http2 | 0x0003 Grpc | 0x0004 WebSocket in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+max_size_bytes = 2
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:ready-channel-surface-0x0001-native-fgp"
+wire_type_id = 0x0534
+name = "ReadyChannelSurface.0x0001_native_fgp"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReadyChannelSurface"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 NativeFgp of closed discriminant ReadyChannelSurface (a21:2645); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+max_size_bytes = 2
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:ready-channel-surface-0x0002-http2"
+wire_type_id = 0x0535
+name = "ReadyChannelSurface.0x0002_http2"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReadyChannelSurface"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 Http2 of closed discriminant ReadyChannelSurface (a21:2645); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+max_size_bytes = 2
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:ready-channel-surface-0x0003-grpc"
+wire_type_id = 0x0536
+name = "ReadyChannelSurface.0x0003_grpc"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReadyChannelSurface"
+wire_tag = 0x0003
+encoding_context = "arm 0x0003 Grpc of closed discriminant ReadyChannelSurface (a21:2645); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+max_size_bytes = 2
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:ready-channel-surface-0x0004-web-socket"
+wire_type_id = 0x0537
+name = "ReadyChannelSurface.0x0004_web_socket"
+kind = "union_variant"
+status = "reserved"
+containing_union = "ReadyChannelSurface"
+wire_tag = 0x0004
+encoding_context = "arm 0x0004 WebSocket of closed discriminant ReadyChannelSurface (a21:2645); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+max_size_bytes = 2
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:subscription-close-precondition"
+wire_type_id = 0x0538
+name = "SubscriptionClosePrecondition"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2651 source definition; the arm set is the exact source bijection 0x0001 NoOutstanding | 0x0002 Outstanding in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["SubscriptionClosePrecondition"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:subscription-close-precondition-0x0001-no-outstanding"
+wire_type_id = 0x0539
+name = "SubscriptionClosePrecondition.0x0001_no_outstanding"
+kind = "union_variant"
+status = "reserved"
+containing_union = "SubscriptionClosePrecondition"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 NoOutstanding of closed union SubscriptionClosePrecondition (a21:2651); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["SubscriptionClosePrecondition"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:subscription-close-precondition-0x0002-outstanding"
+wire_type_id = 0x053a
+name = "SubscriptionClosePrecondition.0x0002_outstanding"
+kind = "union_variant"
+status = "reserved"
+containing_union = "SubscriptionClosePrecondition"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 Outstanding of closed union SubscriptionClosePrecondition (a21:2651); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["SubscriptionClosePrecondition"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:capability-migration-retry-selector"
+wire_type_id = 0x053b
+name = "CapabilityMigrationRetrySelector"
+kind = "union"
+status = "reserved"
+encoding_context = "reserved closed u16-tagged union registered from the a21:2651 source definition; the arm set is the exact source bijection 0x0001 Initial | 0x0002 ExactLiveSuccessorRetry in source order, and exact arm payload-member registration remains producer-gated"
+allowed_containing_schemas = ["CapabilityMigrationRetrySelector"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:capability-migration-retry-selector-0x0001-initial"
+wire_type_id = 0x053c
+name = "CapabilityMigrationRetrySelector.0x0001_initial"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CapabilityMigrationRetrySelector"
+wire_tag = 0x0001
+encoding_context = "arm 0x0001 Initial of closed union CapabilityMigrationRetrySelector (a21:2651); unit arm carrying no payload; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["CapabilityMigrationRetrySelector"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:capability-migration-retry-selector-0x0002-exact-live-successor-retry"
+wire_type_id = 0x053d
+name = "CapabilityMigrationRetrySelector.0x0002_exact_live_successor_retry"
+kind = "union_variant"
+status = "reserved"
+containing_union = "CapabilityMigrationRetrySelector"
+wire_tag = 0x0002
+encoding_context = "arm 0x0002 ExactLiveSuccessorRetry of closed union CapabilityMigrationRetrySelector (a21:2651); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
+allowed_containing_schemas = ["CapabilityMigrationRetrySelector"]
+max_size_bytes = 16777216
+
 [[union]]
 slice_id = "a12"
 row_id = "a12:union:local-constraint-reservation-record-state-7357ce85cf25236e"
@@ -104493,6 +104743,71 @@ tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["LocalConstraintReservationRecord"]
 role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a21"
+row_id = "a21:union:replay-completeness-55a48e7ff9c55d56"
+union_name = "ReplayCompleteness"
+containing_schema = "ReplayCompleteness"
+union_path = "ReplayCompleteness"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReplayCompleteness"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union]]
+slice_id = "a21"
+row_id = "a21:union:durable-capability-time-validation-basis-45aa2dab11668e16"
+union_name = "DurableCapabilityTimeValidationBasis"
+containing_schema = "DurableCapabilityTimeValidationBasis"
+union_path = "DurableCapabilityTimeValidationBasis"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["DurableCapabilityTimeValidationBasis"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a21"
+row_id = "a21:union:ready-channel-surface-e78e4ef700ad2088"
+union_name = "ReadyChannelSurface"
+containing_schema = "ReadyChannelSurface"
+union_path = "ReadyChannelSurface"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ReadyChannelSurface"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union]]
+slice_id = "a21"
+row_id = "a21:union:subscription-close-precondition-f0b47ae63532e726"
+union_name = "SubscriptionClosePrecondition"
+containing_schema = "SubscriptionClosePrecondition"
+union_path = "SubscriptionClosePrecondition"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["SubscriptionClosePrecondition"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a21"
+row_id = "a21:union:capability-migration-retry-selector-7ecdb7fdbf121c96"
+union_name = "CapabilityMigrationRetrySelector"
+containing_schema = "CapabilityMigrationRetrySelector"
+union_path = "CapabilityMigrationRetrySelector"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["CapabilityMigrationRetrySelector"]
+role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -104539,6 +104854,222 @@ payload_sha256 = "4e309e62fe0318dfcc0b0bd50e69f2259b21cdf5a767b9ba9dc573ab3eb973
 role_predicate = "role-local"
 version_status = "reserved"
 max_size_bytes = 32
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:replay-completeness-replayable-c70509e20bca3b29"
+union_name = "ReplayCompleteness"
+containing_schema = "ReplayCompleteness"
+union_path = "ReplayCompleteness"
+arm_tag = 0x0001
+source_arm_name = "Replayable"
+stable_name = "replayable"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:replay-completeness-structural-replay-34805b2f21b224f2"
+union_name = "ReplayCompleteness"
+containing_schema = "ReplayCompleteness"
+union_path = "ReplayCompleteness"
+arm_tag = 0x0002
+source_arm_name = "StructuralReplay"
+stable_name = "structural_replay"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:replay-completeness-verifiable-if-artifacts-supplied-b4671edef544a7f6"
+union_name = "ReplayCompleteness"
+containing_schema = "ReplayCompleteness"
+union_path = "ReplayCompleteness"
+arm_tag = 0x0003
+source_arm_name = "VerifiableIfArtifactsSupplied"
+stable_name = "verifiable_if_artifacts_supplied"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:replay-completeness-audit-only-98fb7cd6644166ae"
+union_name = "ReplayCompleteness"
+containing_schema = "ReplayCompleteness"
+union_path = "ReplayCompleteness"
+arm_tag = 0x0004
+source_arm_name = "AuditOnly"
+stable_name = "audit_only"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:durable-capability-time-validation-basis-0x0001-current-local-fe7cf66f90712e35"
+union_name = "DurableCapabilityTimeValidationBasis"
+containing_schema = "DurableCapabilityTimeValidationBasis"
+union_path = "DurableCapabilityTimeValidationBasis"
+arm_tag = 0x0001
+source_arm_name = "0x0001 CurrentLocal"
+stable_name = "0x0001_current_local"
+payload_kind = "inline-record"
+payload_sha256 = "2572f3d2827e5e807b39c6fd0c7a6800afcdf6906253e8e024060f7ca5cf4818"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:durable-capability-time-validation-basis-0x0002-current-meta-635187800769548d"
+union_name = "DurableCapabilityTimeValidationBasis"
+containing_schema = "DurableCapabilityTimeValidationBasis"
+union_path = "DurableCapabilityTimeValidationBasis"
+arm_tag = 0x0002
+source_arm_name = "0x0002 CurrentMeta"
+stable_name = "0x0002_current_meta"
+payload_kind = "inline-record"
+payload_sha256 = "949eca7774dc8bae06e34c2a7de21bd6dccfe6851a2c22c0be04ed19ba1dca47"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:durable-capability-time-validation-basis-0x0003-legacy-local-to-meta-migration-b4f8e92e7fe6250d"
+union_name = "DurableCapabilityTimeValidationBasis"
+containing_schema = "DurableCapabilityTimeValidationBasis"
+union_path = "DurableCapabilityTimeValidationBasis"
+arm_tag = 0x0003
+source_arm_name = "0x0003 LegacyLocalToMetaMigration"
+stable_name = "0x0003_legacy_local_to_meta_migration"
+payload_kind = "inline-record"
+payload_sha256 = "1eb6b7aa04ee3f1daa29bc639ded2abad750c367c871196ba1fc1b1124460ffa"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:ready-channel-surface-0x0001-native-fgp-0dc77ba2de075630"
+union_name = "ReadyChannelSurface"
+containing_schema = "ReadyChannelSurface"
+union_path = "ReadyChannelSurface"
+arm_tag = 0x0001
+source_arm_name = "0x0001 NativeFgp"
+stable_name = "0x0001_native_fgp"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:ready-channel-surface-0x0002-http2-ef8cac895be95f95"
+union_name = "ReadyChannelSurface"
+containing_schema = "ReadyChannelSurface"
+union_path = "ReadyChannelSurface"
+arm_tag = 0x0002
+source_arm_name = "0x0002 Http2"
+stable_name = "0x0002_http2"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:ready-channel-surface-0x0003-grpc-f79faf5d358d855f"
+union_name = "ReadyChannelSurface"
+containing_schema = "ReadyChannelSurface"
+union_path = "ReadyChannelSurface"
+arm_tag = 0x0003
+source_arm_name = "0x0003 Grpc"
+stable_name = "0x0003_grpc"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:ready-channel-surface-0x0004-web-socket-3f4040ea0c4dc265"
+union_name = "ReadyChannelSurface"
+containing_schema = "ReadyChannelSurface"
+union_path = "ReadyChannelSurface"
+arm_tag = 0x0004
+source_arm_name = "0x0004 WebSocket"
+stable_name = "0x0004_web_socket"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:subscription-close-precondition-0x0001-no-outstanding-6828531467908e26"
+union_name = "SubscriptionClosePrecondition"
+containing_schema = "SubscriptionClosePrecondition"
+union_path = "SubscriptionClosePrecondition"
+arm_tag = 0x0001
+source_arm_name = "0x0001 NoOutstanding"
+stable_name = "0x0001_no_outstanding"
+payload_kind = "inline-record"
+payload_sha256 = "dcdf190deb6fe2a0faca224778722f601190550d50ba5f7fdaa682fb1d9b380a"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:subscription-close-precondition-0x0002-outstanding-6baa6aa06a6aeb67"
+union_name = "SubscriptionClosePrecondition"
+containing_schema = "SubscriptionClosePrecondition"
+union_path = "SubscriptionClosePrecondition"
+arm_tag = 0x0002
+source_arm_name = "0x0002 Outstanding"
+stable_name = "0x0002_outstanding"
+payload_kind = "inline-record"
+payload_sha256 = "7a265b1970f0666df4091bcecedb4b93251a07dd1c45a8f85223f42f22e484f9"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:capability-migration-retry-selector-0x0001-initial-90ebd6f9de630153"
+union_name = "CapabilityMigrationRetrySelector"
+containing_schema = "CapabilityMigrationRetrySelector"
+union_path = "CapabilityMigrationRetrySelector"
+arm_tag = 0x0001
+source_arm_name = "0x0001 Initial"
+stable_name = "0x0001_initial"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:capability-migration-retry-selector-0x0002-exact-live-successor-retry-5ce310d21a9996c3"
+union_name = "CapabilityMigrationRetrySelector"
+containing_schema = "CapabilityMigrationRetrySelector"
+union_path = "CapabilityMigrationRetrySelector"
+arm_tag = 0x0002
+source_arm_name = "0x0002 ExactLiveSuccessorRetry"
+stable_name = "0x0002_exact_live_successor_retry"
+payload_kind = "inline-record"
+payload_sha256 = "2df8500933992369cd19dc1d9fb96200571d1aa70e0bf254d1dfd68d6022a66e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[target]]
 row_id = "a12:target:logical-kind-constraint-state-transition"
@@ -104617,5 +105148,325 @@ row_id = "a12:target:union-arm-local-constraint-reservation-record-state-release
 target_row_id = "a12:union-arm:local-constraint-reservation-record-state-released-bde346b08423bb65"
 slice_id = "a12"
 source_key = "arm|LocalConstraintReservationRecord|LocalConstraintReservationRecord.state|Released"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-replay-completeness"
+target_row_id = "a21:wire-type:replay-completeness"
+slice_id = "a21"
+source_key = "top|ReplayCompleteness"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-replay-completeness-55a48e7ff9c55d56"
+target_row_id = "a21:union:replay-completeness-55a48e7ff9c55d56"
+slice_id = "a21"
+source_key = "union|ReplayCompleteness|ReplayCompleteness"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-replay-completeness-replayable"
+target_row_id = "a21:wire-type:replay-completeness-replayable"
+slice_id = "a21"
+source_key = "arm|ReplayCompleteness|ReplayCompleteness|Replayable"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-replay-completeness-replayable-c70509e20bca3b29"
+target_row_id = "a21:union-arm:replay-completeness-replayable-c70509e20bca3b29"
+slice_id = "a21"
+source_key = "arm|ReplayCompleteness|ReplayCompleteness|Replayable"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-replay-completeness-structural-replay"
+target_row_id = "a21:wire-type:replay-completeness-structural-replay"
+slice_id = "a21"
+source_key = "arm|ReplayCompleteness|ReplayCompleteness|StructuralReplay"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-replay-completeness-structural-replay-34805b2f21b224f2"
+target_row_id = "a21:union-arm:replay-completeness-structural-replay-34805b2f21b224f2"
+slice_id = "a21"
+source_key = "arm|ReplayCompleteness|ReplayCompleteness|StructuralReplay"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-replay-completeness-verifiable-if-artifacts-supplied"
+target_row_id = "a21:wire-type:replay-completeness-verifiable-if-artifacts-supplied"
+slice_id = "a21"
+source_key = "arm|ReplayCompleteness|ReplayCompleteness|VerifiableIfArtifactsSupplied"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-replay-completeness-verifiable-if-artifacts-supplied-b4671edef544a7f6"
+target_row_id = "a21:union-arm:replay-completeness-verifiable-if-artifacts-supplied-b4671edef544a7f6"
+slice_id = "a21"
+source_key = "arm|ReplayCompleteness|ReplayCompleteness|VerifiableIfArtifactsSupplied"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-replay-completeness-audit-only"
+target_row_id = "a21:wire-type:replay-completeness-audit-only"
+slice_id = "a21"
+source_key = "arm|ReplayCompleteness|ReplayCompleteness|AuditOnly"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-replay-completeness-audit-only-98fb7cd6644166ae"
+target_row_id = "a21:union-arm:replay-completeness-audit-only-98fb7cd6644166ae"
+slice_id = "a21"
+source_key = "arm|ReplayCompleteness|ReplayCompleteness|AuditOnly"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-durable-capability-time-validation-basis"
+target_row_id = "a21:wire-type:durable-capability-time-validation-basis"
+slice_id = "a21"
+source_key = "top|DurableCapabilityTimeValidationBasis"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-durable-capability-time-validation-basis-45aa2dab11668e16"
+target_row_id = "a21:union:durable-capability-time-validation-basis-45aa2dab11668e16"
+slice_id = "a21"
+source_key = "union|DurableCapabilityTimeValidationBasis|DurableCapabilityTimeValidationBasis"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-durable-capability-time-validation-basis-0x0001-current-local"
+target_row_id = "a21:wire-type:durable-capability-time-validation-basis-0x0001-current-local"
+slice_id = "a21"
+source_key = "arm|DurableCapabilityTimeValidationBasis|DurableCapabilityTimeValidationBasis|0x0001 CurrentLocal"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-durable-capability-time-validation-basis-0x0001-current-local-fe7cf66f90712e35"
+target_row_id = "a21:union-arm:durable-capability-time-validation-basis-0x0001-current-local-fe7cf66f90712e35"
+slice_id = "a21"
+source_key = "arm|DurableCapabilityTimeValidationBasis|DurableCapabilityTimeValidationBasis|0x0001 CurrentLocal"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-durable-capability-time-validation-basis-0x0002-current-meta"
+target_row_id = "a21:wire-type:durable-capability-time-validation-basis-0x0002-current-meta"
+slice_id = "a21"
+source_key = "arm|DurableCapabilityTimeValidationBasis|DurableCapabilityTimeValidationBasis|0x0002 CurrentMeta"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-durable-capability-time-validation-basis-0x0002-current-meta-635187800769548d"
+target_row_id = "a21:union-arm:durable-capability-time-validation-basis-0x0002-current-meta-635187800769548d"
+slice_id = "a21"
+source_key = "arm|DurableCapabilityTimeValidationBasis|DurableCapabilityTimeValidationBasis|0x0002 CurrentMeta"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-durable-capability-time-validation-basis-0x0003-legacy-local-to-meta-migration"
+target_row_id = "a21:wire-type:durable-capability-time-validation-basis-0x0003-legacy-local-to-meta-migration"
+slice_id = "a21"
+source_key = "arm|DurableCapabilityTimeValidationBasis|DurableCapabilityTimeValidationBasis|0x0003 LegacyLocalToMetaMigration"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-durable-capability-time-validation-basis-0x0003-legacy-local-to-meta-migration-b4f8e92e7fe6250d"
+target_row_id = "a21:union-arm:durable-capability-time-validation-basis-0x0003-legacy-local-to-meta-migration-b4f8e92e7fe6250d"
+slice_id = "a21"
+source_key = "arm|DurableCapabilityTimeValidationBasis|DurableCapabilityTimeValidationBasis|0x0003 LegacyLocalToMetaMigration"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-ready-channel-surface"
+target_row_id = "a21:wire-type:ready-channel-surface"
+slice_id = "a21"
+source_key = "top|ReadyChannelSurface"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-ready-channel-surface-e78e4ef700ad2088"
+target_row_id = "a21:union:ready-channel-surface-e78e4ef700ad2088"
+slice_id = "a21"
+source_key = "union|ReadyChannelSurface|ReadyChannelSurface"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-ready-channel-surface-0x0001-native-fgp"
+target_row_id = "a21:wire-type:ready-channel-surface-0x0001-native-fgp"
+slice_id = "a21"
+source_key = "arm|ReadyChannelSurface|ReadyChannelSurface|0x0001 NativeFgp"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-ready-channel-surface-0x0001-native-fgp-0dc77ba2de075630"
+target_row_id = "a21:union-arm:ready-channel-surface-0x0001-native-fgp-0dc77ba2de075630"
+slice_id = "a21"
+source_key = "arm|ReadyChannelSurface|ReadyChannelSurface|0x0001 NativeFgp"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-ready-channel-surface-0x0002-http2"
+target_row_id = "a21:wire-type:ready-channel-surface-0x0002-http2"
+slice_id = "a21"
+source_key = "arm|ReadyChannelSurface|ReadyChannelSurface|0x0002 Http2"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-ready-channel-surface-0x0002-http2-ef8cac895be95f95"
+target_row_id = "a21:union-arm:ready-channel-surface-0x0002-http2-ef8cac895be95f95"
+slice_id = "a21"
+source_key = "arm|ReadyChannelSurface|ReadyChannelSurface|0x0002 Http2"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-ready-channel-surface-0x0003-grpc"
+target_row_id = "a21:wire-type:ready-channel-surface-0x0003-grpc"
+slice_id = "a21"
+source_key = "arm|ReadyChannelSurface|ReadyChannelSurface|0x0003 Grpc"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-ready-channel-surface-0x0003-grpc-f79faf5d358d855f"
+target_row_id = "a21:union-arm:ready-channel-surface-0x0003-grpc-f79faf5d358d855f"
+slice_id = "a21"
+source_key = "arm|ReadyChannelSurface|ReadyChannelSurface|0x0003 Grpc"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-ready-channel-surface-0x0004-web-socket"
+target_row_id = "a21:wire-type:ready-channel-surface-0x0004-web-socket"
+slice_id = "a21"
+source_key = "arm|ReadyChannelSurface|ReadyChannelSurface|0x0004 WebSocket"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-ready-channel-surface-0x0004-web-socket-3f4040ea0c4dc265"
+target_row_id = "a21:union-arm:ready-channel-surface-0x0004-web-socket-3f4040ea0c4dc265"
+slice_id = "a21"
+source_key = "arm|ReadyChannelSurface|ReadyChannelSurface|0x0004 WebSocket"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-subscription-close-precondition"
+target_row_id = "a21:wire-type:subscription-close-precondition"
+slice_id = "a21"
+source_key = "top|SubscriptionClosePrecondition"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-subscription-close-precondition-f0b47ae63532e726"
+target_row_id = "a21:union:subscription-close-precondition-f0b47ae63532e726"
+slice_id = "a21"
+source_key = "union|SubscriptionClosePrecondition|SubscriptionClosePrecondition"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-subscription-close-precondition-0x0001-no-outstanding"
+target_row_id = "a21:wire-type:subscription-close-precondition-0x0001-no-outstanding"
+slice_id = "a21"
+source_key = "arm|SubscriptionClosePrecondition|SubscriptionClosePrecondition|0x0001 NoOutstanding"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-subscription-close-precondition-0x0001-no-outstanding-6828531467908e26"
+target_row_id = "a21:union-arm:subscription-close-precondition-0x0001-no-outstanding-6828531467908e26"
+slice_id = "a21"
+source_key = "arm|SubscriptionClosePrecondition|SubscriptionClosePrecondition|0x0001 NoOutstanding"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-subscription-close-precondition-0x0002-outstanding"
+target_row_id = "a21:wire-type:subscription-close-precondition-0x0002-outstanding"
+slice_id = "a21"
+source_key = "arm|SubscriptionClosePrecondition|SubscriptionClosePrecondition|0x0002 Outstanding"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-subscription-close-precondition-0x0002-outstanding-6baa6aa06a6aeb67"
+target_row_id = "a21:union-arm:subscription-close-precondition-0x0002-outstanding-6baa6aa06a6aeb67"
+slice_id = "a21"
+source_key = "arm|SubscriptionClosePrecondition|SubscriptionClosePrecondition|0x0002 Outstanding"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-capability-migration-retry-selector"
+target_row_id = "a21:wire-type:capability-migration-retry-selector"
+slice_id = "a21"
+source_key = "top|CapabilityMigrationRetrySelector"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-capability-migration-retry-selector-7ecdb7fdbf121c96"
+target_row_id = "a21:union:capability-migration-retry-selector-7ecdb7fdbf121c96"
+slice_id = "a21"
+source_key = "union|CapabilityMigrationRetrySelector|CapabilityMigrationRetrySelector"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-capability-migration-retry-selector-0x0001-initial"
+target_row_id = "a21:wire-type:capability-migration-retry-selector-0x0001-initial"
+slice_id = "a21"
+source_key = "arm|CapabilityMigrationRetrySelector|CapabilityMigrationRetrySelector|0x0001 Initial"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-capability-migration-retry-selector-0x0001-initial-90ebd6f9de630153"
+target_row_id = "a21:union-arm:capability-migration-retry-selector-0x0001-initial-90ebd6f9de630153"
+slice_id = "a21"
+source_key = "arm|CapabilityMigrationRetrySelector|CapabilityMigrationRetrySelector|0x0001 Initial"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-capability-migration-retry-selector-0x0002-exact-live-successor-retry"
+target_row_id = "a21:wire-type:capability-migration-retry-selector-0x0002-exact-live-successor-retry"
+slice_id = "a21"
+source_key = "arm|CapabilityMigrationRetrySelector|CapabilityMigrationRetrySelector|0x0002 ExactLiveSuccessorRetry"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-capability-migration-retry-selector-0x0002-exact-live-successor-retry-5ce310d21a9996c3"
+target_row_id = "a21:union-arm:capability-migration-retry-selector-0x0002-exact-live-successor-retry-5ce310d21a9996c3"
+slice_id = "a21"
+source_key = "arm|CapabilityMigrationRetrySelector|CapabilityMigrationRetrySelector|0x0002 ExactLiveSuccessorRetry"
 target_kind = "union-arm"
 definition_status = "declared"
