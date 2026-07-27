@@ -7551,7 +7551,7 @@ const CENSUS_DAG_WAIVERS: &[CensusDagWaiver] = &[
                    CommitMarker@30 (needs <= 30), so order 10 satisfies both bounds with no cascade",
         repair: "re-order CommittedEffectCapsule 30 -> 10; construction_order is not pinned, so \
                  this is a mechanical catalog repair and retires this waiver",
-        owning_bead: "fgdb-a10-command-delta-ooy1",
+        owning_bead: "fgdb-dbta",
     },
     CensusDagWaiver {
         owner: "CommitCommand",
