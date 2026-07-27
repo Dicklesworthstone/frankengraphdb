@@ -960,3 +960,180 @@ fn an_empty_roster_fails_before_any_safe_facing_conclusion() {
     );
     assert_eq!(report.islands_api_scanned, 0);
 }
+
+// ---------------------------------------------------------------------------
+// The ten laws of `check_workspace` that had never been watched fire
+// (`fgdb-validator-laws-never-witnessed-firing-xnxy.1`).
+//
+// The suite above proves the checker's headline verdicts. These ten are the
+// failure modes BELOW those verdicts — the ones that decide whether a run
+// examined anything at all — and until now none of them had been seen to fire
+// from any input. Eight can be reached by a one-fact mutation of a workspace
+// this file already builds; each pairs the clean control with that mutation and
+// requires the exact code.
+//
+// The remaining two are `site_scanner_self_test_failed` and
+// `safe_facing_self_test_failed`, and they are a different kind of thing: their
+// predicate compares a reader's answer on a COMPILED-IN fixture against a
+// compiled-in constant, so no workspace, ledger or source tree can move it.
+// They are unreachable from any input by construction — which is exactly right
+// for a control, and exactly why an input-driven witness for them cannot exist.
+// What is witnessable is that the guard is a live predicate rather than a
+// constant, and the last two tests do that: same public reader, perturbed
+// fixture, answer moves.
+// ---------------------------------------------------------------------------
+
+/// Build the clean control, assert it really is clean, seed one defect, and
+/// require the exact code. The control is asserted per test rather than once
+/// for the file: a fixture builder that silently started producing a violating
+/// workspace would otherwise make every mutation below pass for the wrong
+/// reason.
+fn assert_seeded_defect_fires(tag: &str, code: &str, seed: impl Fn(&Path)) {
+    let root = clean_workspace(tag);
+    let control = check_workspace(&root).1;
+    assert!(
+        control.is_empty(),
+        "the control must pass, or the mutation below proves nothing: {control:?}"
+    );
+    seed(&root);
+    let found = codes(&root);
+    assert!(
+        found.contains(&code.to_owned()),
+        "expected {code:?} after seeding it, got {found:?}"
+    );
+}
+
+#[test]
+fn a_manifest_without_a_workspace_section_fails() {
+    assert_seeded_defect_fires("no-ws-section", "workspace_section_absent", |root| {
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"solo\"\n").unwrap();
+    });
+}
+
+#[test]
+fn an_unparseable_workspace_manifest_fails_rather_than_being_skipped() {
+    assert_seeded_defect_fires("ws-unparseable", "workspace_manifest_unparseable", |root| {
+        fs::write(root.join("Cargo.toml"), "[workspace\nmembers = ]\n").unwrap();
+    });
+}
+
+#[test]
+fn a_member_roster_that_cannot_be_resolved_fails() {
+    // A roster written as a bare string rather than an array. The resolver
+    // returns an error instead of an empty roster on purpose: an empty roster
+    // is a clean pass over nothing, which is the vacuity this checker exists to
+    // refuse.
+    assert_seeded_defect_fires(
+        "members-unresolvable",
+        "workspace_members_unresolvable",
+        |root| {
+            fs::write(
+                root.join("Cargo.toml"),
+                "[workspace]\nresolver = \"3\"\nmembers = \"crates/fgdb-ordinary\"\n\n[workspace.lints.rust]\nunsafe_code = \"forbid\"\n",
+            )
+            .unwrap();
+        },
+    );
+}
+
+#[test]
+fn a_member_whose_manifest_cannot_be_read_fails() {
+    assert_seeded_defect_fires("member-unreadable", "member_manifest_unreadable", |root| {
+        fs::remove_file(root.join("crates/fgdb-ordinary/Cargo.toml")).unwrap();
+    });
+}
+
+#[test]
+fn an_unknown_ledger_schema_version_fails() {
+    assert_seeded_defect_fires("schema-unknown", "ledger_schema_version_unknown", |root| {
+        fs::write(
+            root.join("registries/unsafe_boundary_ledger.toml"),
+            LEDGER_HEAD.replace("schema_version = 1", "schema_version = 2"),
+        )
+        .unwrap();
+    });
+}
+
+#[test]
+fn an_island_with_an_unknown_status_fails() {
+    assert_seeded_defect_fires("status-unknown", "island_status_unknown", |root| {
+        fs::write(
+            root.join("registries/unsafe_boundary_ledger.toml"),
+            LEDGER_HEAD.replace("status = \"planned\"", "status = \"maybe\""),
+        )
+        .unwrap();
+    });
+}
+
+#[test]
+fn an_island_without_a_charter_fails() {
+    assert_seeded_defect_fires("charter-empty", "island_charter_empty", |root| {
+        fs::write(
+            root.join("registries/unsafe_boundary_ledger.toml"),
+            LEDGER_HEAD.replace(
+                "charter = \"SIMD kernels with bit-identical scalar fallbacks.\"",
+                "charter = \"   \"",
+            ),
+        )
+        .unwrap();
+    });
+}
+
+#[test]
+fn a_duplicated_ledger_row_id_fails() {
+    assert_seeded_defect_fires("row-id-dup", "ledger_row_id_duplicated", |root| {
+        let site = "[[site]]\nrow_id = \"dup-1\"\nisland = \"fgdb-unsafe-simd\"\n\
+                    path = \"p.rs\"\nsymbol = \"unsafe fn x() {}\"\n\
+                    stated_invariant = \"i\"\nevidence = \"e\"\nfallback = \"f\"\n\
+                    no_claim_boundary = \"n\"\n";
+        fs::write(
+            root.join("registries/unsafe_boundary_ledger.toml"),
+            format!("{LEDGER_HEAD}\n{site}\n{site}"),
+        )
+        .unwrap();
+    });
+}
+
+/// `site_scanner_self_test_failed` cannot be reached from any input, so what is
+/// proved here is the next best thing and the only thing that matters: the
+/// guard is a LIVE predicate. If the scanner stopped reading, its answer on the
+/// fixture would stop matching `SCANNER_FIXTURE_SITES` — which is what the
+/// production guard compares. A scanner that had become constant would pass
+/// that comparison forever, and would fail this test.
+#[test]
+fn the_site_scanner_self_test_guard_is_a_live_predicate() {
+    let fixture = scanner_fixture();
+    assert_eq!(
+        scan_sites("<fixture>", &fixture).len(),
+        SCANNER_FIXTURE_SITES,
+        "the shipped scanner must reproduce its own fixture"
+    );
+    // Remove what the scanner is looking for and the count must move. It is the
+    // SAME public reader the guard calls, on text that differs in exactly the
+    // fact the reader exists to find.
+    let blinded = fixture.replace("allow(unsafe_code)", "allow(dead_code)");
+    assert_ne!(
+        scan_sites("<fixture>", &blinded).len(),
+        SCANNER_FIXTURE_SITES,
+        "the scanner's answer must depend on its input, or its self-test licenses nothing"
+    );
+}
+
+/// The same argument for the safe-facing reader's control. Both halves of the
+/// guard are exercised: the finding count AND the `pub` token count, because a
+/// reader that found nothing at all would satisfy a count-only comparison.
+#[test]
+fn the_safe_facing_self_test_guard_is_a_live_predicate() {
+    let fixture = safe_facing_fixture();
+    let control = public_api(fixture);
+    assert_eq!(control.findings.len(), SAFE_FACING_FIXTURE_FINDINGS);
+    assert_eq!(control.pub_tokens, SAFE_FACING_FIXTURE_PUB_TOKENS);
+
+    let blinded = fixture.replace("pub ", "pub(crate) ");
+    let mutated = public_api(&blinded);
+    assert!(
+        mutated.findings.len() != SAFE_FACING_FIXTURE_FINDINGS
+            || mutated.pub_tokens != SAFE_FACING_FIXTURE_PUB_TOKENS,
+        "the safe-facing reader's answer must depend on its input, or its self-test licenses nothing"
+    );
+}
