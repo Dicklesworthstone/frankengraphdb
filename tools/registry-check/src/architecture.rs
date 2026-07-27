@@ -5775,6 +5775,7 @@ pub fn validate_architecture(registry: &ArchitectureRegistry, root: &Path) -> Ve
     validate_hash_and_ids(registry, &mut violations);
     let profiles = validate_profiles(registry, &mut violations);
     validate_sources(registry, root, &mut violations);
+    validate_document_glosses(registry, &mut violations);
     validate_external_review_contract_into(registry, &mut violations);
 
     let catalog = match load_reference_catalog(root) {
@@ -5908,4 +5909,384 @@ pub fn validate_architecture(registry: &ArchitectureRegistry, root: &Path) -> Ve
     violations.sort();
     violations.dedup();
     violations
+}
+
+// ---------------------------------------------------------------------------
+// The generated document
+// ---------------------------------------------------------------------------
+//
+// `validate_sources` above already reads `docs/ARCHITECTURE_DECISION_RECORD.md`
+// and verifies the two CHECKED-SOURCE excerpt regions byte-for-byte.  It is the
+// only reader of that file, and everything below extends it rather than adding
+// a second one: the rest of the document becomes a projection of this registry,
+// so a fact stated in the prose cannot disagree with the registry any more than
+// an excerpt can disagree with the plan.
+//
+// This closes a measured hole.  Between f805ec7 (the document's only commit)
+// and 82e1a93, `registries/architecture_decisions.toml` took 48 commits and
+// `architecture.rs` took 51, while the document took none — because nothing
+// asked it to move.  Its two byte-compared siblings track their registries
+// exactly (THREAT 1 commit / 1, TOPOLOGY 4 / 4); this one was 1 / 48.
+
+/// The one document this registry renders.
+pub const DOCUMENT_PATH: &str = "docs/ARCHITECTURE_DECISION_RECORD.md";
+
+/// One prose gloss per `allowed_categories` member.
+///
+/// The rendered vocabulary tables are how the document states what it binds
+/// without restating it: the phrases live here, the membership lives in the
+/// registry, and `validate_document_glosses` requires the two to be equal sets
+/// in BOTH directions.  Without that guard the table fails open — a newly
+/// declared category would simply not appear, and the document would go on
+/// claiming a coverage it no longer had.
+const CATEGORY_GLOSS: [(&str, &str); 12] = [
+    ("thesis_bet", "one of the six leapfrog bets of §0"),
+    ("constraint", "a constitutional non-negotiable of §1"),
+    (
+        "foundation_asupersync",
+        "an audited asupersync capability, consumed as-is",
+    ),
+    (
+        "foundation_fnx",
+        "an audited franken_networkx capability, consumed as-is",
+    ),
+    (
+        "foundation_frankensqlite",
+        "a frankensqlite design, re-instantiated and re-proved locally",
+    ),
+    (
+        "foundation_gap",
+        "a capability the foundations do not provide, so §18 builds it",
+    ),
+    ("sota_storage", "a dynamic-graph-storage lesson from §3.1"),
+    ("sota_query", "a query-processing lesson from §3.2"),
+    (
+        "sota_incremental",
+        "an incremental, temporal, or vector lesson from §3.3",
+    ),
+    (
+        "rejection",
+        "an alternative evaluated and rejected or deferred, with its recorded reason",
+    ),
+    (
+        "calibration",
+        "a calibration, control, or verifiability principle from §3.5",
+    ),
+    ("bibliography", "a distinct reviewed anchor from Appendix E"),
+];
+
+/// One prose gloss per `allowed_relationship_kinds` member.  Same both-direction
+/// guard: this table is the document's statement that the dependency universe is
+/// closed, so a relationship kind that escaped it would be an unnamed way to
+/// depend on something.
+const RELATIONSHIP_GLOSS: [(&str, &str); 6] = [
+    (
+        "consume_as_is",
+        "an audited foundation capability is linked directly",
+    ),
+    (
+        "design_donor",
+        "a design is re-instantiated and re-proved locally",
+    ),
+    (
+        "upstream_prerequisite",
+        "a feature stays absent until a named upstream capability exists",
+    ),
+    (
+        "build_in_house",
+        "graph-specific implementation is assigned to the §18 crate universe",
+    ),
+    (
+        "test_only_oracle",
+        "a dependency is permitted only in verification",
+    ),
+    (
+        "research_only_citation",
+        "provenance is recorded without authorizing any dependency",
+    ),
+];
+
+/// One prose gloss per `bead_provenance.resolution_precedence` tier.  The table
+/// renders the registry's own order, because the order is the law.
+const PRECEDENCE_GLOSS: [(&str, &str); 4] = [
+    (
+        "direct_owner",
+        "a decision names the Bead in its `owner_beads`",
+    ),
+    ("bet_label", "the Bead's own closed `b1`–`b6` label set"),
+    (
+        "exact_override",
+        "a named `[[bead_override]]` row for that exact Bead",
+    ),
+    (
+        "family_rule",
+        "exactly one disjoint `[[bead_family]]` prefix or Appendix-A rule",
+    ),
+];
+
+/// Every gloss table must be a total, exact cover of the registry vocabulary it
+/// renders.  A missing gloss drops a live row out of the document; an orphan
+/// gloss renders a row for a vocabulary member that no longer exists.
+fn validate_document_glosses(registry: &ArchitectureRegistry, violations: &mut Vec<Violation>) {
+    for (label, declared, gloss) in [
+        (
+            "category",
+            &registry.registry.allowed_categories,
+            &CATEGORY_GLOSS[..],
+        ),
+        (
+            "relationship_kind",
+            &registry.registry.allowed_relationship_kinds,
+            &RELATIONSHIP_GLOSS[..],
+        ),
+        (
+            "resolution_precedence",
+            &registry.bead_provenance.resolution_precedence,
+            &PRECEDENCE_GLOSS[..],
+        ),
+    ] {
+        let declared: BTreeSet<&str> = declared.iter().map(String::as_str).collect();
+        let glossed: BTreeSet<&str> = gloss.iter().map(|(key, _)| *key).collect();
+        for missing in declared.difference(&glossed) {
+            violations.push(Violation::global(
+                "document_gloss_missing",
+                "source_integrity",
+                format!(
+                    "{label} {missing:?} is declared by the registry but has no rendered gloss, so it would vanish from {DOCUMENT_PATH}"
+                ),
+            ));
+        }
+        for orphan in glossed.difference(&declared) {
+            violations.push(Violation::global(
+                "document_gloss_orphan",
+                "source_integrity",
+                format!(
+                    "{label} {orphan:?} has a rendered gloss but is not declared by the registry"
+                ),
+            ));
+        }
+    }
+}
+
+fn heading(out: &mut String, level: usize, text: &str) {
+    out.push('\n');
+    for _ in 0..level {
+        out.push('#');
+    }
+    out.push(' ');
+    out.push_str(text);
+    out.push_str("\n\n");
+}
+
+fn table_row(out: &mut String, cells: &[&str]) {
+    out.push('|');
+    for cell in cells {
+        out.push(' ');
+        out.push_str(cell);
+        out.push_str(" |");
+    }
+    out.push('\n');
+}
+
+fn table_head(out: &mut String, headers: &[&str]) {
+    table_row(out, headers);
+    out.push('|');
+    for _ in headers {
+        out.push_str(" --- |");
+    }
+    out.push('\n');
+}
+
+/// Render a byte count the way the document has always rendered one.
+fn thousands(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+fn gloss_table(out: &mut String, headers: &[&str], gloss: &[(&str, &str)], order: &[String]) {
+    table_head(out, headers);
+    for key in order {
+        if let Some((_, text)) = gloss.iter().find(|(candidate, _)| candidate == key) {
+            table_row(out, &[&format!("`{key}`"), text]);
+        }
+    }
+}
+
+/// Generate the published architecture-decision record.  Deterministic: the same
+/// registry plus the same plan bytes produce the same document, byte for byte.
+pub fn generate_document(registry: &ArchitectureRegistry, root: &Path) -> Result<String, String> {
+    let mut out = String::new();
+    out.push_str("<!-- GENERATED FILE — DO NOT EDIT BY HAND.\n");
+    out.push_str("     Source: registries/architecture_decisions.toml\n");
+    out.push_str("     Regenerate: ");
+    out.push_str(REPLAY_COMMAND);
+    out.push_str(" --write\n");
+    out.push_str("     Verify:     ");
+    out.push_str(REPLAY_COMMAND);
+    out.push_str("\n-->\n");
+
+    out.push_str("\n# FrankenGraphDB Architectural Decision Record\n\n");
+    out.push_str(
+        "This record freezes the reasoning that governs FrankenGraphDB's architecture. The exact audited source corpus is preserved below, while the normative, machine-readable decision and provenance matrix lives in [`registries/architecture_decisions.toml`](../registries/architecture_decisions.toml). The registry is the master and this document is its rendering: every count, vocabulary row, and table cell below is derived from the registry at render time, and the checker fails if the committed bytes differ from the regenerated ones. Together they bind every decision category listed below to a stable `",
+    );
+    out.push_str(&registry.registry.decision_id_prefix);
+    out.push_str(
+        "*` identity, an implementation owner, a verification route, and an explicit no-claim boundary.\n\n",
+    );
+    out.push_str(
+        "The source excerpts are historical evidence, not proof that an implementation or gate is complete. Time-sensitive market, foundation, and research statements retain their original review date; changing one requires a fresh external-source review rather than silently rewriting the frozen rationale. Neither of those two sentences is mechanically checked, and neither is written as if it were: no artifact can contradict a claim about what is *not* proven, and a checker can observe that an `[[external_review]]` row was added but never that a review happened.\n\n",
+    );
+    out.push_str(
+        "`architecture-check` verifies the excerpts byte-for-byte against the master plan, pins the decision identity and semantic tables, validates live owner and claim references, prevents research citations from authorizing dependencies, regenerates this document, and emits deterministic decision-to-owner, owner-to-decision, and every-Bead-to-rationale NDJSON. Run it from the repository root with `",
+    );
+    out.push_str(REPLAY_COMMAND);
+    out.push_str("`.\n");
+
+    heading(&mut out, 2, "Decision categories");
+    out.push_str(&format!(
+        "The closed category vocabulary — {} rows, exactly as `registry.allowed_categories` declares it. A category with no row here fails the gate rather than quietly leaving the document.\n\n",
+        registry.registry.allowed_categories.len()
+    ));
+    gloss_table(
+        &mut out,
+        &["Category", "What a row of it binds"],
+        &CATEGORY_GLOSS,
+        &registry.registry.allowed_categories,
+    );
+
+    heading(&mut out, 2, "Dependency-universe relationships");
+    out.push_str(&format!(
+        "The {} relationship kinds are closed: they are the complete set of ways a decision may relate this codebase to something outside it.\n\n",
+        registry.registry.allowed_relationship_kinds.len()
+    ));
+    gloss_table(
+        &mut out,
+        &["Relationship", "Meaning"],
+        &RELATIONSHIP_GLOSS,
+        &registry.registry.allowed_relationship_kinds,
+    );
+
+    let provenance = &registry.bead_provenance;
+    heading(&mut out, 2, "Bead-provenance closure");
+    out.push_str(&format!(
+        "The provenance closure is **total**: every record in [`{}`](../{}) resolves to a rationale, including closed historical work, and a record that does not resolve fails the architecture gate. Totality is the property the gate enforces — not a cardinality. The corpus is shared and multi-writer, so the declared counts below are monotone **floors**, never equalities: a `br create` in any pane can only raise the observed counts, so it never invalidates a floor, while a record disappearing still trips one. Raising a floor is a deliberate ratchet, and is never required to make the tree green.\n\n",
+        provenance.source_path, provenance.source_path,
+    ));
+    table_head(&mut out, &["Resolution floor", "Declared minimum"]);
+    table_row(
+        &mut out,
+        &["records", &format!("≥ {}", provenance.bead_count)],
+    );
+    for (tier, floor) in [
+        ("direct_owner", provenance.direct_owner_count),
+        ("bet_label", provenance.bet_label_count),
+        ("exact_override", provenance.exact_override_count),
+        ("family_rule", provenance.family_rule_count),
+    ] {
+        table_row(&mut out, &[&format!("`{tier}`"), &format!("≥ {floor}")]);
+    }
+    out.push_str(
+        "\nEach issue resolves through exactly one precedence tier, tried in this order. Two tiers matching the same Bead is a shadowed override or an ambiguous rule, and both fail the gate.\n\n",
+    );
+    gloss_table(
+        &mut out,
+        &["Tier", "Resolves when"],
+        &PRECEDENCE_GLOSS,
+        &provenance.resolution_precedence,
+    );
+    out.push_str(&format!(
+        "\nThe bet-label vocabulary is closed to {}. The rule-binding table is pinned by exact equality at `{}` — keyed by rule rather than by Bead, so no Bead can move it and a rule edit must. An unknown bet label, a shadowed override, an ambiguous rule, a missing decision, profile, or rationale, or an unresolved Bead fails the architecture gate.\n",
+        provenance
+            .allowed_bet_labels
+            .iter()
+            .map(|label| format!("`{label}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        provenance.binding_hash,
+    ));
+
+    heading(&mut out, 2, "Frozen source blocks");
+    out.push_str(
+        "Each block below is embedded verbatim from the master plan under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the frozen rationale.\n\n",
+    );
+    let mut blocks: Vec<&SourceBlock> = registry.source_blocks.iter().collect();
+    blocks.sort_by_key(|block| block.plan_start_line);
+    table_head(
+        &mut out,
+        &[
+            "Block ID",
+            "Repository-relative source",
+            "Inclusive lines",
+            "Lines",
+            "Bytes",
+            "FNV-1a-64",
+        ],
+    );
+    for block in &blocks {
+        table_row(
+            &mut out,
+            &[
+                &format!("`{}`", block.id),
+                &format!("`{}`", block.plan_path),
+                &format!("{}–{}", block.plan_start_line, block.plan_end_line),
+                &block.line_count.to_string(),
+                &thousands(block.byte_count),
+                &format!("`{}`", block.fnv1a64),
+            ],
+        );
+    }
+
+    for block in &blocks {
+        let plan = read_repo_bytes(root, &block.plan_path)?;
+        let excerpt = line_range(&plan, block.plan_start_line, block.plan_end_line)?;
+        let excerpt = std::str::from_utf8(excerpt)
+            .map_err(|error| format!("source block {:?} is not UTF-8: {error}", block.id))?;
+        out.push('\n');
+        out.push_str(&block.start_marker);
+        out.push('\n');
+        out.push_str(excerpt);
+        out.push_str(&block.end_marker);
+        out.push('\n');
+    }
+
+    Ok(out)
+}
+
+/// Compare the generated document against the committed one.
+pub fn check_document(registry: &ArchitectureRegistry, root: &Path) -> Result<bool, String> {
+    let generated = generate_document(registry, root)?;
+    let committed = fs::read_to_string(root.join(DOCUMENT_PATH))
+        .map_err(|error| format!("{DOCUMENT_PATH}: {error}"))?;
+    Ok(generated == committed)
+}
+
+/// The drift violation for the generated document.  The binary owns the
+/// `--write` decision, so it constructs this after regenerating.
+pub fn document_drift_violation() -> Violation {
+    Violation::global(
+        "document_drift",
+        "source_integrity",
+        format!(
+            "the committed {DOCUMENT_PATH} differs from the regenerated bytes; run `{REPLAY_COMMAND} --write`"
+        ),
+    )
+}
+
+/// A document that cannot be rendered is a registry defect, so it is reported
+/// as a violation (exit 1) rather than a load failure (exit 2).  Otherwise a
+/// registry mutation that happens to break rendering would change the gate's
+/// contract from "this registry is invalid" to "the checker could not run".
+pub fn document_generation_violation(error: &str) -> Violation {
+    Violation::global(
+        "document_generation_failed",
+        "source_integrity",
+        format!("{DOCUMENT_PATH} could not be rendered from the registry: {error}"),
+    )
 }

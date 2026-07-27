@@ -100,7 +100,7 @@ coverage_of() {
     registries/unsafe_boundary_ledger.toml) echo "topology-check" ;;
     registries/*.toml)                   echo "registry-check all" ;;
     .beads/issues.jsonl)                 echo "architecture-check (parses every record; malformed line fails file:line)" ;;
-    docs/ARCHITECTURE_DECISION_RECORD.md) echo "architecture-check (CHECKED-SOURCE region)" ;;
+    docs/ARCHITECTURE_DECISION_RECORD.md) echo "architecture-check (generated document)" ;;
     docs/THREAT_AND_TRUST_MODEL.md)      echo "threat-check (generated document)" ;;
     docs/WORKSPACE_TOPOLOGY.md)          echo "topology-check (generated document)" ;;
     COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md)
