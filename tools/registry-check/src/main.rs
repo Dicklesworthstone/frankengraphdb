@@ -225,6 +225,7 @@ fn finish_appendix_load_failure(
                 ("reservations", n(0)),
                 ("source_dispositions", n(0)),
                 ("top_level_candidates", n(0)),
+                ("unclassified_candidates", n(0)),
                 ("targets", n(0)),
                 ("semantic_bindings", n(0)),
                 ("evidence_rows", n(0)),
@@ -406,6 +407,24 @@ fn emit_appendix_catalog(
             (
                 "top_level_candidates",
                 n(catalog.top_level_candidates.len() as i64),
+            ),
+            // The RESIDUE, reported next to the total because the total cannot
+            // show it. A candidate whose class the source does not force sits at
+            // `identity_class = "unclassified"`, and appendix_a.rs's fourth arm
+            // for that case is empty: no violation, no count, no pin. MEASURED
+            // 2026-07-27 at HEAD 525b314: 543 of 1237 candidates are
+            // unclassified — 44% — and no number anywhere in the tree said so.
+            // Classifying one leaves `top_level_candidates` unchanged and adding
+            // one raises it by a count that fgdb-su5y correctly made derived, so
+            // neither direction fired anything. This field is what the g0
+            // identity gate holds to a ceiling.
+            (
+                "unclassified_candidates",
+                n(catalog
+                    .top_level_candidates
+                    .iter()
+                    .filter(|row| row.identity_class == "unclassified")
+                    .count() as i64),
             ),
             ("targets", n(catalog.targets.len() as i64)),
             (

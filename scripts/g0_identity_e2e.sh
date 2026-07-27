@@ -385,6 +385,44 @@ else
   )"
   die "Appendix A closure event is missing or drifted; expected reservations=$EXPECT_RESERVATION_COUNT existing=$EXPECT_EXISTING_RESERVATION_COUNT reserved=$EXPECT_RESERVED_RESERVATION_COUNT targets=$EXPECT_TARGET_COUNT; observed $OBSERVED_APPENDIX_CLOSURE"
 fi
+# THE UNCLASSIFIED RESIDUE, AS A CEILING THAT CAN ONLY CLOSE.
+#
+# A top-level source candidate whose class the source does not force sits at
+# `identity_class = "unclassified"`. appendix_a.rs classifies candidates four
+# ways and the fourth arm -- unprojected AND unclassified -- is empty: no
+# violation, no count, no pin. Nothing anywhere in the tree stated how much
+# residue there was. MEASURED 2026-07-27: 542 of 1237 candidates, 44%, while
+# fgdb-a18-restore-union-source-gates-a4fq's prose named seven of them.
+#
+# A CEILING, not a pin, and the distinction is load-bearing. Between two reads
+# eleven minutes apart the number fell 543 -> 542, because dec248a classified
+# one: legitimate progress by another pane, which a pin would have redded. A
+# ceiling lets the residue close and fails only when it GROWS, so adding an
+# unclassified candidate becomes a deliberate bump of this line rather than
+# silence. Same instrument as claims_lint.toml's unmarked_rows gap ledger.
+#
+# The slack is printed on every green run: a ceiling that drifts far above the
+# observed value is a weakened gate, and the only way to notice is to say it.
+EXPECT_UNCLASSIFIED_CEILING=542
+UNCLASSIFIED_OBSERVED=$(awk '
+  index($0, "\"event\":\"appendix_closure_checked\"") {
+    if (match($0, /"unclassified_candidates":[0-9]+/)) {
+      value = substr($0, RSTART, RLENGTH)
+      sub(/^"unclassified_candidates":/, "", value)
+      print value
+      found = 1
+      exit
+    }
+  }
+  END { if (!found) print "missing" }
+' "$WORK/appendix-baseline.jsonl")
+if [ "$UNCLASSIFIED_OBSERVED" = "missing" ]; then
+  die "the closure event carries no unclassified_candidates field; the residue is unreported again"
+elif [ "$UNCLASSIFIED_OBSERVED" -le "$EXPECT_UNCLASSIFIED_CEILING" ]; then
+  ok "unclassified source-candidate residue is within its ceiling ($UNCLASSIFIED_OBSERVED of $EXPECT_UNCLASSIFIED_CEILING, slack $((EXPECT_UNCLASSIFIED_CEILING - UNCLASSIFIED_OBSERVED)))"
+else
+  die "unclassified source-candidate residue GREW: $UNCLASSIFIED_OBSERVED observed against a ceiling of $EXPECT_UNCLASSIFIED_CEILING. Landing a candidate the source does not classify is allowed, but it is a deliberate act: lower or raise EXPECT_UNCLASSIFIED_CEILING in the same commit and say which candidates moved."
+fi
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_completed"' \
     '"slices":21' \
