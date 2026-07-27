@@ -9200,6 +9200,38 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 )
         )
     };
+    // a20's two remaining exact-typed field rows, landed at 19ea99b for
+    // fgdb-a20-restore-promotion-ivsp once fgdb-ww9g's tag-refined reference
+    // mints classified their declared types. Kept as a sibling of
+    // post_erratum_a20_promotion_field_tranche rather than folded into it (the
+    // a04 and a05 cohorts carry the same `_field` / `_field_tranche` pairing)
+    // so that one landing's admissions stay separately auditable and
+    // separately revocable from the other's.
+    //
+    // Each row is admitted on its own evidence, not on the cohort's reputation:
+    //   ("GlobalRestoreServiceFinalizeSpec", "manifest_ref") — field_tag 0x0003,
+    //     exact_wire_type ExternalCasRestoreServicePromotionManifestRef (wire
+    //     0x0550, minted a20:2593), source anchor a20:2593,2597.
+    //   ("RestoreShardOperationalAck", "operational_terminal_pin_basis_ref") —
+    //     field_tag 0x0009, exact_wire_type OperationalRestoreTerminalPinBasisRef
+    //     (wire 0x0551, minted at 2863a7a), source anchor a18:2373, a20:2599.
+    // Both are `[[field]]` rows added by that one commit and by no other; both
+    // report "violations":0,"outcome":"pass" under `registry-check identity`, so
+    // what is excluded here is a VALID row that is merely younger than the
+    // witness. Both (schema, name) pairs occur exactly once in
+    // durable_fields.toml, so this closure cannot remove a third row, and both
+    // hosts already appear in the tranche above — the cohort boundary is drawn
+    // where the arc is, not where this repair is.
+    let post_erratum_a20_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("GlobalRestoreServiceFinalizeSpec", "manifest_ref")
+                | (
+                    "RestoreShardOperationalAck",
+                    "operational_terminal_pin_basis_ref"
+                )
+        )
+    };
     // The l6xd owner ruling makes these ten embedded AuthorityBoundHeader
     // fields inline. They landed after the erratum and are not part of the
     // historical namespace.
@@ -9722,6 +9754,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 &field.containing_schema,
                 &field.stable_name,
             )
+            && !post_erratum_a20_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a18_inline_authority_headers(
                 &field.containing_schema,
                 &field.stable_name,
@@ -9816,9 +9849,46 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // too few and 226, and either way this assert fails instead of the hash
         // silently moving. current_field_count carries all six (975 -> 981), so the
         // denominator absorbs exactly what the filter removed and nothing else.
-        pre_erratum.fields.len() + 756,
+        // 756 -> 758 (fgdb-a20-restore-promotion-ivsp, 19ea99b; the red is
+        // fgdb-a20-historical-witness-red-opc5): two more exact-typed field rows
+        // landed once fgdb-ww9g's tag-refined ref mints classified their declared
+        // types, and both are admitted to post_erratum_a20_field and enumerated
+        // there. current_field_count carries both (981 -> 983).
+        //
+        // CORRECTION to the 750 -> 756 note above, measured rather than reasoned.
+        // "one too few and 226, and either way this assert fails instead of the hash
+        // silently moving" is only half true, and the false half is the one that
+        // keeps costing us a red main. This assert compares a DIFFERENCE, so it is
+        // asymmetric:
+        //   over-broad filter (removes a row that should stay) -> width falls, count
+        //     is unchanged, this assert FAILS. Caught here, as advertised.
+        //   under-broad filter (a newly landed row left unfiltered) -> the row
+        //     increments the width AND current_field_count together, the difference is
+        //     preserved, and this assert PASSES over a wrong-width witness.
+        // That second case is not hypothetical: at 19ea99b the reconstruction was 227
+        // rows and this assert still passed at +756, so the drift travelled all the way
+        // to the hash assert below. Mutation-proven on a depth-matched mirror while
+        // repairing it: constant 757 -> cohort assert fails, 759 -> cohort assert fails,
+        // but dropping one row from post_erratum_a20_field and moving the constant to
+        // 757 to compensate -> THIS ASSERT PASSES and only the hash fails.
+        //
+        // Hence the absolute pin below. The pre-erratum namespace is a historical
+        // constant, so its width is not a value that follows the tree; pinning it
+        // as a difference let the tree drag it. 225 must never move without the same
+        // OWNER ruling the hash needs.
+        pre_erratum.fields.len() + 758,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
+    );
+    assert_eq!(
+        pre_erratum.fields.len(),
+        225,
+        "the historical witness reconstruction is a frozen historical width, not a \
+         value derived from the current tree. A newly landed field row that was not \
+         added to a post_erratum_* filter widens it and is INVISIBLE to the cohort \
+         assert above, because it increments that assert's two sides together. Fix it \
+         by extending the filter that should have claimed the row; do NOT change this \
+         number, and do NOT re-pin A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN."
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
