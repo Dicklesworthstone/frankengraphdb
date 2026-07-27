@@ -10,7 +10,9 @@
 #
 # ONLY ONE OUTCOME OF `br create` NOW REDS THE TREE (changed by fgdb-lzol):
 #
-#   bead matches NO family      -> bead_provenance_orphan
+#   bead matches NO family      -> bead_provenance_orphan, or
+#                                  bead_workstream_label_in_bet_position when the
+#                                  record carries a w<n>/g<n> tag and no bet label
 #                               -> bead_provenance_not_total       STILL RED
 #   bead matches a KNOWN family -> counts rise above their floors    GREEN
 #

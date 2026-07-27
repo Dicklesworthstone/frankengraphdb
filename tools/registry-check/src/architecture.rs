@@ -2147,10 +2147,37 @@ fn family_matches(family: &BeadFamily, bead_id: &str) -> bool {
     }
 }
 
-fn looks_like_bet_label(label: &str) -> bool {
-    label.strip_prefix('b').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-    })
+/// Which provenance taxonomy a Beads label belongs to.
+///
+/// `Bet` is `b` + digits (`b1`..`b6` resolve; any other `b<n>` is an unknown
+/// bet label). `WorkstreamOrGate` is `w`/`g` + digits — the §19 workstream and
+/// gate taxonomy, which is orthogonal to the bet taxonomy and does NOT resolve
+/// provenance. `Other` is every ordinary topic label (`performance`,
+/// `gate-review`, `risk`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LabelKind {
+    Bet,
+    WorkstreamOrGate,
+    Other,
+}
+
+/// THE reader for what taxonomy a label belongs to. The unknown-bet-label check
+/// and the orphan diagnostic both consume it, so they cannot disagree about what
+/// `w1` or `b9` is — a disagreement between two such predicates is exactly how a
+/// record becomes invisible to the check that should have named it.
+fn label_kind(label: &str) -> LabelKind {
+    let digits_after = |prefix: char| {
+        label
+            .strip_prefix(prefix)
+            .filter(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if digits_after('b').is_some() {
+        LabelKind::Bet
+    } else if digits_after('w').is_some() || digits_after('g').is_some() {
+        LabelKind::WorkstreamOrGate
+    } else {
+        LabelKind::Other
+    }
 }
 
 fn provenance_entry(
@@ -2235,7 +2262,8 @@ fn resolve_bead_records(registry: &ArchitectureRegistry, beads: &[BeadRecord]) -
         allowed_labels.sort();
         allowed_labels.dedup();
         for label in &bead.labels {
-            if looks_like_bet_label(label) && !ALLOWED_BET_LABELS.contains(&label.as_str()) {
+            if label_kind(label) == LabelKind::Bet && !ALLOWED_BET_LABELS.contains(&label.as_str())
+            {
                 result.issues.push(BeadResolutionIssue {
                     code: "bead_bet_label_unknown".into(),
                     bead_id: bead.id.clone(),
@@ -2298,13 +2326,57 @@ fn resolve_bead_records(registry: &ArchitectureRegistry, beads: &[BeadRecord]) -
                         family.decision_ids.iter().cloned().collect(),
                     ),
                     [] => {
-                        result.issues.push(BeadResolutionIssue {
-                        code: "bead_provenance_orphan".into(),
-                        bead_id: bead.id.clone(),
-                        message:
-                            "bead has no direct owner, bet label, exact override, or family rule"
-                                .into(),
-                    });
+                        // "It failed" is not a diagnosis. A record reaches here
+                        // for three structurally different reasons needing three
+                        // different repairs, and the message used to be the same
+                        // sentence for all of them — which is why diagnosing one
+                        // orphan cost a `git log -S` per record. Measured on the
+                        // 405-record corpus at 2326fe8: 232 records carry a
+                        // workstream/gate tag, 36 carry no labels at all, and 16
+                        // carry only labels irrelevant to provenance.
+                        let workstream: Vec<&str> = bead
+                            .labels
+                            .iter()
+                            .filter(|label| label_kind(label) == LabelKind::WorkstreamOrGate)
+                            .map(String::as_str)
+                            .collect();
+                        // NOTE: `resolve_bead_provenance` joins issues with
+                        // "; ", so no message below may contain that sequence or
+                        // the joined error stops being splittable. Asserted by
+                        // architecture_provenance_issue_messages_are_parseable.
+                        let issue = if !workstream.is_empty() {
+                            // The confusable case: the record IS labelled and the
+                            // label is the problem. A workstream tag is a
+                            // legitimate, pervasive, orthogonal taxonomy — it is
+                            // never rejected, it simply does not resolve
+                            // provenance, and only a record that would orphan
+                            // anyway is ever told so.
+                            BeadResolutionIssue {
+                                code: "bead_workstream_label_in_bet_position".into(),
+                                bead_id: bead.id.clone(),
+                                message: format!(
+                                    "carries workstream/gate label(s) {workstream:?} and no b1..b6 bet label. A workstream tag is orthogonal to the bet taxonomy and does not resolve provenance -- add a b1..b6 label, a [[bead_override]] row, or a bead family rule."
+                                ),
+                            }
+                        } else if bead.labels.is_empty() {
+                            BeadResolutionIssue {
+                                code: "bead_provenance_orphan".into(),
+                                bead_id: bead.id.clone(),
+                                message:
+                                    "bead has no direct owner, bet label, exact override, or family rule, and carries no labels at all"
+                                        .into(),
+                            }
+                        } else {
+                            BeadResolutionIssue {
+                                code: "bead_provenance_orphan".into(),
+                                bead_id: bead.id.clone(),
+                                message: format!(
+                                    "bead has no direct owner, bet label, exact override, or family rule -- its labels {:?} contain no b1..b6 bet label",
+                                    bead.labels
+                                ),
+                            }
+                        };
+                        result.issues.push(issue);
                         continue;
                     }
                     _ => {

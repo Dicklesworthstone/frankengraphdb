@@ -950,3 +950,245 @@ fn concurrent_bead_creation_cannot_red_another_panes_tree() {
         "deleting a bead must trip a floor, got {codes:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Orphan diagnosis (bead fgdb-bead-provenance-orphan-workstream-tag-7u5m)
+//
+// A bead that resolves by no mechanism used to be told only that it failed:
+//
+//     bead has no direct owner, bet label, exact override, or family rule
+//
+// which is one sentence for three structurally different faults needing three
+// different repairs. Measured on the 405-record corpus at 2326fe8: 232 records
+// carry a workstream/gate tag (239 label-instances over 16 tokens), 36 carry no
+// labels at all, and 16 carry only labels irrelevant to provenance. Diagnosing
+// a single orphan therefore cost a `git log -S` per record.
+//
+// The repair is diagnostic precision, NOT a prohibition. A workstream tag is a
+// legitimate, pervasive, orthogonal taxonomy — rejecting one would redden 232
+// records to catch the handful that are actually misfiled.
+// ---------------------------------------------------------------------------
+
+/// The real beads corpus plus planted records, under a scratch root.
+///
+/// `tag` must be unique per test: these run in parallel and the builder opens
+/// its fixture by destroying it.
+fn corpus_with(tag: &str, planted: &[(&str, &[&str])]) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("fgdb-orphan-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".beads")).expect("fixture .beads dir");
+    let mut text = std::fs::read_to_string(repo_root().join(".beads/issues.jsonl"))
+        .expect("real corpus reads");
+    for (id, labels) in planted {
+        let labels = labels
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        text.push_str(&format!(
+            "{{\"id\":\"fgdb-zz7u5m-{id}\",\"status\":\"open\",\"labels\":[{labels}]}}\n"
+        ));
+    }
+    std::fs::write(root.join(".beads/issues.jsonl"), text).expect("fixture corpus");
+    root
+}
+
+/// Issues about the planted records only.
+///
+/// The live corpus has six concurrent writers, so a global issue count is not a
+/// stable assertion; every test below quantifies over its own planted ids.
+fn planted_issues(registry: &ArchitectureRegistry, root: &Path) -> Vec<String> {
+    architecture::resolve_bead_provenance(registry, root)
+        .expect_err("planted orphans must make the index non-total")
+        .split("; ")
+        .filter(|issue| issue.contains("zz7u5m"))
+        .map(str::to_string)
+        .collect()
+}
+
+fn issues_naming<'a>(issues: &'a [String], bead_id: &str) -> Vec<&'a str> {
+    issues
+        .iter()
+        .filter(|issue| issue.contains(bead_id))
+        .map(String::as_str)
+        .collect()
+}
+
+#[test]
+fn architecture_orphan_names_the_workstream_tag_it_carries() {
+    // The real record this bead was filed about. `fgdb-zwhh` carries
+    // labels = ["w1"] and nothing else, and resolves today only because an
+    // exact override was added for it by hand. Drop that override and it
+    // orphans again — the one condition under which the checker is allowed to
+    // mention its label at all.
+    let mut registry = real_registry();
+    let before = registry.bead_overrides.len();
+    registry
+        .bead_overrides
+        .retain(|rule| rule.bead_id != "fgdb-zwhh");
+    assert_eq!(
+        registry.bead_overrides.len(),
+        before - 1,
+        "the fixture must remove exactly one override"
+    );
+
+    let error = architecture::resolve_bead_provenance(&registry, &repo_root())
+        .expect_err("dropping fgdb-zwhh's override must orphan it");
+    let issues: Vec<String> = error.split("; ").map(str::to_string).collect();
+    let mine = issues_naming(&issues, "fgdb-zwhh");
+    assert_eq!(mine.len(), 1, "one fault, one diagnosis: {error}");
+    assert!(
+        mine[0].starts_with("bead_workstream_label_in_bet_position fgdb-zwhh:"),
+        "the diagnosis must name its own code and bead: {:?}",
+        mine[0]
+    );
+    assert!(
+        mine[0].contains("[\"w1\"]"),
+        "the diagnosis must name the label that failed to resolve: {:?}",
+        mine[0]
+    );
+    assert!(
+        !mine[0].contains("bead_provenance_orphan"),
+        "a labelled record must not fall back to the undifferentiated message: {:?}",
+        mine[0]
+    );
+}
+
+#[test]
+fn architecture_orphan_diagnoses_each_shape_differently() {
+    // Three faults, three repairs, three messages. Collapse them back into one
+    // sentence and the pairwise-distinct assert below dies — which is this
+    // bead's defect, restated as a law.
+    let registry = real_registry();
+    let root = corpus_with(
+        "shapes",
+        &[
+            ("workstream", &["w1"]),
+            ("bare", &[]),
+            ("topical", &["performance", "verification"]),
+        ],
+    );
+    let issues = planted_issues(&registry, &root);
+    assert_eq!(issues.len(), 3, "{issues:#?}");
+
+    let workstream = issues_naming(&issues, "zz7u5m-workstream");
+    assert_eq!(workstream.len(), 1, "{issues:#?}");
+    assert!(
+        workstream[0].starts_with("bead_workstream_label_in_bet_position")
+            && workstream[0].contains("[\"w1\"]"),
+        "{:?}",
+        workstream[0]
+    );
+
+    let bare = issues_naming(&issues, "zz7u5m-bare");
+    assert_eq!(bare.len(), 1, "{issues:#?}");
+    assert!(
+        bare[0].starts_with("bead_provenance_orphan")
+            && bare[0].contains("carries no labels at all"),
+        "{:?}",
+        bare[0]
+    );
+
+    let topical = issues_naming(&issues, "zz7u5m-topical");
+    assert_eq!(topical.len(), 1, "{issues:#?}");
+    assert!(
+        topical[0].starts_with("bead_provenance_orphan")
+            && topical[0].contains("[\"performance\", \"verification\"]"),
+        "{:?}",
+        topical[0]
+    );
+
+    let bodies: BTreeSet<&str> = issues
+        .iter()
+        .map(|issue| issue.split_once(": ").expect("issue has a body").1)
+        .collect();
+    assert_eq!(
+        bodies.len(),
+        3,
+        "three different faults must not share one message: {issues:#?}"
+    );
+}
+
+#[test]
+fn architecture_neg_workstream_diagnostic_is_scoped_to_the_orphan_path() {
+    // THE CONTROL, and it fires in both directions. The tempting fix for this
+    // bead is to reject workstream tags outright; 232 corpus records carry one,
+    // so that fix reddens 232 rows to catch a handful. These three records all
+    // carry a workstream tag and differ only in whether they resolve some other
+    // way. Exactly ONE may be diagnosed: an implementation that validates the
+    // tag instead of explaining the orphan reports three here, and one that
+    // never fires reports zero.
+    let registry = real_registry();
+    let root = corpus_with(
+        "scoped",
+        &[
+            ("resolves-bet", &["w1", "b1"]),
+            ("resolves-gate", &["g0", "b3"]),
+            ("orphans", &["w9"]),
+        ],
+    );
+    let issues = planted_issues(&registry, &root);
+    assert_eq!(
+        issues.len(),
+        1,
+        "a workstream tag is legitimate on a record that resolves: {issues:#?}"
+    );
+    assert!(
+        issues[0].starts_with("bead_workstream_label_in_bet_position fgdb-zz7u5m-orphans:")
+            && issues[0].contains("[\"w9\"]"),
+        "{:?}",
+        issues[0]
+    );
+}
+
+#[test]
+fn architecture_bet_label_unknown_survives_the_orphan_diagnostic() {
+    // The check that already worked must keep working, and must keep being the
+    // one that speaks for a bet-shaped label. `b9` is not a workstream tag, so
+    // it draws the undifferentiated orphan message plus its own vocabulary
+    // violation — two issues for one record, naming the label in both.
+    let registry = real_registry();
+    let root = corpus_with("unknown-bet", &[("b9", &["b9"])]);
+    let issues = planted_issues(&registry, &root);
+    assert_eq!(issues.len(), 2, "{issues:#?}");
+    assert!(
+        issues[0].starts_with("bead_bet_label_unknown fgdb-zz7u5m-b9:")
+            && issues[0].contains("\"b9\""),
+        "{:?}",
+        issues[0]
+    );
+    assert!(
+        issues[1].starts_with("bead_provenance_orphan fgdb-zz7u5m-b9:")
+            && issues[1].contains("[\"b9\"]"),
+        "{:?}",
+        issues[1]
+    );
+}
+
+#[test]
+fn architecture_provenance_issue_messages_are_parseable() {
+    // `resolve_bead_provenance` joins its issues with "; ", so a message that
+    // contains that sequence silently splits into two and every caller counting
+    // issues gets a wrong number. Not hypothetical: the first draft of the
+    // workstream diagnosis contained a semicolon and made a one-orphan fixture
+    // report two. One law over every shape at once.
+    let registry = real_registry();
+    let root = corpus_with(
+        "parseable",
+        &[
+            ("workstream", &["w1"]),
+            ("bare", &[]),
+            ("topical", &["performance", "verification"]),
+            ("unknown-bet", &["b9"]),
+        ],
+    );
+    let issues = planted_issues(&registry, &root);
+    assert_eq!(issues.len(), 5, "{issues:#?}");
+    for issue in &issues {
+        let body = issue.split_once(": ").expect("issue has a body").1;
+        assert!(
+            !body.contains("; "),
+            "an issue message may not contain the joiner separator: {issue:?}"
+        );
+    }
+}
