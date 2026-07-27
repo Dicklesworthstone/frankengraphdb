@@ -520,6 +520,7 @@ is a doctrine violation; see the finding at the top of this file.
 - `46e654e` — `Revert "chore(beads): re-split a03 and a05 on pane2's basis"` — beads bookkeeping; a bead split re-measured and undone. Not a doctrine violation.
 - `3a7248f` — `hand pane2 the provenance-churn measurement; revert my stale +1` — beads bookkeeping; a stale pin increment withdrawn. Not a doctrine violation.
 - `1994b8e` — `a03 — unions cannot land before the identity kinds; write reverted` — a catalog write withdrawn because a construction-order law forbade it. The law worked; this is the system functioning, not a violation of it.
+- `649cbf7` — `chore(beads): dkjg mint designed and checker-advanced to the pin boundary, then reverted [fgdb-dkjg]` — an exploratory a20 mint carried through base-name resolution, reservation-bijection, a derived construction order, and two full checker rounds, then deliberately withdrawn at the pin boundary with the tree left exactly as found (`git status` clean, checker `appendix` exit 0). The derivation survives in the commit message, so the next agent inherits the measurement without inheriting an unlanded write. Not a doctrine violation.
 
 ---
 
