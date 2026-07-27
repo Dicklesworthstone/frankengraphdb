@@ -5671,7 +5671,7 @@ mod tests {
             + "\n";
         assert_eq!(
             sha256_hex(source.as_bytes()),
-            "7783d20462caa8c007ebaa9d000c7a102ab40ef143a856823be209e72e6e74aa",
+            "2c2c119c8b627601933c73c60a161dcca041119034a1b657a6a44c1dbd10d06b",
             "the two-union population was measured on a different Appendix A source"
         );
 

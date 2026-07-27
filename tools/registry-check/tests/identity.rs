@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 69
+registry_epoch = 70
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 69);
+    assert_eq!(epoch, 70);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -4833,6 +4833,17 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "fgdb:key-identity:v1",
         ),
         (
+            0x0002,
+            "expected_key_state",
+            "u8",
+            "one",
+            "inline",
+            "none",
+            None,
+            1,
+            "exactly 0x04=RetainedDecryptOnly",
+        ),
+        (
             0x0003,
             "basis_state",
             "WeakStateIdentity",
@@ -5061,6 +5072,10 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "a15:field:key-destroy-proposal-expected-current-configuration-ref",
         ),
         (
+            "field|KeyDestroyProposal|KeyDestroyProposal.expected_key_state|expected_key_state",
+            "a15:field:key-destroy-proposal-expected-key-state",
+        ),
+        (
             "field|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|expected_state_conditions",
             "a15:field:key-destroy-proposal-expected-state-conditions",
         ),
@@ -5275,7 +5290,6 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         "only the three source-forced shorthand fields may be adjudicated"
     );
     for unresolved in [
-        "expected_key_state",
         "expected_prospective_configuration_set_digest",
         "exact_root_slot_generations",
         "complete_target_set_digest",
@@ -5295,6 +5309,154 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "{unresolved} must remain unadjudicated"
         );
     }
+
+    use registry_check::appendix_source::{SourceSliceSpec, census_appendix_source};
+
+    let plan = real_plan_source();
+    let appendix = source_range(
+        &plan,
+        catalog.source_manifest.start_line,
+        catalog.source_manifest.end_line,
+    );
+    let specs = catalog
+        .slices
+        .iter()
+        .map(|slice| SourceSliceSpec {
+            id: &slice.id,
+            start_line: usize::try_from(slice.start_line).expect("slice start fits"),
+            end_line: usize::try_from(slice.end_line).expect("slice end fits"),
+        })
+        .collect::<Vec<_>>();
+    let census = census_appendix_source(
+        &appendix,
+        usize::try_from(catalog.source_manifest.start_line).expect("source start fits"),
+        &specs,
+    )
+    .expect("source census");
+    let source_field = census
+        .fields
+        .iter()
+        .find(|field| {
+            field.key.source_key()
+                == "field|KeyDestroyProposal|KeyDestroyProposal.expected_key_state|expected_key_state"
+        })
+        .expect("expected_key_state source candidate exists");
+    assert_eq!(source_field.exact_types, vec!["u8"]);
+    assert_eq!(
+        source_field
+            .cardinalities
+            .iter()
+            .map(|cardinality| cardinality.as_str())
+            .collect::<Vec<_>>(),
+        vec!["one"]
+    );
+    assert!(!source_field.type_conflict);
+    assert!(!source_field.ambiguous);
+    assert_eq!(source_field.locations.len(), 1);
+    assert_eq!(source_field.locations[0].start.line, 2059);
+    assert_eq!(source_field.locations[0].start.column, 59);
+    assert_eq!(source_field.locations[0].end.line, 2059);
+    assert_eq!(source_field.locations[0].end.column, 80);
+    assert!(
+        !census.ambiguities.iter().any(|ambiguity| ambiguity
+            .affected_source_keys
+            .iter()
+            .any(|key| key == &source_field.key.source_key())),
+        "the explicit u8 spelling must not require an ambiguity adjudication"
+    );
+
+    let plan = String::from_utf8(plan).expect("plan is UTF-8");
+    let lifecycle_law = |source: &str| {
+        source.contains(
+            "The one-byte key-lifecycle discriminant table is closed and source-ordered: \
+             0x01 means Generated, 0x02 means Active, 0x03 means Retiring, 0x04 means \
+             RetainedDecryptOnly, 0x05 means DestroyPending, 0x06 means \
+             DestroyedPendingCertificate, and 0x07 means Destroyed; 0x00 and 0x08 through \
+             0xff are invalid.",
+        ) && source.contains(
+            "A proposal MUST carry exactly 0x04; readers reject every other value before \
+             scanning or applying it.",
+        ) && source.contains(
+            "This field is only the compare-and-swap state tag and never carries the \
+             quarantine_generation and target_set_digest payload of DestroyPending",
+        )
+    };
+    assert!(
+        lifecycle_law(&plan),
+        "the plan must pin the full source-ordered lifecycle table, 0x04 proposal law, and payload boundary"
+    );
+    let wrong_state = plan.replacen(
+        "0x04 means RetainedDecryptOnly",
+        "0x03 means RetainedDecryptOnly",
+        1,
+    );
+    assert!(
+        !lifecycle_law(&wrong_state),
+        "negative control: a changed lifecycle code must fire"
+    );
+
+    let expected_key_state = identity
+        .fields
+        .iter()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "expected_key_state"
+        })
+        .expect("KeyDestroyProposal.expected_key_state exists");
+    assert!(
+        expected_key_state
+            .retention_and_cut_rule
+            .contains("never carries the later DestroyPending payload"),
+        "the field row must preserve the source payload boundary"
+    );
+    assert!(
+        !identity.wire.iter().any(|row| matches!(
+            row.name.as_str(),
+            "KeyLifecycleState" | "RetainedDecryptOnly"
+        )) && !identity.logical.iter().any(|row| {
+            matches!(
+                row.name.as_str(),
+                "KeyLifecycleState" | "RetainedDecryptOnly"
+            )
+        }) && !catalog.reservations.iter().any(|row| {
+            matches!(
+                row.symbol.as_str(),
+                "KeyLifecycleState" | "RetainedDecryptOnly"
+            )
+        }),
+        "an inline lifecycle discriminant must not mint a producer or reservation"
+    );
+
+    let mut duplicate_tag = identity.clone();
+    duplicate_tag
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "expected_key_state"
+        })
+        .expect("KeyDestroyProposal.expected_key_state exists")
+        .field_tag = 0x0003;
+    assert!(
+        codes_without_assignment_drift(&duplicate_tag).contains(&"code_duplicate".to_owned()),
+        "negative control: reusing the source-adjacent basis_state tag must fire"
+    );
+
+    let mut invented_lifecycle_producer = identity.clone();
+    invented_lifecycle_producer
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "expected_key_state"
+        })
+        .expect("KeyDestroyProposal.expected_key_state exists")
+        .exact_wire_type = "RetainedDecryptOnly".to_owned();
+    assert!(
+        codes_without_assignment_drift(&invented_lifecycle_producer)
+            .contains(&"field_unresolved_wire_type".to_owned()),
+        "negative control: an invented RetainedDecryptOnly producer must fire"
+    );
 
     let key_identity = identity
         .fields
@@ -6966,7 +7128,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         )
     };
     // A15 adds the first seven fully resolved KeyDestroyProposal members, the
-    // source-forced WeakStateIdentity basis, and n45i's opaque key identity.
+    // source-forced WeakStateIdentity basis, n45i's opaque key identity, and
+    // wh81's closed one-byte expected lifecycle-state tag.
     // The two shared-union consumer fields are already removed through
     // `post_erratum_union`. Remove the remaining cohort so the historical witness still
     // reconstructs the exact namespace predating every post-erratum field
@@ -6976,6 +7139,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && matches!(
                 name,
                 "key_identity"
+                    | "expected_key_state"
                     | "basis_state"
                     | "expected_current_configuration_ref"
                     | "checkpoint_and_configuration_floor_refs"
@@ -8098,10 +8262,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a10_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_j00a_field(&field.containing_schema, &field.stable_name)
-            && !post_erratum_oicl_digest_field(
-                &field.containing_schema,
-                &field.stable_name,
-            )
+            && !post_erratum_oicl_digest_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_inline_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_strong_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_weak_field(&field.containing_schema, &field.stable_name)
@@ -8120,7 +8281,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 570,
+        pre_erratum.fields.len() + 571,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A12 residue tranche"
     );
@@ -9492,9 +9653,7 @@ fn idr_oicl_cycle_backlinks_are_nonretaining_target_digests() {
         let row = identity
             .fields
             .iter()
-            .find(|row| {
-                row.containing_schema == schema && row.stable_name == stable_name
-            })
+            .find(|row| row.containing_schema == schema && row.stable_name == stable_name)
             .unwrap_or_else(|| panic!("{schema}.{stable_name} exists"));
         assert_eq!(row.field_tag, field_tag);
         assert_eq!(row.exact_wire_type, "digest256");

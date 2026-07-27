@@ -1,12 +1,12 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=7783d20462caa8c007ebaa9d000c7a102ab40ef143a856823be209e72e6e74aa.
+# Appendix A lines 1388-2728; sha256=2c2c119c8b627601933c73c60a161dcca041119034a1b657a6a44c1dbd10d06b.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 69
+registry_epoch = 70
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -3838,6 +3838,20 @@ role_predicate = "role-local"
 retention_and_cut_rule = "opaque nonretaining KeyIdentity bytes are BLAKE3(\"fgdb:key-identity:v1\" || canonical(0x0001 database_security_namespace_id:id256, 0x0002 material_class:u16, 0x0003 key_id:id256, 0x0004 key_epoch:u64)); the key-lifecycle registry recomputes this transcript, every proposal/quarantine/operation/finalization/record/certificate projection byte-matches it, and reachability, GC, checkpoint, and backup walkers never follow it (a15:2059-2069)"
 version_status = "reserved"
 max_size_bytes = 32
+
+[[field]]
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x0002
+stable_name = "expected_key_state"
+exact_wire_type = "u8"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "closed one-byte key-lifecycle compare-and-swap tag; exactly 0x04=RetainedDecryptOnly is legal in a proposal, 0x01..=0x07 are the complete source-ordered lifecycle discriminants, and 0x00/0x08..=0xff and every non-0x04 proposal value fail before scanning or apply; never carries the later DestroyPending payload and is retained and cut with the proposal (a15:2059)"
+version_status = "reserved"
+max_size_bytes = 1
 
 [[field]]
 containing_schema = "KeyDestroyProposal"
