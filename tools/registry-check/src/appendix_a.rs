@@ -33,17 +33,17 @@ pub const HASH_ALGORITHM: &str = "sha256";
 pub const APPENDIX_START_LINE: i64 = 1388;
 pub const APPENDIX_END_LINE: i64 = 2728;
 pub const APPENDIX_LINE_COUNT: i64 = 1341;
-pub const APPENDIX_BYTE_COUNT: i64 = 1_021_428;
+pub const APPENDIX_BYTE_COUNT: i64 = 1_021_849;
 pub const APPENDIX_SHA256: &str =
-    "4fdc494ad32c25576b92134c92e7822e114f3d1c679afd2c8249791f4ceb1181";
+    "7783d20462caa8c007ebaa9d000c7a102ab40ef143a856823be209e72e6e74aa";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3309;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3313;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "6680aa59e095da809cb5807b5c0483405fa9961fcbe811554150375940020e27";
+    "9d72b94fdb6e39ca366f535436f57ce64243bb5ce9fe496b125f01c5e72cdae1";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 111;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "106b5b176c5dca18e96d41791dd31979ac1b005b6cf40fa57e4a772758d201a6";
+    "2c72eb9d29f92b01ba254be197763f4172675156972cdc50f2787960491f4cd8";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -60,9 +60,9 @@ pub const COMPLETION_LAYER_SCHEMA_VERSION: i64 = 1;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT: usize = 4;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 433;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 437;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "e093eaa56f40ecc5917229ce4c145d9ce48e6c4050a5746d274b3839fd81cca8";
+    "08267641a21667ff3ec9cc13246879d90cd8a2fa67b1e3bd71fa9b61a3969150";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 437;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 376;
@@ -71,9 +71,9 @@ pub const EXPECTED_RESERVATION_ASSIGNMENT_SHA256: &str =
     "70461e343be25b55641eac6370c77a67f2aee60c768880e46dd2ab88979fe452";
 pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
-pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_458;
+pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_455;
 pub const EXPECTED_REFERENCE_OCCURRENCE_SHA256: &str =
-    "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48";
+    "ae40064992d27bd2772130802ec594b2f1238856fd561366d92fe46e6ae1ab93";
 pub const EXPECTED_G0_PROJECTION_ROW_COUNT: usize = 35;
 pub const EXPECTED_G0_PROJECTION_ROW_IDS_SHA256: &str =
     "ff344794c0f061e83016f9f4844591a75d07bff597d439258d2b2632fc810d61";
@@ -347,7 +347,7 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 0] = [];
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
-static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 433] = [
+static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 437] = [
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459",
         slice_id: "a01",
@@ -4967,6 +4967,50 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 433] 
         ],
         rationale: "a02:1449: the shorthand sorted_symbol_inventory_and_locators member is committed byte-exactly by the registered LocationForm Explicit arm payload digest; the single affected census key maps to that arm-interior source form.",
     },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a07:ambiguity-adjudication:ee23aced90506d99111b719ae0f8486df181ed161f5ec8a12c8214f574341d65",
+        slice_id: "a07",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.expected_registered_outcome_digest|4cdd6ebe699aa3b89b0893897f37ab3454f3b8987b0f8b79608e8ff56e081377|1|ad30e2526f4a279dd72dd315bfabe92febf7e04cd8c027fe4307fc355cfbcbc0|shorthand field has no exact type",
+        source_locations: &["a07:1780"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.expected_registered_outcome_digest|expected_registered_outcome_digest",
+        ],
+        rationale: "a07:1780 explicitly defines a comparison-only expected Registered predecessor digest; it maps to the source-ordered digest256 field and creates no retention or construction edge.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a08:ambiguity-adjudication:37232bd950b2c30115d0e2e9a2c861fbf52ee2e33dfeff50914c944c05927b86",
+        slice_id: "a08",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.freeze_digest|c00af86955aba5af4b7a66fbf8f4effb8029b4520f356181b08c41c24726f57d|1|923fb1d5ce42dfc81fff1073d744ce39733b18c2769fcd352e8185a23eba9e27|shorthand field has no exact type",
+        source_locations: &["a08:1838"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.freeze_digest|freeze_digest",
+        ],
+        rationale: "a08:1838 explicitly defines a comparison-only ReleasePending freeze digest; it maps to the source-ordered digest256 field and creates no retention or construction edge.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a13:ambiguity-adjudication:3b42cf9567870731386d634a72ce4198def5da7fa1007e561b11c740bd67e521",
+        slice_id: "a13",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_digest|eda96c96e62e2160110a85f02a2152fcba4da71b149f5a700a19f8b7d8f0b247|1|58807e0144c0e5c466ff6ab229699cac2322548e3ee7d276c66c5512d356afd2|shorthand field has no exact type",
+        source_locations: &["a13:2006"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_digest|source_root_digest",
+        ],
+        rationale: "a13:2006 explicitly defines the inherited source-root identity as a comparison-only digest; it maps to the source-ordered digest256 field and creates no retention or construction edge.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a13:ambiguity-adjudication:3d70fb474e157bb474917cb69259eb2374ba0bc450888830e9b9d4790efa4da3",
+        slice_id: "a13",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_ciphertext_digest|83204203c8c59d3ab8f3d9d1dfb493f2c193dd411b9c1c18c8b2184026b72176|1|fc2f15f8bf55ca659ff0fe5b9308d88f0c057d6c2ba375d6e51c0230693412fb|shorthand field has no exact type",
+        source_locations: &["a13:2006"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_ciphertext_digest|source_root_ciphertext_digest",
+        ],
+        rationale: "a13:2006 explicitly defines the selected inherited-root ciphertext realization as a comparison-only digest; it maps to the source-ordered digest256 field and creates no retention or construction edge.",
+    },
 ];
 
 pub const PROJECTION_CLASSES: [&str; 6] = [
@@ -5535,8 +5579,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1701,
         end_line: 1790,
         line_count: 90,
-        byte_count: 87_339,
-        sha256: "1b3a393d03ffbecec17b95f09be8b30067bd7803d1bc2e1176a83876a056f114",
+        byte_count: 87_484,
+        sha256: "8faa24e7397c7df244cb52ffb5332d4a828d5b014e71efc844aef0ebea32b44f",
     },
     SlicePin {
         ordinal: 8,
@@ -5546,8 +5590,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1791,
         end_line: 1889,
         line_count: 99,
-        byte_count: 92_121,
-        sha256: "9bee4c412d4ebb7df1d274528aa0b8e82033d1fb052db3b1a7e08bf4461f2481",
+        byte_count: 92_259,
+        sha256: "31b52a7080dbfa02e09c582857066e194ccb03782f54ee1ac76dcc5b16fe329a",
     },
     SlicePin {
         ordinal: 9,
@@ -5601,8 +5645,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 2000,
         end_line: 2034,
         line_count: 35,
-        byte_count: 17_149,
-        sha256: "1901c5bda19eb47aba710870dc0bd87c2184b4142f5ed51d6b8db732401031f8",
+        byte_count: 17_287,
+        sha256: "66aecae3d6e14a7c5c2e806f33b988efd343d2df6a3288a3df50e45f79461851",
     },
     SlicePin {
         ordinal: 14,

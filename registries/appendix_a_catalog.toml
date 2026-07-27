@@ -27,21 +27,21 @@ plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 start_line = 1388
 end_line = 2728
 line_count = 1341
-byte_count = 1021428
-sha256 = "4fdc494ad32c25576b92134c92e7822e114f3d1c679afd2c8249791f4ceb1181"
+byte_count = 1021849
+sha256 = "7783d20462caa8c007ebaa9d000c7a102ab40ef143a856823be209e72e6e74aa"
 heading = "## Appendix A — On-Disk Object Formats (normative contract)"
 next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 
 [reference_manifest]
 target_count = 813
 target_ids_sha256 = "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"
-occurrence_count = 2458
-occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
+occurrence_count = 2455
+occurrence_transcript_sha256 = "ae40064992d27bd2772130802ec594b2f1238856fd561366d92fe46e6ae1ab93"
 
 [target_manifest]
-target_count = 3309
+target_count = 3313
 projection_fallback_count = 111
-target_source_assignment_sha256 = "106b5b176c5dca18e96d41791dd31979ac1b005b6cf40fa57e4a772758d201a6"
+target_source_assignment_sha256 = "2c72eb9d29f92b01ba254be197763f4172675156972cdc50f2787960491f4cd8"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -256,8 +256,8 @@ title = "Appendix A exact catalog: W12 transaction, statement, result, and outco
 start_line = 1701
 end_line = 1790
 line_count = 90
-byte_count = 87339
-sha256 = "1b3a393d03ffbecec17b95f09be8b30067bd7803d1bc2e1176a83876a056f114"
+byte_count = 87484
+sha256 = "8faa24e7397c7df244cb52ffb5332d4a828d5b014e71efc844aef0ebea32b44f"
 predecessor = "a06"
 successor = "a08"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
@@ -265,13 +265,13 @@ definition_status = "declared"
 top_level_candidate_count = 88
 top_level_candidate_ids_sha256 = "c4f12ac71d40d5f8717f1ab5888edade214929bd47738ad1f5534c388978c7ca"
 field_candidate_count = 956
-field_candidate_ids_sha256 = "7fcb79e26fb630b181ca70f5bd6b1a80dea2a823abde91651ac7a4777aaf56ce"
+field_candidate_ids_sha256 = "69ebe148bc9939ac61a60b8cb4249ed96ad1ac75afe56c9dc5691cf9523fff64"
 union_candidate_count = 93
 union_candidate_ids_sha256 = "a0b2d1f042ba38157fd68ebdbf5b56caa4bfb6bc815feac4cf05db3337992b23"
 arm_candidate_count = 248
 arm_candidate_ids_sha256 = "c784ab56077ffafef0f2f360a0768c72b624ad3901fc9146115ae11208b5e3dd"
-ambiguity_count = 502
-ambiguity_ids_sha256 = "5bc33d39e1a45a26d77fcbe8b0e3938569625026bc4dfa1116f44cf022e268f7"
+ambiguity_count = 503
+ambiguity_ids_sha256 = "43c48742b824039032bfa0c2378d77fb4f4d6c1d2ef8661280397b3c393c6cfc"
 
 [[slice]]
 ordinal = 8
@@ -281,8 +281,8 @@ title = "Appendix A exact catalog: W12 retention, compaction, reconfiguration, G
 start_line = 1791
 end_line = 1889
 line_count = 99
-byte_count = 92121
-sha256 = "9bee4c412d4ebb7df1d274528aa0b8e82033d1fb052db3b1a7e08bf4461f2481"
+byte_count = 92259
+sha256 = "31b52a7080dbfa02e09c582857066e194ccb03782f54ee1ac76dcc5b16fe329a"
 predecessor = "a07"
 successor = "a09"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
@@ -290,13 +290,13 @@ definition_status = "declared"
 top_level_candidate_count = 111
 top_level_candidate_ids_sha256 = "3f997c3bcd5078b287868ffe3fca5a8a2b9197b140d070f3c4a60c25a439150e"
 field_candidate_count = 1112
-field_candidate_ids_sha256 = "6e53933f488141d0d52922241bad2a1fd5408f91b886f41239072198d27d065b"
+field_candidate_ids_sha256 = "822f4ab0a5c43a095d0e2c4787ad45ce4a1603d61425d40f2218e415bce4b63b"
 union_candidate_count = 42
 union_candidate_ids_sha256 = "867a6dc2f093d342e80d0dc5e1a4fd6597a97b94ec6353a08ac250ae04da2fd8"
 arm_candidate_count = 142
 arm_candidate_ids_sha256 = "dbaca4cd29c32a02c0aec03ab339767c83e9e485eeaaae7719e646971e9fb5c1"
-ambiguity_count = 702
-ambiguity_ids_sha256 = "cf2f86f5e53271a02fb601a99e52543eae35af86beb11ada8fd5768a2e5d5e0b"
+ambiguity_count = 703
+ambiguity_ids_sha256 = "b4798596abb8d03947852c910d1ee64c3101edbeeb090030d2da2e79d79c22ae"
 
 [[slice]]
 ordinal = 9
@@ -406,8 +406,8 @@ title = "Appendix A exact catalog: Branch manifest, key grants, retirement, and 
 start_line = 2000
 end_line = 2034
 line_count = 35
-byte_count = 17149
-sha256 = "1901c5bda19eb47aba710870dc0bd87c2184b4142f5ed51d6b8db732401031f8"
+byte_count = 17287
+sha256 = "66aecae3d6e14a7c5c2e806f33b988efd343d2df6a3288a3df50e45f79461851"
 predecessor = "a12"
 successor = "a14"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
@@ -415,13 +415,13 @@ definition_status = "declared"
 top_level_candidate_count = 20
 top_level_candidate_ids_sha256 = "57f8d36a5c0e1dbabe02fccd7c16d9ca7444075fba48b5dea85dafbdbef0fd68"
 field_candidate_count = 241
-field_candidate_ids_sha256 = "c7d81371f6da26131cf54f9df2776a2020e90e4ecacb6102770d1b773a488689"
+field_candidate_ids_sha256 = "c5b4280ed07ef7021dc62d5ba5fc386723c78823f4466fbeffc739aabe6eff7f"
 union_candidate_count = 12
 union_candidate_ids_sha256 = "6e2714a04046f4969248c1dd53fdcc1a4f8587a8e2071a52af5f555400b21e02"
 arm_candidate_count = 31
 arm_candidate_ids_sha256 = "de5fbfa5b507f602dee823ef009029c0760dacf065734dd12cbfb670ccecf691"
-ambiguity_count = 165
-ambiguity_ids_sha256 = "4efd9c1f03c9f5eb75561d464103a487ff197797293ed9b305f378fc56a11152"
+ambiguity_count = 167
+ambiguity_ids_sha256 = "d8b54b6f07999ab2357fdde9f25be5422819eff336727acd2585141e6341eca6"
 
 [[slice]]
 ordinal = 14
@@ -645,7 +645,7 @@ registry_epoch = 38
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 67
+registry_epoch = 68
 
 [[logical_kind]]
 slice_id = "a03"
@@ -85756,7 +85756,7 @@ row_id = "a07:source-symbol-disposition:global-txn-outcome-record"
 slice_id = "a07"
 symbol = "GlobalTxnOutcomeRecord"
 disposition = "appendix-structural-definition"
-source_locations = ["a05:1656", "a07:1716", "a07:1734", "a07:1780", "a07:1782", "a07:1790", "a08:1800", "a08:1886"]
+source_locations = ["a05:1656", "a07:1716", "a07:1734", "a07:1782", "a07:1790", "a08:1800", "a08:1886"]
 
 [[source_symbol_disposition]]
 row_id = "a07:source-symbol-disposition:global-txn-workspace-generation"
@@ -86148,7 +86148,7 @@ row_id = "a08:source-symbol-disposition:audit-terminal-freeze-record"
 slice_id = "a08"
 symbol = "AuditTerminalFreezeRecord"
 disposition = "appendix-structural-definition"
-source_locations = ["a08:1832", "a08:1834", "a08:1836", "a08:1838", "a08:1840"]
+source_locations = ["a08:1832", "a08:1834", "a08:1836", "a08:1840"]
 
 [[source_symbol_disposition]]
 row_id = "a08:source-symbol-disposition:audit-terminal-plan-abandonment"
@@ -87030,7 +87030,7 @@ row_id = "a13:source-symbol-disposition:key-envelope-root"
 slice_id = "a13"
 symbol = "KeyEnvelopeRoot"
 disposition = "appendix-structural-definition"
-source_locations = ["a13:2000", "a13:2006", "a13:2027", "a13:2029"]
+source_locations = ["a13:2000", "a13:2027", "a13:2029"]
 
 [[source_symbol_disposition]]
 row_id = "a13:source-symbol-disposition:key-grant-registry"
@@ -103910,5 +103910,141 @@ row_id = "a02:target:field-symbol-record-symbol-mac"
 target_row_id = "a02:field:symbol-record-symbol-mac"
 slice_id = "a02"
 source_key = "field|SymbolRecord|SymbolRecord.symbol_mac|symbol_mac"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a07"
+row_id = "a07:field:global-txn-outcome-preparation-record-expected-registered-outcome-digest"
+containing_schema = "GlobalTxnOutcomePreparationRecord"
+field_tag = 0x0007
+stable_name = "expected_registered_outcome_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the exact current Registered GlobalTxnOutcomeRecord identity; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a07:1780)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a08"
+row_id = "a08:field:no-terminal-signature-or-order-proof-freeze-digest"
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x0002
+stable_name = "freeze_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the exact ReleasePending AuditTerminalFreezeRecord identity; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a08:1838)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:key-envelope-node-source-root-digest"
+containing_schema = "KeyEnvelopeNode"
+field_tag = 0x0016
+stable_name = "source_root_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the already-constructed inherited KeyEnvelopeRoot identity; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a13:2006)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:key-envelope-node-source-root-ciphertext-digest"
+containing_schema = "KeyEnvelopeNode"
+field_tag = 0x0017
+stable_name = "source_root_ciphertext_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the selected inherited-root ciphertext realization; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a13:2006)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[ambiguity_adjudication]]
+row_id = "a07:ambiguity-adjudication:ee23aced90506d99111b719ae0f8486df181ed161f5ec8a12c8214f574341d65"
+slice_id = "a07"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.expected_registered_outcome_digest|4cdd6ebe699aa3b89b0893897f37ab3454f3b8987b0f8b79608e8ff56e081377|1|ad30e2526f4a279dd72dd315bfabe92febf7e04cd8c027fe4307fc355cfbcbc0|shorthand field has no exact type"
+source_locations = ["a07:1780"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.expected_registered_outcome_digest|expected_registered_outcome_digest"]
+rationale = "a07:1780 explicitly defines a comparison-only expected Registered predecessor digest; it maps to the source-ordered digest256 field and creates no retention or construction edge."
+
+[[ambiguity_adjudication]]
+row_id = "a08:ambiguity-adjudication:37232bd950b2c30115d0e2e9a2c861fbf52ee2e33dfeff50914c944c05927b86"
+slice_id = "a08"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.freeze_digest|c00af86955aba5af4b7a66fbf8f4effb8029b4520f356181b08c41c24726f57d|1|923fb1d5ce42dfc81fff1073d744ce39733b18c2769fcd352e8185a23eba9e27|shorthand field has no exact type"
+source_locations = ["a08:1838"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.freeze_digest|freeze_digest"]
+rationale = "a08:1838 explicitly defines a comparison-only ReleasePending freeze digest; it maps to the source-ordered digest256 field and creates no retention or construction edge."
+
+[[ambiguity_adjudication]]
+row_id = "a13:ambiguity-adjudication:3b42cf9567870731386d634a72ce4198def5da7fa1007e561b11c740bd67e521"
+slice_id = "a13"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_digest|eda96c96e62e2160110a85f02a2152fcba4da71b149f5a700a19f8b7d8f0b247|1|58807e0144c0e5c466ff6ab229699cac2322548e3ee7d276c66c5512d356afd2|shorthand field has no exact type"
+source_locations = ["a13:2006"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_digest|source_root_digest"]
+rationale = "a13:2006 explicitly defines the inherited source-root identity as a comparison-only digest; it maps to the source-ordered digest256 field and creates no retention or construction edge."
+
+[[ambiguity_adjudication]]
+row_id = "a13:ambiguity-adjudication:3d70fb474e157bb474917cb69259eb2374ba0bc450888830e9b9d4790efa4da3"
+slice_id = "a13"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_ciphertext_digest|83204203c8c59d3ab8f3d9d1dfb493f2c193dd411b9c1c18c8b2184026b72176|1|fc2f15f8bf55ca659ff0fe5b9308d88f0c057d6c2ba375d6e51c0230693412fb|shorthand field has no exact type"
+source_locations = ["a13:2006"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_ciphertext_digest|source_root_ciphertext_digest"]
+rationale = "a13:2006 explicitly defines the selected inherited-root ciphertext realization as a comparison-only digest; it maps to the source-ordered digest256 field and creates no retention or construction edge."
+
+[[target]]
+row_id = "a07:target:field-global-txn-outcome-preparation-record-expected-registered-outcome-digest"
+target_row_id = "a07:field:global-txn-outcome-preparation-record-expected-registered-outcome-digest"
+slice_id = "a07"
+source_key = "field|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.expected_registered_outcome_digest|expected_registered_outcome_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a08:target:field-no-terminal-signature-or-order-proof-freeze-digest"
+target_row_id = "a08:field:no-terminal-signature-or-order-proof-freeze-digest"
+slice_id = "a08"
+source_key = "field|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.freeze_digest|freeze_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-key-envelope-node-source-root-digest"
+target_row_id = "a13:field:key-envelope-node-source-root-digest"
+slice_id = "a13"
+source_key = "field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_digest|source_root_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-key-envelope-node-source-root-ciphertext-digest"
+target_row_id = "a13:field:key-envelope-node-source-root-ciphertext-digest"
+slice_id = "a13"
+source_key = "field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_ciphertext_digest|source_root_ciphertext_digest"
 target_kind = "field"
 definition_status = "declared"

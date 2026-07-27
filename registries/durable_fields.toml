@@ -1,12 +1,12 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=4fdc494ad32c25576b92134c92e7822e114f3d1c679afd2c8249791f4ceb1181.
+# Appendix A lines 1388-2728; sha256=7783d20462caa8c007ebaa9d000c7a102ab40ef143a856823be209e72e6e74aa.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 67
+registry_epoch = 68
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -3127,6 +3127,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "GlobalTxnOutcomePreparationRecord"
+field_tag = 0x0007
+stable_name = "expected_registered_outcome_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the exact current Registered GlobalTxnOutcomeRecord identity; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a07:1780)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "GlobalTxnOutcomePreparationRecord"
 field_tag = 0x0009
 stable_name = "routing_certificate_ref"
 exact_wire_type = "StrongRef"
@@ -3953,6 +3968,36 @@ role_predicate = "role-local"
 retention_and_cut_rule = "the one source-required TerminalAuditGate embedded by value under the SequenceNeutralSpec wrapper law; the Required arm's separately registered payload members provide its exact retaining edges (a10:1914, a15:2059, a21:2699)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "KeyEnvelopeNode"
+field_tag = 0x0016
+stable_name = "source_root_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the already-constructed inherited KeyEnvelopeRoot identity; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a13:2006)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "KeyEnvelopeNode"
+field_tag = 0x0017
+stable_name = "source_root_ciphertext_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the selected inherited-root ciphertext realization; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a13:2006)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
 
 [[field]]
 containing_schema = "LegacyRetentionAuthorityTransferEvidence"
@@ -5049,6 +5094,21 @@ retention_and_cut_rule = "weak identity of the originating reservation; comparis
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "NoTerminalSignatureOrOrderProof"
+field_tag = 0x0002
+stable_name = "freeze_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the exact ReleasePending AuditTerminalFreezeRecord identity; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a08:1838)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
 
 [[field]]
 containing_schema = "NoTerminalSignatureOrOrderProof"

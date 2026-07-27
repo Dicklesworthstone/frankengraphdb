@@ -285,8 +285,8 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"start_line":1388' \
     '"end_line":2728' \
     '"line_count":1341' \
-    '"byte_count":1021428' \
-    '"sha256":"4fdc494ad32c25576b92134c92e7822e114f3d1c679afd2c8249791f4ceb1181"' \
+    '"byte_count":1021849' \
+    '"sha256":"7783d20462caa8c007ebaa9d000c7a102ab40ef143a856823be209e72e6e74aa"' \
     '"outcome":"pass"'; then
   ok "Appendix A exact source manifest is pinned"
 else
@@ -304,8 +304,8 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_reference_manifest"' \
     '"target_count":'"$EXPECT_RESERVATION_COUNT" \
     '"target_ids_sha256":"84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"' \
-    '"occurrence_count":2458' \
-    '"occurrence_transcript_sha256":"027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"' \
+    '"occurrence_count":2455' \
+    '"occurrence_transcript_sha256":"ae40064992d27bd2772130802ec594b2f1238856fd561366d92fe46e6ae1ab93"' \
     '"outcome":"pass"'; then
   ok "full-plan Appendix A reference census is pinned"
 else

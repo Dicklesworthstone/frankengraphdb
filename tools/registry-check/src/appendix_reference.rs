@@ -544,10 +544,10 @@ mod tests {
             census.target_ids_sha256,
             "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"
         );
-        assert_eq!(census.occurrence_count, 2_458);
+        assert_eq!(census.occurrence_count, 2_455);
         assert_eq!(
             census.occurrence_transcript_sha256,
-            "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
+            "ae40064992d27bd2772130802ec594b2f1238856fd561366d92fe46e6ae1ab93"
         );
     }
 }

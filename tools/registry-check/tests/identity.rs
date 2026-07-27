@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 67
+registry_epoch = 68
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 67);
+    assert_eq!(epoch, 68);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -7633,6 +7633,19 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "TimeSubjectIssuanceReservation<Role>"
             )
     };
+    // 2lch replaces four mutual-cycle back-links with comparison-only target
+    // digests. These rows also postdate the A10 namespace witness.
+    let post_erratum_oicl_digest_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            (
+                "GlobalTxnOutcomePreparationRecord",
+                "expected_registered_outcome_digest"
+            ) | ("NoTerminalSignatureOrOrderProof", "freeze_digest")
+                | ("KeyEnvelopeNode", "source_root_digest")
+                | ("KeyEnvelopeNode", "source_root_ciphertext_digest")
+        )
+    };
     // The a07 W12 inline tranche postdates the erratum and must not leak into
     // its historical assignment witness.
     let post_erratum_a07_inline_field = |schema: &str, name: &str| {
@@ -8030,6 +8043,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a10_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_j00a_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_oicl_digest_field(
+                &field.containing_schema,
+                &field.stable_name,
+            )
             && !post_erratum_a07_inline_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_strong_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_weak_field(&field.containing_schema, &field.stable_name)
@@ -8048,7 +8065,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 565,
+        pre_erratum.fields.len() + 569,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A12 residue tranche"
     );
@@ -9375,6 +9392,106 @@ fn idr_j00a_predecessors_are_nonretaining_and_current_generations_stay_owned() {
             "current-generation owner is not stated: {owner}"
         );
     }
+}
+
+#[test]
+fn idr_oicl_cycle_backlinks_are_nonretaining_target_digests() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let expected = [
+        (
+            "GlobalTxnOutcomePreparationRecord",
+            "expected_registered_outcome_digest",
+            0x0007,
+            60,
+            "a07",
+            "GlobalTxnOutcomePreparationRecord.expected_registered_outcome_digest",
+        ),
+        (
+            "NoTerminalSignatureOrOrderProof",
+            "freeze_digest",
+            0x0002,
+            6,
+            "a08",
+            "NoTerminalSignatureOrOrderProof.freeze_digest",
+        ),
+        (
+            "KeyEnvelopeNode",
+            "source_root_digest",
+            0x0016,
+            50,
+            "a13",
+            "KeyEnvelopeNode.inherited_roots.record.source_root_digest",
+        ),
+        (
+            "KeyEnvelopeNode",
+            "source_root_ciphertext_digest",
+            0x0017,
+            50,
+            "a13",
+            "KeyEnvelopeNode.inherited_roots.record.source_root_ciphertext_digest",
+        ),
+    ];
+
+    for (schema, stable_name, field_tag, construction_order, slice, source_path) in expected {
+        let row = identity
+            .fields
+            .iter()
+            .find(|row| {
+                row.containing_schema == schema && row.stable_name == stable_name
+            })
+            .unwrap_or_else(|| panic!("{schema}.{stable_name} exists"));
+        assert_eq!(row.field_tag, field_tag);
+        assert_eq!(row.exact_wire_type, "digest256");
+        assert_eq!(row.cardinality, "one");
+        assert_eq!(row.identity_class, "inline");
+        assert_eq!(row.reference_semantics, "none");
+        assert_eq!(row.target_schema_id, None);
+        assert_eq!(row.construction_order, construction_order);
+        assert_eq!(row.version_status, "reserved");
+        assert_eq!(row.max_size_bytes, 32);
+        assert_eq!(row.digest_class.as_deref(), Some("target"));
+        assert!(row.retention_and_cut_rule.contains("comparison-only"));
+        assert!(row.retention_and_cut_rule.contains("never traversed"));
+
+        let source_key = format!("field|{schema}|{source_path}|{stable_name}");
+        let target = catalog
+            .targets
+            .iter()
+            .find(|target| target.source_key == source_key)
+            .unwrap_or_else(|| panic!("{schema}.{stable_name} has one source target"));
+        assert_eq!(target.slice_id, slice);
+        assert_eq!(target.target_kind, "field");
+        assert_eq!(target.definition_status, "declared");
+    }
+
+    let plan = String::from_utf8(real_plan_source()).expect("plan is UTF-8");
+    for old_retaining_spelling in [
+        "expected_registered_outcome_ref:StrongRef<GlobalTxnOutcomeRecord>",
+        "SameGroupCertificateHeader,freeze_ref:StrongRef<AuditTerminalFreezeRecord>",
+        "source_root_ref:StrongRef<KeyEnvelopeRoot>",
+        "source_root_ciphertext_ref:StrongCiphertextRef<KeyEnvelopeRoot>",
+    ] {
+        assert!(
+            !plan.contains(old_retaining_spelling),
+            "retaining cycle back-link survived: {old_retaining_spelling}"
+        );
+    }
+
+    let mut missing_digest_class = identity;
+    missing_digest_class
+        .fields
+        .iter_mut()
+        .find(|row| {
+            row.containing_schema == "NoTerminalSignatureOrOrderProof"
+                && row.stable_name == "freeze_digest"
+        })
+        .expect("freeze digest exists")
+        .digest_class = None;
+    assert!(
+        codes(&missing_digest_class).contains(&"digest_missing_class".to_owned()),
+        "control must reject a plan-named digest without its target digest class"
+    );
 }
 
 #[test]
