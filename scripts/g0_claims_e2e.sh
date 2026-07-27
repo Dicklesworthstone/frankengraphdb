@@ -54,11 +54,13 @@ mkdir -p "$WORK"
 # shellcheck source=lib/private_subject.sh
 . "$ROOT/scripts/lib/private_subject.sh"
 
-log "building registry-check from this tree into $WORK/bin"
-if ! subject_build "$ROOT" "$WORK/bin"; then
-  log "FATAL: building registry-check from this tree failed (see $WORK/bin/build.log)"
+mkdir -p "$WORK/bin"
+log "acquiring the subject for this tree state"
+if ! SUBJECT_DIR="$(subject_acquire "$ROOT")"; then
+  log "FATAL: building registry-check from this tree failed (see $SUBJECT_DIR/build.log)"
   exit 2
 fi
+BIN="$SUBJECT_DIR/registry-check"
 subject_is_fresh "$BIN" "$ROOT" || {
   log "FATAL: $BIN is not newer than $(subject_newest_source "$ROOT") — the build did not produce this tree's artifact"
   exit 2
@@ -75,6 +77,17 @@ if subject_is_fresh "$BIN" "$ROOT" && ! subject_is_fresh "$WORK/bin/stale-probe"
   ok "control: the freshness rule accepts this run's artifact and rejects a backdated one"
 else
   die "control: the freshness rule does not separate a fresh artifact from a stale one; this script's subject is unproven"
+fi
+
+# THIS SCRIPT'S OWN control over the shared subject RUNNER, counted in this
+# script's own tally, for the same reason as the one above. The subject is no
+# longer a private directory per run (fgdb-1j16: 113 abandoned directories,
+# 18.01GB, two build freezes in one night), and a reuse that quietly stops
+# reusing looks exactly like one that works.
+if subject_residue_control "$WORK"; then
+  ok "control: the subject runner reuses one directory and leaves no residue"
+else
+  die "control: the subject runner leaks a directory per run"
 fi
 
 # --- Phase 1: the shipped registries pass everything -------------------------
