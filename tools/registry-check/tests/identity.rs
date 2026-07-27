@@ -15,12 +15,13 @@
 //! defect in the checker are both build breaks.
 
 use registry_check::appendix_a::{self, Catalog, Violation};
+use registry_check::appendix_source;
 use registry_check::architecture;
 use registry_check::identity::{
     self, FieldRow, IdentityRegistries, LogicalKind, WireType, bodydigest_pin,
     bodydigest_transcript,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -323,6 +324,47 @@ fn undo_cq4x_capsule_retarget(identity: &mut IdentityRegistries) {
         })
         .expect("CommitMarker.capsule_ref exists");
     field.target_schema_id = Some("CommitCapsule".to_owned());
+}
+
+/// Reverse mn8i's repairs to existing A12 rows for the historical witness.
+///
+/// The 80 added fields are removed by the historical cohort filter. These
+/// modifications need explicit reversal because a filter cannot see the
+/// previous CheckpointStateVector order or the previous top-level union shape.
+fn undo_mn8i_exact_order_repairs(identity: &mut IdentityRegistries) {
+    identity
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "CheckpointStateVector"
+                && field.stable_name == "mandatory_inventory"
+        })
+        .expect("CheckpointStateVector.mandatory_inventory exists")
+        .construction_order = 35;
+
+    identity
+        .ordinary_unions
+        .iter_mut()
+        .find(|union| union.union_name == "LocalConstraintReservationRecordState")
+        .expect("LocalConstraintReservationRecordState exists")
+        .field_tag = None;
+
+    for (union_name, allowed) in [
+        ("ConstraintStateMutation", vec!["ConstraintStateMutation"]),
+        ("QuotaPath", vec!["QuotaPath"]),
+        (
+            "TerminalAuditGate",
+            vec!["KeyDestroyProposal", "SequenceNeutralSpec<Tag>"],
+        ),
+    ] {
+        if let Some(union) = identity
+            .ordinary_unions
+            .iter_mut()
+            .find(|union| union.union_name == union_name)
+        {
+            union.allowed_containing_schemas = allowed.into_iter().map(str::to_owned).collect();
+        }
+    }
 }
 
 /// Reverse the transcript-visible A01 increment-2B exactness repairs so the
@@ -5329,7 +5371,13 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     );
     assert_shared_union(
         "TerminalAuditGate",
-        &["KeyDestroyProposal", "SequenceNeutralSpec<Tag>"],
+        &[
+            "HistoryCutActivationSpec",
+            "InitialConfigFloorInstallSpec",
+            "KeyDestroyProposal",
+            "ResourceLedgerTransitionSpec",
+            "SequenceNeutralSpec<Tag>",
+        ],
         &[
             (
                 "StructurallyInapplicable",
@@ -8768,6 +8816,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("LocalResultDeliveryLease", "activation_applied_ref")
         )
     };
+    // mn8i's 80 exact-order rows all carry this source-position witness.
+    // Five are also recognized through their embedded ordinary-union type;
+    // this exact marker removes the complete cohort without enumerating a
+    // second, drift-prone copy of the source reader's field list.
+    let post_erratum_a12_exact_order_field =
+        |retention_and_cut_rule: &str| retention_and_cut_rule.contains("source-position tag");
     pre_erratum.fields.retain(|field| {
         !post_erratum_a21_field(&field.containing_schema)
             && !post_erratum_union(&field.exact_wire_type)
@@ -8814,6 +8868,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a03_inline_fields(&field.containing_schema, &field.stable_name)
             && !post_erratum_a03_flat_residue_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a03_wire_consumer_fields(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a12_exact_order_field(&field.retention_and_cut_rule)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 372,
@@ -8821,13 +8876,14 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 575,
+        pre_erratum.fields.len() + 655,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A12 residue tranche"
+        "the historical witness must remove every post-erratum field cohort through the A12 exact-order tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
     undo_cq4x_capsule_retarget(&mut pre_erratum);
+    undo_mn8i_exact_order_repairs(&mut pre_erratum);
     let reconstructed_previous_fields_pin = identity::assignment_pins(&pre_erratum)
         .into_iter()
         .find(|pin| pin.registry == "durable_fields")
@@ -9843,28 +9899,37 @@ fn idr_a12_residue_promotions_and_fields_are_source_exact() {
         "negative control: a fabricated StrongRef target must fire"
     );
 
-    let mut future_checkpoint_state = identity.clone();
-    let future_field = future_checkpoint_state
+    let checkpoint_state_field = identity
         .fields
-        .iter_mut()
+        .iter()
         .find(|field| {
             field.containing_schema == "RecoveryCheckpoint"
-                && field.stable_name == "basis_payload_digest"
+                && field.stable_name == "checkpoint_state_vector_ref"
         })
-        .expect("RecoveryCheckpoint control field exists");
-    future_field.stable_name = "checkpoint_state_vector_ref".to_owned();
-    future_field.field_tag = 0x0008;
-    future_field.exact_wire_type = "StrongRef".to_owned();
-    future_field.identity_class = "logical".to_owned();
-    future_field.reference_semantics = "strong".to_owned();
-    future_field.target_schema_id = Some("CheckpointStateVector".to_owned());
-    future_field.max_size_bytes = 40;
-    future_field.digest_class = None;
-    future_field.transcript_recipe = None;
+        .expect("RecoveryCheckpoint source field exists");
+    assert_eq!(checkpoint_state_field.field_tag, 0x0008);
+    assert_eq!(
+        checkpoint_state_field.target_schema_id.as_deref(),
+        Some("CheckpointStateVector")
+    );
+    assert_eq!(checkpoint_state_field.construction_order, 30);
+
+    let mut future_checkpoint_state = identity.clone();
+    future_checkpoint_state
+        .logical
+        .iter_mut()
+        .find(|kind| kind.name == "CheckpointStateVector")
+        .expect("CheckpointStateVector exists")
+        .construction_order = 31;
+    for field in &mut future_checkpoint_state.fields {
+        if field.containing_schema == "CheckpointStateVector" {
+            field.construction_order = 31;
+        }
+    }
     assert!(
         codes_without_assignment_drift(&future_checkpoint_state)
             .contains(&"dag_future_result".to_owned()),
-        "negative control: RecoveryCheckpoint@30 cannot StrongRef CheckpointStateVector@35"
+        "negative control FIRED: RecoveryCheckpoint@30 cannot StrongRef CheckpointStateVector@31"
     );
 
     catalog
@@ -13539,18 +13604,17 @@ fn idr_field_identity_class_domain_is_wire_shape_independent() {
 }
 
 // ---------------------------------------------------------------------------
-// A12 genuine-residue owner rulings (fgdb-a12-genuine-residue-hm6l).
+// A12 genuine-residue class rulings (fgdb-a12-genuine-residue-hm6l).
 //
-// The source reader found zero retaining and zero typed-by-value uses for all
-// seven candidates.  That makes the class choice an owner decision, but it
-// does not make either directional law vacuous: the controlled mutations below
-// prove that a retaining use forces logical and a by-value use forces wire.
-// ResourceLedgerTransitionSpec remains deliberately unminted because its two
-// source directions require an empty construction-order interval.
+// Six source-body hosts were owner-ruled.  ResourceLedgerTransitionSpec is
+// logical because its source body retains ResourceLedgerTransition; A10's
+// wrapper law says ControlCommand retains SequenceNeutralSpec<Tag>, not the
+// specific body.  The controlled mutations below keep both class directions
+// and that source-dispatch distinction nonvacuous.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn idr_a12_genuine_residue_class_rulings_and_order_blocker_are_nonvacuous() {
+fn idr_a12_genuine_residue_class_rulings_and_source_dispatch_are_nonvacuous() {
     let base = real_identity();
     assert!(
         identity::validate_identity(&base).is_empty(),
@@ -13564,6 +13628,7 @@ fn idr_a12_genuine_residue_class_rulings_and_order_blocker_are_nonvacuous() {
         "ConstraintValidationEvidence",
         "LocalConstraintReservationRecord",
         "ResourceLedgerAppliedRecord",
+        "ResourceLedgerTransitionSpec",
     ] {
         assert!(
             logical_names.contains(name) && !wire_names.contains(name),
@@ -13576,12 +13641,6 @@ fn idr_a12_genuine_residue_class_rulings_and_order_blocker_are_nonvacuous() {
             "{name} must resolve only as the A12 owner-ruled wire class"
         );
     }
-    assert!(
-        !logical_names.contains("ResourceLedgerTransitionSpec")
-            && !wire_names.contains("ResourceLedgerTransitionSpec"),
-        "the construction-order-blocked spec must remain unminted"
-    );
-
     let state_union = base
         .ordinary_unions
         .iter()
@@ -13596,6 +13655,11 @@ fn idr_a12_genuine_residue_class_rulings_and_order_blocker_are_nonvacuous() {
         state_arms,
         vec![("Held", 1), ("Consumed", 2), ("Released", 3)],
         "arm tags come from source spelling order"
+    );
+    assert_eq!(
+        state_union.field_tag,
+        Some(8),
+        "the source-spelled state path is the eighth carrying field"
     );
 
     let next_logical_code = base
@@ -13707,41 +13771,386 @@ fn idr_a12_genuine_residue_class_rulings_and_order_blocker_are_nonvacuous() {
     assert_eq!(transition_order, 15, "named outbound target order moved");
     assert_eq!(control_order, 10, "named inbound owner order moved");
 
-    let spec_at = |order: i64| {
-        let mut probe = base.clone();
-        probe.logical.push(kind(
-            next_logical_code,
-            "ResourceLedgerTransitionSpec",
-            "reserved",
-            order,
-        ));
-        let mut outbound = field(
-            "ResourceLedgerTransitionSpec",
-            0x0002,
-            "sorted_transition_refs",
-            order,
-        );
-        outbound.cardinality = "many".into();
-        outbound.target_schema_id = Some("ResourceLedgerTransition".into());
-        probe.fields.push(outbound);
-        let mut inbound = field(
-            "ControlCommand",
-            0x7ffd,
-            "hm6l_resource_ledger_transition_spec_ref",
-            control_order,
-        );
-        inbound.target_schema_id = Some("ResourceLedgerTransitionSpec".into());
-        probe.fields.push(inbound);
-        codes_without_assignment_drift(&probe)
-    };
-    let at_inbound_ceiling = spec_at(control_order);
+    let spec_order = base
+        .logical
+        .iter()
+        .find(|row| row.name == "ResourceLedgerTransitionSpec")
+        .expect("ResourceLedgerTransitionSpec is registered")
+        .construction_order;
+    assert_eq!(spec_order, 20, "source-dispatched spec order moved");
+    let outbound = base
+        .fields
+        .iter()
+        .find(|row| {
+            row.containing_schema == "ResourceLedgerTransitionSpec"
+                && row.stable_name == "sorted_transition_refs"
+        })
+        .expect("source-named transition edge is registered");
     assert!(
-        at_inbound_ceiling.contains(&"dag_future_result".to_string()),
-        "order 10 must fire on outbound target order 15: {at_inbound_ceiling:?}"
+        outbound.target_schema_id.as_deref() == Some("ResourceLedgerTransition")
+            && outbound.construction_order == 20,
+        "the spec must retain transitions from order 20 to named target order 15"
     );
-    let at_outbound_floor = spec_at(transition_order);
     assert!(
-        at_outbound_floor.contains(&"dag_future_result".to_string()),
-        "order 15 must fire on inbound owner order 10: {at_outbound_floor:?}"
+        !base.fields.iter().any(|row| {
+            row.containing_schema == "ControlCommand"
+                && row.target_schema_id.as_deref() == Some("ResourceLedgerTransitionSpec")
+        }),
+        "A10 dispatches ControlCommand through SequenceNeutralSpec<Tag>, never directly to its body"
+    );
+
+    let mut forbidden_direct_dispatch = base.clone();
+    let mut forbidden = field(
+        "ControlCommand",
+        0x7ffd,
+        "hm6l_forbidden_direct_resource_spec_ref",
+        control_order,
+    );
+    forbidden.target_schema_id = Some("ResourceLedgerTransitionSpec".into());
+    forbidden_direct_dispatch.fields.push(forbidden);
+    let forbidden_codes = codes_without_assignment_drift(&forbidden_direct_dispatch);
+    assert!(
+        forbidden_codes.contains(&"dag_future_result".to_string()),
+        "vacuity control FIRED: forbidden ControlCommand@10 -> ResourceLedgerTransitionSpec@20: {forbidden_codes:?}"
+    );
+
+    let mut too_early = base.clone();
+    too_early
+        .logical
+        .iter_mut()
+        .find(|row| row.name == "ResourceLedgerTransitionSpec")
+        .expect("ResourceLedgerTransitionSpec exists")
+        .construction_order = 14;
+    for row in &mut too_early.fields {
+        if row.containing_schema == "ResourceLedgerTransitionSpec" {
+            row.construction_order = 14;
+        }
+    }
+    let too_early_codes = codes_without_assignment_drift(&too_early);
+    assert!(
+        too_early_codes.contains(&"dag_future_result".to_string()),
+        "outbound control FIRED: ResourceLedgerTransitionSpec@14 cannot retain ResourceLedgerTransition@15: {too_early_codes:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A12 exact source field order (fgdb-a12-exact-field-order-residue-mn8i).
+//
+// The source census is alphabetical, so vector position is never a durable
+// field tag. This reader derives tags only from first source position, proves
+// the known alphabetical-order counterexample, and then checks all 80 landed
+// rows plus the five named semantic residue fields against that one derivation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
+    let base = real_identity();
+    assert!(
+        identity::validate_identity(&base).is_empty(),
+        "the released identity registry is the baseline control"
+    );
+
+    let catalog = real_appendix_catalog();
+    let plan = real_plan_source();
+    let appendix = source_range(
+        &plan,
+        catalog.source_manifest.start_line,
+        catalog.source_manifest.end_line,
+    );
+    assert_eq!(
+        registry_check::hash::sha256_hex(&appendix),
+        catalog.source_manifest.sha256,
+        "the exact source-manifest control must fire before assigning tags"
+    );
+    let source_start =
+        usize::try_from(catalog.source_manifest.start_line).expect("source line fits usize");
+    let specs: Vec<_> = catalog
+        .slices
+        .iter()
+        .map(|slice| appendix_source::SourceSliceSpec {
+            id: slice.id.as_str(),
+            start_line: usize::try_from(slice.start_line).expect("slice start fits usize"),
+            end_line: usize::try_from(slice.end_line).expect("slice end fits usize"),
+        })
+        .collect();
+    let census = appendix_source::census_appendix_source(&appendix, source_start, &specs)
+        .expect("the one Appendix A source reader succeeds");
+    let a12 = census
+        .slices
+        .iter()
+        .find(|slice| slice.slice_id == "a12")
+        .expect("A12 census exists");
+
+    let global_bodyless: BTreeSet<_> = census
+        .ambiguities
+        .iter()
+        .filter(|row| {
+            row.key.kind == appendix_source::AmbiguityKind::DefinitionWithoutStructuralBody
+        })
+        .flat_map(|row| row.affected_source_keys.iter().cloned())
+        .collect();
+    assert_eq!(
+        global_bodyless.len(),
+        202,
+        "the Appendix-wide definition-without-body control moved"
+    );
+    let a12_bodyless: BTreeSet<_> = a12
+        .ambiguities
+        .iter()
+        .filter(|row| {
+            row.key.kind == appendix_source::AmbiguityKind::DefinitionWithoutStructuralBody
+        })
+        .filter_map(|row| row.key.schema_family.clone())
+        .collect();
+    assert_eq!(
+        a12_bodyless,
+        BTreeSet::from(["ConstraintStateDirectoryRoot".to_owned()]),
+        "A12's one bodyless schema moved"
+    );
+    assert_eq!(
+        a12.fields
+            .iter()
+            .filter(|row| a12_bodyless.contains(&row.key.schema_family))
+            .count(),
+        0,
+        "a definition without a structural body emits zero interior keys"
+    );
+
+    let targeted_arms: BTreeSet<_> = catalog
+        .targets
+        .iter()
+        .filter(|target| target.target_kind == "union-arm")
+        .map(|target| target.source_key.as_str())
+        .collect();
+    let targeted_arm_spans: Vec<_> = a12
+        .arms
+        .iter()
+        .filter(|arm| targeted_arms.contains(arm.key.source_key().as_str()))
+        .flat_map(|arm| arm.locations.iter().copied())
+        .collect();
+    let arm_interior = |field: &appendix_source::FieldCandidate| {
+        targeted_arm_spans.iter().any(|arm_span| {
+            field.locations.iter().any(|field_span| {
+                field_span.start >= arm_span.start && field_span.end <= arm_span.end
+            })
+        })
+    };
+
+    let mut leaves_by_owner: BTreeMap<&str, Vec<&appendix_source::FieldCandidate>> =
+        BTreeMap::new();
+    for field in &a12.fields {
+        if arm_interior(field)
+            || field
+                .exact_types
+                .iter()
+                .any(|exact| exact.starts_with('{') && exact.ends_with('}'))
+        {
+            continue;
+        }
+        leaves_by_owner
+            .entry(field.key.schema_owner.as_str())
+            .or_default()
+            .push(field);
+    }
+    let mut inferred_tags = BTreeMap::new();
+    for (owner, fields) in &mut leaves_by_owner {
+        fields.sort_by_key(|field| {
+            field
+                .locations
+                .iter()
+                .map(|span| span.start)
+                .min()
+                .expect("field location exists")
+        });
+        for (index, field) in fields.iter().enumerate() {
+            inferred_tags.insert(
+                (owner.to_string(), field.key.stable_name.clone()),
+                i64::try_from(index + 1).expect("source-position tag fits"),
+            );
+        }
+    }
+
+    let landed: Vec<_> = base
+        .fields
+        .iter()
+        .filter(|row| row.retention_and_cut_rule.contains("source-position tag"))
+        .collect();
+    assert_eq!(landed.len(), 80, "the mn8i landed field tranche moved");
+    for row in &landed {
+        let key = (row.containing_schema.clone(), row.stable_name.clone());
+        let expected = inferred_tags
+            .get(&key)
+            .unwrap_or_else(|| panic!("source leaf missing for {}.{}", key.0, key.1));
+        assert_eq!(
+            row.field_tag, *expected,
+            "{}.{} must use source position, never census order",
+            row.containing_schema, row.stable_name
+        );
+        assert_eq!(
+            row.construction_order,
+            base.logical
+                .iter()
+                .find(|kind| { kind.name == identity::generic_free_family(&row.containing_schema) })
+                .expect("every landed field has a non-wire logical host")
+                .construction_order,
+            "{}.{} must equal its containing kind order",
+            row.containing_schema,
+            row.stable_name
+        );
+        if row.reference_semantics == "none" {
+            assert_eq!(
+                row.identity_class, "inline",
+                "every non-reference field uses the settled inline class"
+            );
+        }
+    }
+
+    let residue = [
+        (
+            "ConstraintValidationEvidence",
+            "sorted_positive_negative_gap_range_interval_witness_refs",
+            4,
+        ),
+        ("ConstraintValidationEvidence", "body_digest", 9),
+        ("ResourceLedgerAppliedRecord", "command_ref", 1),
+        (
+            "ResourceLedgerTransition<Role:AuthorityOwningRole>",
+            "release_or_measurement_evidence_ref",
+            13,
+        ),
+        (
+            "ResourceLedgerTransition<Role:AuthorityOwningRole>",
+            "body_digest",
+            14,
+        ),
+    ];
+    for (schema, stable_name, tag) in residue {
+        assert_eq!(
+            inferred_tags.get(&(schema.to_owned(), stable_name.to_owned())),
+            Some(&tag),
+            "named semantic residue still gets its source-spelled durable tag"
+        );
+        assert!(
+            !base
+                .fields
+                .iter()
+                .any(|row| { row.containing_schema == schema && row.stable_name == stable_name }),
+            "{schema}.{stable_name} stays named residue, not a guessed row"
+        );
+    }
+    assert_eq!(
+        landed.len() + residue.len(),
+        85,
+        "85 genuine obligations = 80 landed + 5 named semantic residue"
+    );
+
+    let local_fields = leaves_by_owner
+        .get("LocalConstraintReservationRecord")
+        .expect("local reservation fields exist");
+    let mut alphabetical: Vec<_> = local_fields
+        .iter()
+        .map(|field| field.key.stable_name.as_str())
+        .collect();
+    alphabetical.sort_unstable();
+    let census_position = alphabetical
+        .iter()
+        .position(|name| *name == "before_root_commitment")
+        .expect("control field exists")
+        + 1;
+    let source_position = inferred_tags
+        .get(&(
+            "LocalConstraintReservationRecord".to_owned(),
+            "before_root_commitment".to_owned(),
+        ))
+        .copied()
+        .expect("source tag exists");
+    assert_eq!(census_position, 2, "alphabetical census control moved");
+    assert_eq!(source_position, 6, "source-spelled control tag moved");
+    assert_ne!(
+        i64::try_from(census_position).expect("census position fits"),
+        source_position,
+        "vacuity control FIRED: census order must disagree with source spelling"
+    );
+
+    let checkpoint_order = base
+        .logical
+        .iter()
+        .find(|kind| kind.name == "CheckpointStateVector")
+        .expect("CheckpointStateVector exists")
+        .construction_order;
+    let retention_order = base
+        .logical
+        .iter()
+        .find(|kind| kind.name == "RetentionCutBody")
+        .expect("RetentionCutBody exists")
+        .construction_order;
+    let recovery_order = base
+        .logical
+        .iter()
+        .find(|kind| kind.name == "RecoveryCheckpoint")
+        .expect("RecoveryCheckpoint exists")
+        .construction_order;
+    assert_eq!(retention_order, 20, "named outbound order moved");
+    assert_eq!(checkpoint_order, 25, "adjudicated checkpoint order moved");
+    assert_eq!(recovery_order, 30, "named inbound order moved");
+
+    let mut too_early = base.clone();
+    too_early
+        .logical
+        .iter_mut()
+        .find(|kind| kind.name == "CheckpointStateVector")
+        .expect("CheckpointStateVector exists")
+        .construction_order = 19;
+    for row in &mut too_early.fields {
+        if row.containing_schema == "CheckpointStateVector" {
+            row.construction_order = 19;
+        }
+    }
+    let mut outbound = field(
+        "CheckpointStateVector",
+        0x7ffe,
+        "mn8i_retention_cut_body_ref",
+        19,
+    );
+    outbound.target_schema_id = Some("RetentionCutBody".into());
+    too_early.fields.push(outbound);
+    let too_early_codes = codes_without_assignment_drift(&too_early);
+    assert!(
+        too_early_codes.contains(&"dag_future_result".to_string()),
+        "outbound mutation FIRED: CheckpointStateVector@19 cannot retain RetentionCutBody@20: {too_early_codes:?}"
+    );
+
+    let mut too_late = base.clone();
+    too_late
+        .logical
+        .iter_mut()
+        .find(|kind| kind.name == "CheckpointStateVector")
+        .expect("CheckpointStateVector exists")
+        .construction_order = 31;
+    for row in &mut too_late.fields {
+        if row.containing_schema == "CheckpointStateVector" {
+            row.construction_order = 31;
+        }
+    }
+    let too_late_codes = codes_without_assignment_drift(&too_late);
+    assert!(
+        too_late_codes.contains(&"dag_future_result".to_string()),
+        "inbound mutation FIRED: RecoveryCheckpoint@30 cannot retain CheckpointStateVector@31: {too_late_codes:?}"
+    );
+
+    let mut field_order_mismatch = base.clone();
+    field_order_mismatch
+        .fields
+        .iter_mut()
+        .find(|row| {
+            row.containing_schema == "LocalConstraintReservationRecord"
+                && row.stable_name == "admission_generation"
+        })
+        .expect("named source-order field exists")
+        .construction_order = 29;
+    let mismatch_codes = codes_without_assignment_drift(&field_order_mismatch);
+    assert!(
+        mismatch_codes.contains(&"field_construction_order_mismatch".to_string()),
+        "field-order equality control FIRED: field@29 must equal containing kind@30: {mismatch_codes:?}"
     );
 }

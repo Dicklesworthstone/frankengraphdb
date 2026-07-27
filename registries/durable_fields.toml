@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 75
+registry_epoch = 76
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -937,6 +937,34 @@ max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0002
+stable_name = "basis_logical_command_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1966 source-position tag 2; exact covered logical-command prefix; embedded by value and retained/cut with CheckpointInstallSpec, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0003
+stable_name = "basis_commit_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1966 source-position tag 3; exact covered committed-transaction prefix; embedded by value and retained/cut with CheckpointInstallSpec, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "CheckpointInstallSpec"
 field_tag = 0x0004
 stable_name = "basis_payload_digest"
 exact_wire_type = "WeakDigest"
@@ -1027,6 +1055,20 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x000a
+stable_name = "reset_field_tags"
+exact_wire_type = "u16"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1966 source-position tag 10; strictly ascending unique source field tags reset by install; embedded by value and retained/cut with CheckpointInstallSpec, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 131070
+
+[[field]]
 containing_schema = "CheckpointStateVector"
 field_tag = 0x0001
 stable_name = "mandatory_inventory"
@@ -1034,7 +1076,7 @@ exact_wire_type = "MandatoryInventoryRef"
 cardinality = "many"
 identity_class = "logical"
 reference_semantics = "strong"
-construction_order = 35
+construction_order = 25
 role_predicate = "role-local"
 retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
 version_status = "reserved"
@@ -1320,6 +1362,20 @@ digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "ConstraintMutationBatch"
+field_tag = 0x0001
+stable_name = "coordinate"
+exact_wire_type = "ConstraintCoordinateKey"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 1; inline sequence-neutral constraint coordinate; embedded by value and retained/cut with ConstraintMutationBatch, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ConstraintMutationBatch"
 field_tag = 0x0002
 stable_name = "apply_basis"
 exact_wire_type = "WeakMarkerIdentity"
@@ -1361,6 +1417,56 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the exact constraint-state root constructed after this mutation batch; retained while the batch is retained and cut only with that batch (a12:1980)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "ConstraintMutationBatch"
+field_tag = 0x0005
+stable_name = "sorted_mutations"
+exact_wire_type = "ConstraintStateMutation"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 5; closed mutation values sorted by constraint, domain key and subkey; embedded by value and retained/cut with ConstraintMutationBatch, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ConstraintMutationBatch"
+field_tag = 0x0006
+stable_name = "removed_and_added_contribution_commitment"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 6; net contribution transcript; embedded by value and retained/cut with ConstraintMutationBatch, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(utf8(\"fgdb:constraint-contribution-delta:v1\") || canonical(removed contribution identities in ascending byte order, added contribution identities in ascending byte order)); reject duplicates, overlap and count overflow before hashing"
+
+[[field]]
+containing_schema = "ConstraintMutationBatch"
+field_tag = 0x0007
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 7; BodyDigest over tags 1 through 6, excluding itself; embedded by value and retained/cut with ConstraintMutationBatch, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:constraint-mutation-batch:v1"
+bd_schema_major = 1
+bd_included_field_tags = [1, 2, 3, 4, 5, 6]
+bd_excluded_field_tags = [7]
+recipe_pin = "fnv1a64:05b5867b55bea2c9"
 
 [[field]]
 containing_schema = "ConstraintReservationRecord"
@@ -1409,6 +1515,48 @@ max_size_bytes = 537
 
 [[field]]
 containing_schema = "ConstraintStateRoot"
+field_tag = 0x0001
+stable_name = "format_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1978 source-position tag 1; canonical constraint-state format version; embedded by value and retained/cut with ConstraintStateRoot, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x0002
+stable_name = "database_security_namespace_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1978 source-position tag 2; opaque database security namespace identity; embedded by value and retained/cut with ConstraintStateRoot, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x0003
+stable_name = "cluster_incarnation"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1978 source-position tag 3; opaque cluster-incarnation identity; embedded by value and retained/cut with ConstraintStateRoot, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "ConstraintStateRoot"
 field_tag = 0x0004
 stable_name = "coordinate"
 exact_wire_type = "ConstraintCoordinateKey"
@@ -1420,6 +1568,20 @@ role_predicate = "true"
 retention_and_cut_rule = "inline sequence-neutral ConstraintCoordinateKey embedded by value in the constraint state root; retained and cut with the containing root, names no selected head or future marker, and creates no reachability edge (a12:1974,1978)"
 version_status = "reserved"
 max_size_bytes = 256
+
+[[field]]
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x0005
+stable_name = "state_generation"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1978 source-position tag 5; monotone state generation; embedded by value and retained/cut with ConstraintStateRoot, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "ConstraintStateRoot"
@@ -1435,6 +1597,247 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the exact constraint definition set governing this state root; retained while the root is retained and cut only with that root (a12:1978)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x0007
+stable_name = "equality_map_root"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1978 source-position tag 7; canonical authenticated equality-map root encoding; embedded by value and retained/cut with ConstraintStateRoot, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x0008
+stable_name = "cardinality_map_root"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1978 source-position tag 8; canonical authenticated cardinality-map root encoding; embedded by value and retained/cut with ConstraintStateRoot, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x0009
+stable_name = "reference_map_root"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1978 source-position tag 9; canonical authenticated reference-map root encoding; embedded by value and retained/cut with ConstraintStateRoot, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x000a
+stable_name = "temporal_interval_map_root"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1978 source-position tag 10; canonical authenticated temporal-interval-map root encoding; embedded by value and retained/cut with ConstraintStateRoot, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x000b
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1978 source-position tag 11; BodyDigest over tags 1 through 10, excluding itself; embedded by value and retained/cut with ConstraintStateRoot, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:constraint-state-root:v1"
+bd_schema_major = 1
+bd_included_field_tags = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+bd_excluded_field_tags = [11]
+recipe_pin = "fnv1a64:04c5c11b3885b10f"
+
+[[field]]
+containing_schema = "ConstraintStateTransition"
+field_tag = 0x0001
+stable_name = "transition_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 1; opaque sequence-neutral transition identity; embedded by value and retained/cut with ConstraintStateTransition, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "ConstraintStateTransition"
+field_tag = 0x0002
+stable_name = "mutation_batch_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConstraintMutationBatch"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 2; retains the already-built mutation batch; retained while ConstraintStateTransition is retained, with target ConstraintMutationBatch constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ConstraintStateTransition"
+field_tag = 0x0003
+stable_name = "validation_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConstraintValidationEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 3; retains the complete validation evidence; retained while ConstraintStateTransition is retained, with target ConstraintValidationEvidence constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ConstraintStateTransition"
+field_tag = 0x0004
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 4; BodyDigest over tags 1 through 3, excluding itself; embedded by value and retained/cut with ConstraintStateTransition, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:constraint-state-transition:v1"
+bd_schema_major = 1
+bd_included_field_tags = [1, 2, 3]
+bd_excluded_field_tags = [4]
+recipe_pin = "fnv1a64:6a0d1d1acccb0ef5"
+
+[[field]]
+containing_schema = "ConstraintValidationEvidence"
+field_tag = 0x0001
+stable_name = "mutation_batch_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConstraintMutationBatch"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 1; retains the exact batch being validated; retained while ConstraintValidationEvidence is retained, with target ConstraintMutationBatch constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ConstraintValidationEvidence"
+field_tag = 0x0002
+stable_name = "complete_affected_definition_bitmap"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 2; canonical complete definition bitmap with length and trailing-bit checks; embedded by value and retained/cut with ConstraintValidationEvidence, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 1048576
+
+[[field]]
+containing_schema = "ConstraintValidationEvidence"
+field_tag = 0x0003
+stable_name = "sorted_row_local_evidence"
+exact_wire_type = "bytes"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 3; canonical source-ordered row-local evidence values, length framed and duplicate rejecting; embedded by value and retained/cut with ConstraintValidationEvidence, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ConstraintValidationEvidence"
+field_tag = 0x0005
+stable_name = "owner_reservation_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalConstraintReservationRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 5; retains every exact local owner reservation in canonical identity order; retained while ConstraintValidationEvidence is retained, with target LocalConstraintReservationRecord constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ConstraintValidationEvidence"
+field_tag = 0x0006
+stable_name = "authorization_and_disclosure_binding"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 6; canonical authority and disclosure binding bytes; embedded by value and retained/cut with ConstraintValidationEvidence, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[field]]
+containing_schema = "ConstraintValidationEvidence"
+field_tag = 0x0007
+stable_name = "canonicalization_profile_commitment"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 7; target commitment to the exact canonicalization profile; embedded by value and retained/cut with ConstraintValidationEvidence, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "ConstraintValidationEvidence"
+field_tag = 0x0008
+stable_name = "reference_evaluator_version"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1980 source-position tag 8; pinned reference-evaluator version; embedded by value and retained/cut with ConstraintValidationEvidence, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 4
 
 [[field]]
 containing_schema = "ContinuityAuthorityObservationImport<Role>"
@@ -3437,6 +3840,34 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "HistoryCutActivationSpec"
+field_tag = 0x0004
+stable_name = "verified_contiguous_suffix_start"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1972 source-position tag 4; first retained command position after the verified cut; embedded by value and retained/cut with HistoryCutActivationSpec, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "HistoryCutActivationSpec"
+field_tag = 0x0005
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1972 source-position tag 5; shared closed terminal-audit gate carried by the sequence-neutral wrapper bytes; embedded by value and retained/cut with HistoryCutActivationSpec, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
 field_tag = 0x0001
 stable_name = "authority_bound_header"
@@ -3827,6 +4258,34 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0006
+stable_name = "expected_logical_command_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1966 source-position tag 6; exact expected local logical command position; embedded by value and retained/cut with InitialConfigFloorInstallSpec, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0007
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1966 source-position tag 7; shared closed terminal-audit gate carried by the sequence-neutral wrapper bytes; embedded by value and retained/cut with InitialConfigFloorInstallSpec, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "KeyDestroyProposal"
 field_tag = 0x0001
 stable_name = "key_identity"
@@ -4213,6 +4672,121 @@ role_predicate = "true"
 retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the buffered result manifest; retained with the manifest and creates no reachability edge (a03:1490)"
 version_status = "reserved"
 max_size_bytes = 256
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecord"
+field_tag = 0x0001
+stable_name = "reservation_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1982 source-position tag 1; opaque reservation identity; embedded by value and retained/cut with LocalConstraintReservationRecord, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecord"
+field_tag = 0x0002
+stable_name = "registration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalAttemptRegistration"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1982 source-position tag 2; owner registration leaf from the anonymous owner body; retained while LocalConstraintReservationRecord is retained, with target LocalAttemptRegistration constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecord"
+field_tag = 0x0003
+stable_name = "prepare_admission_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalPrepareAdmissionSpec"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1982 source-position tag 3; owner prepare-admission leaf from the anonymous owner body; retained while LocalConstraintReservationRecord is retained, with target LocalPrepareAdmissionSpec constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecord"
+field_tag = 0x0004
+stable_name = "admission_generation"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1982 source-position tag 4; owner admission generation leaf from the anonymous owner body; embedded by value and retained/cut with LocalConstraintReservationRecord, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecord"
+field_tag = 0x0005
+stable_name = "sorted_domain_keys_and_ranges"
+exact_wire_type = "bytes"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1982 source-position tag 5; canonical constraint/domain key-or-range encodings sorted by coordinate, constraint and key; embedded by value and retained/cut with LocalConstraintReservationRecord, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecord"
+field_tag = 0x0006
+stable_name = "before_root_commitment"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1982 source-position tag 6; target commitment to the validated before-root state; embedded by value and retained/cut with LocalConstraintReservationRecord, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecord"
+field_tag = 0x0007
+stable_name = "reservation_generation"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1982 source-position tag 7; monotone reservation generation; embedded by value and retained/cut with LocalConstraintReservationRecord, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "LocalConstraintReservationRecord"
+field_tag = 0x0008
+stable_name = "state"
+exact_wire_type = "LocalConstraintReservationRecordState"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1982 source-position tag 8; closed Held=1 | Consumed=2 | Released=3 state union; embedded by value and retained/cut with LocalConstraintReservationRecord, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "LocalFinalCertificationReservation"
@@ -5897,6 +6471,34 @@ digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "RecoveryCheckpoint"
+field_tag = 0x0001
+stable_name = "basis_logical_command_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1964 source-position tag 1; exact covered logical-command prefix; embedded by value and retained/cut with RecoveryCheckpoint, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RecoveryCheckpoint"
+field_tag = 0x0002
+stable_name = "basis_commit_seq"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1964 source-position tag 2; exact covered committed-transaction prefix; embedded by value and retained/cut with RecoveryCheckpoint, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RecoveryCheckpoint"
 field_tag = 0x0005
 stable_name = "basis_payload_digest"
 exact_wire_type = "WeakDigest"
@@ -5925,6 +6527,35 @@ version_status = "reserved"
 max_size_bytes = 32
 digest_class = "transcript"
 transcript_recipe = "BLAKE3(\"fgdb:checkpoint-projection:v1\" || canonical(vector reconstruction with exact literals))"
+
+[[field]]
+containing_schema = "RecoveryCheckpoint"
+field_tag = 0x0007
+stable_name = "logical_hlc_state"
+exact_wire_type = "HlcTimestamp"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1964 source-position tag 7; canonical persisted logical HLC state; embedded by value and retained/cut with RecoveryCheckpoint, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16
+
+[[field]]
+containing_schema = "RecoveryCheckpoint"
+field_tag = 0x0008
+stable_name = "checkpoint_state_vector_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CheckpointStateVector"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "a12:1964 source-position tag 8; retains the already-built vector at source-mandated order 25 before checkpoint order 30; retained while RecoveryCheckpoint is retained, with target CheckpointStateVector constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "RecoveryCheckpoint"
@@ -8074,6 +8705,177 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "ResourceChargeEffect"
+field_tag = 0x0002
+stable_name = "stable_subject_key"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "a12:1996 source-position tag 2; canonical stable logical subject key, never a future object identity; embedded by value and retained/cut with ResourceChargeEffect, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 4096
+
+[[field]]
+containing_schema = "ResourceChargeEffect"
+field_tag = 0x0003
+stable_name = "before_vector"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "a12:1996 source-position tag 3; fixed six-component checked nonnegative DurableChargeVector before value; embedded by value and retained/cut with ResourceChargeEffect, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "ResourceChargeEffect"
+field_tag = 0x0004
+stable_name = "after_vector"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "a12:1996 source-position tag 4; fixed six-component checked nonnegative DurableChargeVector after value; embedded by value and retained/cut with ResourceChargeEffect, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "ResourceLedgerAppliedRecord"
+field_tag = 0x0002
+stable_name = "assigned_role_logical_position"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "a12:1996 source-position tag 2; assigned Local logical command sequence or Meta global logical command sequence under the containing role; embedded by value and retained/cut with ResourceLedgerAppliedRecord, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "ResourceLedgerAppliedRecord"
+field_tag = 0x0003
+stable_name = "transition_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ResourceLedgerTransition"
+construction_order = 30
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "a12:1996 source-position tag 3; retains the exact canonical transition set applied by this record; retained while ResourceLedgerAppliedRecord is retained, with target ResourceLedgerTransition constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerAppliedRecord"
+field_tag = 0x0004
+stable_name = "before_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ResourceLedgerState"
+construction_order = 30
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "a12:1996 source-position tag 4; retains the exact before ledger root; retained while ResourceLedgerAppliedRecord is retained, with target ResourceLedgerState constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ResourceLedgerAppliedRecord"
+field_tag = 0x0005
+stable_name = "after_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ResourceLedgerState"
+construction_order = 30
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "a12:1996 source-position tag 5; retains the exact after ledger root; retained while ResourceLedgerAppliedRecord is retained, with target ResourceLedgerState constructed no later than owner order 30"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x0001
+stable_name = "format_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1990 source-position tag 1; canonical resource-ledger format version; embedded by value and retained/cut with ResourceLedgerState, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x0002
+stable_name = "database_security_namespace_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1990 source-position tag 2; opaque database security namespace identity; embedded by value and retained/cut with ResourceLedgerState, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x0003
+stable_name = "cluster_incarnation"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1990 source-position tag 3; opaque cluster-incarnation identity; embedded by value and retained/cut with ResourceLedgerState, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x0004
+stable_name = "role"
+exact_wire_type = "u8"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1990 source-position tag 4; closed ResourceAccountingRole tag: Local=1, Meta=2; every other value invalid; embedded by value and retained/cut with ResourceLedgerState, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x0005
+stable_name = "ledger_generation"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1990 source-position tag 5; monotone ledger generation; embedded by value and retained/cut with ResourceLedgerState, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
 containing_schema = "ResourceLedgerState"
 field_tag = 0x0006
 stable_name = "limit_policy_ref"
@@ -8089,6 +8891,96 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x0007
+stable_name = "limit_policy_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1990 source-position tag 7; exact limit-policy epoch repeated from the retained policy; embedded by value and retained/cut with ResourceLedgerState, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x0008
+stable_name = "bucket_state_root"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1990 source-position tag 8; canonical authenticated quota-bucket map root encoding; embedded by value and retained/cut with ResourceLedgerState, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x0009
+stable_name = "reservation_entry_root"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1990 source-position tag 9; canonical authenticated reservation-entry map root encoding; embedded by value and retained/cut with ResourceLedgerState, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x000a
+stable_name = "charge_entry_root"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1990 source-position tag 10; canonical authenticated charge-entry map root encoding; embedded by value and retained/cut with ResourceLedgerState, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x000b
+stable_name = "applied_transition_index_root"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1990 source-position tag 11; canonical authenticated transition-id-to-body-and-outcome map root encoding; embedded by value and retained/cut with ResourceLedgerState, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x000c
+stable_name = "body_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "a12:1990 source-position tag 12; BodyDigest over tags 1 through 11, excluding itself; embedded by value and retained/cut with ResourceLedgerState, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "body"
+bd_domain_separator = "fgdb:body:resource-ledger-state:v1"
+bd_schema_major = 1
+bd_included_field_tags = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+bd_excluded_field_tags = [12]
+recipe_pin = "fnv1a64:014cbd89d7a2da64"
+
+[[field]]
 containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
 field_tag = 0x0001
 stable_name = "authority_bound_header"
@@ -8101,6 +8993,20 @@ role_predicate = "true"
 retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in the sequence-neutral pre-order ledger transition; retained with the containing object, byte-matched against the basis role and containing command, and creates no reachability edge (a12:1992)"
 version_status = "reserved"
 max_size_bytes = 256
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0002
+stable_name = "transition_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "a12:1992 source-position tag 2; opaque sequence-neutral transition identity; embedded by value and retained/cut with ResourceLedgerTransition<Role:AuthorityOwningRole>, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
 
 [[field]]
 containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
@@ -8147,6 +9053,92 @@ max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0006
+stable_name = "resource_class"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "a12:1992 source-position tag 6; closed generated resource-class discriminant under the selected policy epoch; embedded by value and retained/cut with ResourceLedgerTransition<Role:AuthorityOwningRole>, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0007
+stable_name = "quota_path"
+exact_wire_type = "QuotaPath"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "a12:1992 source-position tag 7; canonical nonempty root-to-leaf Database|Tenant|Graph|Branch|Feature path; embedded by value and retained/cut with ResourceLedgerTransition<Role:AuthorityOwningRole>, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0008
+stable_name = "operation"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "a12:1992 source-position tag 8; closed source-ordered Reserve|Charge|Release|Expire|Transfer|Adjust operation encoding with exact arm payload; embedded by value and retained/cut with ResourceLedgerTransition<Role:AuthorityOwningRole>, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "exact_sorted_before_buckets"
+exact_wire_type = "bytes"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "a12:1992 source-position tag 9; canonical exact before-bucket rows sorted by unique quota path; embedded by value and retained/cut with ResourceLedgerTransition<Role:AuthorityOwningRole>, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "exact_sorted_after_buckets"
+exact_wire_type = "bytes"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "a12:1992 source-position tag 10; canonical exact after-bucket rows sorted by the same unique quota paths; embedded by value and retained/cut with ResourceLedgerTransition<Role:AuthorityOwningRole>, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "checked_arithmetic_commitment"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "a12:1992 source-position tag 11; checked arithmetic transcript over exact before, delta and after values; embedded by value and retained/cut with ResourceLedgerTransition<Role:AuthorityOwningRole>, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(utf8(\"fgdb:resource-ledger-checked-arithmetic:v1\") || canonical(operation tag and payload, exact_sorted_before_buckets, exact_sorted_after_buckets, shared-ancestor netting and every checked intermediate)); reject overflow, underflow and path mismatch before hashing"
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
 field_tag = 0x000c
 stable_name = "authorization_decision_ref"
 exact_wire_type = "StrongRef"
@@ -8159,6 +9151,79 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the exact role-parameterized authorization decision that admitted this transition; retained while the transition is retained, with the target constructed no later than its owner (a12:1992)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "ResourceLedgerTransitionSpec"
+field_tag = 0x0001
+stable_name = "expected_basis"
+exact_wire_type = "ResourceLedgerBasis"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "a12:1994 source-position tag 1; inline expected ledger basis; embedded by value and retained/cut with ResourceLedgerTransitionSpec, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerTransitionSpec"
+field_tag = 0x0002
+stable_name = "sorted_transition_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ResourceLedgerTransition"
+construction_order = 20
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "a12:1994 source-position tag 2; retains the already-built transitions in canonical transition-id order; retained while ResourceLedgerTransitionSpec is retained, with target ResourceLedgerTransition constructed no later than owner order 20"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResourceLedgerTransitionSpec"
+field_tag = 0x0003
+stable_name = "complete_transition_id_set_commitment"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "a12:1994 source-position tag 3; complete transition-id set transcript; embedded by value and retained/cut with ResourceLedgerTransitionSpec, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(utf8(\"fgdb:resource-ledger-transition-id-set:v1\") || canonical(u64 transition_count, each unique transition_id:id256 in ascending byte order)); reject duplicates and count overflow before hashing"
+
+[[field]]
+containing_schema = "ResourceLedgerTransitionSpec"
+field_tag = 0x0004
+stable_name = "semantic_subject_basis"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "a12:1994 source-position tag 4; canonical semantic subject basis, sequence neutral and free of a future applied identity; embedded by value and retained/cut with ResourceLedgerTransitionSpec, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 1048576
+
+[[field]]
+containing_schema = "ResourceLedgerTransitionSpec"
+field_tag = 0x0005
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "role-local || role-meta"
+retention_and_cut_rule = "a12:1994 source-position tag 5; shared closed terminal-audit gate carried by the sequence-neutral wrapper bytes; embedded by value and retained/cut with ResourceLedgerTransitionSpec, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "RestoreAbandonOperationRecord<Role:AuthorityOwningRole>"
@@ -9303,6 +10368,108 @@ role_predicate = "true"
 retention_and_cut_rule = "inline comparison-only identity for the state basis of the checkpoint-free cut body; retained and cut with the body and never followed as a reachability edge (a12:1968)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RetentionCutBody"
+field_tag = 0x0003
+stable_name = "command_cut_recipe"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "a12:1968 source-position tag 3; closed role-valid logical/global/shard/marker/effect cut recipe encoding; embedded by value and retained/cut with RetentionCutBody, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RetentionCutBody"
+field_tag = 0x0004
+stable_name = "sorted_marker_cut_recipes"
+exact_wire_type = "bytes"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "a12:1968 source-position tag 4; canonical marker-cut recipes sorted by axis and stop identity; embedded by value and retained/cut with RetentionCutBody, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RetentionCutBody"
+field_tag = 0x0005
+stable_name = "sorted_effect_cut_recipes"
+exact_wire_type = "bytes"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "a12:1968 source-position tag 5; canonical effect-cut recipes sorted by graph, branch and through sequence; embedded by value and retained/cut with RetentionCutBody, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "RetentionCutBody"
+field_tag = 0x0006
+stable_name = "covered_policy_epoch"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "a12:1968 source-position tag 6; policy epoch under which completeness was checked; embedded by value and retained/cut with RetentionCutBody, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RetentionCutBody"
+field_tag = 0x0007
+stable_name = "covered_coordinate_set_commitment"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "a12:1968 source-position tag 7; complete coordinate-set transcript; embedded by value and retained/cut with RetentionCutBody, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(utf8(\"fgdb:retention-cut-coordinate-set:v1\") || canonical(u64 coordinate_count, each unique canonical coordinate identity in ascending byte order)); reject duplicates and count overflow before hashing"
+
+[[field]]
+containing_schema = "RetentionCutBody"
+field_tag = 0x0008
+stable_name = "verified_first_retained_order"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "a12:1968 source-position tag 8; first retained role order after the cut; embedded by value and retained/cut with RetentionCutBody, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "RetentionCutBody"
+field_tag = 0x0009
+stable_name = "completeness_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "a12:1968 source-position tag 9; complete cut-body transcript excluding itself and every future checkpoint identity; embedded by value and retained/cut with RetentionCutBody, with no independent reachability edge"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(utf8(\"fgdb:retention-cut-completeness:v1\") || canonical(tags 1 through 8 in source order)); excludes completeness_digest, checkpoint identity, install result identity and every reclaimed object identity not present in the cut recipes"
 
 [[field]]
 containing_schema = "RootAuthorityTrustArtifact"
@@ -12280,7 +13447,7 @@ containing_schema = "ConstraintStateMutation"
 union_path = "ConstraintStateMutation"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ConstraintStateMutation"]
+allowed_containing_schemas = ["ConstraintMutationBatch", "ConstraintStateMutation"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -13336,6 +14503,7 @@ max_size_bytes = 16777216
 union_name = "LocalConstraintReservationRecordState"
 containing_schema = "LocalConstraintReservationRecord"
 union_path = "LocalConstraintReservationRecord.state"
+field_tag = 0x0008
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["LocalConstraintReservationRecord"]
@@ -14147,7 +15315,7 @@ containing_schema = "QuotaPath"
 union_path = "QuotaPath"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["QuotaPath"]
+allowed_containing_schemas = ["QuotaPath", "ResourceLedgerTransition<Role:AuthorityOwningRole>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -15605,7 +16773,7 @@ containing_schema = "TerminalAuditGate"
 union_path = "TerminalAuditGate"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["KeyDestroyProposal", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

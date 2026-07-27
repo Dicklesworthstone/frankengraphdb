@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 58
+registry_epoch = 59
 
 [[kind]]
 object_kind = 0x0001
@@ -84,7 +84,7 @@ golden_corpus = "corpus/logical/authority_binding_record/"
 object_kind = 0x0009
 name = "CheckpointStateVector"
 status = "reserved"
-construction_order = 35
+construction_order = 25
 role_predicate = "role-local"
 max_size_bytes = 268435456
 golden_corpus = "corpus/logical/checkpoint_state_vector/"
@@ -4786,3 +4786,12 @@ construction_order = 30
 role_predicate = "role-local || role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/resource_ledger_applied_record/"
+
+[[kind]]
+object_kind = 0x056f
+name = "ResourceLedgerTransitionSpec"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-local || role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_ledger_transition_spec/"

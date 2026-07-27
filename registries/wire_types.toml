@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 40
+registry_epoch = 41
 
 [[type]]
 wire_type_id = 0x0001
@@ -2355,7 +2355,7 @@ name = "ConstraintStateMutation"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: SetCardinality | SetEquality | SetReference | SetTemporalInterval; the registered constraint-state mutations (a12:1964-1999)"
-allowed_containing_schemas = ["ConstraintStateMutation"]
+allowed_containing_schemas = ["ConstraintMutationBatch", "ConstraintStateMutation"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -2461,7 +2461,7 @@ name = "QuotaPath"
 kind = "discriminant"
 status = "reserved"
 encoding_context = "closed union: Database | Tenant | Graph | Branch | Feature; one segment of the canonical nonempty root-to-leaf quota path (a12:1964-1999)"
-allowed_containing_schemas = ["QuotaPath"]
+allowed_containing_schemas = ["QuotaPath", "ResourceLedgerTransition<Role:AuthorityOwningRole>"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -4144,7 +4144,7 @@ name = "TerminalAuditGate"
 kind = "union"
 status = "reserved"
 encoding_context = "shared closed u8-tagged terminal audit union StructurallyInapplicable | NotRequired | Required in source order; the Required payload carries the exact ticket, event, and terminal-resolution strong-reference triple (a21:2699)"
-allowed_containing_schemas = ["KeyDestroyProposal", "SequenceNeutralSpec<Tag>"]
+allowed_containing_schemas = ["HistoryCutActivationSpec", "InitialConfigFloorInstallSpec", "KeyDestroyProposal", "ResourceLedgerTransitionSpec", "SequenceNeutralSpec<Tag>"]
 max_size_bytes = 16777216
 
 [[type]]
