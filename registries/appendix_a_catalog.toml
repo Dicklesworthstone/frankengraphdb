@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3636
+target_count = 3638
 projection_fallback_count = 133
-target_source_assignment_sha256 = "31be673449be0221cf51998dfb1084a7c9fd7e028180af780a1d0043af28c6de"
+target_source_assignment_sha256 = "3d9db24a0045849533e3ec9f49b0166b7e21b3ef75c5a79fc07b03f345a747c0"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -48502,7 +48502,7 @@ symbol = "AbandonedRestoreTerminalPinBasisRef"
 generic_signature = "<Role>"
 source_key = "top|AbandonedRestoreTerminalPinBasisRef<Role>"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a18:2373"]
 
 [[top_level_candidate]]
@@ -111575,7 +111575,7 @@ symbol = "OperationalRestoreTerminalPinBasisRef"
 generic_signature = "<Role>"
 source_key = "top|OperationalRestoreTerminalPinBasisRef<Role>"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a18:2373"]
 
 [[top_level_candidate]]
@@ -111759,6 +111759,28 @@ target_kind = "field"
 definition_status = "declared"
 
 [[wire_type]]
+slice_id = "a18"
+row_id = "a18:wire-type:operational-restore-terminal-pin-basis-ref"
+wire_type_id = 0x0551
+name = "OperationalRestoreTerminalPinBasisRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated tag-refined strong reference whose validator admits only the Operational arm (arm_tag 0x0001) of the RestoreTerminalPinBasis<Role> union; both arms own protected bytes and retain full authority (a18:2373)"
+allowed_containing_schemas = ["LocalRestoreCompletionEvidence", "LocalRestorePhase", "MetaRestoreCompletionEvidence", "RestoreShardOperationalAck", "ShardRestoreRegistryValue"]
+max_size_bytes = 40
+
+[[wire_type]]
+slice_id = "a18"
+row_id = "a18:wire-type:abandoned-restore-terminal-pin-basis-ref"
+wire_type_id = 0x0552
+name = "AbandonedRestoreTerminalPinBasisRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated tag-refined strong reference whose validator admits only the Abandoned arm (arm_tag 0x0002) of the RestoreTerminalPinBasis<Role> union; the abandoned arm is constructed only after the abandonment root is durable and the activation ledger is Active (a18:2373)"
+allowed_containing_schemas = ["LocalRestoreCompletionEvidence", "LocalRestorePhase", "MetaRestoreCompletionEvidence", "RestoreShardAbandonAck", "ShardRestoreRegistryValue"]
+max_size_bytes = 40
+
+[[wire_type]]
 slice_id = "a20"
 row_id = "a20:wire-type:external-cas-restore-service-promotion-manifest-ref"
 wire_type_id = 0x0550
@@ -111768,6 +111790,22 @@ status = "reserved"
 encoding_context = "generated tag-refined strong reference whose validator admits only the Sharded/ExternalCas RestoreServicePromotionManifest arm; variant syntax is never used as a reference target (a20:2593)"
 allowed_containing_schemas = ["GlobalRestoreServiceFinalizeSpec"]
 max_size_bytes = 40
+
+[[target]]
+row_id = "a18:target:wire-type-operational-restore-terminal-pin-basis-ref"
+target_row_id = "a18:wire-type:operational-restore-terminal-pin-basis-ref"
+slice_id = "a18"
+source_key = "top|OperationalRestoreTerminalPinBasisRef<Role>"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:wire-type-abandoned-restore-terminal-pin-basis-ref"
+target_row_id = "a18:wire-type:abandoned-restore-terminal-pin-basis-ref"
+slice_id = "a18"
+source_key = "top|AbandonedRestoreTerminalPinBasisRef<Role>"
+target_kind = "wire-type"
+definition_status = "declared"
 
 [[target]]
 row_id = "a20:target:wire-type-external-cas-restore-service-promotion-manifest-ref"

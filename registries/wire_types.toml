@@ -5723,3 +5723,21 @@ status = "reserved"
 encoding_context = "generated tag-refined strong reference whose validator admits only the Sharded/ExternalCas RestoreServicePromotionManifest arm; variant syntax is never used as a reference target (a20:2593)"
 allowed_containing_schemas = ["GlobalRestoreServiceFinalizeSpec"]
 max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0551
+name = "OperationalRestoreTerminalPinBasisRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated tag-refined strong reference whose validator admits only the Operational arm (arm_tag 0x0001) of the RestoreTerminalPinBasis<Role> union; both arms own protected bytes and retain full authority (a18:2373)"
+allowed_containing_schemas = ["LocalRestoreCompletionEvidence", "LocalRestorePhase", "MetaRestoreCompletionEvidence", "RestoreShardOperationalAck", "ShardRestoreRegistryValue"]
+max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0552
+name = "AbandonedRestoreTerminalPinBasisRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated tag-refined strong reference whose validator admits only the Abandoned arm (arm_tag 0x0002) of the RestoreTerminalPinBasis<Role> union; the abandoned arm is constructed only after the abandonment root is durable and the activation ledger is Active (a18:2373)"
+allowed_containing_schemas = ["LocalRestoreCompletionEvidence", "LocalRestorePhase", "MetaRestoreCompletionEvidence", "RestoreShardAbandonAck", "ShardRestoreRegistryValue"]
+max_size_bytes = 40
