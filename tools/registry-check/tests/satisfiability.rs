@@ -202,6 +202,38 @@ const REGISTRY: &[(&str, Coverage)] = &[
          block in scripts/g0_identity_e2e.sh",
         ),
     ),
+    // ---- refinement family: the tag-refined-wrapper law (fgdb-gpms) -------------------
+    // All four land witnessed rather than on the backlog, because the law shipped
+    // with its fixture: `idr_refinement_claims_resolve_to_a_registered_arm` mutates
+    // one LANDED wire row per code on the real corpus and pairs the four with a
+    // conformant control. The unparseable case is the completeness half — it fires
+    // on the PRE-CHANGE prose spelling of a row that is now canonicalized, so the
+    // witness proves the law reaches the rows that motivated it, not only synthetic
+    // ones.
+    (
+        "refinement_claim_unparseable",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_refinement_claims_resolve_to_a_registered_arm"],
+        },
+    ),
+    (
+        "refinement_union_unresolved",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_refinement_claims_resolve_to_a_registered_arm"],
+        },
+    ),
+    (
+        "refinement_arm_unresolved",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_refinement_claims_resolve_to_a_registered_arm"],
+        },
+    ),
+    (
+        "refinement_arm_tag_mismatch",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_refinement_claims_resolve_to_a_registered_arm"],
+        },
+    ),
     // ---- completion family: cannot be witnessed until instance [III] resolves ----------
     (
         "complete_slice_annotation_missing",
