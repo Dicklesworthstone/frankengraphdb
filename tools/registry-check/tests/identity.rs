@@ -7604,7 +7604,6 @@ fn post_erratum_k3sa_collection_field(schema: &str, name: &str) -> bool {
     )
 }
 
-
 /// Two ordinary unions landed after 8a704c2 and were retained in the historical
 /// namespace: MEMBERSHIP drift, so a filter is the correct instrument.
 /// Licensed by accounting (fgdb-e55p): of 37 retained non-field transcript
@@ -9686,11 +9685,16 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     pre_erratum
         .ordinary_unions
         .retain(|union| !post_erratum_e55p_union(&union.union_name));
-    for (union_name, arm_name, previous_payload_sha256) in [(
-        "TrustTransition",
-        "Successor",
-        "160d187b6b8852d0adfc861629795e136d326a46dc5ee22281fa61d39fb1b392",
-    )] {
+    // A one-element `for` is a clippy::single_element_loop error under -D warnings.
+    // Destructured rather than looped: there is exactly one pre-ymqm arm to restore,
+    // and if a second is ever needed this should become a real slice with more than
+    // one row rather than a loop that pretends it already is one.
+    {
+        let (union_name, arm_name, previous_payload_sha256) = (
+            "TrustTransition",
+            "Successor",
+            "160d187b6b8852d0adfc861629795e136d326a46dc5ee22281fa61d39fb1b392",
+        );
         pre_erratum
             .ordinary_unions
             .iter_mut()
