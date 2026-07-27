@@ -7261,6 +7261,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     );
     let mut pre_erratum = r.clone();
     let current_union_count = pre_erratum.ordinary_unions.len();
+    let current_reference_union_count = pre_erratum.unions.len();
+    let current_reference_arm_count: usize = pre_erratum.unions.iter().map(|u| u.arms.len()).sum();
+    let current_ordinary_arm_count: usize = pre_erratum
+        .ordinary_unions
+        .iter()
+        .map(|u| u.arms.len())
+        .sum();
     let current_field_count = pre_erratum.fields.len();
     // Post-erratum ordinary unions, whole-schema and embedded alike.  An
     // embedded union's anchor field row exists only because the union does, so
@@ -9106,6 +9113,21 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         pre_erratum.ordinary_unions.len() + 377,
         current_union_count,
         "the historical witness must remove every post-erratum union through the ymqm self-edge repair"
+    );
+    assert_eq!(
+        pre_erratum.unions.len(),
+        current_reference_union_count,
+        "historical witness reference-union cohort drift (unrecognised reference union)"
+    );
+    assert_eq!(
+        pre_erratum.unions.iter().map(|u| u.arms.len()).sum::<usize>(),
+        current_reference_arm_count,
+        "historical witness reference-union arm cohort drift (unrecognised arm)"
+    );
+    assert_eq!(
+        pre_erratum.ordinary_unions.iter().map(|u| u.arms.len()).sum::<usize>() + 41,
+        current_ordinary_arm_count,
+        "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
     assert_eq!(
         pre_erratum.fields.len() + 711,
