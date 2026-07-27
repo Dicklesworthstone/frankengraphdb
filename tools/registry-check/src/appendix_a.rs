@@ -9029,17 +9029,38 @@ fn catalog_projection_rows(
         }
         if let (Some(slice_id), Some(row_id)) = (slice_id, row_id) {
             let identity = projection_row_identity(catalog_key, table);
-            if let Some((suffix, _)) = &identity {
-                let expected = format!("{slice_id}:{row_kind}:{suffix}");
-                if row_id != expected {
-                    violations.push(Violation::new(
-                        "catalog_row_id_derived_mismatch",
-                        &row_id,
-                        format!(
-                            "row_id must be derived from the typed row identity; expected {expected:?}"
-                        ),
-                    ));
+            match &identity {
+                Some((suffix, _)) => {
+                    let expected = format!("{slice_id}:{row_kind}:{suffix}");
+                    if row_id != expected {
+                        violations.push(Violation::new(
+                            "catalog_row_id_derived_mismatch",
+                            &row_id,
+                            format!(
+                                "row_id must be derived from the typed row identity; expected {expected:?}"
+                            ),
+                        ));
+                    }
                 }
+                // COMPLETENESS GUARD, and it must stay.  `projection_row_identity`
+                // returns None for any catalog key its match does not name, and
+                // this arm used to be an `if let` with no else: a projection row
+                // kind added tomorrow would have had its row_id silently
+                // UNCHECKED while every other law kept passing, which reads as
+                // enforced.  Measured 2026-07-27: 15 catalog row kinds carry a
+                // row_id over 10320 rows and all 15 are covered today, so this
+                // guard is not currently reachable from the shipped catalog --
+                // that is exactly when a fail-open is cheapest to close and
+                // hardest to notice.  Registering a new kind in
+                // `projection_row_identity` is the fix; suppressing this code is
+                // not.
+                None => violations.push(Violation::new(
+                    "catalog_row_id_derivation_unregistered",
+                    &row_id,
+                    format!(
+                        "catalog row kind {catalog_key:?} has no row_id derivation in projection_row_identity; register one rather than leaving the row unchecked"
+                    ),
+                )),
             }
             let (canonical_suffix, canonical_symbol) =
                 identity.unwrap_or_else(|| (String::new(), String::new()));
@@ -14369,6 +14390,81 @@ stable_name = "Ready"
                 .count(),
             1,
             "a mutated hash-bearing row ID must fail closed: {consumer_violations:?}"
+        );
+    }
+
+    /// The completeness guard on the derived-row_id law.
+    ///
+    /// `projection_row_identity` names ten catalog keys and returns None for
+    /// everything else.  Before this control the caller matched that None with a
+    /// bare `if let Some`, so a projection row kind nobody had registered was
+    /// skipped in silence while the surrounding laws stayed green.  The positive
+    /// half proves a registered kind is still checked; the negative half proves
+    /// an unregistered one is a violation rather than a skip.
+    #[test]
+    fn appendix_unregistered_projection_row_kind_fails_closed() {
+        let document = r#"
+[[union]]
+slice_id = "a01"
+row_id = "a01:union:whatever"
+union_name = "Probe"
+containing_schema = "Probe"
+union_path = "Probe"
+
+[[probe_kind]]
+slice_id = "a01"
+row_id = "a01:probe-kind:whatever"
+name = "Probe"
+"#;
+        let root = toml::parse(document).expect("completeness fixture parses");
+
+        // Positive control: a REGISTERED kind still reaches the derivation law,
+        // so the negative below cannot pass for the wrong reason.
+        let mut registered = Vec::new();
+        let mut registered_meta = Vec::new();
+        catalog_projection_rows(
+            &root,
+            "union",
+            "durable_fields",
+            "union",
+            &mut registered_meta,
+            &mut registered,
+        )
+        .expect("union rows");
+        assert_eq!(
+            registered
+                .iter()
+                .filter(|violation| violation.code == "catalog_row_id_derived_mismatch")
+                .count(),
+            1,
+            "a registered kind with a hand-written row_id must still fail: {registered:?}"
+        );
+        assert!(
+            !registered
+                .iter()
+                .any(|violation| violation.code == "catalog_row_id_derivation_unregistered"),
+            "a registered kind must not report itself unregistered: {registered:?}"
+        );
+
+        // The guard itself: an unregistered kind must be a violation, not a skip.
+        let mut unregistered = Vec::new();
+        let mut unregistered_meta = Vec::new();
+        catalog_projection_rows(
+            &root,
+            "probe_kind",
+            "durable_fields",
+            "probe-kind",
+            &mut unregistered_meta,
+            &mut unregistered,
+        )
+        .expect("probe rows");
+        assert_eq!(
+            unregistered
+                .iter()
+                .filter(|violation| violation.code == "catalog_row_id_derivation_unregistered")
+                .count(),
+            1,
+            "an unregistered projection row kind must fail closed: {unregistered:?}"
         );
     }
 
