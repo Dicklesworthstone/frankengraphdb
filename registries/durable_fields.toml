@@ -2584,8 +2584,9 @@ identity_class = "logical"
 reference_semantics = "strong"
 target_schema_id = "GlobalTxnRecord"
 construction_order = 44
+construction_relation = "prior_object"
 role_predicate = "true"
-retention_and_cut_rule = "strong reference to the GlobalTxnRecord this GlobalLogicalDeltaBatch names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1870)"
+retention_and_cut_rule = "PriorObject strong reference to the exact already-known GlobalTxnRecord this GlobalLogicalDeltaBatch names; retained while the referrer is retained, and every concrete target must exist before the batch encoder runs (a08:1870)"
 version_status = "reserved"
 max_size_bytes = 40
 

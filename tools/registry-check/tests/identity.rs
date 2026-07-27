@@ -142,6 +142,7 @@ fn field(containing: &str, tag: i64, name: &str, order: i64) -> FieldRow {
         reference_semantics: "strong".into(),
         target_schema_id: None,
         construction_order: order,
+        construction_relation: None,
         role_predicate: "true".into(),
         retention_and_cut_rule: "fixture".into(),
         version_status: "active".into(),
@@ -6569,6 +6570,7 @@ fn idr_wire_backed_top_level_union_validates_every_consumer() {
         reference_semantics: "none".into(),
         target_schema_id: None,
         construction_order: 0,
+        construction_relation: None,
         role_predicate: "role-local".into(),
         retention_and_cut_rule: "fixture consumer".into(),
         version_status: "active".into(),
@@ -6818,6 +6820,7 @@ fn idr_ordinary_union_embedded_field_requires_exact_anchor() {
         reference_semantics: "none".into(),
         target_schema_id: None,
         construction_order: 0,
+        construction_relation: None,
         role_predicate: "true".into(),
         retention_and_cut_rule: "embedded-fixture".into(),
         version_status: "active".into(),
@@ -6917,6 +6920,7 @@ fn idr_field_containing_schema_resolves_by_generic_free_family() {
         reference_semantics: "none".into(),
         target_schema_id: None,
         construction_order: host.construction_order,
+        construction_relation: None,
         role_predicate: "true".into(),
         retention_and_cut_rule: "family-fixture".into(),
         version_status: "active".into(),
@@ -7016,6 +7020,7 @@ fn idr_strongref_only_arm_payload_shapes_stay_on_the_wire_path() {
             reference_semantics: "none".into(),
             target_schema_id: None,
             construction_order: host,
+            construction_relation: None,
             role_predicate: "true".into(),
             retention_and_cut_rule: "arm-payload-fixture".into(),
             version_status: "active".into(),
@@ -10026,6 +10031,148 @@ fn idr_construction_dag_acyclic() {
     assert!(
         !violations.iter().any(|v| v.code.starts_with("dag_")),
         "shipped construction DAG must be clean: {violations:?}"
+    );
+}
+
+#[test]
+fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
+    fn component_codes(r: &IdentityRegistries) -> Vec<String> {
+        identity::validate_identity(r)
+            .into_iter()
+            .filter(|violation| {
+                violation.code.starts_with("dag_")
+                    || violation.code == "bad_field"
+                    || violation.code == "field_construction_order_mismatch"
+            })
+            .map(|violation| violation.code)
+            .collect()
+    }
+
+    let mut component = real_identity();
+    let backlink = component
+        .fields
+        .iter()
+        .find(|field| {
+            field.containing_schema == "GlobalLogicalDeltaBatch"
+                && field.stable_name == "global_txn_record_ref"
+        })
+        .expect("GlobalLogicalDeltaBatch.global_txn_record_ref exists");
+    assert_eq!(backlink.field_tag, 0x0001);
+    assert_eq!(backlink.exact_wire_type, "StrongRef");
+    assert_eq!(backlink.reference_semantics, "strong");
+    assert_eq!(
+        backlink.target_schema_id.as_deref(),
+        Some("GlobalTxnRecord")
+    );
+    assert_eq!(backlink.construction_order, 44);
+    assert_eq!(
+        backlink.construction_relation.as_deref(),
+        Some("prior_object")
+    );
+    assert!(backlink.retention_and_cut_rule.contains("PriorObject"));
+    assert!(backlink.retention_and_cut_rule.contains("already-known"));
+
+    // Land the two still-unminted source edges in memory. Together with the
+    // two shipped rows, this is the exact rtnf component:
+    //   GlobalStatePayload -> GlobalDeltaBatchIndex
+    //   GlobalDeltaBatchIndex -> GlobalLogicalDeltaBatch
+    //   GlobalLogicalDeltaBatch -> GlobalTxnRecord
+    //   GlobalTxnRecord -> GlobalStatePayload
+    component.logical.push(kind(
+        0x7ffe,
+        "GlobalDeltaBatchIndex",
+        "reserved",
+        44,
+    ));
+    let mut state_to_index = field(
+        "GlobalStatePayload",
+        0x7ffe,
+        "global_delta_batch_index_root",
+        44,
+    );
+    state_to_index.target_schema_id = Some("GlobalDeltaBatchIndex".into());
+    state_to_index.version_status = "reserved".into();
+    state_to_index.retention_and_cut_rule =
+        "fixture strong owner of the exact retained GlobalDeltaBatchIndex".into();
+    component.fields.push(state_to_index);
+    let mut index_to_batch = field(
+        "GlobalDeltaBatchIndex",
+        0x0001,
+        "entries",
+        44,
+    );
+    index_to_batch.target_schema_id = Some("GlobalLogicalDeltaBatch".into());
+    index_to_batch.version_status = "reserved".into();
+    index_to_batch.retention_and_cut_rule =
+        "fixture strong owner of every retained GlobalLogicalDeltaBatch".into();
+    component.fields.push(index_to_batch);
+
+    assert!(
+        component_codes(&component).is_empty(),
+        "the exact four-edge component must be constructible with one typed PriorObject cut"
+    );
+
+    // Vacuity control: restoring the backlink to the ordinary schema relation
+    // must recreate the all-44 cycle. If this does not fire, the component
+    // fixture is not actually exercising the repair.
+    let mut restored = component.clone();
+    restored
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "GlobalLogicalDeltaBatch"
+                && field.stable_name == "global_txn_record_ref"
+        })
+        .expect("backlink")
+        .construction_relation = None;
+    assert!(
+        component_codes(&restored).contains(&"dag_cycle".to_owned()),
+        "restoring the GlobalLogicalDeltaBatch@44 -> GlobalTxnRecord@44 schema edge must fire dag_cycle"
+    );
+
+    // Both reference directions constrain GlobalStatePayload@44. Lowering it
+    // to 43 makes its outbound index target future; raising it to 45 makes the
+    // inbound GlobalTxnRecord@44 result digest future.
+    let mut lowered = component.clone();
+    lowered
+        .logical
+        .iter_mut()
+        .find(|kind| kind.name == "GlobalStatePayload")
+        .expect("GlobalStatePayload")
+        .construction_order = 43;
+    lowered
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "GlobalStatePayload"
+                && field.stable_name == "global_delta_batch_index_root"
+        })
+        .expect("state-to-index fixture")
+        .construction_order = 43;
+    assert!(
+        component_codes(&lowered).contains(&"dag_future_result".to_owned()),
+        "GlobalStatePayload 44 -> 43 must fire on outbound GlobalDeltaBatchIndex@44"
+    );
+
+    let mut raised = component;
+    raised
+        .logical
+        .iter_mut()
+        .find(|kind| kind.name == "GlobalStatePayload")
+        .expect("GlobalStatePayload")
+        .construction_order = 45;
+    raised
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "GlobalStatePayload"
+                && field.stable_name == "global_delta_batch_index_root"
+        })
+        .expect("state-to-index fixture")
+        .construction_order = 45;
+    assert!(
+        component_codes(&raised).contains(&"dag_future_result".to_owned()),
+        "GlobalStatePayload 44 -> 45 must fire on inbound GlobalTxnRecord@44"
     );
 }
 
@@ -13247,6 +13394,7 @@ fn idr_field_identity_class_domain_is_wire_shape_independent() {
                     reference_semantics: "none".into(),
                     target_schema_id: None,
                     construction_order: host.construction_order,
+                    construction_relation: None,
                     role_predicate: "true".into(),
                     retention_and_cut_rule: "controlled l6xd probe".into(),
                     version_status: "reserved".into(),

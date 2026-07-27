@@ -13814,6 +13814,9 @@ fn render_fields(identity: &IdentityRegistries) -> String {
         }
         writeln!(&mut out, "construction_order = {}", row.construction_order)
             .expect("writing to String cannot fail");
+        if let Some(value) = &row.construction_relation {
+            write_string(&mut out, "construction_relation", value);
+        }
         write_string(&mut out, "role_predicate", &row.role_predicate);
         write_string(
             &mut out,

@@ -1306,6 +1306,9 @@ fn run_identity(root: &Path) -> Result<usize, String> {
         if let Some(target_schema_id) = &field.target_schema_id {
             fields.push(("target_schema_id", s(target_schema_id)));
         }
+        if let Some(construction_relation) = &field.construction_relation {
+            fields.push(("construction_relation", s(construction_relation)));
+        }
         fields.extend([
             ("construction_order", n(field.construction_order)),
             ("role_predicate", s(&field.role_predicate)),

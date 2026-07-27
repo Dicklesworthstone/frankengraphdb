@@ -283,6 +283,13 @@ pub struct FieldRow {
     pub reference_semantics: String,
     pub target_schema_id: Option<String>,
     pub construction_order: i64,
+    /// Optional instance-order refinement for a co-phased schema edge.
+    ///
+    /// `prior_object` preserves the field's declared reference strength while
+    /// asserting that every encoded target instance already exists before the
+    /// referrer encoder runs. It may discharge a schema-level cycle only when
+    /// the source contract and retention rule say so explicitly.
+    pub construction_relation: Option<String>,
     pub role_predicate: String,
     pub retention_and_cut_rule: String,
     pub version_status: String,
@@ -714,6 +721,7 @@ pub fn fields_from(root: &Table) -> Result<DurableFieldsRows, ReadError> {
                 "reference_semantics",
                 "target_schema_id",
                 "construction_order",
+                "construction_relation",
                 "role_predicate",
                 "retention_and_cut_rule",
                 "version_status",
@@ -738,6 +746,7 @@ pub fn fields_from(root: &Table) -> Result<DurableFieldsRows, ReadError> {
             reference_semantics: get_str(t, "reference_semantics", &ctx)?,
             target_schema_id: get_opt_str(t, "target_schema_id", &ctx)?,
             construction_order: get_int(t, "construction_order", &ctx)?,
+            construction_relation: get_opt_str(t, "construction_relation", &ctx)?,
             role_predicate: get_str(t, "role_predicate", &ctx)?,
             retention_and_cut_rule: get_str(t, "retention_and_cut_rule", &ctx)?,
             version_status: get_str(t, "version_status", &ctx)?,
@@ -1894,6 +1903,25 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 "role_predicate and retention_and_cut_rule must be nonblank",
             ));
         }
+        if let Some(relation) = f.construction_relation.as_deref()
+            && (relation != "prior_object"
+                || !matches!(
+                    f.reference_semantics.as_str(),
+                    "strong" | "conditional" | "weak_digest"
+                )
+                || f.target_schema_id.is_none()
+                || !f.retention_and_cut_rule.contains("PriorObject")
+                || !f.retention_and_cut_rule.contains("already-known"))
+        {
+            out.push(v(
+                "bad_field",
+                "durable_fields",
+                &row_id,
+                "construction_relation is either absent or prior_object; prior_object requires \
+                 one direct strong/conditional/weak_digest target and an explicit PriorObject \
+                 already-known instance contract in retention_and_cut_rule",
+            ));
+        }
         // Wire-type resolution: builtin -> wire_types -> ordinary union ->
         // generated reference union.
         let is_builtin = BUILTIN_WIRE_TYPES.contains(&f.exact_wire_type.as_str());
@@ -3033,6 +3061,25 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                         containing.construction_order
                     ),
                 ));
+            }
+            // A typed PriorObject relation is an instance-order assertion, not
+            // a weakening of reference strength: GC/checkpoint/backup walkers
+            // still follow the edge exactly as its wire tag declares. It may
+            // cut only a co-phased, non-self schema edge whose row carries the
+            // explicit source-backed contract checked above. Invalid uses stay
+            // in the schema graph and therefore fail closed.
+            let valid_prior_object = f.construction_relation.as_deref() == Some("prior_object")
+                && target_kind.construction_order == containing.construction_order
+                && target != containing_family
+                && matches!(
+                    f.reference_semantics.as_str(),
+                    "strong" | "conditional" | "weak_digest"
+                )
+                && f.target_schema_id.is_some()
+                && f.retention_and_cut_rule.contains("PriorObject")
+                && f.retention_and_cut_rule.contains("already-known");
+            if valid_prior_object {
+                continue;
             }
             edges
                 .entry(containing.name.as_str())

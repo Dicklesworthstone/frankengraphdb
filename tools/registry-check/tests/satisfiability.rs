@@ -295,6 +295,7 @@ fn strong_field(owner: &str, name: &str, target: &str, order: i64) -> FieldRow {
         reference_semantics: "strong".to_owned(),
         target_schema_id: Some(target.to_owned()),
         construction_order: order,
+        construction_relation: None,
         role_predicate: "true".to_owned(),
         retention_and_cut_rule: "retained with the owning witness".to_owned(),
         version_status: "reserved".to_owned(),
