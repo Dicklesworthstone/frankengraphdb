@@ -609,8 +609,24 @@ run_ubs() {
 # other two classes), and the text listing prints roughly 3 findings per class
 # with NO "and N more" marker, so it truncates silently. Tightening this to an
 # exact set needs a per-finding output UBS does not currently emit.
+# MOVED 2026-07-27 (fgdb-gpms): timing-safe 796 -> 798, +2, all of it in
+# `tools/registry-check/tests/identity.rs`. The two findings are the only two
+# `==` comparisons added by `idr_refinement_claims_resolve_to_a_registered_arm`:
+#     .position(|w| w.name == "OperationalRestoreTerminalPinBasisRef")
+#     .position(|w| w.name == "ExternalCasRestoreServicePromotionReceiptRef")
+# Both are wire-type-name lookups in a test fixture, the same false-positive
+# class as the 338 this one file already contributes; no secret, signature or
+# token is involved and no `subtle`-style helper could exist under Doctrine #1.
+#
+# ATTRIBUTED BY DIFFERENTIAL, not by reading the report. Per the KNOWN LIMIT
+# above, the text listing samples ~3 sites per class and truncates silently, so
+# site-level attribution is impossible from it — re-confirmed here, the sampled
+# sites named none of the two. What discriminates is a per-file count against a
+# settled pre-change root (`git archive 0c2d593 | tar -x` plus `git init`, since
+# UBS refuses a shadow workspace outside a repo): tests/identity.rs 338 -> 340,
+# src/identity.rs and tests/satisfiability.rs unchanged at 0.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=796"
+  "Secret/token comparisons without timing-safe equality=798"
   "panic!/unreachable!/todo!/unimplemented!=135"
   "JWT decode, validation bypass, or missing claim binding=120"
 )
