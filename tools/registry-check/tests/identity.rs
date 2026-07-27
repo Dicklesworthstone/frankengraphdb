@@ -7652,6 +7652,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "GlobalConflictIndexEntriesRecordState"
                 | "SequenceNeutralAuditEventBodyOutcome"
                 | "TopologyRetirementAckFloorRef"
+                | "WitnessPolicyRotation"
         )
     };
     pre_erratum
@@ -8632,6 +8633,32 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | "TimeSubjectIssuanceReservation<Role>"
             )
     };
+    // ymqm consumes fourteen source self-edges: ten become comparison-only
+    // predecessor digests and four become source-owned embedded unions. The
+    // WitnessPolicy anchor is already removed with its new union above; the
+    // explicit predicate keeps the complete field increment auditable.
+    let post_erratum_ymqm_field = |schema: &str, name: &str| {
+        (name == "nonretaining_predecessor_digest"
+            && matches!(
+                schema,
+                "LocalTxnWorkspaceGeneration"
+                    | "GlobalTxnWorkspaceGeneration"
+                    | "GlobalTxnOutcomeRecord"
+                    | "AuditTerminalFreezeRecord"
+                    | "AuditTerminalSigningPlan"
+                    | "AuditTerminalAttemptRecord"
+                    | "ShardPrepareRecord"
+                    | "ConstraintReservationRecord"
+                    | "MetaConstraintReservationRecord"
+                    | "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+            ))
+            || matches!(
+                (schema, name),
+                ("BranchKeyEpochRecord", "predecessor")
+                    | ("TopologyTransitionRecord", "phase_predecessor")
+                    | ("WitnessPolicy", "rotation")
+            )
+    };
     // 2lch replaces four mutual-cycle back-links with comparison-only target
     // digests. These rows also postdate the A10 namespace witness.
     let post_erratum_oicl_digest_field = |schema: &str, name: &str| {
@@ -9059,6 +9086,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a12_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a10_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_j00a_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_ymqm_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_oicl_digest_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_inline_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a07_strong_field(&field.containing_schema, &field.stable_name)
@@ -9075,19 +9103,37 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a12_exact_order_field(&field.retention_and_cut_rule)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 376,
+        pre_erratum.ordinary_unions.len() + 377,
         current_union_count,
-        "the historical witness must remove every post-erratum union through the A12 reservation-state union"
+        "the historical witness must remove every post-erratum union through the ymqm self-edge repair"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 698,
+        pre_erratum.fields.len() + 711,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A05 StrongRef tranche"
+        "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
     undo_cq4x_capsule_retarget(&mut pre_erratum);
     undo_mn8i_exact_order_repairs(&mut pre_erratum);
+    for (union_name, arm_name, previous_payload_sha256) in [(
+        "TrustTransition",
+        "Successor",
+        "160d187b6b8852d0adfc861629795e136d326a46dc5ee22281fa61d39fb1b392",
+    )] {
+        pre_erratum
+            .ordinary_unions
+            .iter_mut()
+            .find(|union| union.union_name == union_name)
+            .and_then(|union| {
+                union
+                    .arms
+                    .iter_mut()
+                    .find(|arm| arm.source_arm_name == arm_name)
+            })
+            .expect("pre-ymqm union arm exists")
+            .payload_sha256 = Some(previous_payload_sha256.to_owned());
+    }
     let reconstructed_previous_fields_pin = identity::assignment_pins(&pre_erratum)
         .into_iter()
         .find(|pin| pin.registry == "durable_fields")
@@ -9144,6 +9190,220 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         codes(&missing_arm).contains(&"registry_assignment_drift".to_string()),
         "missing closed-union arm must fail the released manifest"
     );
+}
+
+#[test]
+fn idr_ymqm_fourteen_source_self_edges_are_nonretaining() {
+    let identity = real_identity();
+    let digest_fields = [
+        (
+            "LocalTxnWorkspaceGeneration",
+            "nonretaining_predecessor_digest",
+            0x0006,
+            16,
+        ),
+        (
+            "GlobalTxnWorkspaceGeneration",
+            "nonretaining_predecessor_digest",
+            0x0006,
+            30,
+        ),
+        (
+            "GlobalTxnOutcomeRecord",
+            "nonretaining_predecessor_digest",
+            0x0005,
+            60,
+        ),
+        (
+            "AuditTerminalFreezeRecord",
+            "nonretaining_predecessor_digest",
+            0x0007,
+            6,
+        ),
+        (
+            "AuditTerminalSigningPlan",
+            "nonretaining_predecessor_digest",
+            0x0003,
+            6,
+        ),
+        (
+            "AuditTerminalAttemptRecord",
+            "nonretaining_predecessor_digest",
+            0x0001,
+            40,
+        ),
+        (
+            "ShardPrepareRecord",
+            "nonretaining_predecessor_digest",
+            0x0008,
+            60,
+        ),
+        (
+            "ConstraintReservationRecord",
+            "nonretaining_predecessor_digest",
+            0x000d,
+            40,
+        ),
+        (
+            "MetaConstraintReservationRecord",
+            "nonretaining_predecessor_digest",
+            0x000b,
+            60,
+        ),
+        (
+            "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>",
+            "nonretaining_predecessor_digest",
+            0x0004,
+            60,
+        ),
+    ];
+    for (schema, name, tag, order) in digest_fields {
+        let field = identity
+            .fields
+            .iter()
+            .find(|field| field.containing_schema == schema && field.stable_name == name)
+            .unwrap_or_else(|| panic!("{schema}.{name} field exists"));
+        assert_eq!(field.field_tag, tag, "{schema}.{name} source-order tag");
+        assert_eq!(
+            field.construction_order, order,
+            "{schema}.{name} construction order"
+        );
+        assert_eq!(field.exact_wire_type, "WeakDigest");
+        assert_eq!(field.cardinality, "one");
+        assert_eq!(field.identity_class, "logical");
+        assert_eq!(field.reference_semantics, "weak_digest");
+        assert_eq!(field.target_schema_id, None);
+        assert_eq!(field.digest_class.as_deref(), Some("weak_identity"));
+    }
+
+    let embedded_anchors = [
+        (
+            "RemoteAuthorityConfigurationEvidence",
+            "trust_transition",
+            "TrustTransition",
+            0x0009,
+            14,
+        ),
+        (
+            "BranchKeyEpochRecord",
+            "predecessor",
+            "BranchKeyEpochRecordPredecessor",
+            0x0008,
+            40,
+        ),
+        (
+            "TopologyTransitionRecord",
+            "phase_predecessor",
+            "TopologyTransitionRecordPhasePredecessor",
+            0x0004,
+            30,
+        ),
+        (
+            "WitnessPolicy",
+            "rotation",
+            "WitnessPolicyRotation",
+            0x001f,
+            40,
+        ),
+    ];
+    for (schema, name, wire_type, tag, order) in embedded_anchors {
+        let field = identity
+            .fields
+            .iter()
+            .find(|field| field.containing_schema == schema && field.stable_name == name)
+            .unwrap_or_else(|| panic!("{schema}.{name} embedded anchor exists"));
+        assert_eq!(field.exact_wire_type, wire_type);
+        assert_eq!(field.field_tag, tag);
+        assert_eq!(field.construction_order, order);
+        assert_eq!(field.identity_class, "inline");
+        assert_eq!(field.reference_semantics, "none");
+        assert_eq!(field.target_schema_id, None);
+
+        let union = identity
+            .ordinary_unions
+            .iter()
+            .find(|union| union.union_name == wire_type)
+            .unwrap_or_else(|| panic!("{wire_type} union exists"));
+        assert_eq!(union.field_tag, Some(tag), "{wire_type} owns its host tag");
+        assert_eq!(union.containing_schema, schema);
+    }
+
+    for (union_name, arm_name, payload_sha256) in [
+        (
+            "TrustTransition",
+            "Successor",
+            "bdf887bb8354e7c0a444ce07a4bcada43c272180cbbda3ac530ecf6be8694db4",
+        ),
+        (
+            "BranchKeyEpochRecordPredecessor",
+            "SameEpochLifecycle",
+            "7236acf5dd9fb7de06dbe6e4b5c2b0ae91a2c391edeea59890f7a373cbc986ad",
+        ),
+        (
+            "TopologyTransitionRecordPhasePredecessor",
+            "Copy",
+            "7236acf5dd9fb7de06dbe6e4b5c2b0ae91a2c391edeea59890f7a373cbc986ad",
+        ),
+        (
+            "TopologyTransitionRecordPhasePredecessor",
+            "Cutover",
+            "7236acf5dd9fb7de06dbe6e4b5c2b0ae91a2c391edeea59890f7a373cbc986ad",
+        ),
+        (
+            "WitnessPolicyRotation",
+            "JointSuccessor",
+            "db322f7d109fb373af9025e613394b3f86cb704764bb2a9026ff7e8463661408",
+        ),
+    ] {
+        let arm = identity
+            .ordinary_unions
+            .iter()
+            .find(|union| union.union_name == union_name)
+            .and_then(|union| {
+                union
+                    .arms
+                    .iter()
+                    .find(|arm| arm.source_arm_name == arm_name)
+            })
+            .unwrap_or_else(|| panic!("{union_name}.{arm_name} arm exists"));
+        assert_eq!(arm.payload_sha256.as_deref(), Some(payload_sha256));
+    }
+
+    let plan = String::from_utf8(real_plan_source()).expect("plan is UTF-8");
+    let consumed_markers = [
+        "predecessor_evidence_ref:StrongRef<RemoteAuthorityConfigurationEvidence>",
+        "predecessor_ref:StrongRef<LocalTxnWorkspaceGeneration>?",
+        "predecessor_ref:StrongRef<GlobalTxnWorkspaceGeneration>?",
+        "predecessor_ref:StrongRef<GlobalTxnOutcomeRecord>?",
+        "predecessor_ref:StrongRef<AuditTerminalFreezeRecord>?",
+        "predecessor_plan_ref:StrongRef<AuditTerminalSigningPlan>?",
+        "predecessor_ref:StrongRef<AuditTerminalAttemptRecord>?",
+        "predecessor_ref:StrongRef<ShardPrepareRecord>?",
+        "predecessor_ref:StrongRef<ConstraintReservationRecord>?",
+        "predecessor_ref:StrongRef<MetaConstraintReservationRecord>?",
+        "SameEpochLifecycle{ref:StrongRef<BranchKeyEpochRecord>}",
+        "predecessor_record_ref:StrongRef<KeyEnvelopeGrantRecord<Role>>?",
+        "Copy{ref:StrongRef<TopologyTransitionRecord>}",
+        "predecessor_policy_ref:StrongRef<WitnessPolicy>",
+    ];
+    assert_eq!(consumed_markers.len(), 14);
+    for marker in consumed_markers {
+        assert!(
+            !plan.contains(marker),
+            "consumed self-edge marker must stay absent: {marker}"
+        );
+    }
+    let ruling_remainders = [
+        "child_ref:StrongRef<KeyEnvelopeNode>",
+        "base_reserved_ref:StrongRef<ReservationUseRecord<Role>>",
+    ];
+    assert_eq!(ruling_remainders.len(), 2);
+    for marker in ruling_remainders {
+        assert!(
+            plan.contains(marker),
+            "owner-ruling remainder must remain explicit: {marker}"
+        );
+    }
 }
 
 #[test]

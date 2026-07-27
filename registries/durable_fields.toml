@@ -1,6 +1,6 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=b04701610581f864d42f59362411b8863512b2d75d00f59fabf1b2a7b195b302.
+# Appendix A lines 1388-2728; sha256=d9a3dfad58deaf2a82796d6c4cc867f2ec33ec7273dcc0f533dbaa99e46a8a7d.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
@@ -320,6 +320,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "AuditTerminalAttemptRecord"
+field_tag = 0x0001
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a08:1850)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "AuditTerminalAttemptRecord"
 field_tag = 0x0002
 stable_name = "terminal_plan_ref"
 exact_wire_type = "StrongRef"
@@ -362,6 +377,21 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the AuditResolutionSigningAttemptPlan this AuditTerminalAttemptRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1850)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "AuditTerminalFreezeRecord"
+field_tag = 0x0007
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a08:1832)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "AuditTerminalFreezeRecord"
@@ -419,6 +449,21 @@ role_predicate = "true"
 retention_and_cut_rule = "inline AppliedControlRef embedded by value in AuditTerminalFreezeRecord; retained with the containing object and creates no reachability edge (a08:1832)"
 version_status = "reserved"
 max_size_bytes = 49
+
+[[field]]
+containing_schema = "AuditTerminalSigningPlan"
+field_tag = 0x0003
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 6
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a08:1842)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "AuditTerminalSigningPlan"
@@ -789,6 +834,20 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the ClaimToAppliedUseIdentityDerivationProof<Role,Kind> this BootstrapReservationUsePublicationCertificate names; retained while the referrer is retained, and the acyclic order 20 <= 40 keeps the reference backward-only (a19:2511)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchKeyEpochRecord"
+field_tag = 0x0008
+stable_name = "predecessor"
+exact_wire_type = "BranchKeyEpochRecordPredecessor"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "closed epoch-predecessor union lives and dies with the epoch record; SameEpochLifecycle authenticates the prior lifecycle value through a comparison-only WeakDigest and PriorEpoch remains weak-identity-bound, so neither arm creates a reachability edge (a13:2004)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "BufferedResultManifest"
@@ -1542,6 +1601,21 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the ParticipantRoutingCertificate this ConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1856)"
 version_status = "reserved"
 max_size_bytes = 537
+
+[[field]]
+containing_schema = "ConstraintReservationRecord"
+field_tag = 0x000d
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a08:1856)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "ConstraintStateRoot"
@@ -3845,6 +3919,21 @@ max_size_bytes = 256
 
 [[field]]
 containing_schema = "GlobalTxnOutcomeRecord"
+field_tag = 0x0005
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a07:1782)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "GlobalTxnOutcomeRecord"
 field_tag = 0x0007
 stable_name = "registration_ref"
 exact_wire_type = "StrongRef"
@@ -4019,6 +4108,21 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the GlobalAttemptRegistration this GlobalTxnWorkspaceGeneration names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a07:1720)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalTxnWorkspaceGeneration"
+field_tag = 0x0006
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a07:1720)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "GlobalTxnWorkspaceGeneration"
@@ -4757,6 +4861,21 @@ role_predicate = "role-local"
 retention_and_cut_rule = "the one source-required TerminalAuditGate embedded by value under the SequenceNeutralSpec wrapper law; the Required arm's separately registered payload members provide its exact retaining edges (a10:1914, a15:2059, a21:2699)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a13:2027)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "KeyEnvelopeNode"
@@ -5600,6 +5719,21 @@ version_status = "reserved"
 max_size_bytes = 256
 
 [[field]]
+containing_schema = "LocalTxnWorkspaceGeneration"
+field_tag = 0x0006
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 16
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a03:1486)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
 containing_schema = "LogicalCommandRecord"
 field_tag = 0x0001
 stable_name = "logical_command_seq"
@@ -5879,6 +6013,21 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the GlobalPrepareAdmissionSpec this MetaConstraintReservationRecord names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1858)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "MetaConstraintReservationRecord"
+field_tag = 0x000b
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a08:1858)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "MetaConstraintReservationRecord"
@@ -12159,6 +12308,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "ShardPrepareRecord"
+field_tag = 0x0008
+stable_name = "nonretaining_predecessor_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "nonretaining generation-adjacency digest; comparison-only and never traversed by reachability/GC, checkpoint, or backup walkers (a08:1854)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "ShardPrepareRecord"
 field_tag = 0x0009
 stable_name = "basis_ref"
 exact_wire_type = "StrongRef"
@@ -13433,6 +13597,20 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "TopologyTransitionRecord"
+field_tag = 0x0004
+stable_name = "phase_predecessor"
+exact_wire_type = "TopologyTransitionRecordPhasePredecessor"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "closed phase-predecessor union lives and dies with the transition record; Copy and Cutover authenticate the prior phase through a comparison-only WeakDigest payload and create no reachability edge (a08:1888)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "TxnAllocationBindingRoot"
 field_tag = 0x0001
 stable_name = "generation"
@@ -13576,6 +13754,20 @@ reference_semantics = "none"
 construction_order = 14
 role_predicate = "true"
 retention_and_cut_rule = "inline nonretaining consumer applied identity retained with the validated anchor; no independent reachability edge (a04:1586)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "WitnessPolicy"
+field_tag = 0x001f
+stable_name = "rotation"
+exact_wire_type = "WitnessPolicyRotation"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "closed rotation union lives and dies with the witness policy; JointSuccessor authenticates the prior policy through a comparison-only WeakDigest and creates no reachability edge (a21:2717)"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -13880,6 +14072,7 @@ max_size_bytes = 16777216
 union_name = "BranchKeyEpochRecordPredecessor"
 containing_schema = "BranchKeyEpochRecord"
 union_path = "BranchKeyEpochRecord.predecessor"
+field_tag = 0x0008
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["BranchKeyEpochRecord"]
@@ -17662,6 +17855,7 @@ max_size_bytes = 16777216
 union_name = "TopologyTransitionRecordPhasePredecessor"
 containing_schema = "TopologyTransitionRecord"
 union_path = "TopologyTransitionRecord.phase_predecessor"
+field_tag = 0x0004
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["TopologyTransitionRecord"]
@@ -17764,6 +17958,18 @@ union_path = "WeakAuthorityAppliedIdentity"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["ValidatedRemoteConfigurationAnchor"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "WitnessPolicyRotation"
+containing_schema = "WitnessPolicy"
+union_path = "WitnessPolicy.rotation"
+field_tag = 0x001f
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["WitnessPolicy"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -18846,7 +19052,7 @@ arm_tag = 0x0002
 source_arm_name = "SameEpochLifecycle"
 stable_name = "same_epoch_lifecycle"
 payload_kind = "inline-record"
-payload_sha256 = "03ca120b78d5b0bcb6f6573ae435f77910dfdbb9a87528e92fe15f9e4c4d8fad"
+payload_sha256 = "7236acf5dd9fb7de06dbe6e4b5c2b0ae91a2c391edeea59890f7a373cbc986ad"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -26223,7 +26429,7 @@ arm_tag = 0x0002
 source_arm_name = "Successor"
 stable_name = "successor"
 payload_kind = "inline-record"
-payload_sha256 = "160d187b6b8852d0adfc861629795e136d326a46dc5ee22281fa61d39fb1b392"
+payload_sha256 = "bdf887bb8354e7c0a444ce07a4bcada43c272180cbbda3ac530ecf6be8694db4"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 65536
@@ -31475,7 +31681,7 @@ arm_tag = 0x0002
 source_arm_name = "Copy"
 stable_name = "copy"
 payload_kind = "inline-record"
-payload_sha256 = "d22c022d9fba1cb6a8cd455321c453220369d25caeb72f1cf859464fafcb97e3"
+payload_sha256 = "7236acf5dd9fb7de06dbe6e4b5c2b0ae91a2c391edeea59890f7a373cbc986ad"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -31488,7 +31694,7 @@ arm_tag = 0x0003
 source_arm_name = "Cutover"
 stable_name = "cutover"
 payload_kind = "inline-record"
-payload_sha256 = "d22c022d9fba1cb6a8cd455321c453220369d25caeb72f1cf859464fafcb97e3"
+payload_sha256 = "7236acf5dd9fb7de06dbe6e4b5c2b0ae91a2c391edeea59890f7a373cbc986ad"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -31847,6 +32053,31 @@ source_arm_name = "Shard"
 stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "1126f8d358d2d7cac029d698aa0e66457118484f25bcc95c6f1562a676652509"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "WitnessPolicyRotation"
+containing_schema = "WitnessPolicy"
+union_path = "WitnessPolicy.rotation"
+arm_tag = 0x0001
+source_arm_name = "Genesis"
+stable_name = "genesis"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "WitnessPolicyRotation"
+containing_schema = "WitnessPolicy"
+union_path = "WitnessPolicy.rotation"
+arm_tag = 0x0002
+source_arm_name = "JointSuccessor"
+stable_name = "joint_successor"
+payload_kind = "inline-record"
+payload_sha256 = "db322f7d109fb373af9025e613394b3f86cb704764bb2a9026ff7e8463661408"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
