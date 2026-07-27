@@ -18,7 +18,7 @@ use registry_check::appendix_a::{self, Catalog, Violation};
 use registry_check::appendix_source;
 use registry_check::architecture;
 use registry_check::identity::{
-    self, FieldRow, IdentityRegistries, LogicalKind, WireType, bodydigest_pin,
+    self, BUILTIN_WIRE_TYPES, FieldRow, IdentityRegistries, LogicalKind, WireType, bodydigest_pin,
     bodydigest_transcript,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -424,12 +424,10 @@ fn undo_mn8i_exact_order_repairs(identity: &mut IdentityRegistries) {
         .expect("CheckpointStateVector.mandatory_inventory exists")
         .construction_order = 35;
 
-    identity
-        .ordinary_unions
-        .iter_mut()
-        .find(|union| union.union_name == "LocalConstraintReservationRecordState")
-        .expect("LocalConstraintReservationRecordState exists")
-        .field_tag = None;
+    // LocalConstraintReservationRecordState is NOT undone here.  It is itself a
+    // post-erratum union (81ccbce), so the reconstruction removes it outright via
+    // post_erratum_union; reversing its field_tag would be compensating for a row
+    // that must not be present at all.
 
     for (union_name, allowed) in [
         ("ConstraintStateMutation", vec!["ConstraintStateMutation"]),
@@ -7283,6 +7281,14 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "TimeAuthorityRegistryProfileState"
                 | "LocationForm"
                 | "BoltBookmarkRequestKind"
+                // Landed by 81ccbce [hm6l] as LocalConstraintReservationRecord.state.
+                // It is embedded rather than whole-schema, which is why it was missed:
+                // the durable_fields pin transcript folds in every ordinary union AND
+                // its arms, so leaving this one in the reconstruction carried three
+                // post-erratum arms into a pre-erratum hash.  Neither cohort assert
+                // could see it — one counts fields, the other counts unions, and this
+                // moved only the arm lines.
+                | "LocalConstraintReservationRecordState"
                 | "AuthorityPermitRef<Role:AuthorityOwningRole>"
                 | "LifecycleAuthoritySource<Role>"
                 | "ReadCapablePermitRef<Role:AuthorityOwningRole>"
@@ -9069,9 +9075,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a12_exact_order_field(&field.retention_and_cut_rule)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 375,
+        pre_erratum.ordinary_unions.len() + 376,
         current_union_count,
-        "the historical witness must remove every post-erratum union through the A20 promotion sweep"
+        "the historical witness must remove every post-erratum union through the A12 reservation-state union"
     );
     assert_eq!(
         pre_erratum.fields.len() + 698,
@@ -9090,7 +9096,14 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     assert_eq!(
         reconstructed_previous_fields_pin,
         identity::A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN,
-        "the historical witness must reconstruct from the exact pre-erratum namespace"
+        "the historical witness must reconstruct from the exact pre-erratum namespace. \
+         NOTE when this fails: the durable_fields transcript is not only fields — \
+         assignment_pins folds in reference unions, ordinary unions, and every ARM of \
+         both, while the two cohort asserts above count only fields and only unions. A \
+         post-erratum union left in the reconstruction moves this hash through its arm \
+         lines alone. Extend post_erratum_union / post_erratum_*_field; do NOT re-pin \
+         A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN — that was done once at 8a704c2 and \
+         is why this failure recurred"
     );
     for pin in identity::assignment_pins(&r) {
         assert_eq!(
@@ -13904,72 +13917,105 @@ fn idr_declared_reference_strengths_are_field_spellable() {
 // Field identity classes are a field-domain law, not a wire-shape convention
 // (fgdb-identity-class-record-wire-convention-l6xd).
 //
-// This is intentionally a controlled probe.  The subject differs from the
-// known-boring u64 control only in exact_wire_type/max_size_bytes, and both
-// carry the construction order of their registered host.  An earlier
-// subject-only probe used a malformed order and incorrectly reported that no
-// class was accepted; the control makes that failure mode visible.
+// The independence claim is about wire KIND — record vs discriminant vs union —
+// and it is checked inside the domain of
+// non_reference_wire_identity_class_mismatch, which is fields whose exact type
+// resolves to a REGISTERED non-reference wire row.  An earlier version of this
+// test compared a registered record against a `u64` "control".  That control is
+// a BUILTIN: it resolves through BUILTIN_WIRE_TYPES, owns no wire_types row, and
+// is therefore outside the law entirely, so the test was comparing in-domain
+// against out-of-domain and reporting the difference as a broken law.  It also
+// checked a vocabulary of ["logical","physical","inline","wire","prebootstrap"],
+// which omits the `scalar` (132) and `bootstrap_local` (29) classes that landed
+// rows actually use.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn idr_field_identity_class_domain_is_wire_shape_independent() {
     let base = real_identity();
-    let host = base
-        .logical
-        .iter()
-        .find(|kind| kind.name == "LocalBeginReservationSpec")
-        .expect("the A03 field host is registered")
-        .clone();
-    let vocabulary = ["logical", "physical", "inline", "wire", "prebootstrap"];
+    // The five classes landed field rows use, plus the two kind classes a field
+    // may never claim.
+    let vocabulary = [
+        "logical",
+        "physical",
+        "inline",
+        "scalar",
+        "bootstrap_local",
+        "wire",
+        "prebootstrap",
+    ];
 
-    let accepted = |exact_wire_type: &str, max_size_bytes: i64| -> Vec<&str> {
+    // One representative ALREADY-VALID landed row per registered non-reference
+    // wire kind — the exact domain of non_reference_wire_identity_class_mismatch.
+    // Mutating a landed row rather than synthesising one keeps the answer
+    // attributable to identity_class alone; a fresh probe row also has to satisfy
+    // whatever per-type law its exact type carries (WeakDigest's mandatory
+    // digest_class, for one), and those rejections say nothing about field class.
+    let accepted_at = |index: usize| -> Vec<&str> {
         vocabulary
             .iter()
             .copied()
             .filter(|class| {
                 let mut probe = base.clone();
-                probe.fields.retain(|field| {
-                    field.containing_schema != host.name
-                        || field.stable_name != "authority_bound_header"
-                });
-                probe.fields.push(FieldRow {
-                    containing_schema: host.name.clone(),
-                    field_tag: 0x0001,
-                    stable_name: "authority_bound_header".into(),
-                    exact_wire_type: exact_wire_type.into(),
-                    cardinality: "one".into(),
-                    identity_class: (*class).into(),
-                    reference_semantics: "none".into(),
-                    target_schema_id: None,
-                    construction_order: host.construction_order,
-                    construction_relation: None,
-                    role_predicate: "true".into(),
-                    retention_and_cut_rule: "controlled l6xd probe".into(),
-                    version_status: "reserved".into(),
-                    max_size_bytes,
-                    digest_class: None,
-                    transcript_recipe: None,
-                    bd_domain_separator: None,
-                    bd_schema_major: None,
-                    bd_included_field_tags: None,
-                    bd_excluded_field_tags: None,
-                    recipe_pin: None,
-                });
+                probe.fields[index].identity_class = (*class).into();
                 codes_without_assignment_drift(&probe).is_empty()
             })
             .collect()
     };
-
-    let subject = accepted("AuthorityBoundHeader", 256);
-    let control = accepted("u64", 8);
+    let wire_kind: BTreeMap<&str, &str> = base
+        .wire
+        .iter()
+        .map(|wire| (wire.name.as_str(), wire.kind.as_str()))
+        .collect();
+    let mut representative: BTreeMap<&str, usize> = BTreeMap::new();
+    for (index, field) in base.fields.iter().enumerate() {
+        if let Some(kind) = wire_kind.get(field.exact_wire_type.as_str())
+            && *kind != "reference_wrapper"
+            && field.reference_semantics == "none"
+        {
+            representative.entry(kind).or_insert(index);
+        }
+    }
+    assert!(
+        representative.len() >= 2,
+        "the independence claim is vacuous unless at least two registered non-reference wire kinds are covered, found {:?}",
+        representative.keys().collect::<Vec<_>>()
+    );
+    let by_kind: BTreeMap<&str, Vec<&str>> = representative
+        .iter()
+        .map(|(kind, index)| (*kind, accepted_at(*index)))
+        .collect();
+    let distinct: BTreeSet<&Vec<&str>> = by_kind.values().collect();
     assert_eq!(
-        subject, control,
-        "record-shaped exact wire types and plain scalars must traverse the same field-class law"
+        distinct.len(),
+        1,
+        "record-, discriminant-, and union-shaped exact wire types must traverse the same field-class law, got {by_kind:?}"
     );
     assert_eq!(
-        subject,
-        vec!["logical", "physical", "inline"],
-        "among top-level durable identity classes, fields admit logical, physical, and inline while rejecting wire and prebootstrap"
+        by_kind.values().next().expect("a representative kind"),
+        &vec!["inline"],
+        "a registered non-reference wire member contributes inline identity and nothing else"
+    );
+
+    // A builtin exact type resolves through BUILTIN_WIRE_TYPES and owns no
+    // wire_types row, so it is OUTSIDE that law by construction.  It is the
+    // vehicle that shows the durable FIELD vocabulary is five, and that `wire`
+    // and `prebootstrap` are kind classes a field may never claim.  Widening the
+    // law to reach builtins is not the repair: it would newly reject 169 landed
+    // rows that legitimately carry scalar or bootstrap_local.
+    let builtin = base
+        .fields
+        .iter()
+        .position(|field| {
+            BUILTIN_WIRE_TYPES.contains(&field.exact_wire_type.as_str())
+                && field.reference_semantics == "none"
+                && field.identity_class == "scalar"
+        })
+        .expect("a builtin-typed scalar field row is landed");
+    assert_eq!(
+        accepted_at(builtin),
+        vec!["logical", "physical", "inline", "scalar", "bootstrap_local"],
+        "outside the registered-wire law a field admits all five durable field classes, and never the kind classes wire or prebootstrap"
     );
 }
 
