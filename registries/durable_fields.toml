@@ -5052,6 +5052,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "LocalRestoreReadyCertificate"
+field_tag = 0x0008
+stable_name = "current_checkpoint_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryCheckpoint"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the RecoveryCheckpoint this ready certificate certifies current; retained while the ready certificate is retained, and order 30 <= 40 keeps the edge backward-only (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalRestoreReadyCertificate"
 field_tag = 0x0009
 stable_name = "current_config_floor_ref"
 exact_wire_type = "StrongRef"

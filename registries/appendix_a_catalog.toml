@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
 
 [target_manifest]
-target_count = 3490
+target_count = 3491
 projection_fallback_count = 111
-target_source_assignment_sha256 = "b9d055f1d9cc2c9c21cf8fb1c9210b586965b69fdca4a6bfbba52e3629e2f09b"
+target_source_assignment_sha256 = "12a0fd1400925eb19fbdd65908e879137e914308a9df7774ab57e2f5b43d1b48"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -18869,6 +18869,23 @@ target_schema_id = "ConfigurationState"
 construction_order = 40
 role_predicate = "role-local"
 retention_and_cut_rule = "strong reference to the ConfigurationState certified by the ready root; retained while the ready certificate is retained, and order 5 <= 40 keeps the edge backward-only (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-ready-certificate-current-checkpoint-ref"
+containing_schema = "LocalRestoreReadyCertificate"
+field_tag = 0x0008
+stable_name = "current_checkpoint_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryCheckpoint"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the RecoveryCheckpoint this ready certificate certifies current; retained while the ready certificate is retained, and order 30 <= 40 keeps the edge backward-only (a20:2603)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -83213,6 +83230,14 @@ row_id = "a20:target:field-local-restore-ready-certificate-current-configuration
 target_row_id = "a20:field:local-restore-ready-certificate-current-configuration-ref"
 slice_id = "a20"
 source_key = "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.current_configuration_ref|current_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-local-restore-ready-certificate-current-checkpoint-ref"
+target_row_id = "a20:field:local-restore-ready-certificate-current-checkpoint-ref"
+slice_id = "a20"
+source_key = "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.current_checkpoint_ref|current_checkpoint_ref"
 target_kind = "field"
 definition_status = "declared"
 

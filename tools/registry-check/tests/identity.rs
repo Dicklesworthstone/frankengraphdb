@@ -106,6 +106,11 @@ fn idr_dgtv_registered_strong_ref_bodyless_marker_accounting_is_exact() {
         0,
         "bodyless vocabulary must emit no interior field rows"
     );
+    assert_eq!(
+        registry_check::appendix_source::AmbiguityKind::DefinitionWithoutStructuralBody.as_str(),
+        "definition-without-structural-body",
+        "bodyless-schema guard code must remain explicit"
+    );
 }
 
 fn real_identity() -> IdentityRegistries {
@@ -8407,6 +8412,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 "LocalRestoreReadyCertificate",
                 "ready_closure_inventory_ref"
             ) | ("LocalRestoreReadyCertificate", "current_configuration_ref")
+                | ("LocalRestoreReadyCertificate", "current_checkpoint_ref")
                 | ("LocalRestoreReadyCertificate", "current_config_floor_ref")
                 | ("RestoreShardOperationalAck", "post_close_state_root_ref")
                 | ("RestoreShardOperationalAck", "source_access_closure_ref")
@@ -8956,7 +8962,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 655,
+        pre_erratum.fields.len() + 656,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A12 exact-order tranche"
     );
