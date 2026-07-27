@@ -16,13 +16,25 @@
 #   * The subject artifact is compiled from THIS tree into a private path. It
 #     used to be resolved by path out of the shared CARGO_TARGET_DIR, so the
 #     gate reported on whichever artifact happened to be there.
-#   * Phase 3's negative assertion is attributed: it requires the closure to
-#     have been COMPUTED and to name a non-live reachable clause. It used to
-#     accept any non-zero exit, and so passed on a fixture that never parsed —
-#     the assertion whose whole job is proving that failure is detectable was
-#     itself succeeding for the wrong reason. Phase 3 carries an in-band
-#     control that re-runs the same classifier on exactly that malformed
-#     fixture and requires a different verdict.
+#   * EVERY negative assertion is attributed, through one shared reader
+#     (`classify_negative_run`): the checker must be shown to have RUN, and the
+#     failure must be shown to be the law under test. Both phases used to
+#     accept any non-zero exit. Phase 3 passed on a fixture that never parsed;
+#     phase 2 was worse — MEASURED, it printed "PASS: validate failed as
+#     required on twenty-first ID" against a staged spine with no twenty-first
+#     ID in it at all, because the staged copy fails validation for unrelated
+#     reasons anyway. Each phase carries an in-band control that re-runs the
+#     shared reader on a fixture that cannot parse and requires a different
+#     verdict.
+#
+# WHAT THE CONTROLS GUARD, AND WHAT THEY DO NOT. They guard the RULE that
+# decides whether a failure counts — widen `classify_negative_run` back to "any
+# non-zero exit" and both controls go red in the same run, which is the point of
+# there being one reader rather than one per phase. They do NOT guard against a
+# future call site that bypasses the reader entirely and tests `$?` inline; no
+# control can, short of re-running the assertion itself. That gap is stated here
+# rather than left for a reader to discover, and it belongs to
+# fgdb-validator-laws-never-witnessed-firing-xnxy's population.
 # =============================================================================
 set -euo pipefail
 
@@ -115,22 +127,108 @@ else
   ok "every checker and negative-test symbol resolves (stub-registered)"
 fi
 
+# --- Shared instrument: how a negative gate is allowed to conclude -----------
+#
+# ONE READER for every negative assertion in this script and for the vacuity
+# control beside each one. A control cannot then pass by exercising a rule its
+# assertion does not use, and a repair to "did the tool even run" lands once
+# rather than in whichever phase the fixer happens to open.
+#
+# This is the bead's own defect, generalized. A non-zero exit from a checker
+# means one of three things: the fixture never parsed (exit 2, run_error), so
+# the run says nothing about any law; the checker ran but something OTHER than
+# the law under test failed it; or the law fired. Only the third is evidence.
+# Until bead fgdb-g0-spine-e2e-red-measures-harness-not-spine-iy7e both phases
+# below accepted all three and reported PASS.
+#
+# classify_negative_run <jsonl> <exit-code> <evidence-event> <attribution-pattern>
+classify_negative_run() {
+  local jsonl="$1" rc="$2" evidence="$3" attribution="$4"
+  if [ "$rc" -eq 0 ]; then echo "tool_passed"; return; fi
+  if grep -q '"event":"run_error"' "$jsonl"; then echo "never_ran"; return; fi
+  if ! grep -q "\"event\":\"$evidence\"" "$jsonl"; then echo "no_evidence"; return; fi
+  if ! grep -qE "$attribution" "$jsonl"; then echo "failed_elsewhere"; return; fi
+  echo "attributed"
+}
+
 # --- Phase 2: twenty-first ID fails naming the exact row ---------------------
 log "phase 2: planted twenty-first invariant ID"
-SPINE="$WORK/spine-stage"
-mkdir -p "$SPINE/registries"
-cp "$ROOT"/registries/*.toml "$SPINE/registries/"
-cat >> "$SPINE/registries/invariants.toml" <<'EOF'
+
+# write_planted_spine <dir> <twenty_first | unparseable>
+# One writer for the live fixture and its control, so the control differs from
+# the fixture in exactly one thing: whether the file can be read at all.
+write_planted_spine() {
+  local dir="$1" mode="$2"
+  mkdir -p "$dir/registries"
+  cp "$ROOT"/registries/*.toml "$dir/registries/"
+  case "$mode" in
+    twenty_first)
+      cat >> "$dir/registries/invariants.toml" <<'EOF'
 
 [[invariant]]
 id = "FG-INV-21"
 title = "planted illegal twenty-first row"
 EOF
-if "$BIN" validate --root "$SPINE" >"$WORK/spine-neg-21.jsonl" 2>/dev/null; then
-  die "validate passed despite twenty-first ID"
+      ;;
+    unparseable)
+      # The same planted row with its table header left unclosed. validate
+      # cannot read the registry at all: exit 2, run_error, no law checked.
+      cat >> "$dir/registries/invariants.toml" <<'EOF'
+
+[[invariant]
+id = "FG-INV-21"
+title = "planted illegal twenty-first row"
+EOF
+      ;;
+    *)
+      log "internal error: unknown planted-spine mode $mode"
+      exit 2
+      ;;
+  esac
+}
+
+# The law fired at all; that it named the right row is asserted separately
+# below, exactly as phase 3 separates "the closure found something absent"
+# from "it named FG-INV-04.core".
+TWENTY_ID_ATTRIBUTION='"code":"twenty_id_violation"'
+
+# CONTROL FIRST, as in phase 3 and as the binary reports closure_self_test
+# before its own verdicts. Until this commit phase 2's assertion was a bare
+# `if "$BIN" validate …; then die; else ok; fi`, and MEASURED against this very
+# fixture it printed "PASS: validate failed as required on twenty-first ID" on
+# a registry no reader ever parsed. The phase as a whole still went red on the
+# line beneath it, so the defect was a false PASS rather than a false green —
+# but a reader scanning PASS lines was being told a law had fired that had not.
+write_planted_spine "$WORK/spine-stage-unparseable" unparseable
+P2_CONTROL_RC=0
+"$BIN" validate --root "$WORK/spine-stage-unparseable" \
+  >"$WORK/spine-neg-21-control.jsonl" 2>/dev/null || P2_CONTROL_RC=$?
+P2_CONTROL_VERDICT="$(classify_negative_run "$WORK/spine-neg-21-control.jsonl" \
+  "$P2_CONTROL_RC" registry_validated "$TWENTY_ID_ATTRIBUTION")"
+if [ "$P2_CONTROL_RC" -ne 0 ] && [ "$P2_CONTROL_VERDICT" = "never_ran" ]; then
+  ok "control: a staged spine that never parsed classifies never_ran, not attributed (exit $P2_CONTROL_RC)"
 else
-  ok "validate failed as required on twenty-first ID"
+  die "control: unparseable staged spine classified $P2_CONTROL_VERDICT (exit $P2_CONTROL_RC); the twenty-first-ID assertion below is vacuous"
 fi
+
+SPINE="$WORK/spine-stage"
+write_planted_spine "$SPINE" twenty_first
+P2_RC=0
+"$BIN" validate --root "$SPINE" >"$WORK/spine-neg-21.jsonl" 2>/dev/null || P2_RC=$?
+P2_VERDICT="$(classify_negative_run "$WORK/spine-neg-21.jsonl" "$P2_RC" \
+  registry_validated "$TWENTY_ID_ATTRIBUTION")"
+case "$P2_VERDICT" in
+  attributed)
+    ok "validate failed on the twenty-ID law itself (exit $P2_RC, twenty_id_violation emitted over a spine that parsed)" ;;
+  tool_passed)
+    die "validate passed despite twenty-first ID" ;;
+  never_ran)
+    die "validate never ran: the staged spine did not parse (run_error), so exit $P2_RC proves nothing about the twenty-ID law (see $WORK/spine-neg-21.jsonl)" ;;
+  no_evidence)
+    die "validate exited $P2_RC without validating a single registry (see $WORK/spine-neg-21.jsonl)" ;;
+  failed_elsewhere)
+    die "validate failed without emitting twenty_id_violation: the red is not the twenty-ID law (see $WORK/spine-neg-21.jsonl)" ;;
+esac
 grep -q '"code":"twenty_id_violation".*FG-INV-21' "$WORK/spine-neg-21.jsonl" \
   && ok "violation names FG-INV-21 exactly" \
   || die "twenty_id_violation missing FG-INV-21 (see $WORK/spine-neg-21.jsonl)"
@@ -155,25 +253,12 @@ EOF
   [ "$expected" = "omit" ] || printf 'expected_reachable_clauses = %s\n' "$expected" >> "$path"
 }
 
-# classify_closure_run <jsonl> <exit-code>  ->  one verdict token on stdout
-#
-# ONE READER. The live fixture and the vacuity control are both judged here, so
-# the control cannot pass by exercising a rule the assertion does not use.
-#
-# The distinction this makes is the whole point of the phase. A non-zero exit
-# from `closure` means one of: the manifest never parsed (exit 2, run_error);
-# the closure ran and something other than a non-live reachable clause failed
-# it (a count mismatch, an undeclared atom); or the law under test fired. Only
-# the last one is evidence about the reachable-stub law.
-classify_closure_run() {
-  local jsonl="$1" rc="$2" absent
-  if [ "$rc" -eq 0 ]; then echo "closure_passed"; return; fi
-  if grep -q '"event":"run_error"' "$jsonl"; then echo "never_ran"; return; fi
-  if ! grep -q '"event":"closure_computed"' "$jsonl"; then echo "no_closure"; return; fi
-  absent="$(sed -n 's/.*"event":"closure_computed".*"absent":\([0-9][0-9]*\).*/\1/p' "$jsonl" | head -1)"
-  if [ "${absent:-0}" -lt 1 ]; then echo "failed_elsewhere"; return; fi
-  echo "stub_absent"
-}
+# Phase 3's attribution: the closure must have found something absent. `absent`
+# is the count on closure_computed, and `[1-9]` excludes the zero that a count
+# mismatch or an undeclared atom would leave behind; `absent_clauses` cannot
+# match, since `"absent"` there is followed by `_`. The specificity assertions
+# further down name the exact clause and capability.
+REACHABLE_STUB_ATTRIBUTION='"absent":[1-9]'
 
 # The fixture's own `expected_reachable_clauses` is DERIVED, not frozen.
 # 948e1a5 (bead fgdb-regcheck-closure-vacuous-no-control-hp0f) made the key
@@ -207,9 +292,10 @@ write_hot_manifest "$WORK/hot-manifest-unparseable.toml" omit
 CONTROL_RC=0
 "$BIN" closure --root "$ROOT" --manifest "$WORK/hot-manifest-unparseable.toml" \
   >"$WORK/spine-closure-control.jsonl" 2>/dev/null || CONTROL_RC=$?
-CONTROL_VERDICT="$(classify_closure_run "$WORK/spine-closure-control.jsonl" "$CONTROL_RC")"
+CONTROL_VERDICT="$(classify_negative_run "$WORK/spine-closure-control.jsonl" \
+  "$CONTROL_RC" closure_computed "$REACHABLE_STUB_ATTRIBUTION")"
 if [ "$CONTROL_RC" -ne 0 ] && [ "$CONTROL_VERDICT" = "never_ran" ]; then
-  ok "control: a fixture that never parsed classifies never_ran, not stub_absent (exit $CONTROL_RC)"
+  ok "control: a fixture that never parsed classifies never_ran, not attributed (exit $CONTROL_RC)"
 else
   die "control: malformed fixture classified $CONTROL_VERDICT (exit $CONTROL_RC); the reachable-stub assertion below is vacuous"
 fi
@@ -218,15 +304,16 @@ write_hot_manifest "$WORK/hot-manifest.toml" "$REACHED"
 CLOSURE_RC=0
 "$BIN" closure --root "$ROOT" --manifest "$WORK/hot-manifest.toml" \
   >"$WORK/spine-closure-hot.jsonl" 2>/dev/null || CLOSURE_RC=$?
-CLOSURE_VERDICT="$(classify_closure_run "$WORK/spine-closure-hot.jsonl" "$CLOSURE_RC")"
+CLOSURE_VERDICT="$(classify_negative_run "$WORK/spine-closure-hot.jsonl" \
+  "$CLOSURE_RC" closure_computed "$REACHABLE_STUB_ATTRIBUTION")"
 case "$CLOSURE_VERDICT" in
-  stub_absent)
+  attributed)
     ok "closure failed on the reachable stub clause itself (exit $CLOSURE_RC, closure_computed reports absent >= 1)" ;;
-  closure_passed)
+  tool_passed)
     die "closure passed despite reachable stub clause" ;;
   never_ran)
     die "closure never ran: the hot manifest did not parse (run_error), so exit $CLOSURE_RC proves nothing about the reachable-stub law (see $WORK/spine-closure-hot.jsonl)" ;;
-  no_closure)
+  no_evidence)
     die "closure exited $CLOSURE_RC without emitting closure_computed (see $WORK/spine-closure-hot.jsonl)" ;;
   failed_elsewhere)
     die "closure failed with absent=0: the red is not the reachable-stub law (see $WORK/spine-closure-hot.jsonl)" ;;
