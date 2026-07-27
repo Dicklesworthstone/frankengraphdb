@@ -13370,6 +13370,50 @@ fn idr_wire_tag_declares_reference_semantics() {
     );
 }
 
+#[test]
+fn idr_non_reference_wire_members_require_inline_identity_class() {
+    let base = real_identity();
+    let non_reference_wire_fields: Vec<_> = base
+        .fields
+        .iter()
+        .filter(|field| {
+            field.reference_semantics == "none"
+                && base.wire.iter().any(|wire| {
+                    wire.name == field.exact_wire_type && wire.kind != "reference_wrapper"
+                })
+        })
+        .collect();
+    assert!(
+        non_reference_wire_fields.len() >= 100,
+        "non-reference registered-wire population shrank: {}",
+        non_reference_wire_fields.len()
+    );
+    assert!(
+        non_reference_wire_fields
+            .iter()
+            .all(|field| field.identity_class == "inline"),
+        "landed non-reference wire members must all be inline"
+    );
+
+    let mut mutated = base;
+    let index = mutated
+        .fields
+        .iter()
+        .position(|field| {
+            field.reference_semantics == "none"
+                && mutated.wire.iter().any(|wire| {
+                    wire.name == field.exact_wire_type && wire.kind != "reference_wrapper"
+                })
+                && field.identity_class == "inline"
+        })
+        .expect("a non-reference wire field mutation subject");
+    mutated.fields[index].identity_class = "scalar".into();
+    assert!(
+        codes(&mutated).contains(&"non_reference_wire_identity_class_mismatch".to_string()),
+        "changing one subject to scalar must fire the class law"
+    );
+}
+
 /// The two artifacts share ONE table. Every strength the Appendix A catalog can
 /// declare must have a legal field-level spelling, or a row could be required to
 /// carry a value `bad_field` rejects.

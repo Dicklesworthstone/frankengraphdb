@@ -1213,7 +1213,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
     const WIRE: &str = "fnv1a64:8dab244d5b59bc7e";
-    const FIELDS: &str = "fnv1a64:cf977671abed7a12";
+    const FIELDS: &str = "fnv1a64:2eb0f9052764d5fd";
 
     let logical = rows_pin(
         r.logical
@@ -1960,6 +1960,25 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 format!(
                     "wire type {:?} is not permitted in containing schema {:?}",
                     f.exact_wire_type, f.containing_schema
+                ),
+            ));
+        }
+        // LAW: a registered non-reference wire member contributes inline
+        // identity.  The foundation's raw-byte consumers cannot distinguish
+        // another field class, so accepting scalar/logical/physical here would
+        // silently change durable identity semantics.
+        if let Some(wire_type) = wire_by_name.get(f.exact_wire_type.as_str())
+            && wire_type.kind != "reference_wrapper"
+            && f.reference_semantics == "none"
+            && f.identity_class != "inline"
+        {
+            out.push(v(
+                "non_reference_wire_identity_class_mismatch",
+                "durable_fields",
+                &row_id,
+                format!(
+                    "registered wire type {:?} of kind {:?} with reference_semantics=none must use identity_class=inline",
+                    f.exact_wire_type, wire_type.kind
                 ),
             ));
         }
