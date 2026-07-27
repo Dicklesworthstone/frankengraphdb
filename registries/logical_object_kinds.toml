@@ -4804,3 +4804,66 @@ construction_order = 40
 role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/transparency_checkpoint_validation_record/"
+
+[[kind]]
+object_kind = 0x0571
+name = "KeyEnvelopeNodeInheritedRootsRecord"
+status = "reserved"
+construction_order = 50
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/key_envelope_node_inherited_roots_record/"
+
+[[kind]]
+object_kind = 0x0572
+name = "LocalConstraintReservationRecordOwnerRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_constraint_reservation_record_owner_record/"
+
+[[kind]]
+object_kind = 0x0573
+name = "NoTerminalSignatureOrOrderProofRaftNonorderEvidenceRecord"
+status = "reserved"
+construction_order = 6
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/no_terminal_signature_or_order_proof_raft_nonorder_evidence_record/"
+
+[[kind]]
+object_kind = 0x0574
+name = "PriorIncarnationLeaseBarrierBootstrapImportSortedExpiredCohortImportsRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_barrier_bootstrap_import_sorted_expired_cohort_imports_record/"
+
+[[kind]]
+object_kind = 0x0575
+name = "PriorIncarnationLeaseBarrierBootstrapImportSortedIssuerFenceImportsRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_barrier_bootstrap_import_sorted_issuer_fence_imports_record/"
+
+[[kind]]
+object_kind = 0x0576
+name = "PriorIncarnationLeaseBarrierBootstrapImportSortedRevokedCohortImportsRecord"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/prior_incarnation_lease_barrier_bootstrap_import_sorted_revoked_cohort_imports_record/"
+
+[[kind]]
+object_kind = 0x0577
+name = "RemoteGrantRetirementPlanSortedEntriesRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/remote_grant_retirement_plan_sorted_entries_record/"
