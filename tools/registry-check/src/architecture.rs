@@ -83,6 +83,49 @@ pub const PINNED_FAMILY_RULE_COUNT: usize = 39;
 pub const PINNED_BEAD_FAMILY_TABLE_COUNT: usize = 14;
 pub const PINNED_BEAD_OVERRIDE_TABLE_COUNT: usize = 19;
 pub const PINNED_BEAD_BINDING_HASH: &str = "fnv1a64:66a303ca1f79e606";
+/// The per-family floor SPLIT, pinned by equality.
+///
+/// `PINNED_FAMILY_RULE_COUNT` pins only the SUM of these floors (the registry
+/// declares `family_rule_count`, that value is pinned, and the floors must sum
+/// to it).  The split between families is a separate degree of freedom: a
+/// sum-preserving rebalance moves one family's tripwire onto another and every
+/// aggregate check stays green.  The only thing that can object is the
+/// per-family `observed >= floor` test, and it objects only when the receiving
+/// family has no slack.
+///
+/// Measured 2026-07-27: all 14 families currently sit at exactly zero slack
+/// (observed == floor), so the aggregate pins happen to be total — by
+/// coincidence of the corpus, not by construction.  Cloning two
+/// family-resolving beads (slack 1 each) made the rebalance
+/// `risk-governance 7->6, workstream-w2 1->2` pass with ZERO violations.  Two
+/// `br create`s are the whole exploit, so this table pins the split directly.
+///
+/// The floors are deliberately absent from `recompute_rule_binding_hash` (see
+/// the note there) and they stay absent: that hash answers "did the ADR
+/// semantic contract move", and folding corpus tripwire state back into it is
+/// what made 44 of its 45 movements bead churn.  This pin costs no re-freeze of
+/// its own — the six commits that ever changed a floor value
+/// (2cba0a8 4a6943d 5b76722 adc4abb b0c61f7 f805ec7) are exactly the six that
+/// already had to change `PINNED_FAMILY_RULE_COUNT`.
+///
+/// The length is `PINNED_BEAD_FAMILY_TABLE_COUNT` on purpose: adding a family
+/// row is a compile error until both pins move together.
+pub const PINNED_BEAD_FAMILY_FLOORS: [(&str, usize); PINNED_BEAD_FAMILY_TABLE_COUNT] = [
+    ("appendix-a-catalog", 29),
+    ("risk-governance", 7),
+    ("workstream-w1", 0),
+    ("workstream-w2", 1),
+    ("workstream-w3", 0),
+    ("workstream-w4", 1),
+    ("workstream-w5", 0),
+    ("workstream-w6", 0),
+    ("workstream-w7", 0),
+    ("workstream-w8", 0),
+    ("workstream-w9", 0),
+    ("workstream-w10", 0),
+    ("workstream-w11", 0),
+    ("workstream-w12", 1),
+];
 
 pub const PLANNED_CRATES: [&str; 70] = [
     "fgdb-types",
@@ -2941,6 +2984,33 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
                 registry.bead_overrides.len()
             ),
         ));
+    }
+    // Pin the per-family floor SPLIT, not just its sum.  `family_rule_count` is
+    // pinned and the floors must sum to it, so a rebalance between two families
+    // passes every aggregate check; see `PINNED_BEAD_FAMILY_FLOORS`.
+    let pinned_floors: BTreeMap<&str, usize> = PINNED_BEAD_FAMILY_FLOORS.iter().copied().collect();
+    for family in &registry.bead_families {
+        match pinned_floors.get(family.id.as_str()) {
+            Some(&pinned) if pinned == family.expected_match_count => {}
+            Some(&pinned) => violations.push(Violation::global(
+                "bead_family_floor_pin",
+                "bead_provenance",
+                format!(
+                    "bead family {:?} declares expected_match_count {}, independently pinned floor is {pinned}",
+                    family.id, family.expected_match_count
+                ),
+            )),
+            // Completeness guard.  Without it the law fails OPEN: a newly added
+            // family escapes the pin by being unknown to the table.
+            None => violations.push(Violation::global(
+                "bead_family_floor_unpinned",
+                "bead_provenance",
+                format!(
+                    "bead family {:?} has no row in PINNED_BEAD_FAMILY_FLOORS; every family floor must be independently pinned",
+                    family.id
+                ),
+            )),
+        }
     }
 
     let decisions: BTreeMap<&str, &Decision> = registry

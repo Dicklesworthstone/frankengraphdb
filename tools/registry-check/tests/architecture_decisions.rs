@@ -524,6 +524,68 @@ fn architecture_neg_rule_tables_and_resolution_pins() {
     assert_code(&family_count, "bead_family_match_count_below_floor");
 }
 
+/// Positive control for the two floor-pin laws below.  An equality pin that
+/// never matches the shipped registry would make every negative below fire for
+/// the wrong reason.
+#[test]
+fn architecture_bead_family_floor_pins_match_the_shipped_registry() {
+    let codes = violation_codes(&real_registry());
+    assert!(!codes.contains("bead_family_floor_pin"), "{codes:?}");
+    assert!(!codes.contains("bead_family_floor_unpinned"), "{codes:?}");
+}
+
+/// The aggregate pins fix only the SUM of the per-family floors, so a
+/// sum-preserving rebalance moves one family's tripwire onto another with every
+/// aggregate law still green.  The corpus test `observed >= floor` is the only
+/// other objection, and it is silent whenever both families have slack —
+/// measured 2026-07-27, this exact mutation was accepted with ZERO violations
+/// on a corpus carrying slack 1 on each of these two families.
+#[test]
+fn architecture_neg_bead_family_floor_rebalance_is_pinned() {
+    let mut rebalanced = real_registry();
+    for (id, from, to) in [("risk-governance", 7, 6), ("workstream-w2", 1, 2)] {
+        let family = rebalanced
+            .bead_families
+            .iter_mut()
+            .find(|family| family.id == id)
+            .expect("family exists");
+        assert_eq!(
+            family.expected_match_count, from,
+            "{id} floor moved; re-derive this mutation"
+        );
+        family.expected_match_count = to;
+    }
+    let total: usize = rebalanced
+        .bead_families
+        .iter()
+        .map(|family| family.expected_match_count)
+        .sum();
+    assert_eq!(
+        total, PINNED_FAMILY_RULE_COUNT,
+        "the rebalance must preserve the pinned sum, or it proves the wrong law"
+    );
+    let codes = violation_codes(&rebalanced);
+    assert!(codes.contains("bead_family_floor_pin"), "{codes:?}");
+    assert!(
+        !codes.contains("bead_family_expected_total"),
+        "the aggregate law must stay green here, or this negative is redundant: {codes:?}"
+    );
+}
+
+/// Completeness guard.  Without it the pin fails OPEN: a family that is not
+/// named in `PINNED_BEAD_FAMILY_FLOORS` would simply be unconstrained.
+#[test]
+fn architecture_neg_bead_family_floor_table_must_cover_every_family() {
+    let mut renamed = real_registry();
+    renamed
+        .bead_families
+        .iter_mut()
+        .find(|family| family.id == "workstream-w9")
+        .expect("w9 family exists")
+        .id = "workstream-w9x".into();
+    assert_code(&renamed, "bead_family_floor_unpinned");
+}
+
 #[test]
 fn architecture_neg_planned_crate_universe_drift() {
     let mut registry = real_registry();
