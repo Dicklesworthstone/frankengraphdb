@@ -43,7 +43,7 @@ BEADS="$ROOT/.beads/issues.jsonl"
 # no re-freeze when an entry is added, while deleting entries turns this red.
 # (fgdb-lzol / NE-0032: an equality pin over a growing artifact makes every
 # writer a false positive; floors are the repair.)
-LEDGER_ENTRY_FLOOR=41
+LEDGER_ENTRY_FLOOR=44
 
 PASS=0
 FAIL=0

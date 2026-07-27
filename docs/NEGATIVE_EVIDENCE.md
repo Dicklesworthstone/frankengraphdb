@@ -479,6 +479,36 @@ be a commit reachable in this repository.
 - **caught_by**: attempting to witness every code and finding three that no input reaches
 - **signature**: an unwitnessable law is not automatically a defect — but it must be *named* as unwitnessable, or it is indistinguishable from one nobody tried to witness.
 
+### NE-0042 — The doctrine's memorialization clause pointed at nothing
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-negative-evidence-ledger-does-not-exist-m172
+- **repair**: 37c28c0
+- **claimed**: AGENTS.md — "Violating any of them is a revert, memorialized in `docs/NEGATIVE_EVIDENCE.md`"
+- **actual**: the file did not exist and was referenced by nothing but that sentence. The doctrine's entire enforcement clause was unbacked, and the family it exists to make visible stayed invisible while 41 instances of it were repaired one at a time.
+- **caught_by**: a mock/placeholder sweep asking which artifacts the doctrine names
+- **signature**: a rule whose consequence names an artifact nobody checks exists. The class is closed by law 1 of this gate: every repository path AGENTS.md names must resolve.
+
+### NE-0043 — AGENTS.md named a beads export that has never existed
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-negative-evidence-ledger-does-not-exist-m172
+- **repair**: 37c28c0
+- **claimed**: AGENTS.md — "`bv` computes PageRank/betweenness/critical-path/cycles over `.beads/beads.jsonl`"
+- **actual**: `.beads/beads.jsonl` has never been tracked in this repository. `bv` reads the beads database or the `.beads` directory; the JSONL export is `issues.jsonl`. An agent following the instruction literally would find nothing.
+- **caught_by**: law 1 of this gate, on its first run — the second dangling path it found
+- **signature**: the NE-0042 class, same document, different path. One instance is an oversight; two in one file is the absence of a law.
+
+### NE-0044 — This gate's own revert law was a substring search
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-negative-evidence-ledger-does-not-exist-m172
+- **repair**: 37c28c0
+- **claimed**: law 4 — every revert-semantics commit has a disposition in this ledger
+- **actual**: it was `grep -Fq "$sha"` over the whole file. Deleting `46e654e`'s disposition left the gate GREEN, because that sha also appears in this file's preamble prose. The law could not fail for the reason it existed.
+- **caught_by**: the red-proof harness, not review — 12 of 13 mutations fired and this one did not
+- **signature**: NE-0001 through NE-0004, a fifth time, inside the gate that memorializes them. The class is not "checkers written carelessly" — it is that a reader is never proved by reading it. Mutate the input and watch the verdict move, or the law is unwitnessed.
+
 ---
 
 ## Reverts
