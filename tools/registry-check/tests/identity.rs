@@ -6626,6 +6626,44 @@ fn idr_wire_backed_top_level_union_validates_every_consumer() {
     );
 }
 
+/// THE SATISFYING WITNESS for the whole ordinary-union family.
+///
+/// Every negative test below asserts `codes_without_assignment_drift(..) ==
+/// vec![one code]` after mutating one of these two fixtures. That shape carries
+/// a hidden premise: the UNMUTATED fixture emits nothing. If it emitted so much
+/// as one other code, every one of those `vec![one]` assertions would already be
+/// failing — but if a future edit made a fixture emit a code that a mutation
+/// then *removed*, the assertions would keep passing while proving something
+/// else entirely.
+///
+/// It is also the fact `fgdb-a18-restore-union-source-gates-a4fq` turns on.
+/// That bead blocks seven source-census unions on
+/// `ordinary_union_unresolved_schema`, and the question that decides whether a
+/// producer ruling can ever unblock them is not "does the law fire" — it is
+/// "can an ordinary union be authored so the law does NOT fire". A law with a
+/// trigger and no satisfying witness is a permanent blocker wearing a gate's
+/// clothes (`tests/satisfiability.rs`), and two such pairs are already known in
+/// this checker. This test answers it in the other direction: an ordinary union
+/// with a resolvable containing schema is ACCEPTED, so the seven are landable
+/// as soon as their class is ruled on.
+#[test]
+fn idr_ordinary_union_fixtures_are_accepted() {
+    let ordinary = ordinary_top_level_union_fixture();
+    let ordinary_codes = codes_without_assignment_drift(&ordinary);
+    assert!(
+        ordinary_codes.is_empty(),
+        "the ordinary-union fixture must be accepted, or every vec![one code] \
+         assertion built on it is measuring something else: {ordinary_codes:?}"
+    );
+
+    let wire_backed = wire_backed_top_level_union_fixture();
+    let wire_backed_codes = codes_without_assignment_drift(&wire_backed);
+    assert!(
+        wire_backed_codes.is_empty(),
+        "the wire-backed top-level union fixture must be accepted: {wire_backed_codes:?}"
+    );
+}
+
 #[test]
 fn idr_ordinary_union_rejects_duplicate_arm_tag() {
     let mut identity = ordinary_top_level_union_fixture();

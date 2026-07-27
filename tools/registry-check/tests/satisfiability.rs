@@ -40,7 +40,26 @@ enum Coverage {
         sites: &'static str,
         note: &'static str,
     },
-    /// Tractable but not yet authored. CI counts these and fails if the count grows.
+    /// Both witnesses exist, but in `tests/identity.rs` rather than here.
+    ///
+    /// The trigger is an exact-code negative test; the satisfying witness is the
+    /// fixture that test mutates, which
+    /// `idr_ordinary_union_fixtures_are_accepted` proves emits zero codes. That
+    /// is the same two-witness pair this file demands, authored against a
+    /// richer hand-built fixture than [`base`] can express — an ordinary union
+    /// needs arms, containing schemas and payload commitments, and a second
+    /// hand-rolled copy of that fixture here would be a second reader of one
+    /// fact.
+    ///
+    /// `trigger_tests` names the exact `#[test]` functions.
+    /// [`witnessed_elsewhere_sites_are_live`] proves each one still exists AND
+    /// still names this code, so the pointer cannot rot into a claim about
+    /// nothing.
+    WitnessedElsewhere {
+        trigger_tests: &'static [&'static str],
+    },
+    /// Tractable but not yet authored. [`pending_backlog_is_ratcheted`] pins the
+    /// exact set, so a code may neither join it silently nor leave it silently.
     Pending(&'static str),
 }
 
@@ -76,17 +95,40 @@ const REGISTRY: &[(&str, Coverage)] = &[
         "ordinary_union_arm_missing",
         Coverage::Pending("arm fixture"),
     ),
+    // These three read `Pending("arm fixture")` until 2026-07-27, while
+    // `tests/identity.rs` had held exact-code triggers for all of them the whole
+    // time. The stale reading is not cosmetic: `fgdb-a18-restore-union-source-gates-a4fq`
+    // blocks seven source-census unions on `ordinary_union_unresolved_schema`,
+    // and a reader who consults only this table concludes that the law blocking
+    // them has never been watched work — i.e. that the seven might be
+    // unlandable in ANY shape, like the `dag_self_edge` pair below. They are
+    // not. The law is satisfiable, so those unions are landable as soon as
+    // their class is ruled on.
     (
         "ordinary_union_arm_duplicate_tag",
-        Coverage::Pending("arm fixture"),
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_ordinary_union_rejects_duplicate_arm_tag"],
+        },
     ),
     (
         "ordinary_union_name_collision",
-        Coverage::Pending("arm fixture"),
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &[
+                "idr_wire_backed_top_level_union_requires_exact_cross_index",
+                "idr_ordinary_union_rejects_reference_union_name_collision",
+                "idr_ordinary_union_rejects_wire_type_name_collision",
+                "idr_reference_union_rejects_ordinary_union_name_collision",
+            ],
+        },
     ),
     (
         "ordinary_union_unresolved_schema",
-        Coverage::Pending("arm fixture"),
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &[
+                "idr_wire_backed_top_level_union_rejects_conventional_class_collision",
+                "idr_ordinary_union_rejects_unresolved_containing_schema",
+            ],
+        },
     ),
     // ---- union_arm_ family -----------------------------------------------------------
     (
@@ -474,12 +516,17 @@ fn identity_code_set_is_ratcheted() {
 #[test]
 fn report_unsatisfiable_pairs() {
     let mut witnessed = 0;
+    let mut witnessed_elsewhere = 0;
     let mut exempt = 0;
     let mut unsatisfiable = 0;
     let mut pending = 0;
     for (code, cov) in REGISTRY {
         match cov {
             Coverage::Witnessed => witnessed += 1,
+            Coverage::WitnessedElsewhere { trigger_tests } => {
+                witnessed_elsewhere += 1;
+                println!("WITNESSED-IN-IDENTITY {code}: {trigger_tests:?}");
+            }
             Coverage::Exempt(reason) => {
                 exempt += 1;
                 println!("EXEMPT {code}: {reason}");
@@ -501,7 +548,105 @@ fn report_unsatisfiable_pairs() {
         }
     }
     println!(
-        "coverage states: witnessed={witnessed} exempt={exempt} \
-         unsatisfiable={unsatisfiable} pending={pending}"
+        "coverage states: witnessed={witnessed} witnessed_elsewhere={witnessed_elsewhere} \
+         exempt={exempt} unsatisfiable={unsatisfiable} pending={pending}"
+    );
+}
+
+/// The exact set of codes allowed to carry no witness yet.
+///
+/// An exact readable list, not a count, for the reason
+/// [`UNREGISTERED_BASELINE`] already gives: a code replacing another must fail
+/// the ratchet even when the total does not move.
+const PENDING_BASELINE: &[&str] = &[
+    "dag_cycle",
+    "ordinary_union_arm_missing",
+    "union_arm_duplicate_target",
+    "union_arm_lifecycle_mismatch",
+    "union_arm_unresolved",
+];
+
+/// The backlog may not grow, and it may not shrink unnoticed either.
+///
+/// Until 2026-07-27 the `Pending` doc claimed "CI counts these and fails if the
+/// count grows" and NO ASSERTION IMPLEMENTED IT — [`report_unsatisfiable_pairs`]
+/// printed the tally to stdout, which the harness swallows without
+/// `--nocapture`. Measured: flipping `dag_future_result` from `Witnessed` to
+/// `Pending` moved the tally from `witnessed=5 pending=8` to `witnessed=4
+/// pending=9` and the suite still reported 6 passed, 0 failed. A coverage
+/// ledger that cannot notice its own regression is the same defect class it
+/// exists to find, one level up.
+///
+/// Equality in BOTH directions is deliberate. Growth is a regression. Shrinkage
+/// is progress, and it still fails here, because closing a backlog row is
+/// exactly the moment someone should have to say so in the diff — that is how
+/// these three ordinary-union rows sat stale for as long as they did.
+#[test]
+fn pending_backlog_is_ratcheted() {
+    let mut pending: Vec<&str> = REGISTRY
+        .iter()
+        .filter(|(_, cov)| matches!(cov, Coverage::Pending(_)))
+        .map(|(code, _)| *code)
+        .collect();
+    pending.sort_unstable();
+    let mut expected: Vec<&str> = PENDING_BASELINE.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        pending, expected,
+        "the un-witnessed backlog moved: growth is a coverage regression, and a \
+         shrink is progress that must be recorded in PENDING_BASELINE rather \
+         than discovered later"
+    );
+}
+
+/// A `WitnessedElsewhere` row must keep pointing at a live witness.
+///
+/// Read from `tests/identity.rs` itself, so the claim is checked against the
+/// corpus rather than restated. Without this the variant would be strictly
+/// worse than `Pending`: a comfortable label over a test that had been renamed
+/// or deleted.
+#[test]
+fn witnessed_elsewhere_sites_are_live() {
+    let identity_tests = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/identity.rs"));
+    // Controls, so a reader that had stopped reading cannot pass this.
+    assert!(
+        identity_tests.contains("fn idr_ordinary_union_rejects_unresolved_containing_schema("),
+        "reader control: a known-present test function was not found"
+    );
+    assert!(
+        !identity_tests.contains("fn idr_definitely_fabricated_test_name("),
+        "reader control: a fabricated test function was found"
+    );
+
+    let mut broken: Vec<String> = Vec::new();
+    for (code, cov) in REGISTRY {
+        let Coverage::WitnessedElsewhere { trigger_tests } = cov else {
+            continue;
+        };
+        assert!(
+            !trigger_tests.is_empty(),
+            "{code} claims a witness elsewhere and names no test"
+        );
+        for name in *trigger_tests {
+            let Some(start) = identity_tests.find(&format!("fn {name}(")) else {
+                broken.push(format!("{code}: test {name} no longer exists"));
+                continue;
+            };
+            // The named test must still assert THIS code. Bound the search to
+            // the function's own body so a neighbouring test cannot satisfy it.
+            let body = &identity_tests[start..];
+            let end = body[1..]
+                .find("\n#[test]")
+                .map(|offset| offset + 1)
+                .unwrap_or(body.len());
+            if !body[..end].contains(&format!("\"{code}\"")) {
+                broken.push(format!("{code}: test {name} no longer names it"));
+            }
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "WitnessedElsewhere rows point at witnesses that are gone:\n{}",
+        broken.join("\n")
     );
 }
