@@ -14643,6 +14643,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "ControlCommandPayloadAvailabilityCertificateRef"
+containing_schema = "ControlCommand"
+union_path = "ControlCommand.payload_availability_certificate_ref"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ControlCommand"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "DeliveryFrontier"
 containing_schema = "DeliveryFrontier"
 union_path = "DeliveryFrontier"
@@ -16287,6 +16298,17 @@ union_path = "PreBootstrapReservationBodyRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["PreBootstrapReservationBodyRef"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PreparedCommitRecord"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -20278,6 +20300,31 @@ source_arm_name = "Shard"
 stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "0fbf822464c53d46addc695e22b32863efb234e069de0966c3535ae2c8c9e2ea"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "ControlCommandPayloadAvailabilityCertificateRef"
+containing_schema = "ControlCommand"
+union_path = "ControlCommand.payload_availability_certificate_ref"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "ControlCommandPayloadAvailabilityCertificateRef"
+containing_schema = "ControlCommand"
+union_path = "ControlCommand.payload_availability_certificate_ref"
+arm_tag = 0x0002
+source_arm_name = "Some"
+stable_name = "some"
+payload_kind = "inline-record"
+payload_sha256 = "b90ae16fc120663773510eb0f56e8f4e580a3019dc70924e64c844d6cfc279d5"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -25735,6 +25782,69 @@ source_arm_name = "AllocationEpoch"
 stable_name = "allocation_epoch"
 payload_kind = "inline-record"
 payload_sha256 = "af99191847e5b9d19163e9f9cf29f31541b6e373220e0b3fa76085069ca0d102"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+arm_tag = 0x0001
+source_arm_name = "Preparing"
+stable_name = "preparing"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+arm_tag = 0x0002
+source_arm_name = "Receipted"
+stable_name = "receipted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+arm_tag = 0x0003
+source_arm_name = "Ordered"
+stable_name = "ordered"
+payload_kind = "inline-record"
+payload_sha256 = "4bdfb04145586710692c9cdab885bb80f4ec663cf5c17fff8510fb77a847fb75"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+arm_tag = 0x0004
+source_arm_name = "Applied"
+stable_name = "applied"
+payload_kind = "inline-record"
+payload_sha256 = "b02739221aa0b41433910cedebb7b459e5ed8b8721d2ca7d4ff0ca6e5415c393"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+arm_tag = 0x0005
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "inline-record"
+payload_sha256 = "01a941d9eb800dd5538214b9c4186e9f482f5e835854467444faf8bb183390c7"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

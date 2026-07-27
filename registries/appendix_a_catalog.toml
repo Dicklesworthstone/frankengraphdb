@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3583
+target_count = 3592
 projection_fallback_count = 118
-target_source_assignment_sha256 = "5eef2dcbca97143d3879dd7123484a8af7ecad1a2f1d5e1b1878dde95b6a942d"
+target_source_assignment_sha256 = "53f2b9cd66bee3420b41f8b30227bab129200234d3674921ba04249c14aeb5cc"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -110434,5 +110434,205 @@ row_id = "a20:target:union-arm-local-restore-service-prepare-promotion-authority
 target_row_id = "a20:union-arm:local-restore-service-prepare-promotion-authority-profile-recipe-directory-bound-embedded-no-catalog-def1a2cf77468499"
 slice_id = "a20"
 source_key = "arm|LocalRestoreServicePrepareSpec|LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe|DirectoryBoundEmbeddedNoCatalog"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[union]]
+slice_id = "a10"
+row_id = "a10:union:control-command-payload-availability-certificate-ref-7de8391ff45f097b"
+union_name = "ControlCommandPayloadAvailabilityCertificateRef"
+containing_schema = "ControlCommand"
+union_path = "ControlCommand.payload_availability_certificate_ref"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["ControlCommand"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:control-command-payload-availability-certificate-ref-none-0a5cc72983f1f465"
+union_name = "ControlCommandPayloadAvailabilityCertificateRef"
+containing_schema = "ControlCommand"
+union_path = "ControlCommand.payload_availability_certificate_ref"
+arm_tag = 0x0001
+source_arm_name = "None"
+stable_name = "none"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:control-command-payload-availability-certificate-ref-some-b9df827d1ebb434f"
+union_name = "ControlCommandPayloadAvailabilityCertificateRef"
+containing_schema = "ControlCommand"
+union_path = "ControlCommand.payload_availability_certificate_ref"
+arm_tag = 0x0002
+source_arm_name = "Some"
+stable_name = "some"
+payload_kind = "inline-record"
+payload_sha256 = "b90ae16fc120663773510eb0f56e8f4e580a3019dc70924e64c844d6cfc279d5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a10"
+row_id = "a10:union:prepared-commit-record-status-63bcd158d0d677e9"
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["PreparedCommitRecord"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:prepared-commit-record-status-preparing-6506c859d61d6238"
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+arm_tag = 0x0001
+source_arm_name = "Preparing"
+stable_name = "preparing"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:prepared-commit-record-status-receipted-4f27b21eb850768b"
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+arm_tag = 0x0002
+source_arm_name = "Receipted"
+stable_name = "receipted"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:prepared-commit-record-status-ordered-c0eb5bb147396b21"
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+arm_tag = 0x0003
+source_arm_name = "Ordered"
+stable_name = "ordered"
+payload_kind = "inline-record"
+payload_sha256 = "4bdfb04145586710692c9cdab885bb80f4ec663cf5c17fff8510fb77a847fb75"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:prepared-commit-record-status-applied-789b8eb0b8d3ab3d"
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+arm_tag = 0x0004
+source_arm_name = "Applied"
+stable_name = "applied"
+payload_kind = "inline-record"
+payload_sha256 = "b02739221aa0b41433910cedebb7b459e5ed8b8721d2ca7d4ff0ca6e5415c393"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:prepared-commit-record-status-abandoned-a7918b6bb08626b5"
+union_name = "PreparedCommitRecordStatus"
+containing_schema = "PreparedCommitRecord"
+union_path = "PreparedCommitRecord.status"
+arm_tag = 0x0005
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "inline-record"
+payload_sha256 = "01a941d9eb800dd5538214b9c4186e9f482f5e835854467444faf8bb183390c7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-control-command-payload-availability-certificate-ref-7de8391ff45f097b"
+target_row_id = "a10:union:control-command-payload-availability-certificate-ref-7de8391ff45f097b"
+slice_id = "a10"
+source_key = "union|ControlCommand|ControlCommand.payload_availability_certificate_ref"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-control-command-payload-availability-certificate-ref-none-0a5cc72983f1f465"
+target_row_id = "a10:union-arm:control-command-payload-availability-certificate-ref-none-0a5cc72983f1f465"
+slice_id = "a10"
+source_key = "arm|ControlCommand|ControlCommand.payload_availability_certificate_ref|None"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-control-command-payload-availability-certificate-ref-some-b9df827d1ebb434f"
+target_row_id = "a10:union-arm:control-command-payload-availability-certificate-ref-some-b9df827d1ebb434f"
+slice_id = "a10"
+source_key = "arm|ControlCommand|ControlCommand.payload_availability_certificate_ref|Some"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-prepared-commit-record-status-63bcd158d0d677e9"
+target_row_id = "a10:union:prepared-commit-record-status-63bcd158d0d677e9"
+slice_id = "a10"
+source_key = "union|PreparedCommitRecord|PreparedCommitRecord.status"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-prepared-commit-record-status-preparing-6506c859d61d6238"
+target_row_id = "a10:union-arm:prepared-commit-record-status-preparing-6506c859d61d6238"
+slice_id = "a10"
+source_key = "arm|PreparedCommitRecord|PreparedCommitRecord.status|Preparing"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-prepared-commit-record-status-receipted-4f27b21eb850768b"
+target_row_id = "a10:union-arm:prepared-commit-record-status-receipted-4f27b21eb850768b"
+slice_id = "a10"
+source_key = "arm|PreparedCommitRecord|PreparedCommitRecord.status|Receipted"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-prepared-commit-record-status-ordered-c0eb5bb147396b21"
+target_row_id = "a10:union-arm:prepared-commit-record-status-ordered-c0eb5bb147396b21"
+slice_id = "a10"
+source_key = "arm|PreparedCommitRecord|PreparedCommitRecord.status|Ordered"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-prepared-commit-record-status-applied-789b8eb0b8d3ab3d"
+target_row_id = "a10:union-arm:prepared-commit-record-status-applied-789b8eb0b8d3ab3d"
+slice_id = "a10"
+source_key = "arm|PreparedCommitRecord|PreparedCommitRecord.status|Applied"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-prepared-commit-record-status-abandoned-a7918b6bb08626b5"
+target_row_id = "a10:union-arm:prepared-commit-record-status-abandoned-a7918b6bb08626b5"
+slice_id = "a10"
+source_key = "arm|PreparedCommitRecord|PreparedCommitRecord.status|Abandoned"
 target_kind = "union-arm"
 definition_status = "declared"
