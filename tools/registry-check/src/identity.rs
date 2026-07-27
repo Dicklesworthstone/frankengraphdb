@@ -128,14 +128,38 @@ fn declared_field_reference_semantics(exact_wire_type: &str) -> Option<&'static 
     }
 }
 
-/// Historical assignment witness before the reviewed A10 `CommandRef`
-/// namespace erratum (fgdb-a01-reference-roots-2k0q.1).
+/// FORWARD DRIFT DETECTOR FROM A STATED BASELINE. **Not** proof that the
+/// pre-erratum namespace is reconstructible — fgdb-7yo9 proved it is not.
 ///
-/// That pin named both A01's bare wire identity and A10's generated strong
-/// reference union `CommandRef`. No codec or user data existed; the erratum
-/// renamed only the generated union to `LogicalCommandInputRef`, without
-/// changing tags, targets, reachability, lifecycle, or encoded representation.
-pub const A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN: &str = "fnv1a64:236efa5babe190fe";
+/// What this pin does: the witness rebuilds a historical namespace by removing
+/// every post-erratum cohort from the PRESENT registries, hashes it, and
+/// compares against this baseline. A change that moves the hash without a
+/// matching filter/undo extension is caught. That is a real and useful gate.
+///
+/// What it does NOT do, and previously claimed to: reconstruct the namespace as
+/// it stood before the A10 `CommandRef` erratum. The floor it compared against
+/// was computed over 8a704c2's RECONSTRUCTION, while the only surviving
+/// artifact of that commit is its RAW FILE. Those are different objects, and
+/// requiring equality between them demands something meaningless — a gate that
+/// demands the impossible is not stronger, it is permanently red.
+///
+/// SUPERSEDED HISTORICAL VALUES, recorded and not deleted:
+///   `fnv1a64:bdbcdc27ccd92518`  the value 8a704c2 overwrote. Unrecoverable:
+///     fgdb-7yo9 proved that filtering exactly the 26 rows 8a704c2 registered
+///     yields 71729c11125d59d1, not this.
+///   `fnv1a64:236efa5babe190fe`  the floor 8a704c2 re-pinned to, in order to
+///     CONCEAL an unexplained mismatch. Unreachable: fgdb-e55p accounted both
+///     halves of the transcript with zero remainder — fields 225 = 218 identical
+///     + 2 undo-expected + 5 content drift; non-field 37 = 25 identical + 3
+///     rename-expected + 9 membership drift — applied both repairs, and the walk
+///     a86e33d4020143ef -> 69f3b79b0a6221c0 -> e0245f1bf4c183fd still lands one
+///     hash short. The residual is an artifact-class mismatch, not drift.
+///
+/// This baseline is re-computed THE SAME WAY the witness computes the value it
+/// compares, so the assert compares like with like. Extend the filter/undo set
+/// when it drifts; re-baselining is an OWNER ruling and must ship its full
+/// accounting in the same commit, as this one did (fgdb-e55p).
+pub const A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN: &str = "fnv1a64:e0245f1bf4c183fd";
 
 /// One NAMED union-arm payload shape governed by the StrongRef-only
 /// arm-payload law (`STRONGREF_ONLY_ARM_PAYLOAD_SHAPES`).

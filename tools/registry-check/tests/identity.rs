@@ -7604,13 +7604,57 @@ fn post_erratum_k3sa_collection_field(schema: &str, name: &str) -> bool {
     )
 }
 
+
+/// Two ordinary unions landed after 8a704c2 and were retained in the historical
+/// namespace: MEMBERSHIP drift, so a filter is the correct instrument.
+/// Licensed by accounting (fgdb-e55p): of 37 retained non-field transcript
+/// lines, 25 matched 8a704c2 identically, 0 had changed columns, 3 differ only
+/// because rename_logical_command_input_union ran, and these 9 — one union plus
+/// two arms, one union plus five arms — are the whole remainder.
+fn post_erratum_e55p_union(union_name: &str) -> bool {
+    matches!(
+        union_name,
+        "ControlCommandPayloadAvailabilityCertificateRef" | "PreparedCommitRecordStatus"
+    )
+}
+
+/// Five retained field rows whose `exact_wire_type` was re-spelled after
+/// 8a704c2 with no undo covering them: CONTENT drift on a row that legitimately
+/// belongs in the historical namespace, so a filter cannot fix it and an undo
+/// must. Licensed by accounting (fgdb-e55p): of 225 retained field lines, 218
+/// matched 8a704c2 identically, 2 differ only because an existing undo ran, and
+/// these 5 are the whole remainder.
+fn undo_e55p_id256_retype(identity: &mut IdentityRegistries) {
+    for field in identity.fields.iter_mut() {
+        match (field.containing_schema.as_str(), field.stable_name.as_str()) {
+            ("RemoteReleaseSummaryEntry", "grant_id")
+            | ("RemoteRetentionReleaseAckCertificate", "grant_id") => {
+                field.exact_wire_type = "digest256".into();
+            }
+            ("RemoteReleaseSummaryEntry", "release_nonce")
+            | ("RemoteRetentionReleaseAckCertificate", "release_nonce")
+            | ("RemoteRetentionReleaseTombstone", "release_nonce") => {
+                field.exact_wire_type = "bytes".into();
+            }
+            _ => {}
+        }
+    }
+}
+
 #[test]
 fn idr_assignment_history_and_epoch_are_frozen() {
     let r = real_identity();
+    // The baseline is spelled twice on purpose: a drift that moved both the
+    // reconstruction AND the constant would otherwise pass silently.
+    // SUPERSEDED, recorded and not deleted (fgdb-e55p owner ruling):
+    //   fnv1a64:bdbcdc27ccd92518  overwritten by 8a704c2; unrecoverable (fgdb-7yo9)
+    //   fnv1a64:236efa5babe190fe  8a704c2's concealing re-pin; unreachable, because
+    //                            it was computed over that commit's RECONSTRUCTION
+    //                            while only its RAW FILE survives
     assert_eq!(
         identity::A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN,
-        "fnv1a64:236efa5babe190fe",
-        "the pre-codec A10 CommandRef erratum witness must remain explicit"
+        "fnv1a64:e0245f1bf4c183fd",
+        "the A10 CommandRef forward-drift baseline must remain explicit"
     );
     let mut pre_erratum = r.clone();
     let current_union_count = pre_erratum.ordinary_unions.len();
@@ -9575,6 +9619,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     undo_a01_exactness_repair(&mut pre_erratum);
     undo_cq4x_capsule_retarget(&mut pre_erratum);
     undo_mn8i_exact_order_repairs(&mut pre_erratum);
+    undo_e55p_id256_retype(&mut pre_erratum);
+    pre_erratum
+        .ordinary_unions
+        .retain(|union| !post_erratum_e55p_union(&union.union_name));
     for (union_name, arm_name, previous_payload_sha256) in [(
         "TrustTransition",
         "Successor",
@@ -9607,7 +9655,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
          both, while the two cohort asserts above count only fields and only unions. A \
          post-erratum union left in the reconstruction moves this hash through its arm \
          lines alone. Extend post_erratum_union / post_erratum_*_field; do NOT re-pin \
-         A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN — that was done once at 8a704c2 and \
+         A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN without an OWNER ruling that ships its \
+         full accounting — it was re-pinned to conceal a mismatch once at 8a704c2 and \
          is why this failure recurred"
     );
     for pin in identity::assignment_pins(&r) {
