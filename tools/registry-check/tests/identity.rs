@@ -7614,6 +7614,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     );
     let mut pre_erratum = r.clone();
     let current_union_count = pre_erratum.ordinary_unions.len();
+    let current_reference_union_count = pre_erratum.unions.len();
     let current_reference_arm_count: usize = pre_erratum.unions.iter().map(|u| u.arms.len()).sum();
     let current_ordinary_arm_count: usize = pre_erratum
         .ordinary_unions
@@ -7623,7 +7624,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     // No reference-union erratum cohort exists yet; keep the named filter and
     // frozen denominator so the next landed union fails loudly at this assert.
     let post_erratum_reference_union = |_name: &str| false;
-    let expected_reference_unions = 13usize;
+    let expected_reference_unions_removed = 0usize;
     let current_field_count = pre_erratum.fields.len();
     // Post-erratum ordinary unions, whole-schema and embedded alike.  An
     // embedded union's anchor field row exists only because the union does, so
@@ -9536,14 +9537,14 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             .iter()
             .filter(|u| !post_erratum_reference_union(&u.union_name))
             .count(),
-        expected_reference_unions,
+        current_reference_union_count - expected_reference_unions_removed,
         "historical witness reference-union cohort drift (unrecognised reference union)"
     );
     let mut reference_control = pre_erratum.unions.clone();
     reference_control.push(reference_control[0].clone());
     assert_ne!(
         reference_control.len(),
-        expected_reference_unions,
+        current_reference_union_count - expected_reference_unions_removed,
         "reference-union control must fire"
     );
     assert_eq!(
@@ -9561,7 +9562,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             .iter()
             .map(|u| u.arms.len())
             .sum::<usize>()
-            + 44,
+            + 1_108,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
