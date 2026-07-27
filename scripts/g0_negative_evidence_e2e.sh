@@ -296,10 +296,37 @@ echo "  [law 4] every revert-semantics commit has a disposition"
 disposed="$(awk '/^## Reverts$/ {r=1; next} /^## / {r=0} r' "$LEDGER" \
               | sed -nE 's/^- `([0-9a-f]+)`.*/\1/p')"
 
+# A DISPOSITION IS NOT A REVERT. Measured 2026-07-27: this law went red on
+# `4d20077 docs(negative-evidence): dispose 649cbf7 — the first revert to reach
+# the gate`, which is the commit that DISPOSITIONED a revert. The subject scan
+# below matches any commit that *mentions* reverts, so satisfying law 4 emits a
+# commit that violates law 4, whose disposition would emit another. An infinite
+# regress, and it fires the first time anyone ever obeys the law — which is why
+# it lay dormant until tonight: 649cbf7 was the first revert to reach this gate
+# at all, so 4d20077 was the first disposition ever written.
+#
+# The discriminator is STRUCTURAL, in the same spirit as the § Reverts parse
+# above: a disposition act touches the ledger and NOTHING else. A real revert
+# always restores content somewhere outside it. Anything touching a second path
+# stays in the population, so a commit that both reverts and disposes is still
+# scanned, and a `Revert "docs(negative-evidence): ..."` — a revert OF the ledger
+# — is excluded only if it changes the ledger alone, in which case it is exactly
+# the ledger-only edit this rule is about.
+#
+# The exclusion is REPORTED, never silent: a discriminator that can swallow the
+# population without saying so is the failure this whole gate exists to prevent.
 n_reverts=0
 missing_reverts=0
+n_disposition_acts=0
 while IFS= read -r sha; do
   [ -z "$sha" ] && continue
+  touched="$(git -C "$ROOT" show --pretty=format: --name-only "$sha" | grep -c .)"
+  ledger_only="$(git -C "$ROOT" show --pretty=format: --name-only "$sha" \
+                   | grep -cx 'docs/NEGATIVE_EVIDENCE.md')"
+  if [ "$touched" -ge 1 ] && [ "$touched" -eq "$ledger_only" ]; then
+    n_disposition_acts=$((n_disposition_acts + 1))
+    continue
+  fi
   n_reverts=$((n_reverts + 1))
   printf '%s\n' "$disposed" | grep -Fxq "$sha" || {
     subject="$(git -C "$ROOT" log -1 --pretty=format:%s "$sha")"
@@ -309,6 +336,8 @@ while IFS= read -r sha; do
 done < <(git -C "$ROOT" log --all --pretty=format:'%h|%s' \
            | grep -iE '\brevert(s|ed|ing)?\b' \
            | cut -d'|' -f1)
+
+echo "    [law 4] $n_disposition_acts ledger-only disposition act(s) excluded from the revert population"
 
 if [ "$n_reverts" -eq 0 ]; then
   fail "found ZERO revert-semantics commits — this repository is known to contain at least one (46e654e), so the scan is broken"
