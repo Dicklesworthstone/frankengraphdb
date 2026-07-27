@@ -337,16 +337,16 @@ predecessor = "a09"
 successor = "a11"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 17
-top_level_candidate_ids_sha256 = "c995329082d5b42ab512bb583c52d9cbfed6ade2ff616c812c13e6520f037140"
-field_candidate_count = 150
-field_candidate_ids_sha256 = "7a813f1b302cb37836aaca1198104a504ba235a84f868b9631caf1adc94cab90"
+top_level_candidate_count = 18
+top_level_candidate_ids_sha256 = "f523c0186612a49600265c0973fcccb6ec387aa293993e2cb538877fa2599543"
+field_candidate_count = 180
+field_candidate_ids_sha256 = "4c0d4584f1f1a77a77cca3e7f3cab456d86758b931a5bf47adec75acacb186d3"
 union_candidate_count = 5
 union_candidate_ids_sha256 = "ad9a6e5137cb020d17d5deb1296356146580661a0500823df541203875e56170"
 arm_candidate_count = 17
 arm_candidate_ids_sha256 = "7fcfd50dfd4f06f8be8676acbdc70683db596e0dd9f56020e0950b9c25aab16e"
-ambiguity_count = 97
-ambiguity_ids_sha256 = "0b49aafcc5b556d003d25c85fc73e263d4577d391beb3645569c77bd1c5d7e5e"
+ambiguity_count = 110
+ambiguity_ids_sha256 = "6c00401a9c06e771bee0ace5b4770dbfe90ebbb4487272ae9e347f232bcf4109"
 
 [[slice]]
 ordinal = 11
@@ -387,16 +387,16 @@ predecessor = "a11"
 successor = "a13"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 29
-top_level_candidate_ids_sha256 = "8a91f71901cc36ebdbb14c0546e7d9c289c366c1a5058e4149c0f1e0665fdf64"
-field_candidate_count = 197
-field_candidate_ids_sha256 = "d7afbc0da720b788768d147cdec418abbc6f9a78db5a10910e32b59c03f75b74"
-union_candidate_count = 18
-union_candidate_ids_sha256 = "cb8bb179a1e38a53dc675c6097c36f6cde6a8db057df5ddf4e8a33bd5cd396d8"
-arm_candidate_count = 58
-arm_candidate_ids_sha256 = "1ff9688521c4b4ec5f82d55973a98a3568e99c6e7a2b65374968aa23b065d528"
-ambiguity_count = 166
-ambiguity_ids_sha256 = "6cbe9c47700cab21960acfd70604dfc5ca856647cee703e1e9a4a9e679927560"
+top_level_candidate_count = 30
+top_level_candidate_ids_sha256 = "e53a463fbff61dc3922acb7f99f5213fd1b8fa22b1b289271c354bcdb5ba2b27"
+field_candidate_count = 213
+field_candidate_ids_sha256 = "a19099fa1d7489405dfadb9f927097a4621ba2b16b96e32e3642b079e2c86290"
+union_candidate_count = 20
+union_candidate_ids_sha256 = "47ef8363cef302008330cc2df005be7f590e5cd49d3fb74ebc01f4529f8e1194"
+arm_candidate_count = 62
+arm_candidate_ids_sha256 = "8532eb0b7a649b985b5a18f571e49fda97ebcb6b86c202e50aa316c18c1ad30d"
+ambiguity_count = 174
+ambiguity_ids_sha256 = "6990ce75d0be066b19207c7062cdccf80a35a7385172be51211247dce16ab864"
 
 [[slice]]
 ordinal = 13
@@ -412,16 +412,16 @@ predecessor = "a12"
 successor = "a14"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 19
-top_level_candidate_ids_sha256 = "a7952c6c57e77302644b369453cd2fb3f64c6522a9b9e90f3c67b1a869eca8db"
-field_candidate_count = 228
-field_candidate_ids_sha256 = "3a30512bccdd91ab6ce2a9cdc82385c175f3e89d005f3e61d4d4b8a0bd1e5e19"
-union_candidate_count = 11
-union_candidate_ids_sha256 = "390d8706695d0ac23ad80d4d636ce1bafed43d5912d47094fbc74ee911e5e512"
-arm_candidate_count = 29
-arm_candidate_ids_sha256 = "e7bcef80fee4ed44ab04798391b6ca5897ffa516e1f8282f0b8c3babd717d0eb"
-ambiguity_count = 157
-ambiguity_ids_sha256 = "0703aa61a5f4de15bc001ef3c4b5e71236d3a3444f29b7d0bf85935dd37aa01b"
+top_level_candidate_count = 20
+top_level_candidate_ids_sha256 = "57f8d36a5c0e1dbabe02fccd7c16d9ca7444075fba48b5dea85dafbdbef0fd68"
+field_candidate_count = 241
+field_candidate_ids_sha256 = "c7d81371f6da26131cf54f9df2776a2020e90e4ecacb6102770d1b773a488689"
+union_candidate_count = 12
+union_candidate_ids_sha256 = "6e2714a04046f4969248c1dd53fdcc1a4f8587a8e2071a52af5f555400b21e02"
+arm_candidate_count = 31
+arm_candidate_ids_sha256 = "de5fbfa5b507f602dee823ef009029c0760dacf065734dd12cbfb670ccecf691"
+ambiguity_count = 165
+ambiguity_ids_sha256 = "4efd9c1f03c9f5eb75561d464103a487ff197797293ed9b305f378fc56a11152"
 
 [[slice]]
 ordinal = 14
@@ -43853,8 +43853,8 @@ code_reservation = "0x0330"
 disposition = "reserved"
 
 [[reservation]]
-row_id = "a07:reservation:logical-delta-template"
-slice_id = "a07"
+row_id = "a10:reservation:logical-delta-template"
+slice_id = "a10"
 symbol = "LogicalDeltaTemplate"
 row_kind = "logical-kind"
 identity_class = "logical"
@@ -45230,8 +45230,8 @@ code_reservation = "0x000c"
 disposition = "existing"
 
 [[reservation]]
-row_id = "a03:reservation:recovery-checkpoint"
-slice_id = "a03"
+row_id = "a12:reservation:recovery-checkpoint"
+slice_id = "a12"
 symbol = "RecoveryCheckpoint"
 row_kind = "logical-kind"
 identity_class = "logical"
@@ -49476,6 +49476,16 @@ identity_class = "logical"
 source_locations = ["a13:2004"]
 
 [[top_level_candidate]]
+row_id = "a13:top-level-candidate:branch-manifest-20a582e537d3d4f0"
+slice_id = "a13"
+symbol = "BranchManifest"
+generic_signature = ""
+source_key = "top|BranchManifest"
+source_kind = "confirmed"
+identity_class = "unclassified"
+source_locations = ["a13:2000"]
+
+[[top_level_candidate]]
 row_id = "a13:top-level-candidate:branch-merge-ledger-root-2d0c9a61f09d0703"
 slice_id = "a13"
 symbol = "BranchMergeLedgerRoot"
@@ -50121,9 +50131,9 @@ slice_id = "a03"
 symbol = "CommitCommand"
 generic_signature = ""
 source_key = "top|CommitCommand"
-source_kind = "name-only"
+source_kind = "confirmed"
 identity_class = "logical"
-source_locations = ["a03:1530"]
+source_locations = ["a03:1530", "a10:1912"]
 
 [[top_level_candidate]]
 row_id = "a16:top-level-candidate:commit-cx-e53dc7d9a4930a66"
@@ -53466,6 +53476,16 @@ identity_class = "unclassified"
 source_locations = ["a10:1926"]
 
 [[top_level_candidate]]
+row_id = "a10:top-level-candidate:logical-delta-template-5cea901220bd4f72"
+slice_id = "a10"
+symbol = "LogicalDeltaTemplate"
+generic_signature = ""
+source_key = "top|LogicalDeltaTemplate"
+source_kind = "confirmed"
+identity_class = "unclassified"
+source_locations = ["a10:1924"]
+
+[[top_level_candidate]]
 row_id = "a03:top-level-candidate:logical-state-root-20a5b373fa6f6ff2"
 slice_id = "a03"
 symbol = "LogicalStateRoot"
@@ -55224,6 +55244,16 @@ source_key = "top|QuotaPath"
 source_kind = "confirmed"
 identity_class = "wire"
 source_locations = ["a12:1988"]
+
+[[top_level_candidate]]
+row_id = "a12:top-level-candidate:recovery-checkpoint-feca189451e402cf"
+slice_id = "a12"
+symbol = "RecoveryCheckpoint"
+generic_signature = ""
+source_key = "top|RecoveryCheckpoint"
+source_kind = "confirmed"
+identity_class = "unclassified"
+source_locations = ["a12:1964"]
 
 [[top_level_candidate]]
 row_id = "a05:top-level-candidate:resume-migrate-239949d58766d043"
@@ -83099,7 +83129,7 @@ source_locations = ["a03:1484", "a03:1486", "a07:1716", "a07:1720", "a07:1726", 
 row_id = "a03:source-symbol-disposition:commit-command"
 slice_id = "a03"
 symbol = "CommitCommand"
-disposition = "appendix-name-only"
+disposition = "appendix-structural-definition"
 source_locations = ["a03:1530", "plan:340"]
 
 [[source_symbol_disposition]]
@@ -83390,10 +83420,10 @@ disposition = "reference-only"
 source_locations = ["a03:1532", "a07:1790"]
 
 [[source_symbol_disposition]]
-row_id = "a03:source-symbol-disposition:recovery-checkpoint"
-slice_id = "a03"
+row_id = "a12:source-symbol-disposition:recovery-checkpoint"
+slice_id = "a12"
 symbol = "RecoveryCheckpoint"
-disposition = "reference-only"
+disposition = "appendix-structural-definition"
 source_locations = ["a03:1464", "a05:1610", "a10:1920", "a12:1966", "a12:1970", "a14:2045", "a15:2057", "a15:2117", "a16:2203", "a16:2205", "a20:2603", "plan:429"]
 
 [[source_symbol_disposition]]
@@ -84832,10 +84862,10 @@ disposition = "reference-only"
 source_locations = ["a07:1750"]
 
 [[source_symbol_disposition]]
-row_id = "a07:source-symbol-disposition:logical-delta-template"
-slice_id = "a07"
+row_id = "a10:source-symbol-disposition:logical-delta-template"
+slice_id = "a10"
 symbol = "LogicalDeltaTemplate"
-disposition = "reference-only"
+disposition = "appendix-structural-definition"
 source_locations = ["a07:1720", "a08:1824", "a10:1910", "a10:1912", "plan:391", "plan:393"]
 
 [[source_symbol_disposition]]
@@ -86011,7 +86041,7 @@ source_locations = ["a13:2004", "a13:2006", "a13:2029"]
 row_id = "a13:source-symbol-disposition:branch-manifest"
 slice_id = "a13"
 symbol = "BranchManifest"
-disposition = "reference-only"
+disposition = "appendix-structural-definition"
 source_locations = ["a13:2029"]
 
 [[source_symbol_disposition]]

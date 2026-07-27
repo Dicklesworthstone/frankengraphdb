@@ -1892,7 +1892,11 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
         appendix_a::EXPECTED_RESERVED_TYPE_RESERVATION_COUNT
     );
     assert_eq!(baseline.source_symbol_dispositions.len(), 848);
-    assert_eq!(baseline.top_level_candidates.len(), 1_231);
+    // 1_231 -> 1_234: fgdb-ihtt bound the four heading-led appendix bodies, and
+    // LogicalDeltaTemplate, RecoveryCheckpoint and BranchManifest became candidates
+    // for the first time (CommitCommand already had a row, name-only, and was
+    // promoted to confirmed rather than added).
+    assert_eq!(baseline.top_level_candidates.len(), 1_234);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT

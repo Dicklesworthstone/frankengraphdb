@@ -1484,6 +1484,66 @@ fn prose_schema_links(
     links
 }
 
+/// The range, within `before`, of the bold owner name that owns the structural
+/// fragment `before` precedes. Two spellings, one reader.
+///
+/// A. `**Name**: {…}` — a bold owner immediately colon-introducing its body.
+/// B. `**Name / Other / Third.** A <phrase> is {…}` — a bold heading listing the
+///    types the paragraph defines, whose FIRST body is introduced by an anonymous
+///    noun phrase instead of a backticked name. The phrase is a paraphrase of the
+///    heading's first name, so the heading is the attribution.
+///
+/// B cannot collide with `prose_schema_links`, which binds a backticked intro
+/// (`` `ControlCommand` is {…} ``). A backticked name is its own inline fragment,
+/// so for a backtick-introduced body `before` is just " is " and never begins with
+/// `**`. That is why B needs no explicit "reject a backticked phrase" guard —
+/// one was measured and could not fire on any input. `bold_owner_name_range_b_
+/// cannot_claim_a_backticked_intro` pins that rather than leaving it to comment.
+///
+/// B reads ONLY the appendix. The plan also spells a named `CommitCommand` body at
+/// plan line 393, whose 21 members match 1912's in name and order but leave two
+/// array element types unelaborated. That line is outside `[source_manifest]`
+/// (1388-2728), so this reader never sees it, never compares the two spellings and
+/// never normalises one to the other: it records exactly what the appendix spells,
+/// element types included. Choosing between the spellings would be a durable-format
+/// ruling, and it is not this reader's to make.
+fn bold_owner_name_range(before: &str) -> Option<Range<usize>> {
+    let before_range = trim_range(before, 0..before.len());
+    let colon_index = before_range.end.checked_sub(1)?;
+    if before.as_bytes().get(colon_index) == Some(&b':') {
+        // Shape A.
+        let prefix_range = trim_range(before, before_range.start..colon_index);
+        if !before[prefix_range.clone()].ends_with("**") {
+            return None;
+        }
+        let close_start = prefix_range.end - 2;
+        let open = before[..close_start].rfind("**")?;
+        return Some(trim_range(before, open + 2..close_start));
+    }
+    // Shape B. Anchor to the current source line: `before` reaches back to the
+    // previous inline fragment, which is usually in an earlier paragraph.
+    let line_start = before[..before_range.end]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let line_range = trim_range(before, line_start..before_range.end);
+    let line = &before[line_range.clone()];
+    if !line.starts_with("**") || !line.ends_with(" is") {
+        return None;
+    }
+    let close = line[2..].find("**")? + 2;
+    // The heading's FIRST name owns the first body. A heading lists the types its
+    // paragraph defines in the order it defines them, so any later name is a
+    // different type's; `heading_led_binding_takes_the_first_name_not_a_later_one`
+    // is the control that keeps this honest.
+    let first = line[2..close].split('/').next()?;
+    let lead = first.len() - first.trim_start().len();
+    let trimmed = first.trim();
+    let name = trimmed.strip_suffix('.').unwrap_or(trimmed).trim_end();
+    let start = line_range.start + 2 + lead;
+    let end = start + name.len();
+    (start < end).then_some(start..end)
+}
+
 fn bold_schema_links(fragments: &[MarkdownFragment]) -> Vec<BoldLink> {
     let mut links = Vec::new();
     for (index, fragment) in fragments.iter().enumerate() {
@@ -1491,22 +1551,9 @@ fn bold_schema_links(fragments: &[MarkdownFragment]) -> Vec<BoldLink> {
             continue;
         }
         let before = &fragment.before;
-        let before_range = trim_range(before, 0..before.len());
-        let Some(colon_index) = before_range.end.checked_sub(1) else {
+        let Some(candidate_range) = bold_owner_name_range(before) else {
             continue;
         };
-        if before.as_bytes().get(colon_index) != Some(&b':') {
-            continue;
-        }
-        let prefix_range = trim_range(before, before_range.start..colon_index);
-        if !before[prefix_range.clone()].ends_with("**") {
-            continue;
-        }
-        let close_start = prefix_range.end - 2;
-        let Some(open) = before[..close_start].rfind("**") else {
-            continue;
-        };
-        let candidate_range = trim_range(before, open + 2..close_start);
         let Some(display_name) = simple_type_display(&before[candidate_range.clone()]) else {
             continue;
         };
@@ -3663,10 +3710,10 @@ mod tests {
     use super::{
         AmbiguityCandidate, AmbiguityKind, AmbiguityOccurrence, CensusErrorKind, DelimiterIssue,
         FieldCandidateKey, OPENING_DELIMITERS, SchemaCandidateKey, SourceMap, SourceSliceSpec,
-        SplitSpan, StructuralCandidateKey, affected_source_key, canonical_ambiguities,
-        census_appendix_source, half_open_interval_end, is_generic_angle_open, matching_delimiter,
-        normalize_whitespace, opening_delimiter_for, sha256_hex, source_key_transcript,
-        split_top_level, top_level_arrow,
+        SplitSpan, StructuralCandidateKey, affected_source_key, bold_owner_name_range,
+        canonical_ambiguities, census_appendix_source, half_open_interval_end,
+        is_generic_angle_open, matching_delimiter, normalize_whitespace, opening_delimiter_for,
+        sha256_hex, source_key_transcript, split_top_level, top_level_arrow,
     };
 
     // ===================================================================
@@ -4180,6 +4227,176 @@ mod tests {
              grammar; the relaxed grammar would silently accept {relaxed_would_accept} \
              of them",
             TYPOS.len()
+        );
+    }
+
+    /// fgdb-ihtt — the heading-led attribution, and the two ways it could be wrong.
+    ///
+    /// The appendix spells four bodies as `**A / B / C.** <anonymous phrase> is
+    /// {…}`: CommitCommand@1912, LogicalDeltaTemplate@1924, RecoveryCheckpoint@1964
+    /// and BranchManifest@2000. Before this rule all four bound nothing. The rule
+    /// is that the heading's FIRST name owns that first body, and the whole-corpus
+    /// numbers it moves are pinned in the catalog (a10 150->180, a12 197->213,
+    /// a13 228->241; whole corpus 11712->11771 fields, the other 18 slices
+    /// byte-identical). This test pins the RULE itself, where those pins cannot:
+    /// a reader that attributed all four for the wrong reason would satisfy every
+    /// count above and still be wrong.
+    #[test]
+    fn heading_led_body_binds_the_headings_first_name() {
+        // One paragraph carrying both spellings at once: an anonymous first body,
+        // then a backticked one — exactly the shape of plan line 1912.
+        let source = concat!(
+            "**Alpha / Beta / Gamma.** A transaction order unit is ",
+            "`{id:u64,tag:u8}`. A `Beta` is `{other:u16}`.\n",
+        );
+        let slices = [SourceSliceSpec {
+            id: "heading",
+            start_line: 80,
+            end_line: 80,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 80, &slices)
+            .expect("a heading-led paragraph must census");
+        let paths = |family: &str| {
+            let mut found = census
+                .fields
+                .iter()
+                .filter(|field| field.key.schema_family == family)
+                .map(|field| field.key.path.clone())
+                .collect::<Vec<_>>();
+            found.sort();
+            found
+        };
+
+        // POSITIVE. The anonymous body belongs to the heading's first name.
+        assert_eq!(
+            paths("Alpha"),
+            ["Alpha.id", "Alpha.tag"],
+            "the anonymous body must bind to the heading's FIRST name"
+        );
+
+        // CONTROL 1 — WRONG NAME, and it FIRES. Measured: mutating `.next()` to
+        // `.nth(1)` turns exactly these two tests red and leaves the module's other
+        // 19 green.
+        //
+        // Why OWNERSHIP is asserted here and not a count. The catalog's census pins
+        // lock how MANY candidates a slice has (a10 180, a12 213, a13 241); they
+        // never lock WHICH schema owns them. Binding all four appendix bodies to
+        // the wrong name of the right heading is precisely the defect those pins
+        // cannot see, so it has to be caught here. `Beta` is a real type name that
+        // owns a body of its own, which makes it the specific wrong answer this
+        // fixture exists to rule out.
+        assert_eq!(
+            paths("Beta"),
+            ["Beta.other"],
+            "a later heading name owns only its own backticked body, never the \
+             anonymous one; if this holds Beta.id the reader picked the wrong name"
+        );
+        assert_eq!(
+            census.counts.field_candidates, 3,
+            "fixture shape: the anonymous body's two members plus Beta's own"
+        );
+        assert!(
+            paths("Gamma").is_empty(),
+            "a heading name with no body of its own must bind nothing"
+        );
+
+        // CONTROL 2 — B CANNOT CLAIM A BACKTICKED INTRO, which is why shape B
+        // needs no explicit guard against one. `Beta`'s body is introduced by a
+        // backticked name, so it is `prose_schema_links`' to bind; B never sees it
+        // because a backtick opens its own fragment and `before` is then " is ".
+        // A guard rejecting a backtick inside the phrase was written and MEASURED
+        // VACUOUS on the whole corpus (identical census with it disabled), so it
+        // was dropped rather than shipped as if it earned its place.
+        assert_eq!(
+            bold_owner_name_range(" is "),
+            None,
+            "a backtick-introduced body leaves `before` as \" is \", which shape B \
+             must not match — this is the guard, structurally"
+        );
+
+        // And shape A, the spelling that already worked, is untouched.
+        assert_eq!(bold_owner_name_range("**Alpha**: "), Some(2..7));
+    }
+
+    /// fgdb-ihtt — the reader records the APPENDIX spelling, and does not reconcile
+    /// it with the plan's prose copy.
+    ///
+    /// Plan line 393 spells a NAMED `CommitCommand` body with the same 21 members
+    /// in the same order as the appendix body at 1912, but leaves two array element
+    /// types bare. 393 sits outside `[source_manifest]` (1388-2728), so this reader
+    /// never sees it, never compares the spellings and never normalises one to the
+    /// other. That is deliberate: the appendix is the normative contract, and
+    /// choosing between two spellings of a durable field is a format ruling, not a
+    /// reader's call.
+    ///
+    /// The difference is LOAD-BEARING, not cosmetic, which is why silently
+    /// normalising would be a defect rather than a tidy-up: the elaborated spelling
+    /// yields a concrete element type, a `Many` cardinality, and four additional
+    /// interior field candidates. On the real appendix that is the difference
+    /// between CommitCommand's 25 recovered fields and the 21 the bare prose copy
+    /// would give.
+    #[test]
+    fn heading_led_binding_records_the_appendix_spelling_verbatim() {
+        let elaborated = concat!(
+            "**Alpha / Beta.** A unit is `{expected_branch_heads[WeakMarkerIdentity],",
+            "expected_branch_key_epochs[{graph,branch}]}`.\n",
+        );
+        let bare =
+            "**Alpha / Beta.** A unit is `{expected_branch_heads,expected_branch_key_epochs}`.\n";
+        let slices = [SourceSliceSpec {
+            id: "spelling",
+            start_line: 90,
+            end_line: 90,
+        }];
+        let census =
+            |text: &str| census_appendix_source(text.as_bytes(), 90, &slices).expect("must census");
+
+        let rich = census(elaborated);
+        let heads = rich
+            .fields
+            .iter()
+            .find(|field| field.key.path == "Alpha.expected_branch_heads")
+            .expect("the elaborated array member is a field candidate");
+        assert_eq!(
+            heads.exact_types,
+            ["[WeakMarkerIdentity]"],
+            "the element type must be recorded exactly as the appendix spells it"
+        );
+        assert_eq!(heads.cardinalities, [super::Cardinality::Many]);
+
+        // The inline record's interior members are candidates in their own right.
+        let interior = rich
+            .fields
+            .iter()
+            .filter(|field| {
+                field
+                    .key
+                    .path
+                    .starts_with("Alpha.expected_branch_key_epochs.")
+            })
+            .count();
+        assert_eq!(
+            interior, 2,
+            "an elaborated inline element type contributes its interior members"
+        );
+
+        // THE COUNTERFACTUAL, measured rather than asserted: the bare prose
+        // spelling of the same two members yields strictly less. If the reader ever
+        // normalised the elaborated form to this one it would silently discard
+        // durable field rows.
+        let plain = census(bare);
+        assert_eq!(rich.counts.field_candidates, 4);
+        assert_eq!(plain.counts.field_candidates, 2);
+        let plain_heads = plain
+            .fields
+            .iter()
+            .find(|field| field.key.path == "Alpha.expected_branch_heads")
+            .expect("the bare member is still a field candidate");
+        assert!(
+            plain_heads.exact_types.is_empty()
+                && plain_heads.cardinalities == [super::Cardinality::One],
+            "the bare spelling carries no element type and no Many cardinality, \
+             which is exactly what normalising the two would throw away"
         );
     }
 
