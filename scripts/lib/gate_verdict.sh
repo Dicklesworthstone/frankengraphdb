@@ -210,7 +210,51 @@ gate_init() {
   GATE_TREE_CHECKED=0
   GATE_TREE_HEAD_START="$(gate_tree_head)"
   GATE_TREE_FP_START="$(gate_tree_fingerprint)"
+  gate_landing_acquire
   trap gate_on_exit EXIT
+}
+
+# gate_landing_acquire / gate_landing_release — the PREVENTION half (fgdb-eesn).
+#
+# The fingerprint above DETECTS a tree that moved under this gate and reports
+# UNRUN. This takes the landing lease so it does not move in the first place: the
+# pre-commit hook refuses a commit on `main` while the lease is held live.
+#
+# DEFAULT OFF, AND THAT IS DELIBERATE. Enabling it makes a gate run block every
+# other pane's landings for its duration, which is a real cost to the swarm and a
+# policy decision for the operator, not a library default. Nothing here executes
+# unless FGDB_LANDING_LEASE=1 is exported.
+#
+# IT MUST TOLERATE landing_lease.sh BEING ABSENT. check.sh's own contract
+# fixtures build scratch roots containing ONLY gate_verdict.sh, so an
+# unconditional source here would break the gate that verifies the contract.
+# Every failure path leaves GATE_LANDING_HELD=0 and the gate runs unprotected —
+# which is exactly right, because a gate that cannot take the lease should still
+# run and let the fingerprint report honestly if it is voided.
+GATE_LANDING_HELD=0
+gate_landing_acquire() {
+  GATE_LANDING_HELD=0
+  [ "${FGDB_LANDING_LEASE:-0}" = "1" ] || return 0
+  local lib
+  lib="${FGDB_LANDING_LIB:-$(dirname "${BASH_SOURCE[0]}")/landing_lease.sh}"
+  [ -r "$lib" ] || return 0
+  # shellcheck source=landing_lease.sh
+  . "$lib" 2>/dev/null || return 0
+  command -v landing_lease_acquire >/dev/null 2>&1 || return 0
+  if landing_lease_acquire "${FGDB_LANDING_NAME:-gate-${GATE_NAME:-unnamed}}" \
+    "${FGDB_LANDING_TTL:-45}"; then
+    GATE_LANDING_HELD=1
+    gate_diag "  landing lease held for this run; other panes cannot land on main"
+  fi
+  return 0
+}
+
+gate_landing_release() {
+  [ "$GATE_LANDING_HELD" -eq 1 ] || return 0
+  GATE_LANDING_HELD=0
+  command -v landing_lease_release >/dev/null 2>&1 || return 0
+  landing_lease_release "${FGDB_LANDING_NAME:-gate-${GATE_NAME:-unnamed}}" || true
+  return 0
 }
 
 # gate_pass <detail> — an assertion that passed. stdout, anchored.
@@ -286,6 +330,10 @@ gate_verdict() {
 # one.
 gate_on_exit() {
   local rc=$?
+  # Give the landing lease back FIRST. Every other pane in the swarm is blocked
+  # from landing while this is held, so releasing it must not be downstream of
+  # anything that can fail or be slow. No-op unless this gate took it.
+  gate_landing_release || true
   if [ -n "$GATE_TALLY_HOOK" ]; then
     "$GATE_TALLY_HOOK" "$rc" || true
   fi
