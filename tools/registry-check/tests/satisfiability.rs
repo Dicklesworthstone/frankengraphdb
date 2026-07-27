@@ -155,6 +155,34 @@ const REGISTRY: &[(&str, Coverage)] = &[
     ("unclassified_reference_wrapper", Coverage::Witnessed),
     // ---- arm-payload family (fgdb-a11-residue-unresolved-schema-ref-laws-54sd) ----------
     ("arm_payload_shape_field_row", Coverage::Witnessed),
+    // ---- wire field class and digest family (fgdb-zmp3) ---------------------------------
+    // These three codes landed with 83397ff and 94dd2bf and were never added here, so the
+    // ratchet fired on the DELTA -- which is the mechanism working, not failing. Each
+    // already had an exact-code negative trigger in tests/identity.rs, so they are
+    // recorded as covered rather than appended to UNREGISTERED_BASELINE: the backlog is
+    // for codes with no witness, and these have one.
+    (
+        "digest_class_wire_type_mismatch",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &[
+                "idr_digest_class_is_function_of_exact_wire_type_and_wire_kinds_are_closed",
+            ],
+        },
+    ),
+    (
+        "field_wire_kind_unclassified",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &[
+                "idr_digest_class_is_function_of_exact_wire_type_and_wire_kinds_are_closed",
+            ],
+        },
+    ),
+    (
+        "non_reference_wire_identity_class_mismatch",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_non_reference_wire_members_require_inline_identity_class"],
+        },
+    ),
     // ---- declared exemptions, each with a reason ---------------------------------------
     (
         "registry_epoch_mismatch",
