@@ -37,8 +37,7 @@ catalog_manifest_value() {
   ' "$ROOT/registries/appendix_a_catalog.toml"
 }
 WORK="${G0_E2E_WORKDIR:-$(mktemp -d)}"
-TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-BIN="$TARGET_DIR/debug/registry-check"
+BIN="$WORK/bin/registry-check"
 PASS=0
 FAIL=0
 
@@ -139,9 +138,39 @@ assert_load_error_path() {
 log "work directory: $WORK"
 mkdir -p "$WORK"
 
-log "building registry-check"
-(cd "$ROOT" && cargo build -p registry-check --quiet)
-[ -x "$BIN" ] || { log "registry-check binary missing at $BIN"; exit 2; }
+# The subject is compiled from THIS tree into $WORK by
+# scripts/lib/private_subject.sh, the single implementation shared with
+# g0_spine_e2e.sh and g0_claims_e2e.sh. It used to be
+# "${CARGO_TARGET_DIR:-$ROOT/target}/debug/registry-check" gated only on
+# `[ -x "$BIN" ]` after a cargo build whose exit status nothing read — the
+# shape that let a neighbouring pane's artifact decide this gate's verdict.
+# The library states what that measured and what it costs. Disk price here:
+# 73MB per run for the artifact, same as its two siblings.
+# shellcheck source=lib/private_subject.sh
+. "$ROOT/scripts/lib/private_subject.sh"
+
+log "building registry-check from this tree into $WORK/bin"
+if ! subject_build "$ROOT" "$WORK/bin"; then
+  log "FATAL: building registry-check from this tree failed (see $WORK/bin/build.log)"
+  exit 2
+fi
+subject_is_fresh "$BIN" "$ROOT" || {
+  log "FATAL: $BIN is not newer than $(subject_newest_source "$ROOT") — the build did not produce this tree's artifact"
+  exit 2
+}
+log "subject artifact: $BIN (newer than $(subject_newest_source "$ROOT"))"
+
+# THIS SCRIPT'S OWN control over the shared predicate, counted in this script's
+# own tally. Sharing the runner must not mean sharing the credit: a gate that
+# passes only because some OTHER script proved the predicate has no evidence
+# about its own subject. This gate is the one that pins Appendix A identity, so
+# a subject it never verified is exactly how phantom pin drift gets reported.
+subject_write_stale_probe "$WORK/bin/stale-probe"
+if subject_is_fresh "$BIN" "$ROOT" && ! subject_is_fresh "$WORK/bin/stale-probe" "$ROOT"; then
+  ok "control: the freshness rule accepts this run's artifact and rejects a backdated one"
+else
+  die "control: the freshness rule does not separate a fresh artifact from a stale one; this script's subject is unproven"
+fi
 
 # --- Phase 0: canonical Appendix A source and projections -------------------
 log "phase 0: canonical Appendix A catalog, exact source, and six projections"
