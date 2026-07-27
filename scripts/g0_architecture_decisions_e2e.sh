@@ -38,7 +38,15 @@ cmp "$FIRST" "$SECOND"
 
 # Bead-dependent expectations are DERIVED from the declared registry, not
 # hand-copied. Every bead filing moves them, and a hand-copied literal drifted
-# unnoticed for ~15 filings precisely because this script is not in check.sh.
+# unnoticed for ~15 filings because check.sh did not run this script at all
+# until 8ea2055 wired it in. It runs on every invocation now, and NOT by name:
+# check.sh reads registries/checker_index.toml, keeps the `status = "live"`
+# rows, and dispatches `kind = "script"` to `bash <artifact>`; a nonzero exit
+# here is counted RED and the whole run ends "QUALITY GATE RED". Demoting this
+# artifact's rows to `status = "planned"` is therefore all it takes to make the
+# gate stop opening this file — which is the shape the drift took the first
+# time.
+#
 # The declared TOML is an artifact independent of the binary under test, so the
 # assertion still cross-checks two sources rather than comparing output to
 # itself. Values that do NOT move on a bead filing stay literal on purpose.
