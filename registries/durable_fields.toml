@@ -39,6 +39,21 @@ max_size_bytes = 49
 
 [[field]]
 containing_schema = "ActivationMetaProjectionPayload"
+field_tag = 0x0001
+stable_name = "transition_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertifiedRoleTransitionRef"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertifiedRoleTransitionRef named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1622)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ActivationMetaProjectionPayload"
 field_tag = 0x0003
 stable_name = "consumer_domain"
 exact_wire_type = "ConsensusDomain"
@@ -906,6 +921,21 @@ role_predicate = "true"
 retention_and_cut_rule = "inline remote identity of the role-transition certificate this bootstrap leaf imports; names a foreign-group object and is never followed as a local edge (a05:1604)"
 version_status = "reserved"
 max_size_bytes = 159
+
+[[field]]
+containing_schema = "CertifiedRoleTransitionSuccessorRef"
+field_tag = 0x0001
+stable_name = "bootstrap_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertifiedRoleTransitionRef"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertifiedRoleTransitionRef named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1604)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "CertifiedTransitionArtifactRef<T>"
@@ -2475,6 +2505,21 @@ max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "GenesisMetaProjectionPayload"
+field_tag = 0x0001
+stable_name = "genesis_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardedGenesisCertificate"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardedGenesisCertificate named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1590)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GenesisMetaProjectionPayload"
 field_tag = 0x0002
 stable_name = "consumer_domain"
 exact_wire_type = "ConsensusDomain"
@@ -2838,6 +2883,21 @@ target_schema_id = "AuthorizationDecisionRecord"
 construction_order = 24
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the AuthorizationDecisionRecord<Meta> this GlobalControlCommand names; retained while the referrer is retained, and the acyclic order 10 <= 30 keeps the reference backward-only (a07:1766)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalControlRecord"
+field_tag = 0x0002
+stable_name = "command_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlCommand"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalControlCommand named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1658)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -3412,6 +3472,186 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0013
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact TopologyState named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0015
+stable_name = "identity_continuity_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "IdentityContinuityRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact IdentityContinuityRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0018
+stable_name = "global_conflict_index_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalConflictIndex"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalConflictIndex named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0019
+stable_name = "global_begin_idempotency_index_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalBeginIdempotencyIndex"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalBeginIdempotencyIndex named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalStatePayload"
+field_tag = 0x001b
+stable_name = "global_statement_index_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStatementIndex"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalStatementIndex named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalStatePayload"
+field_tag = 0x002d
+stable_name = "retention_map_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RetentionMap"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RetentionMap named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalStatePayload"
+field_tag = 0x002e
+stable_name = "derived_generation_registry_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DerivedGenerationRegistry"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact DerivedGenerationRegistry named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0034
+stable_name = "remote_retention_authority_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionObligationRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteRetentionObligationRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0035
+stable_name = "remote_retention_consumer_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionConsumerRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteRetentionConsumerRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0036
+stable_name = "remote_configuration_trust_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteConfigurationTrustRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteConfigurationTrustRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalStatePayload"
+field_tag = 0x003d
+stable_name = "global_attempt_compaction_pending_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PendingAttemptCompactionRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact PendingAttemptCompactionRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalStateRoot"
+field_tag = 0x0001
+stable_name = "payload_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStatePayload"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalStatePayload named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1658)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "GlobalTxnCommand"
 field_tag = 0x0002
 stable_name = "authority_bound_header"
@@ -3735,6 +3975,21 @@ retention_and_cut_rule = "cross-checks the sibling object; NOT a reachability ed
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "GlobalTxnRecord"
+field_tag = 0x0002
+stable_name = "command_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnCommand"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalTxnCommand named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1658)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "GlobalTxnWorkspaceGeneration"
@@ -4534,6 +4789,51 @@ max_size_bytes = 32
 digest_class = "target"
 
 [[field]]
+containing_schema = "LegacyRetentionAuthorityTransferCertificate"
+field_tag = 0x0001
+stable_name = "evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LegacyRetentionAuthorityTransferEvidence"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact LegacyRetentionAuthorityTransferEvidence named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LegacyRetentionAuthorityTransferCertificate"
+field_tag = 0x0009
+stable_name = "one_digest_signer_lock_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateSignerLock"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateSignerLock named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LegacyRetentionAuthorityTransferEvidence"
+field_tag = 0x0001
+stable_name = "transition_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertifiedRoleTransitionRef"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertifiedRoleTransitionRef named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "LegacyRetentionAuthorityTransferEvidence"
 field_tag = 0x0002
 stable_name = "source_transfer_record_identity"
@@ -4546,6 +4846,36 @@ role_predicate = "true"
 retention_and_cut_rule = "inline remote identity of the Local transfer record this Meta evidence attests; names a Local-group object and is never a local reachability edge (a05:1608)"
 version_status = "reserved"
 max_size_bytes = 159
+
+[[field]]
+containing_schema = "LegacyRetentionAuthorityTransferEvidence"
+field_tag = 0x0009
+stable_name = "migration_retention_grant_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantEvidence"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteRetentionGrantEvidence named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LegacyRetentionAuthorityTransferEvidence"
+field_tag = 0x000a
+stable_name = "new_meta_grant_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantEvidence"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteRetentionGrantEvidence named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "LegacyRetentionAuthorityTransferPlan"
@@ -4574,6 +4904,21 @@ role_predicate = "true"
 retention_and_cut_rule = "inline new Meta authority domain of the pre-order transfer plan; retained with the plan and carries no reachability edge (a05:1606)"
 version_status = "reserved"
 max_size_bytes = 93
+
+[[field]]
+containing_schema = "LegacyRetentionAuthorityTransferPlan"
+field_tag = 0x0004
+stable_name = "old_local_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ConfigurationState named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1606)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "LocalAttemptRegistration"
@@ -10371,6 +10716,21 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "RetentionAuthorityTransferAdoptionSpec"
+field_tag = 0x0004
+stable_name = "new_meta_grant_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteRetentionGrantEvidence named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "RetentionCutBody"
 field_tag = 0x0002
 stable_name = "basis_state_identity"
@@ -10485,6 +10845,111 @@ version_status = "reserved"
 max_size_bytes = 32
 digest_class = "transcript"
 transcript_recipe = "BLAKE3(utf8(\"fgdb:retention-cut-completeness:v1\") || canonical(tags 1 through 8 in source order)); excludes completeness_digest, checkpoint identity, install result identity and every reclaimed object identity not present in the cut recipes"
+
+[[field]]
+containing_schema = "RoleTransitionMetaServicePrepareCertificate"
+field_tag = 0x0001
+stable_name = "transition_successor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertifiedRoleTransitionSuccessorRef"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertifiedRoleTransitionSuccessorRef named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1628)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RoleTransitionMetaServicePrepareCertificate"
+field_tag = 0x0002
+stable_name = "prepare_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalControlRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1628)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RoleTransitionMetaServicePrepareCertificate"
+field_tag = 0x0003
+stable_name = "hidden_meta_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStateRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalStateRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1628)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RoleTransitionMetaServicePrepareCertificate"
+field_tag = 0x0004
+stable_name = "meta_successor_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardingMigrationRetentionFloor"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardingMigrationRetentionFloor named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1628)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RoleTransitionMetaServicePrepareCertificate"
+field_tag = 0x0009
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1628)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RoleTransitionShardOperationalAck"
+field_tag = 0x0005
+stable_name = "post_reopen_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardLogicalStateRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardLogicalStateRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1638)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RoleTransitionShardOperationalAck"
+field_tag = 0x0009
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1638)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "RootAuthorityTrustArtifact"
@@ -11885,6 +12350,96 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[field]]
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x0007
+stable_name = "hidden_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardLogicalStateRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardLogicalStateRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x0008
+stable_name = "checkpoint_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardCheckpointCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardCheckpointCertificate named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x0009
+stable_name = "config_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardConfigPayloadFloor"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardConfigPayloadFloor named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x000a
+stable_name = "history_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardHistoryInventory"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardHistoryInventory named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x000b
+stable_name = "active_meta_projection_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ActiveMetaProjectionRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ActiveMetaProjectionRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x000e
+stable_name = "payload_availability_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PayloadAvailabilityCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact PayloadAvailabilityCertificate named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "ShardTimeAuthorityRetirementAck"
 field_tag = 0x0005
 stable_name = "zero_live_old_profile_subject_proof_ref"
@@ -11971,6 +12526,81 @@ target_schema_id = "TimeBoundSubjectInventory"
 construction_order = 36
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the exact Shard inventory discharged by this proof; retained while the proof is retained, with the generic-free family target preserving the source-bound Shard instantiation and the acyclic order 33 <= 36 (a16:2207)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardingFreezeRecord"
+field_tag = 0x0001
+stable_name = "spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardingFreezeSpec"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardingFreezeSpec named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1594)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardingFreezeSpec"
+field_tag = 0x0001
+stable_name = "plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardingRoleTransitionPlan"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardingRoleTransitionPlan named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1594)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardingRoleTransitionPlan"
+field_tag = 0x0003
+stable_name = "service_epoch_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ServiceVisibilityEpochReservation"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ServiceVisibilityEpochReservation named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1592)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardingRoleTransitionPlan"
+field_tag = 0x0009
+stable_name = "local_to_global_projection_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalToGlobalProjection"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact LocalToGlobalProjection named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1592)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardingRoleTransitionPlan"
+field_tag = 0x000e
+stable_name = "legacy_retention_authority_transfer_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LegacyRetentionAuthorityTransferPlan"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact LegacyRetentionAuthorityTransferPlan named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1592)"
 version_status = "reserved"
 max_size_bytes = 40
 

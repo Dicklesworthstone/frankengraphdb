@@ -7863,6 +7863,117 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("LocalToShardProjection", "target_shard_domain")
         )
     };
+    // The a05 plain-StrongRef field tranche [fgdb-uug4]: 42 depth-1 rows, each a
+    // bare StrongRef with a concrete registered target, the construction DAG
+    // satisfied and no self-edge. Its cohort is REMOVED from the pre-erratum
+    // reconstruction; the erratum pin itself is never re-pinned.
+    let post_erratum_a05_field_tranche = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("ActivationMetaProjectionPayload", "transition_ref")
+                | ("CertifiedRoleTransitionSuccessorRef", "bootstrap_ref")
+                | ("GenesisMetaProjectionPayload", "genesis_certificate_ref")
+                | ("GlobalControlRecord", "command_ref")
+                | ("GlobalStatePayload", "topology_state_ref")
+                | ("GlobalStatePayload", "identity_continuity_record_ref")
+                | ("GlobalStatePayload", "global_conflict_index_ref")
+                | ("GlobalStatePayload", "global_begin_idempotency_index_root")
+                | ("GlobalStatePayload", "global_statement_index_root")
+                | ("GlobalStatePayload", "retention_map_root")
+                | ("GlobalStatePayload", "derived_generation_registry_root")
+                | ("GlobalStatePayload", "remote_retention_authority_root")
+                | ("GlobalStatePayload", "remote_retention_consumer_root")
+                | ("GlobalStatePayload", "remote_configuration_trust_root")
+                | (
+                    "GlobalStatePayload",
+                    "global_attempt_compaction_pending_root"
+                )
+                | ("GlobalStateRoot", "payload_ref")
+                | ("GlobalTxnRecord", "command_ref")
+                | (
+                    "LegacyRetentionAuthorityTransferCertificate",
+                    "evidence_ref"
+                )
+                | (
+                    "LegacyRetentionAuthorityTransferCertificate",
+                    "one_digest_signer_lock_ref"
+                )
+                | ("LegacyRetentionAuthorityTransferEvidence", "transition_ref")
+                | (
+                    "LegacyRetentionAuthorityTransferEvidence",
+                    "migration_retention_grant_evidence_ref"
+                )
+                | (
+                    "LegacyRetentionAuthorityTransferEvidence",
+                    "new_meta_grant_evidence_ref"
+                )
+                | (
+                    "LegacyRetentionAuthorityTransferPlan",
+                    "old_local_configuration_ref"
+                )
+                | (
+                    "RetentionAuthorityTransferAdoptionSpec",
+                    "new_meta_grant_evidence_ref"
+                )
+                | (
+                    "RoleTransitionMetaServicePrepareCertificate",
+                    "transition_successor_ref"
+                )
+                | (
+                    "RoleTransitionMetaServicePrepareCertificate",
+                    "prepare_record_ref"
+                )
+                | (
+                    "RoleTransitionMetaServicePrepareCertificate",
+                    "hidden_meta_state_root_ref"
+                )
+                | (
+                    "RoleTransitionMetaServicePrepareCertificate",
+                    "meta_successor_floor_ref"
+                )
+                | (
+                    "RoleTransitionMetaServicePrepareCertificate",
+                    "certificate_attempt_ref"
+                )
+                | (
+                    "RoleTransitionShardOperationalAck",
+                    "post_reopen_state_root_ref"
+                )
+                | (
+                    "RoleTransitionShardOperationalAck",
+                    "certificate_attempt_ref"
+                )
+                | ("ShardRoleTransitionReadyBarrier", "hidden_state_root_ref")
+                | (
+                    "ShardRoleTransitionReadyBarrier",
+                    "checkpoint_certificate_ref"
+                )
+                | ("ShardRoleTransitionReadyBarrier", "config_floor_ref")
+                | ("ShardRoleTransitionReadyBarrier", "history_inventory_ref")
+                | (
+                    "ShardRoleTransitionReadyBarrier",
+                    "active_meta_projection_root_ref"
+                )
+                | (
+                    "ShardRoleTransitionReadyBarrier",
+                    "payload_availability_certificate_ref"
+                )
+                | ("ShardingFreezeRecord", "spec_ref")
+                | ("ShardingFreezeSpec", "plan_ref")
+                | (
+                    "ShardingRoleTransitionPlan",
+                    "service_epoch_reservation_ref"
+                )
+                | (
+                    "ShardingRoleTransitionPlan",
+                    "local_to_global_projection_ref"
+                )
+                | (
+                    "ShardingRoleTransitionPlan",
+                    "legacy_retention_authority_transfer_plan_ref"
+                )
+        )
+    };
     let post_erratum_a04_field = |schema: &str, name: &str| {
         matches!(
             (schema, name),
@@ -8920,6 +9031,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a15_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a11_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a05_field(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a05_field_tranche(&field.containing_schema, &field.stable_name)
             && !post_erratum_a04_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a14_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a19_field_tranche(&field.containing_schema, &field.stable_name)
@@ -8962,9 +9074,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 656,
+        pre_erratum.fields.len() + 698,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A12 exact-order tranche"
+        "the historical witness must remove every post-erratum field cohort through the A05 StrongRef tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

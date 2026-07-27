@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
 
 [target_manifest]
-target_count = 3491
+target_count = 3533
 projection_fallback_count = 111
-target_source_assignment_sha256 = "12a0fd1400925eb19fbdd65908e879137e914308a9df7774ab57e2f5b43d1b48"
+target_source_assignment_sha256 = "322f49d7457e5557735a6d3407589f87e83e0b3eaffbb0bccba9642bb91a1a6d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -107273,6 +107273,720 @@ max_size_bytes = 32
 digest_class = "transcript"
 transcript_recipe = "BLAKE3(utf8(\"fgdb:retention-cut-completeness:v1\") || canonical(tags 1 through 8 in source order)); excludes completeness_digest, checkpoint identity, install result identity and every reclaimed object identity not present in the cut recipes"
 
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:activation-meta-projection-payload-transition-ref"
+containing_schema = "ActivationMetaProjectionPayload"
+field_tag = 0x0001
+stable_name = "transition_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertifiedRoleTransitionRef"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertifiedRoleTransitionRef named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1622)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:certified-role-transition-successor-ref-bootstrap-ref"
+containing_schema = "CertifiedRoleTransitionSuccessorRef"
+field_tag = 0x0001
+stable_name = "bootstrap_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertifiedRoleTransitionRef"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertifiedRoleTransitionRef named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1604)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:genesis-meta-projection-payload-genesis-certificate-ref"
+containing_schema = "GenesisMetaProjectionPayload"
+field_tag = 0x0001
+stable_name = "genesis_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardedGenesisCertificate"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardedGenesisCertificate named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1590)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-control-record-command-ref"
+containing_schema = "GlobalControlRecord"
+field_tag = 0x0002
+stable_name = "command_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlCommand"
+construction_order = 24
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalControlCommand named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1658)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-payload-topology-state-ref"
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0013
+stable_name = "topology_state_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TopologyState"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact TopologyState named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-payload-identity-continuity-record-ref"
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0015
+stable_name = "identity_continuity_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "IdentityContinuityRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact IdentityContinuityRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-payload-global-conflict-index-ref"
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0018
+stable_name = "global_conflict_index_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalConflictIndex"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalConflictIndex named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-payload-global-begin-idempotency-index-root"
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0019
+stable_name = "global_begin_idempotency_index_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalBeginIdempotencyIndex"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalBeginIdempotencyIndex named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-payload-global-statement-index-root"
+containing_schema = "GlobalStatePayload"
+field_tag = 0x001b
+stable_name = "global_statement_index_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStatementIndex"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalStatementIndex named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-payload-retention-map-root"
+containing_schema = "GlobalStatePayload"
+field_tag = 0x002d
+stable_name = "retention_map_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RetentionMap"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RetentionMap named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-payload-derived-generation-registry-root"
+containing_schema = "GlobalStatePayload"
+field_tag = 0x002e
+stable_name = "derived_generation_registry_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "DerivedGenerationRegistry"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact DerivedGenerationRegistry named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-payload-remote-retention-authority-root"
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0034
+stable_name = "remote_retention_authority_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionObligationRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteRetentionObligationRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-payload-remote-retention-consumer-root"
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0035
+stable_name = "remote_retention_consumer_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionConsumerRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteRetentionConsumerRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-payload-remote-configuration-trust-root"
+containing_schema = "GlobalStatePayload"
+field_tag = 0x0036
+stable_name = "remote_configuration_trust_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteConfigurationTrustRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteConfigurationTrustRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-payload-global-attempt-compaction-pending-root"
+containing_schema = "GlobalStatePayload"
+field_tag = 0x003d
+stable_name = "global_attempt_compaction_pending_root"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PendingAttemptCompactionRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact PendingAttemptCompactionRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1650)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-state-root-payload-ref"
+containing_schema = "GlobalStateRoot"
+field_tag = 0x0001
+stable_name = "payload_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStatePayload"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalStatePayload named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1658)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:global-txn-record-command-ref"
+containing_schema = "GlobalTxnRecord"
+field_tag = 0x0002
+stable_name = "command_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalTxnCommand"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalTxnCommand named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1658)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:legacy-retention-authority-transfer-certificate-evidence-ref"
+containing_schema = "LegacyRetentionAuthorityTransferCertificate"
+field_tag = 0x0001
+stable_name = "evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LegacyRetentionAuthorityTransferEvidence"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact LegacyRetentionAuthorityTransferEvidence named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:legacy-retention-authority-transfer-certificate-one-digest-signer-lock-ref"
+containing_schema = "LegacyRetentionAuthorityTransferCertificate"
+field_tag = 0x0009
+stable_name = "one_digest_signer_lock_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateSignerLock"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateSignerLock named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:legacy-retention-authority-transfer-evidence-transition-ref"
+containing_schema = "LegacyRetentionAuthorityTransferEvidence"
+field_tag = 0x0001
+stable_name = "transition_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertifiedRoleTransitionRef"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertifiedRoleTransitionRef named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:legacy-retention-authority-transfer-evidence-migration-retention-grant-evidence-ref"
+containing_schema = "LegacyRetentionAuthorityTransferEvidence"
+field_tag = 0x0009
+stable_name = "migration_retention_grant_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantEvidence"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteRetentionGrantEvidence named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:legacy-retention-authority-transfer-evidence-new-meta-grant-evidence-ref"
+containing_schema = "LegacyRetentionAuthorityTransferEvidence"
+field_tag = 0x000a
+stable_name = "new_meta_grant_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantEvidence"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteRetentionGrantEvidence named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:legacy-retention-authority-transfer-plan-old-local-configuration-ref"
+containing_schema = "LegacyRetentionAuthorityTransferPlan"
+field_tag = 0x0004
+stable_name = "old_local_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ConfigurationState named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1606)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:retention-authority-transfer-adoption-spec-new-meta-grant-evidence-ref"
+containing_schema = "RetentionAuthorityTransferAdoptionSpec"
+field_tag = 0x0004
+stable_name = "new_meta_grant_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RemoteRetentionGrantEvidence"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact RemoteRetentionGrantEvidence named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1608)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:role-transition-meta-service-prepare-certificate-transition-successor-ref"
+containing_schema = "RoleTransitionMetaServicePrepareCertificate"
+field_tag = 0x0001
+stable_name = "transition_successor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertifiedRoleTransitionSuccessorRef"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertifiedRoleTransitionSuccessorRef named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1628)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:role-transition-meta-service-prepare-certificate-prepare-record-ref"
+containing_schema = "RoleTransitionMetaServicePrepareCertificate"
+field_tag = 0x0002
+stable_name = "prepare_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalControlRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalControlRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1628)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:role-transition-meta-service-prepare-certificate-hidden-meta-state-root-ref"
+containing_schema = "RoleTransitionMetaServicePrepareCertificate"
+field_tag = 0x0003
+stable_name = "hidden_meta_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "GlobalStateRoot"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact GlobalStateRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1628)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:role-transition-meta-service-prepare-certificate-meta-successor-floor-ref"
+containing_schema = "RoleTransitionMetaServicePrepareCertificate"
+field_tag = 0x0004
+stable_name = "meta_successor_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardingMigrationRetentionFloor"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardingMigrationRetentionFloor named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1628)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:role-transition-meta-service-prepare-certificate-certificate-attempt-ref"
+containing_schema = "RoleTransitionMetaServicePrepareCertificate"
+field_tag = 0x0009
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 44
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1628)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:role-transition-shard-operational-ack-post-reopen-state-root-ref"
+containing_schema = "RoleTransitionShardOperationalAck"
+field_tag = 0x0005
+stable_name = "post_reopen_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardLogicalStateRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardLogicalStateRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1638)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:role-transition-shard-operational-ack-certificate-attempt-ref"
+containing_schema = "RoleTransitionShardOperationalAck"
+field_tag = 0x0009
+stable_name = "certificate_attempt_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "CertificateAttemptRecord"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact CertificateAttemptRecord named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1638)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:shard-role-transition-ready-barrier-hidden-state-root-ref"
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x0007
+stable_name = "hidden_state_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardLogicalStateRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardLogicalStateRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:shard-role-transition-ready-barrier-checkpoint-certificate-ref"
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x0008
+stable_name = "checkpoint_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardCheckpointCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardCheckpointCertificate named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:shard-role-transition-ready-barrier-config-floor-ref"
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x0009
+stable_name = "config_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardConfigPayloadFloor"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardConfigPayloadFloor named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:shard-role-transition-ready-barrier-history-inventory-ref"
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x000a
+stable_name = "history_inventory_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardHistoryInventory"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardHistoryInventory named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:shard-role-transition-ready-barrier-active-meta-projection-root-ref"
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x000b
+stable_name = "active_meta_projection_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ActiveMetaProjectionRoot"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ActiveMetaProjectionRoot named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:shard-role-transition-ready-barrier-payload-availability-certificate-ref"
+containing_schema = "ShardRoleTransitionReadyBarrier"
+field_tag = 0x000e
+stable_name = "payload_availability_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PayloadAvailabilityCertificate"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact PayloadAvailabilityCertificate named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1624)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:sharding-freeze-record-spec-ref"
+containing_schema = "ShardingFreezeRecord"
+field_tag = 0x0001
+stable_name = "spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardingFreezeSpec"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardingFreezeSpec named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1594)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:sharding-freeze-spec-plan-ref"
+containing_schema = "ShardingFreezeSpec"
+field_tag = 0x0001
+stable_name = "plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ShardingRoleTransitionPlan"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ShardingRoleTransitionPlan named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1594)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:sharding-role-transition-plan-service-epoch-reservation-ref"
+containing_schema = "ShardingRoleTransitionPlan"
+field_tag = 0x0003
+stable_name = "service_epoch_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ServiceVisibilityEpochReservation"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact ServiceVisibilityEpochReservation named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1592)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:sharding-role-transition-plan-local-to-global-projection-ref"
+containing_schema = "ShardingRoleTransitionPlan"
+field_tag = 0x0009
+stable_name = "local_to_global_projection_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalToGlobalProjection"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact LocalToGlobalProjection named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1592)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a05"
+row_id = "a05:field:sharding-role-transition-plan-legacy-retention-authority-transfer-plan-ref"
+containing_schema = "ShardingRoleTransitionPlan"
+field_tag = 0x000e
+stable_name = "legacy_retention_authority_transfer_plan_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LegacyRetentionAuthorityTransferPlan"
+construction_order = 29
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact LegacyRetentionAuthorityTransferPlan named by this field; retained while the referrer is retained, with the target constructed no later than its owner (a05:1592)"
+version_status = "reserved"
+max_size_bytes = 40
+
 [[target]]
 row_id = "a12:target:logical-kind-resource-ledger-transition-spec"
 target_row_id = "a12:logical-kind:resource-ledger-transition-spec"
@@ -108143,4 +108857,340 @@ target_row_id = "a21:union-arm:audit-receipt-validation-resolution-0x0006-meta-c
 slice_id = "a21"
 source_key = "arm|AuditReceiptValidationResolution|AuditReceiptValidationResolution|0x0006 MetaCancelledBeforeWrite"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-activation-meta-projection-payload-transition-ref"
+target_row_id = "a05:field:activation-meta-projection-payload-transition-ref"
+slice_id = "a05"
+source_key = "field|ActivationMetaProjectionPayload|ActivationMetaProjectionPayload.transition_ref|transition_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-certified-role-transition-successor-ref-bootstrap-ref"
+target_row_id = "a05:field:certified-role-transition-successor-ref-bootstrap-ref"
+slice_id = "a05"
+source_key = "field|CertifiedRoleTransitionSuccessorRef|CertifiedRoleTransitionSuccessorRef.bootstrap_ref|bootstrap_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-genesis-meta-projection-payload-genesis-certificate-ref"
+target_row_id = "a05:field:genesis-meta-projection-payload-genesis-certificate-ref"
+slice_id = "a05"
+source_key = "field|GenesisMetaProjectionPayload|GenesisMetaProjectionPayload.genesis_certificate_ref|genesis_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-control-record-command-ref"
+target_row_id = "a05:field:global-control-record-command-ref"
+slice_id = "a05"
+source_key = "field|GlobalControlRecord|GlobalControlRecord.command_ref|command_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-payload-topology-state-ref"
+target_row_id = "a05:field:global-state-payload-topology-state-ref"
+slice_id = "a05"
+source_key = "field|GlobalStatePayload|GlobalStatePayload.topology_state_ref|topology_state_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-payload-identity-continuity-record-ref"
+target_row_id = "a05:field:global-state-payload-identity-continuity-record-ref"
+slice_id = "a05"
+source_key = "field|GlobalStatePayload|GlobalStatePayload.identity_continuity_record_ref|identity_continuity_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-payload-global-conflict-index-ref"
+target_row_id = "a05:field:global-state-payload-global-conflict-index-ref"
+slice_id = "a05"
+source_key = "field|GlobalStatePayload|GlobalStatePayload.global_conflict_index_ref|global_conflict_index_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-payload-global-begin-idempotency-index-root"
+target_row_id = "a05:field:global-state-payload-global-begin-idempotency-index-root"
+slice_id = "a05"
+source_key = "field|GlobalStatePayload|GlobalStatePayload.global_begin_idempotency_index_root|global_begin_idempotency_index_root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-payload-global-statement-index-root"
+target_row_id = "a05:field:global-state-payload-global-statement-index-root"
+slice_id = "a05"
+source_key = "field|GlobalStatePayload|GlobalStatePayload.global_statement_index_root|global_statement_index_root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-payload-retention-map-root"
+target_row_id = "a05:field:global-state-payload-retention-map-root"
+slice_id = "a05"
+source_key = "field|GlobalStatePayload|GlobalStatePayload.retention_map_root|retention_map_root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-payload-derived-generation-registry-root"
+target_row_id = "a05:field:global-state-payload-derived-generation-registry-root"
+slice_id = "a05"
+source_key = "field|GlobalStatePayload|GlobalStatePayload.derived_generation_registry_root|derived_generation_registry_root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-payload-remote-retention-authority-root"
+target_row_id = "a05:field:global-state-payload-remote-retention-authority-root"
+slice_id = "a05"
+source_key = "field|GlobalStatePayload|GlobalStatePayload.remote_retention_authority_root|remote_retention_authority_root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-payload-remote-retention-consumer-root"
+target_row_id = "a05:field:global-state-payload-remote-retention-consumer-root"
+slice_id = "a05"
+source_key = "field|GlobalStatePayload|GlobalStatePayload.remote_retention_consumer_root|remote_retention_consumer_root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-payload-remote-configuration-trust-root"
+target_row_id = "a05:field:global-state-payload-remote-configuration-trust-root"
+slice_id = "a05"
+source_key = "field|GlobalStatePayload|GlobalStatePayload.remote_configuration_trust_root|remote_configuration_trust_root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-payload-global-attempt-compaction-pending-root"
+target_row_id = "a05:field:global-state-payload-global-attempt-compaction-pending-root"
+slice_id = "a05"
+source_key = "field|GlobalStatePayload|GlobalStatePayload.global_attempt_compaction_pending_root|global_attempt_compaction_pending_root"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-state-root-payload-ref"
+target_row_id = "a05:field:global-state-root-payload-ref"
+slice_id = "a05"
+source_key = "field|GlobalStateRoot|GlobalStateRoot.payload_ref|payload_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-global-txn-record-command-ref"
+target_row_id = "a05:field:global-txn-record-command-ref"
+slice_id = "a05"
+source_key = "field|GlobalTxnRecord|GlobalTxnRecord.command_ref|command_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-legacy-retention-authority-transfer-certificate-evidence-ref"
+target_row_id = "a05:field:legacy-retention-authority-transfer-certificate-evidence-ref"
+slice_id = "a05"
+source_key = "field|LegacyRetentionAuthorityTransferCertificate|LegacyRetentionAuthorityTransferCertificate.evidence_ref|evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-legacy-retention-authority-transfer-certificate-one-digest-signer-lock-ref"
+target_row_id = "a05:field:legacy-retention-authority-transfer-certificate-one-digest-signer-lock-ref"
+slice_id = "a05"
+source_key = "field|LegacyRetentionAuthorityTransferCertificate|LegacyRetentionAuthorityTransferCertificate.one_digest_signer_lock_ref|one_digest_signer_lock_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-legacy-retention-authority-transfer-evidence-transition-ref"
+target_row_id = "a05:field:legacy-retention-authority-transfer-evidence-transition-ref"
+slice_id = "a05"
+source_key = "field|LegacyRetentionAuthorityTransferEvidence|LegacyRetentionAuthorityTransferEvidence.transition_ref|transition_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-legacy-retention-authority-transfer-evidence-migration-retention-grant-evidence-ref"
+target_row_id = "a05:field:legacy-retention-authority-transfer-evidence-migration-retention-grant-evidence-ref"
+slice_id = "a05"
+source_key = "field|LegacyRetentionAuthorityTransferEvidence|LegacyRetentionAuthorityTransferEvidence.migration_retention_grant_evidence_ref|migration_retention_grant_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-legacy-retention-authority-transfer-evidence-new-meta-grant-evidence-ref"
+target_row_id = "a05:field:legacy-retention-authority-transfer-evidence-new-meta-grant-evidence-ref"
+slice_id = "a05"
+source_key = "field|LegacyRetentionAuthorityTransferEvidence|LegacyRetentionAuthorityTransferEvidence.new_meta_grant_evidence_ref|new_meta_grant_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-legacy-retention-authority-transfer-plan-old-local-configuration-ref"
+target_row_id = "a05:field:legacy-retention-authority-transfer-plan-old-local-configuration-ref"
+slice_id = "a05"
+source_key = "field|LegacyRetentionAuthorityTransferPlan|LegacyRetentionAuthorityTransferPlan.old_local_configuration_ref|old_local_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-retention-authority-transfer-adoption-spec-new-meta-grant-evidence-ref"
+target_row_id = "a05:field:retention-authority-transfer-adoption-spec-new-meta-grant-evidence-ref"
+slice_id = "a05"
+source_key = "field|RetentionAuthorityTransferAdoptionSpec|RetentionAuthorityTransferAdoptionSpec.new_meta_grant_evidence_ref|new_meta_grant_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-role-transition-meta-service-prepare-certificate-transition-successor-ref"
+target_row_id = "a05:field:role-transition-meta-service-prepare-certificate-transition-successor-ref"
+slice_id = "a05"
+source_key = "field|RoleTransitionMetaServicePrepareCertificate|RoleTransitionMetaServicePrepareCertificate.transition_successor_ref|transition_successor_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-role-transition-meta-service-prepare-certificate-prepare-record-ref"
+target_row_id = "a05:field:role-transition-meta-service-prepare-certificate-prepare-record-ref"
+slice_id = "a05"
+source_key = "field|RoleTransitionMetaServicePrepareCertificate|RoleTransitionMetaServicePrepareCertificate.prepare_record_ref|prepare_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-role-transition-meta-service-prepare-certificate-hidden-meta-state-root-ref"
+target_row_id = "a05:field:role-transition-meta-service-prepare-certificate-hidden-meta-state-root-ref"
+slice_id = "a05"
+source_key = "field|RoleTransitionMetaServicePrepareCertificate|RoleTransitionMetaServicePrepareCertificate.hidden_meta_state_root_ref|hidden_meta_state_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-role-transition-meta-service-prepare-certificate-meta-successor-floor-ref"
+target_row_id = "a05:field:role-transition-meta-service-prepare-certificate-meta-successor-floor-ref"
+slice_id = "a05"
+source_key = "field|RoleTransitionMetaServicePrepareCertificate|RoleTransitionMetaServicePrepareCertificate.meta_successor_floor_ref|meta_successor_floor_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-role-transition-meta-service-prepare-certificate-certificate-attempt-ref"
+target_row_id = "a05:field:role-transition-meta-service-prepare-certificate-certificate-attempt-ref"
+slice_id = "a05"
+source_key = "field|RoleTransitionMetaServicePrepareCertificate|RoleTransitionMetaServicePrepareCertificate.certificate_attempt_ref|certificate_attempt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-role-transition-shard-operational-ack-post-reopen-state-root-ref"
+target_row_id = "a05:field:role-transition-shard-operational-ack-post-reopen-state-root-ref"
+slice_id = "a05"
+source_key = "field|RoleTransitionShardOperationalAck|RoleTransitionShardOperationalAck.post_reopen_state_root_ref|post_reopen_state_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-role-transition-shard-operational-ack-certificate-attempt-ref"
+target_row_id = "a05:field:role-transition-shard-operational-ack-certificate-attempt-ref"
+slice_id = "a05"
+source_key = "field|RoleTransitionShardOperationalAck|RoleTransitionShardOperationalAck.certificate_attempt_ref|certificate_attempt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-shard-role-transition-ready-barrier-hidden-state-root-ref"
+target_row_id = "a05:field:shard-role-transition-ready-barrier-hidden-state-root-ref"
+slice_id = "a05"
+source_key = "field|ShardRoleTransitionReadyBarrier|ShardRoleTransitionReadyBarrier.hidden_state_root_ref|hidden_state_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-shard-role-transition-ready-barrier-checkpoint-certificate-ref"
+target_row_id = "a05:field:shard-role-transition-ready-barrier-checkpoint-certificate-ref"
+slice_id = "a05"
+source_key = "field|ShardRoleTransitionReadyBarrier|ShardRoleTransitionReadyBarrier.checkpoint_certificate_ref|checkpoint_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-shard-role-transition-ready-barrier-config-floor-ref"
+target_row_id = "a05:field:shard-role-transition-ready-barrier-config-floor-ref"
+slice_id = "a05"
+source_key = "field|ShardRoleTransitionReadyBarrier|ShardRoleTransitionReadyBarrier.config_floor_ref|config_floor_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-shard-role-transition-ready-barrier-history-inventory-ref"
+target_row_id = "a05:field:shard-role-transition-ready-barrier-history-inventory-ref"
+slice_id = "a05"
+source_key = "field|ShardRoleTransitionReadyBarrier|ShardRoleTransitionReadyBarrier.history_inventory_ref|history_inventory_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-shard-role-transition-ready-barrier-active-meta-projection-root-ref"
+target_row_id = "a05:field:shard-role-transition-ready-barrier-active-meta-projection-root-ref"
+slice_id = "a05"
+source_key = "field|ShardRoleTransitionReadyBarrier|ShardRoleTransitionReadyBarrier.active_meta_projection_root_ref|active_meta_projection_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-shard-role-transition-ready-barrier-payload-availability-certificate-ref"
+target_row_id = "a05:field:shard-role-transition-ready-barrier-payload-availability-certificate-ref"
+slice_id = "a05"
+source_key = "field|ShardRoleTransitionReadyBarrier|ShardRoleTransitionReadyBarrier.payload_availability_certificate_ref|payload_availability_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-sharding-freeze-record-spec-ref"
+target_row_id = "a05:field:sharding-freeze-record-spec-ref"
+slice_id = "a05"
+source_key = "field|ShardingFreezeRecord|ShardingFreezeRecord.spec_ref|spec_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-sharding-freeze-spec-plan-ref"
+target_row_id = "a05:field:sharding-freeze-spec-plan-ref"
+slice_id = "a05"
+source_key = "field|ShardingFreezeSpec|ShardingFreezeSpec.plan_ref|plan_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-sharding-role-transition-plan-service-epoch-reservation-ref"
+target_row_id = "a05:field:sharding-role-transition-plan-service-epoch-reservation-ref"
+slice_id = "a05"
+source_key = "field|ShardingRoleTransitionPlan|ShardingRoleTransitionPlan.service_epoch_reservation_ref|service_epoch_reservation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-sharding-role-transition-plan-local-to-global-projection-ref"
+target_row_id = "a05:field:sharding-role-transition-plan-local-to-global-projection-ref"
+slice_id = "a05"
+source_key = "field|ShardingRoleTransitionPlan|ShardingRoleTransitionPlan.local_to_global_projection_ref|local_to_global_projection_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a05:target:field-sharding-role-transition-plan-legacy-retention-authority-transfer-plan-ref"
+target_row_id = "a05:field:sharding-role-transition-plan-legacy-retention-authority-transfer-plan-ref"
+slice_id = "a05"
+source_key = "field|ShardingRoleTransitionPlan|ShardingRoleTransitionPlan.legacy_retention_authority_transfer_plan_ref|legacy_retention_authority_transfer_plan_ref"
+target_kind = "field"
 definition_status = "declared"
