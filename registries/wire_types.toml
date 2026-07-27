@@ -5530,3 +5530,21 @@ wire_tag = 0x0002
 encoding_context = "arm 0x0002 ExactLiveSuccessorRetry of closed union CapabilityMigrationRetrySelector (a21:2651); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
 allowed_containing_schemas = ["CapabilityMigrationRetrySelector"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x053e
+name = "ExecutableArtifactSet"
+kind = "record"
+status = "reserved"
+encoding_context = "a21:2613 source-confirmed 11-member record; the complete structural body is committed by this wire envelope, no StrongRef targets the family, and no member is promoted to an independent tagged union"
+allowed_containing_schemas = ["ExecutableArtifactSet"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x053f
+name = "DurableCapabilityRetentionResolutionBasis"
+kind = "record"
+status = "reserved"
+encoding_context = "a21:2657 source-confirmed 5-member record; the complete structural body is committed by this wire envelope, no StrongRef targets the family, and no member is promoted to an independent tagged union"
+allowed_containing_schemas = ["DurableCapabilityRetentionResolutionBasis"]
+max_size_bytes = 16777216

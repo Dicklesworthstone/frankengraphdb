@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
 
 [target_manifest]
-target_count = 3378
+target_count = 3380
 projection_fallback_count = 111
-target_source_assignment_sha256 = "61d044f75e283f71f1372db4f3f4849db3fdb9b7d9af46ad0d40af4deca17ec3"
+target_source_assignment_sha256 = "38a3c91702820d28ec2cabb86ef12dd8e3350d8f2fb3050cc37701d506236768"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -51246,7 +51246,7 @@ symbol = "DurableCapabilityRetentionResolutionBasis"
 generic_signature = ""
 source_key = "top|DurableCapabilityRetentionResolutionBasis"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2657"]
 
 [[top_level_candidate]]
@@ -51376,7 +51376,7 @@ symbol = "ExecutableArtifactSet"
 generic_signature = ""
 source_key = "top|ExecutableArtifactSet"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2613"]
 
 [[top_level_candidate]]
@@ -104734,6 +104734,28 @@ encoding_context = "arm 0x0002 ExactLiveSuccessorRetry of closed union Capabilit
 allowed_containing_schemas = ["CapabilityMigrationRetrySelector"]
 max_size_bytes = 16777216
 
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:executable-artifact-set"
+wire_type_id = 0x053e
+name = "ExecutableArtifactSet"
+kind = "record"
+status = "reserved"
+encoding_context = "a21:2613 source-confirmed 11-member record; the complete structural body is committed by this wire envelope, no StrongRef targets the family, and no member is promoted to an independent tagged union"
+allowed_containing_schemas = ["ExecutableArtifactSet"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:durable-capability-retention-resolution-basis"
+wire_type_id = 0x053f
+name = "DurableCapabilityRetentionResolutionBasis"
+kind = "record"
+status = "reserved"
+encoding_context = "a21:2657 source-confirmed 5-member record; the complete structural body is committed by this wire envelope, no StrongRef targets the family, and no member is promoted to an independent tagged union"
+allowed_containing_schemas = ["DurableCapabilityRetentionResolutionBasis"]
+max_size_bytes = 16777216
+
 [[union]]
 slice_id = "a12"
 row_id = "a12:union:local-constraint-reservation-record-state-7357ce85cf25236e"
@@ -105470,4 +105492,20 @@ target_row_id = "a21:union-arm:capability-migration-retry-selector-0x0002-exact-
 slice_id = "a21"
 source_key = "arm|CapabilityMigrationRetrySelector|CapabilityMigrationRetrySelector|0x0002 ExactLiveSuccessorRetry"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-executable-artifact-set"
+target_row_id = "a21:wire-type:executable-artifact-set"
+slice_id = "a21"
+source_key = "top|ExecutableArtifactSet"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-durable-capability-retention-resolution-basis"
+target_row_id = "a21:wire-type:durable-capability-retention-resolution-basis"
+slice_id = "a21"
+source_key = "top|DurableCapabilityRetentionResolutionBasis"
+target_kind = "wire-type"
 definition_status = "declared"
