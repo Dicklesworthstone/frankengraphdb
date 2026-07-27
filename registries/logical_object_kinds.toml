@@ -1638,6 +1638,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_prepared_payload_root/"
 
 [[kind]]
+object_kind = 0x031b
+name = "LocalRestoreActivationCertificate"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_activation_certificate/"
+
+[[kind]]
 object_kind = 0x031c
 name = "LocalRestoreCompletionEvidence"
 status = "reserved"
@@ -1663,6 +1672,15 @@ construction_order = 40
 role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_restore_ready_certificate/"
+
+[[kind]]
+object_kind = 0x031f
+name = "LocalRestoreServicePrepareCertificate"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_service_prepare_certificate/"
 
 [[kind]]
 object_kind = 0x0320
@@ -1825,6 +1843,15 @@ construction_order = 50
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/meta_restore_completion_evidence/"
+
+[[kind]]
+object_kind = 0x0358
+name = "MetaRestoreIndependentReopenProof"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_restore_independent_reopen_proof/"
 
 [[kind]]
 object_kind = 0x035a
@@ -3528,6 +3555,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_restore_abandonment_tombstone/"
 
 [[kind]]
+object_kind = 0x0472
+name = "ShardRestoreIndependentReopenProof"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_independent_reopen_proof/"
+
+[[kind]]
 object_kind = 0x0474
 name = "ShardRestoreSourceAccessClosure"
 status = "reserved"
@@ -3562,6 +3598,15 @@ construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_role_transition_ready_barrier/"
+
+[[kind]]
+object_kind = 0x047a
+name = "ShardStatePublicationCertificate"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_state_publication_certificate/"
 
 [[kind]]
 object_kind = 0x047c

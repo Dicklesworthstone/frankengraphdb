@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3623
-projection_fallback_count = 129
-target_source_assignment_sha256 = "8ca832486284fc40539176604dd9c4300901a450bca5023d3d8b8035464bcafb"
+target_count = 3628
+projection_fallback_count = 133
+target_source_assignment_sha256 = "c66ad4ca23f5e3ae02a7283c6586550ec84b5323bf0853379099ac75f7b59c04"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -5648,6 +5648,61 @@ construction_order = 44
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_restore_service_final_certificate/"
+
+[[logical_kind]]
+slice_id = "a20"
+row_id = "a20:logical-kind:local-restore-activation-certificate"
+object_kind = 0x031b
+name = "LocalRestoreActivationCertificate"
+status = "reserved"
+construction_order = 20
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_activation_certificate/"
+
+[[logical_kind]]
+slice_id = "a20"
+row_id = "a20:logical-kind:local-restore-service-prepare-certificate"
+object_kind = 0x031f
+name = "LocalRestoreServicePrepareCertificate"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_service_prepare_certificate/"
+
+[[logical_kind]]
+slice_id = "a20"
+row_id = "a20:logical-kind:meta-restore-independent-reopen-proof"
+object_kind = 0x0358
+name = "MetaRestoreIndependentReopenProof"
+status = "reserved"
+construction_order = 44
+role_predicate = "role-meta"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/meta_restore_independent_reopen_proof/"
+
+[[logical_kind]]
+slice_id = "a20"
+row_id = "a20:logical-kind:shard-restore-independent-reopen-proof"
+object_kind = 0x0472
+name = "ShardRestoreIndependentReopenProof"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_restore_independent_reopen_proof/"
+
+[[logical_kind]]
+slice_id = "a20"
+row_id = "a20:logical-kind:shard-state-publication-certificate"
+object_kind = 0x047a
+name = "ShardStatePublicationCertificate"
+status = "reserved"
+construction_order = 10
+role_predicate = "role-shard"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/shard_state_publication_certificate/"
 
 [[logical_kind]]
 slice_id = "a20"
@@ -44075,7 +44130,7 @@ symbol = "LocalRestoreActivationCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x031b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:local-restore-completion-evidence"
@@ -44111,7 +44166,7 @@ symbol = "LocalRestoreServicePrepareCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x031f"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:local-restore-terminal-tombstone"
@@ -44669,7 +44724,7 @@ symbol = "MetaRestoreIndependentReopenProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0358"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:meta-restore-protocol-floor"
@@ -47567,7 +47622,7 @@ symbol = "ShardRestoreIndependentReopenProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x0472"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a06:reservation:shard-restore-protocol-floor"
@@ -47648,7 +47703,7 @@ symbol = "ShardStatePublicationCertificate"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x047a"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a07:reservation:shard-statement-workspace-certificate"
@@ -53615,7 +53670,7 @@ symbol = "LocalRestoreActivationCertificate"
 generic_signature = ""
 source_key = "top|LocalRestoreActivationCertificate"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a20:2603"]
 
 [[top_level_candidate]]
@@ -80800,6 +80855,46 @@ row_id = "a20:target:logical-kind-global-restore-service-completion-spec"
 target_row_id = "a20:logical-kind:global-restore-service-completion-spec"
 slice_id = "a20"
 source_key = "top|GlobalRestoreServiceCompletionSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:logical-kind-local-restore-activation-certificate"
+target_row_id = "a20:logical-kind:local-restore-activation-certificate"
+slice_id = "a20"
+source_key = "top|LocalRestoreActivationCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:logical-kind-local-restore-service-prepare-certificate"
+target_row_id = "a20:logical-kind:local-restore-service-prepare-certificate"
+slice_id = "a20"
+source_key = "projection|logical_object_kinds|LocalRestoreServicePrepareCertificate"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:logical-kind-meta-restore-independent-reopen-proof"
+target_row_id = "a20:logical-kind:meta-restore-independent-reopen-proof"
+slice_id = "a20"
+source_key = "projection|logical_object_kinds|MetaRestoreIndependentReopenProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:logical-kind-shard-restore-independent-reopen-proof"
+target_row_id = "a20:logical-kind:shard-restore-independent-reopen-proof"
+slice_id = "a20"
+source_key = "projection|logical_object_kinds|ShardRestoreIndependentReopenProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:logical-kind-shard-state-publication-certificate"
+target_row_id = "a20:logical-kind:shard-state-publication-certificate"
+slice_id = "a20"
+source_key = "projection|logical_object_kinds|ShardStatePublicationCertificate"
 target_kind = "logical-kind"
 definition_status = "declared"
 
