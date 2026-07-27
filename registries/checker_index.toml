@@ -619,7 +619,7 @@ reason = "the runner itself: it derives and invokes the registered gates, so reg
 [[script_disposition]]
 path = "scripts/bead_provenance_preflight.sh"
 role = "advisory"
-reason = "pre-commit advisory for .beads/ authors, not part of any gate chain; its own header says 'Run it BEFORE you commit'. It is also currently defective (exits 0 on the pin-drift case it exists to catch) — fgdb-bead-provenance-preflight-misses-pin-drift-a5kb"
+reason = "pre-commit advisory for .beads/ authors, not part of any gate chain; its own header says 'Run it BEFORE you commit'. The defect that used to be recorded here (exit 0 on the case it exists to catch) is FIXED — fgdb-bead-provenance-preflight-misses-pin-drift-a5kb: its probe now reports validate_architecture's own bead_provenance verdict and red-proves itself on every run. It stays advisory rather than registered on purpose: check.sh already runs architecture-check, which reports the same violations, and a second reader of one fact inside the gate chain is the defect this project keeps closing"
 
 [[script_disposition]]
 path = "scripts/w1_bigint_e2e.sh"
