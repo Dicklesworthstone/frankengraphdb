@@ -1236,21 +1236,35 @@ fn respelling_the_kind_registry_does_not_change_the_arm_verdict() {
         base.is_empty(),
         "control: the base registry and both arms agree: {base:?}"
     );
-    for (tag, registry) in [
+    // The third column is whether the respelling preserves the RAW BYTE LAYOUT.
+    //
+    // TWO LAWS LIVE ON THESE FIXTURES AND THEY DISAGREE ON PURPOSE (fgdb-gg4b).
+    // This test's law is the ARM VERDICT: a respelling that declares the same
+    // kinds must bind the same arms. But `logical_kind_projection_layout` is a
+    // RAW-BYTE law -- fgdb-types consumes logical_object_kinds.toml as bytes and
+    // requires `object_kind`/`name`/`status` adjacent and in that order, so its
+    // needle is spelled with double quotes and single spaces. For that consumer a
+    // respelling is NOT equivalent, and the layout law is right to fire.
+    // Excluding it from the comparison without saying so would silence a real law,
+    // so each variant now states which side it lands on and BOTH are asserted.
+    for (tag, registry, layout_preserved) in [
         // read as an unreadable row -> `arm_without_active_logical_kind`
         (
             "literal_quotes",
             ARM_REGISTRY.replace("name = \"Beta\"", "name = 'Beta'"),
+            false,
         ),
         // read as an unreadable row -> `arm_without_active_logical_kind`
         (
             "no_spaces_around_equals",
             ARM_REGISTRY.replace("name = \"Beta\"", "name=\"Beta\""),
+            false,
         ),
         // dropped EVERY row -> `active_logical_kind_none_parsed`
         (
             "trailing_comment_on_status",
             ARM_REGISTRY.replace("status = \"active\"\n", "status = \"active\"  # pinned\n"),
+            true,
         ),
         (
             "rows_reordered",
@@ -1258,6 +1272,7 @@ fn respelling_the_kind_registry_does_not_change_the_arm_verdict() {
              [[kind]]\nobject_kind = 0x0002\nname = \"Beta\"\nstatus = \"active\"\n\n\
              [[kind]]\nobject_kind = 0x0001\nname = \"Alpha\"\nstatus = \"active\"\n"
                 .to_owned(),
+            true,
         ),
         (
             "keys_reordered_within_a_row",
@@ -1265,13 +1280,27 @@ fn respelling_the_kind_registry_does_not_change_the_arm_verdict() {
              [[kind]]\nname = \"Alpha\"\nstatus = \"active\"\nobject_kind = 0x0001\n\n\
              [[kind]]\nstatus = \"active\"\nobject_kind = 0x0002\nname = \"Beta\"\n"
                 .to_owned(),
+            false,
         ),
     ] {
-        let variant = arm_binding_codes(&format!("reg_{tag}"), &refs_source(BOTH_ARMS), &registry);
+        const LAYOUT: &str = "logical_kind_projection_layout";
+        let raw = arm_binding_codes(&format!("reg_{tag}"), &refs_source(BOTH_ARMS), &registry);
+        let variant: BTreeSet<String> =
+            raw.iter().filter(|code| *code != LAYOUT).cloned().collect();
         assert_eq!(
             variant, base,
             "`{tag}` declares exactly the kinds the base declares, so the arm binding \
              must reach the same verdict.\n  base:    {base:?}\n  variant: {variant:?}"
+        );
+        // The other half, so the exclusion above is licensed by a law rather than
+        // by silence: the layout code must be present exactly when the respelling
+        // moves the bytes fgdb-types reads.
+        assert_eq!(
+            !raw.contains(LAYOUT),
+            layout_preserved,
+            "`{tag}` is declared layout_preserved={layout_preserved}, but the raw verdict \
+             {raw:?} says otherwise; a respelling either keeps the fgdb-types byte layout \
+             or it does not, and this table must say which"
         );
     }
 }
@@ -2251,11 +2280,25 @@ fn proof_lane_checked_arm_is_vacuous_today_and_this_is_what_licenses_it() {
          quantified over nothing"
     );
 
-    // Half one: whatever IS shipped as checked must really be checked. Vacuous
-    // today by construction; the licence for that zero is half two.
+    // Half one: whatever IS shipped as checked must really be checked.
+    //
+    // RESOLVED AGAINST THE REAL checker_index, not the synthetic `lane_gates()`
+    // fixture. This half quantifies over REAL lanes, so it must judge them by the
+    // REAL gate roster; the fixture exists for the synthetic relations below it.
+    // While zero lanes shipped as `checked` the loop body never ran and the
+    // mismatch was invisible -- then 06e5d72 (fgdb-dkrc) promoted lean-version-chain
+    // and the test reported `proof_lane_gate_unresolved` for a gate that IS
+    // registered and live, because a real symbol cannot resolve in a fixture that
+    // only ever contained lane_gate/toothless_gate/stub_gate. A vacuous assertion
+    // hid a defect in itself until the population it quantifies over stopped being
+    // empty, which is the reason half two exists at all.
     let mut defective = Vec::new();
     for row in r.proof_lanes.iter().filter(|l| l.status == "checked") {
-        let codes = lane_codes(&repo_root(), row);
+        let codes: BTreeSet<String> =
+            registry_check::liveness::assess_lane(&repo_root(), row, &r.checker_index)
+                .into_iter()
+                .map(|defect| defect.kind.code().to_owned())
+                .collect();
         if !codes.is_empty() {
             defective.push((row.id.clone(), codes));
         }
