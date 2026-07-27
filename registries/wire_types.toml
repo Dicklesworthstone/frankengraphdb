@@ -5271,3 +5271,34 @@ status = "reserved"
 encoding_context = "fixed-width 16-byte record: source tag 0x0001 slot0_generation:u64 little-endian at offsets 0..8, then source tag 0x0002 slot1_generation:u64 little-endian at offsets 8..16; no count, slot-index field, framing, padding, sorting, or trailing bytes (a15:2059)"
 allowed_containing_schemas = ["KeyDestroyProposal"]
 max_size_bytes = 16
+
+[[type]]
+wire_type_id = 0x0525
+name = "BoltBookmarkRequestKind"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "a21:2645 exact nested request selector; u16 tag 0x0001 means Begin and 0x0002 means Run"
+allowed_containing_schemas = ["BoltBookmarkRequestKind"]
+max_size_bytes = 2
+
+[[type]]
+wire_type_id = 0x0526
+name = "BoltBookmarkRequestKind.begin"
+kind = "union_variant"
+status = "reserved"
+containing_union = "BoltBookmarkRequestKind"
+wire_tag = 0x0001
+encoding_context = "a21:2645 source-spelled unit arm Begin"
+allowed_containing_schemas = ["BoltBookmarkRequestKind"]
+max_size_bytes = 2
+
+[[type]]
+wire_type_id = 0x0527
+name = "BoltBookmarkRequestKind.run"
+kind = "union_variant"
+status = "reserved"
+containing_union = "BoltBookmarkRequestKind"
+wire_tag = 0x0002
+encoding_context = "a21:2645 source-spelled unit arm Run"
+allowed_containing_schemas = ["BoltBookmarkRequestKind"]
+max_size_bytes = 2

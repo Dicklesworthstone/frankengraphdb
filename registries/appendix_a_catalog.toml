@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
 
 [target_manifest]
-target_count = 3321
+target_count = 3327
 projection_fallback_count = 111
-target_source_assignment_sha256 = "7551ba613d8667ad73d98e43003a3e6c1cfbc603bbb3ed717aea6efa9d99ca42"
+target_source_assignment_sha256 = "2b333383da27ce64db34b178c37b1232a6fd7a184851756d636cf4651a953016"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -49688,7 +49688,7 @@ symbol = "BoltBookmarkRequestKind"
 generic_signature = ""
 source_key = "top|BoltBookmarkRequestKind"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2645"]
 
 [[top_level_candidate]]
@@ -104238,6 +104238,132 @@ target_row_id = "a21:wire-type:structural-audit-exemption"
 slice_id = "a21"
 source_key = "top|StructuralAuditExemption"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:bolt-bookmark-request-kind"
+wire_type_id = 0x0525
+name = "BoltBookmarkRequestKind"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "a21:2645 exact nested request selector; u16 tag 0x0001 means Begin and 0x0002 means Run"
+allowed_containing_schemas = ["BoltBookmarkRequestKind"]
+max_size_bytes = 2
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:bolt-bookmark-request-kind-begin"
+wire_type_id = 0x0526
+name = "BoltBookmarkRequestKind.begin"
+kind = "union_variant"
+status = "reserved"
+containing_union = "BoltBookmarkRequestKind"
+wire_tag = 0x0001
+encoding_context = "a21:2645 source-spelled unit arm Begin"
+allowed_containing_schemas = ["BoltBookmarkRequestKind"]
+max_size_bytes = 2
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:bolt-bookmark-request-kind-run"
+wire_type_id = 0x0527
+name = "BoltBookmarkRequestKind.run"
+kind = "union_variant"
+status = "reserved"
+containing_union = "BoltBookmarkRequestKind"
+wire_tag = 0x0002
+encoding_context = "a21:2645 source-spelled unit arm Run"
+allowed_containing_schemas = ["BoltBookmarkRequestKind"]
+max_size_bytes = 2
+
+[[union]]
+slice_id = "a21"
+row_id = "a21:union:bolt-bookmark-request-kind-ace2446c2c185c02"
+union_name = "BoltBookmarkRequestKind"
+containing_schema = "BoltBookmarkRequestKind"
+union_path = "BoltBookmarkRequestKind"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BoltBookmarkRequestKind"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:bolt-bookmark-request-kind-begin-09ee413590c4bdda"
+union_name = "BoltBookmarkRequestKind"
+containing_schema = "BoltBookmarkRequestKind"
+union_path = "BoltBookmarkRequestKind"
+arm_tag = 0x0001
+source_arm_name = "0x0001 Begin"
+stable_name = "begin"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union_arm]]
+slice_id = "a21"
+row_id = "a21:union-arm:bolt-bookmark-request-kind-run-065fbeda59085bb8"
+union_name = "BoltBookmarkRequestKind"
+containing_schema = "BoltBookmarkRequestKind"
+union_path = "BoltBookmarkRequestKind"
+arm_tag = 0x0002
+source_arm_name = "0x0002 Run"
+stable_name = "run"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[target]]
+row_id = "a21:target:wire-type-bolt-bookmark-request-kind"
+target_row_id = "a21:wire-type:bolt-bookmark-request-kind"
+slice_id = "a21"
+source_key = "top|BoltBookmarkRequestKind"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-bolt-bookmark-request-kind-ace2446c2c185c02"
+target_row_id = "a21:union:bolt-bookmark-request-kind-ace2446c2c185c02"
+slice_id = "a21"
+source_key = "union|BoltBookmarkRequestKind|BoltBookmarkRequestKind"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-bolt-bookmark-request-kind-begin"
+target_row_id = "a21:wire-type:bolt-bookmark-request-kind-begin"
+slice_id = "a21"
+source_key = "arm|BoltBookmarkRequestKind|BoltBookmarkRequestKind|0x0001 Begin"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-bolt-bookmark-request-kind-begin-09ee413590c4bdda"
+target_row_id = "a21:union-arm:bolt-bookmark-request-kind-begin-09ee413590c4bdda"
+slice_id = "a21"
+source_key = "arm|BoltBookmarkRequestKind|BoltBookmarkRequestKind|0x0001 Begin"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-bolt-bookmark-request-kind-run"
+target_row_id = "a21:wire-type:bolt-bookmark-request-kind-run"
+slice_id = "a21"
+source_key = "arm|BoltBookmarkRequestKind|BoltBookmarkRequestKind|0x0002 Run"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:union-arm-bolt-bookmark-request-kind-run-065fbeda59085bb8"
+target_row_id = "a21:union-arm:bolt-bookmark-request-kind-run-065fbeda59085bb8"
+slice_id = "a21"
+source_key = "arm|BoltBookmarkRequestKind|BoltBookmarkRequestKind|0x0002 Run"
+target_kind = "union-arm"
 definition_status = "declared"
 
 [[target]]

@@ -11982,6 +11982,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "BoltBookmarkRequestKind"
+containing_schema = "BoltBookmarkRequestKind"
+union_path = "BoltBookmarkRequestKind"
+tag_wire_type = "u16"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["BoltBookmarkRequestKind"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union]]
 union_name = "BootstrapReservationAppliedUseIdentityKindSpecificUseSubject"
 containing_schema = "BootstrapReservationAppliedUseIdentity<Role,Kind>"
 union_path = "BootstrapReservationAppliedUseIdentity<Role,Kind>.kind_specific_use_subject"
@@ -16637,6 +16648,30 @@ payload_sha256 = "8d1968314adea11f049629e7c97a4a1515139c81d95da7cea5afab570aa35f
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "BoltBookmarkRequestKind"
+containing_schema = "BoltBookmarkRequestKind"
+union_path = "BoltBookmarkRequestKind"
+arm_tag = 0x0001
+source_arm_name = "0x0001 Begin"
+stable_name = "begin"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[union_arm]]
+union_name = "BoltBookmarkRequestKind"
+containing_schema = "BoltBookmarkRequestKind"
+union_path = "BoltBookmarkRequestKind"
+arm_tag = 0x0002
+source_arm_name = "0x0002 Run"
+stable_name = "run"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 2
 
 [[union_arm]]
 union_name = "BootstrapReservationAppliedUseIdentityKindSpecificUseSubject"
