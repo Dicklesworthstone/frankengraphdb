@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3264
+target_count = 3269
 projection_fallback_count = 109
-target_source_assignment_sha256 = "4e9ba73438219681a3542b22877666217129c7a7d926d2c6a8401033ceebb349"
+target_source_assignment_sha256 = "e5955da8acb399845cb82a9f5e88fbec9c146d731da6ae4759086b93e484dc84"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 38
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 65
+registry_epoch = 66
 
 [[logical_kind]]
 slice_id = "a03"
@@ -7221,7 +7221,7 @@ name = "LocalAuditTicketOwner"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: Control | Operation | Statement"
-allowed_containing_schemas = ["LocalAuditTicketOwner"]
+allowed_containing_schemas = ["LocalAuditTicketOwner", "LocalAuditTicketClaimRecord"]
 max_size_bytes = 16777216
 
 
@@ -7257,7 +7257,7 @@ name = "LocalResultDeliveryOwner"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: AutocommitWriteTerminal | DpResult | Statement | TerminalRead"
-allowed_containing_schemas = ["LocalResultDeliveryOwner"]
+allowed_containing_schemas = ["LocalResultDeliveryOwner", "LocalResultDeliveryLease"]
 max_size_bytes = 16777216
 
 
@@ -7293,7 +7293,7 @@ name = "ResultActivationAppliedRef"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: InlineSemantic | ProtocolActivation"
-allowed_containing_schemas = ["ResultActivationAppliedRef", "ResultDeliveryLease"]
+allowed_containing_schemas = ["ResultActivationAppliedRef", "LocalResultDeliveryLease", "ResultDeliveryLease"]
 max_size_bytes = 16777216
 
 
@@ -7305,7 +7305,7 @@ name = "ResultDeliveryServiceAuthority"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: DirectOrdinary | PromotionReceiptRequired"
-allowed_containing_schemas = ["ResultDeliveryServiceAuthority"]
+allowed_containing_schemas = ["ResultDeliveryServiceAuthority", "ResultDeliveryPolicy<Role>"]
 max_size_bytes = 16777216
 
 
@@ -7317,7 +7317,7 @@ name = "ResultManifestRef"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: Local | Sharded"
-allowed_containing_schemas = ["ResultManifestRef"]
+allowed_containing_schemas = ["ResultManifestRef", "ResultDeliveryPolicy<Role>"]
 max_size_bytes = 16777216
 
 
@@ -21604,7 +21604,7 @@ containing_schema = "LocalAuditTicketOwner"
 union_path = "LocalAuditTicketOwner"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["LocalAuditTicketOwner"]
+allowed_containing_schemas = ["LocalAuditTicketOwner", "LocalAuditTicketClaimRecord"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -21649,7 +21649,7 @@ containing_schema = "LocalResultDeliveryOwner"
 union_path = "LocalResultDeliveryOwner"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["LocalResultDeliveryOwner"]
+allowed_containing_schemas = ["LocalResultDeliveryOwner", "LocalResultDeliveryLease"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -21709,7 +21709,7 @@ containing_schema = "ResultActivationAppliedRef"
 union_path = "ResultActivationAppliedRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ResultActivationAppliedRef", "ResultDeliveryLease"]
+allowed_containing_schemas = ["ResultActivationAppliedRef", "LocalResultDeliveryLease", "ResultDeliveryLease"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -21724,7 +21724,7 @@ containing_schema = "ResultDeliveryServiceAuthority"
 union_path = "ResultDeliveryServiceAuthority"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ResultDeliveryServiceAuthority"]
+allowed_containing_schemas = ["ResultDeliveryServiceAuthority", "ResultDeliveryPolicy<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -21739,7 +21739,7 @@ containing_schema = "ResultManifestRef"
 union_path = "ResultManifestRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ResultManifestRef"]
+allowed_containing_schemas = ["ResultManifestRef", "ResultDeliveryPolicy<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -102120,6 +102120,86 @@ retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value i
 version_status = "reserved"
 max_size_bytes = 256
 
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:local-audit-ticket-claim-record-owner"
+containing_schema = "LocalAuditTicketClaimRecord"
+field_tag = 0x0002
+stable_name = "owner"
+exact_wire_type = "LocalAuditTicketOwner"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline LocalAuditTicketOwner embedded by value in the Local claim record; the selected closed-union arm governs its exact payload and any interior reference, while this field adds no independent target edge (a03:1470)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:result-delivery-policy-role-manifest-ref"
+containing_schema = "ResultDeliveryPolicy<Role>"
+field_tag = 0x0004
+stable_name = "manifest_ref"
+exact_wire_type = "ResultManifestRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline ResultManifestRef embedded by value in the result delivery policy; its selected Local or Sharded arm carries the exact registered manifest reference, while this field adds no second direct target edge (a03:1492)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:result-delivery-policy-role-service-authority"
+containing_schema = "ResultDeliveryPolicy<Role>"
+field_tag = 0x000a
+stable_name = "service_authority"
+exact_wire_type = "ResultDeliveryServiceAuthority"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline ResultDeliveryServiceAuthority embedded by value in the result delivery policy; retained and cut with that immutable policy and creates no reachability edge (a03:1492)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:local-result-delivery-lease-owner"
+containing_schema = "LocalResultDeliveryLease"
+field_tag = 0x0001
+stable_name = "owner"
+exact_wire_type = "LocalResultDeliveryOwner"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline LocalResultDeliveryOwner embedded by value in the Local lease; the selected closed-union arm governs its exact payload and any interior reference, while this field adds no independent target edge (a03:1496)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:local-result-delivery-lease-activation-applied-ref"
+containing_schema = "LocalResultDeliveryLease"
+field_tag = 0x0010
+stable_name = "activation_applied_ref"
+exact_wire_type = "ResultActivationAppliedRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline ResultActivationAppliedRef embedded by value in the Local lease; retained and cut with that lease and creates no reachability edge (a03:1496)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[target]]
 row_id = "a03:target:field-local-audit-ticket-claim-record-claim-applied-ref"
 target_row_id = "a03:field:local-audit-ticket-claim-record-claim-applied-ref"
@@ -102181,6 +102261,46 @@ row_id = "a03:target:field-admitted-txn-abort-command-authority-bound-header"
 target_row_id = "a03:field:admitted-txn-abort-command-authority-bound-header"
 slice_id = "a03"
 source_key = "field|AdmittedTxnAbortCommand|AdmittedTxnAbortCommand.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-local-audit-ticket-claim-record-owner"
+target_row_id = "a03:field:local-audit-ticket-claim-record-owner"
+slice_id = "a03"
+source_key = "field|LocalAuditTicketClaimRecord|LocalAuditTicketClaimRecord.owner|owner"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-result-delivery-policy-role-manifest-ref"
+target_row_id = "a03:field:result-delivery-policy-role-manifest-ref"
+slice_id = "a03"
+source_key = "field|ResultDeliveryPolicy<Role>|ResultDeliveryPolicy<Role>.manifest_ref|manifest_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-result-delivery-policy-role-service-authority"
+target_row_id = "a03:field:result-delivery-policy-role-service-authority"
+slice_id = "a03"
+source_key = "field|ResultDeliveryPolicy<Role>|ResultDeliveryPolicy<Role>.service_authority|service_authority"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-local-result-delivery-lease-owner"
+target_row_id = "a03:field:local-result-delivery-lease-owner"
+slice_id = "a03"
+source_key = "field|LocalResultDeliveryLease|LocalResultDeliveryLease.owner|owner"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a03:target:field-local-result-delivery-lease-activation-applied-ref"
+target_row_id = "a03:field:local-result-delivery-lease-activation-applied-ref"
+slice_id = "a03"
+source_key = "field|LocalResultDeliveryLease|LocalResultDeliveryLease.activation_applied_ref|activation_applied_ref"
 target_kind = "field"
 definition_status = "declared"
 

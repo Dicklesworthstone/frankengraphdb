@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 65
+registry_epoch = 66
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 65);
+    assert_eq!(epoch, 66);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3134,6 +3134,149 @@ fn idr_a18_wire_consumer_allowlists_are_exact() {
         vec!["CatalogTombstoneRestoreTargetReceipt<Contract>".to_owned()],
         "the ordinary union must exactly mirror its wire-parent consumer closure"
     );
+}
+
+#[test]
+fn idr_a03_wire_consumer_repairs_are_exact_and_non_vacuous() {
+    let identity = real_identity();
+    let expected = [
+        (
+            "LocalAuditTicketOwner",
+            &["LocalAuditTicketOwner", "LocalAuditTicketClaimRecord"][..],
+            "LocalAuditTicketClaimRecord",
+            "owner",
+            0x0002,
+            15,
+        ),
+        (
+            "ResultManifestRef",
+            &["ResultManifestRef", "ResultDeliveryPolicy<Role>"][..],
+            "ResultDeliveryPolicy<Role>",
+            "manifest_ref",
+            0x0004,
+            20,
+        ),
+        (
+            "ResultDeliveryServiceAuthority",
+            &[
+                "ResultDeliveryServiceAuthority",
+                "ResultDeliveryPolicy<Role>",
+            ][..],
+            "ResultDeliveryPolicy<Role>",
+            "service_authority",
+            0x000a,
+            20,
+        ),
+        (
+            "LocalResultDeliveryOwner",
+            &["LocalResultDeliveryOwner", "LocalResultDeliveryLease"][..],
+            "LocalResultDeliveryLease",
+            "owner",
+            0x0001,
+            20,
+        ),
+        (
+            "ResultActivationAppliedRef",
+            &[
+                "ResultActivationAppliedRef",
+                "LocalResultDeliveryLease",
+                "ResultDeliveryLease",
+            ][..],
+            "LocalResultDeliveryLease",
+            "activation_applied_ref",
+            0x0010,
+            20,
+        ),
+    ];
+
+    for (wire_name, expected_consumers, container, field_name, field_tag, construction_order) in
+        expected
+    {
+        let expected_consumers: Vec<_> = expected_consumers
+            .iter()
+            .map(|consumer| (*consumer).to_owned())
+            .collect();
+        let wire = identity
+            .wire
+            .iter()
+            .find(|wire| wire.name == wire_name)
+            .expect("A03 repaired wire type exists");
+        assert_eq!(
+            wire.allowed_containing_schemas, expected_consumers,
+            "{wire_name} must admit only its source-derived consumers"
+        );
+        let union = identity
+            .ordinary_unions
+            .iter()
+            .find(|union| union.union_name == wire_name)
+            .expect("A03 repaired ordinary union exists");
+        assert_eq!(
+            union.allowed_containing_schemas, expected_consumers,
+            "{wire_name} ordinary union must exactly mirror its wire parent"
+        );
+        let field = identity
+            .fields
+            .iter()
+            .find(|field| field.containing_schema == container && field.stable_name == field_name)
+            .expect("A03 repaired field exists");
+        assert_eq!(field.field_tag, field_tag);
+        assert_eq!(field.exact_wire_type, wire_name);
+        assert_eq!(field.identity_class, "inline");
+        assert_eq!(field.reference_semantics, "none");
+        assert_eq!(field.construction_order, construction_order);
+        assert_eq!(field.version_status, "reserved");
+
+        let mut narrowed = identity.clone();
+        narrowed
+            .wire
+            .iter_mut()
+            .find(|wire| wire.name == wire_name)
+            .expect("A03 repaired wire type exists")
+            .allowed_containing_schemas
+            .retain(|consumer| consumer != container);
+        narrowed
+            .ordinary_unions
+            .iter_mut()
+            .find(|union| union.union_name == wire_name)
+            .expect("A03 repaired ordinary union exists")
+            .allowed_containing_schemas
+            .retain(|consumer| consumer != container);
+        let row_id = format!("{container}#{field_name}");
+        let violations = identity::validate_identity(&narrowed);
+        assert!(
+            violations.iter().any(|violation| {
+                violation.code == "wire_context_mismatch" && violation.row_id == row_id
+            }),
+            "removing {container} from the exact {wire_name} closure did not restore the original rejection: {violations:?}"
+        );
+    }
+
+    for wire_name in [
+        "LocalAuditTicketOwner",
+        "ResultManifestRef",
+        "ResultDeliveryServiceAuthority",
+        "LocalResultDeliveryOwner",
+        "ResultActivationAppliedRef",
+    ] {
+        let mut unrelated = identity.clone();
+        unrelated
+            .fields
+            .iter_mut()
+            .find(|field| {
+                field.containing_schema == "AdmittedTxnAbortCommand"
+                    && field.stable_name == "authority_bound_header"
+            })
+            .expect("unrelated real inline field exists")
+            .exact_wire_type = wire_name.to_owned();
+        let violations = identity::validate_identity(&unrelated);
+        assert!(
+            violations.iter().any(|violation| {
+                violation.code == "wire_context_mismatch"
+                    && violation.row_id == "AdmittedTxnAbortCommand#authority_bound_header"
+            }),
+            "{wire_name} accepted an unrelated registered logical host: {violations:?}"
+        );
+    }
 }
 
 #[test]
@@ -7792,6 +7935,19 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | ("LocalBeginReservationRecord", "applied_control_ref")
             )
     };
+    // yenh opens five exact A03 wire/ordinary-union consumer closures and
+    // lands their source-forced inline fields. They postdate the erratum and
+    // therefore stay out of its historical assignment witness.
+    let post_erratum_a03_wire_consumer_fields = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("LocalAuditTicketClaimRecord", "owner")
+                | ("ResultDeliveryPolicy<Role>", "manifest_ref")
+                | ("ResultDeliveryPolicy<Role>", "service_authority")
+                | ("LocalResultDeliveryLease", "owner")
+                | ("LocalResultDeliveryLease", "activation_applied_ref")
+        )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_a21_field(&field.containing_schema)
             && !post_erratum_union(&field.exact_wire_type)
@@ -7835,6 +7991,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 &field.stable_name,
             )
             && !post_erratum_a03_inline_fields(&field.containing_schema, &field.stable_name)
+            && !post_erratum_a03_wire_consumer_fields(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 364,
@@ -7842,9 +7999,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 534,
+        pre_erratum.fields.len() + 539,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A20 promotion sweep after the A03 inline authority beneficiary tranche"
+        "the historical witness must remove every post-erratum field cohort through the A03 wire-consumer repair tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);

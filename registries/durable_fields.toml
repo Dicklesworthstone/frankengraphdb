@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 65
+registry_epoch = 66
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -3730,6 +3730,20 @@ max_size_bytes = 256
 
 [[field]]
 containing_schema = "LocalAuditTicketClaimRecord"
+field_tag = 0x0002
+stable_name = "owner"
+exact_wire_type = "LocalAuditTicketOwner"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline LocalAuditTicketOwner embedded by value in the Local claim record; the selected closed-union arm governs its exact payload and any interior reference, while this field adds no independent target edge (a03:1470)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LocalAuditTicketClaimRecord"
 field_tag = 0x0004
 stable_name = "claim_applied_ref"
 exact_wire_type = "AppliedControlRef"
@@ -4167,6 +4181,20 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "LocalResultDeliveryLease"
+field_tag = 0x0001
+stable_name = "owner"
+exact_wire_type = "LocalResultDeliveryOwner"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline LocalResultDeliveryOwner embedded by value in the Local lease; the selected closed-union arm governs its exact payload and any interior reference, while this field adds no independent target edge (a03:1496)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LocalResultDeliveryLease"
 field_tag = 0x0008
 stable_name = "authority_bound_header"
 exact_wire_type = "AuthorityBoundHeader"
@@ -4178,6 +4206,20 @@ role_predicate = "true"
 retention_and_cut_rule = "inline AuthorityBoundHeader<Local> embedded by value in the result delivery lease; retained with the lease and creates no reachability edge (a03:1496)"
 version_status = "reserved"
 max_size_bytes = 256
+
+[[field]]
+containing_schema = "LocalResultDeliveryLease"
+field_tag = 0x0010
+stable_name = "activation_applied_ref"
+exact_wire_type = "ResultActivationAppliedRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline ResultActivationAppliedRef embedded by value in the Local lease; retained and cut with that lease and creates no reachability edge (a03:1496)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "LocalToShardProjection"
@@ -8669,6 +8711,34 @@ version_status = "reserved"
 max_size_bytes = 256
 
 [[field]]
+containing_schema = "ResultDeliveryPolicy<Role>"
+field_tag = 0x0004
+stable_name = "manifest_ref"
+exact_wire_type = "ResultManifestRef"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline ResultManifestRef embedded by value in the result delivery policy; its selected Local or Sharded arm carries the exact registered manifest reference, while this field adds no second direct target edge (a03:1492)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ResultDeliveryPolicy<Role>"
+field_tag = 0x000a
+stable_name = "service_authority"
+exact_wire_type = "ResultDeliveryServiceAuthority"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline ResultDeliveryServiceAuthority embedded by value in the result delivery policy; retained and cut with that immutable policy and creates no reachability edge (a03:1492)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "ResultReleaseEvidence<Meta>"
 field_tag = 0x0001
 stable_name = "receipt_ref"
@@ -12600,7 +12670,7 @@ containing_schema = "LocalAuditTicketOwner"
 union_path = "LocalAuditTicketOwner"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["LocalAuditTicketOwner"]
+allowed_containing_schemas = ["LocalAuditTicketOwner", "LocalAuditTicketClaimRecord"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -12876,7 +12946,7 @@ containing_schema = "LocalResultDeliveryOwner"
 union_path = "LocalResultDeliveryOwner"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["LocalResultDeliveryOwner"]
+allowed_containing_schemas = ["LocalResultDeliveryOwner", "LocalResultDeliveryLease"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -14448,7 +14518,7 @@ containing_schema = "ResultActivationAppliedRef"
 union_path = "ResultActivationAppliedRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ResultActivationAppliedRef", "ResultDeliveryLease"]
+allowed_containing_schemas = ["ResultActivationAppliedRef", "LocalResultDeliveryLease", "ResultDeliveryLease"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -14470,7 +14540,7 @@ containing_schema = "ResultDeliveryServiceAuthority"
 union_path = "ResultDeliveryServiceAuthority"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ResultDeliveryServiceAuthority"]
+allowed_containing_schemas = ["ResultDeliveryServiceAuthority", "ResultDeliveryPolicy<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -14503,7 +14573,7 @@ containing_schema = "ResultManifestRef"
 union_path = "ResultManifestRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
-allowed_containing_schemas = ["ResultManifestRef"]
+allowed_containing_schemas = ["ResultManifestRef", "ResultDeliveryPolicy<Role>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

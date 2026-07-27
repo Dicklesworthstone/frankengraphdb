@@ -626,7 +626,7 @@ name = "LocalAuditTicketOwner"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: Control | Operation | Statement"
-allowed_containing_schemas = ["LocalAuditTicketOwner"]
+allowed_containing_schemas = ["LocalAuditTicketOwner", "LocalAuditTicketClaimRecord"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -653,7 +653,7 @@ name = "LocalResultDeliveryOwner"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: AutocommitWriteTerminal | DpResult | Statement | TerminalRead"
-allowed_containing_schemas = ["LocalResultDeliveryOwner"]
+allowed_containing_schemas = ["LocalResultDeliveryOwner", "LocalResultDeliveryLease"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -680,7 +680,7 @@ name = "ResultActivationAppliedRef"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: InlineSemantic | ProtocolActivation"
-allowed_containing_schemas = ["ResultActivationAppliedRef", "ResultDeliveryLease"]
+allowed_containing_schemas = ["ResultActivationAppliedRef", "LocalResultDeliveryLease", "ResultDeliveryLease"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -689,7 +689,7 @@ name = "ResultDeliveryServiceAuthority"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: DirectOrdinary | PromotionReceiptRequired"
-allowed_containing_schemas = ["ResultDeliveryServiceAuthority"]
+allowed_containing_schemas = ["ResultDeliveryServiceAuthority", "ResultDeliveryPolicy<Role>"]
 max_size_bytes = 16777216
 
 [[type]]
@@ -698,7 +698,7 @@ name = "ResultManifestRef"
 kind = "union"
 status = "reserved"
 encoding_context = "closed union: Local | Sharded"
-allowed_containing_schemas = ["ResultManifestRef"]
+allowed_containing_schemas = ["ResultManifestRef", "ResultDeliveryPolicy<Role>"]
 max_size_bytes = 16777216
 
 [[type]]
