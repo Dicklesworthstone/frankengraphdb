@@ -36,6 +36,75 @@ catalog_manifest_value() {
     }
   ' "$ROOT/registries/appendix_a_catalog.toml"
 }
+
+# Recount one closure-census number straight from the catalog rows.
+#
+# WHY A SECOND READER RATHER THAN A NUMBER TYPED HERE. Every count this returns
+# is the size of a catalog that grows on nearly every Appendix A commit, so a
+# number typed here is stale by construction and the gate then measures how
+# recently somebody swept it rather than anything about the tree. MEASURED
+# 2026-07-26: e7b6f09 (a20, fgdb-5cgb) flipped three a20 restore certificates
+# reserved->existing and moved the reservation split 431/382 -> 434/379, and
+# this script went red on a clean tree for every pane from that commit until
+# fgdb-su5y; the three symbol/candidate counts survived that but were staled two
+# hours later by ac572bc, which re-attributed four heading-led bodies.
+#
+# WHY THE READER AND NOT THE COMPILED PIN. The reservation partition is also
+# pinned in tools/registry-check/src/appendix_a.rs, and restating that pin here
+# looks like the stronger move. It is not: MEASURED 2026-07-26, mutating
+# EXPECTED_EXISTING_TYPE_RESERVATION_COUNT 434 -> 433 with the rows untouched
+# reds phase 0 ("canonical Appendix A validation failed") on the checker's own
+# catalog_reservation_epoch_drift, before any assertion in this file runs. A
+# shell-side pin-versus-rows comparison can therefore only ever pass, and an
+# assertion that cannot fire is not a gate. What this file can still catch is
+# the emitter disagreeing with the rows it claims to be counting -- so the
+# expectation is derived by a reader that is structurally independent of the
+# checker's TOML parser (line-oriented block counting here, a full parse there)
+# and compared against the emitted event.
+catalog_closure_census() {
+  awk -v key="$1" '
+    /^\[\[reservation\]\]/               { blk = "res"; next }
+    /^\[\[source_symbol_disposition\]\]/ { blk = "ssd"; ssd++; slice = ""; next }
+    /^\[\[top_level_candidate\]\]/       { blk = "tlc"; tlc++; next }
+    /^\[\[/                              { blk = "other"; next }
+    blk == "res" && $1 == "disposition" { gsub(/"/, "", $3); res[$3]++ }
+    blk == "ssd" && $1 == "slice_id"    { gsub(/"/, "", $3); slice = $3 }
+    blk == "ssd" && $1 == "disposition" { gsub(/"/, "", $3); ssd_disposition[$3]++ }
+    blk == "ssd" && $1 == "source_locations" {
+      entries = $0
+      sub(/^[^=]*=[[:space:]]*\[/, "", entries)
+      sub(/\].*$/, "", entries)
+      gsub(/[[:space:]]/, "", entries)
+      if (entries != "" && slice != "g0") {
+        pairs += split(entries, parts, /","/)
+      }
+    }
+    END {
+      value["reservations"]                = res["existing"] + res["reserved"] + 0
+      value["existing_reservations"]       = res["existing"] + 0
+      value["reserved_reservations"]       = res["reserved"] + 0
+      value["source_dispositions"]         = ssd + 0
+      value["top_level_candidates"]        = tlc + 0
+      value["reference_only_symbols"]      = ssd_disposition["reference-only"] + 0
+      value["appendix_structural_symbols"] = \
+        ssd_disposition["appendix-structural-definition"] + 0
+      value["source_location_pairs"]       = pairs + 0
+      if (!(key in value)) {
+        print "closure census key " key " is not one this reader derives" > "/dev/stderr"
+        exit 44
+      }
+      # A reader that matched nothing would hand its caller an empty expectation,
+      # and an empty expectation is a substring of every observed value -- the
+      # assertion would pass without ever comparing anything. Refuse to answer
+      # instead: the tables below are non-empty in every tree that has a catalog.
+      if (ssd == 0 || tlc == 0 || value["reservations"] == 0) {
+        print "closure census reader parsed no catalog rows" > "/dev/stderr"
+        exit 45
+      }
+      print value[key]
+    }
+  ' "$ROOT/registries/appendix_a_catalog.toml"
+}
 WORK="${G0_E2E_WORKDIR:-$(mktemp -d)}"
 BIN="$WORK/bin/registry-check"
 PASS=0
@@ -206,9 +275,14 @@ fi
 EXPECT_TARGET_COUNT="$(catalog_manifest_value target_count)"
 EXPECT_FALLBACK_COUNT="$(catalog_manifest_value projection_fallback_count)"
 EXPECT_TARGET_ASSIGNMENT_SHA="$(catalog_manifest_value target_source_assignment_sha256)"
-EXPECT_RESERVATION_COUNT=813
-EXPECT_EXISTING_RESERVATION_COUNT=431
-EXPECT_RESERVED_RESERVATION_COUNT=382
+EXPECT_RESERVATION_COUNT="$(catalog_closure_census reservations)"
+EXPECT_EXISTING_RESERVATION_COUNT="$(catalog_closure_census existing_reservations)"
+EXPECT_RESERVED_RESERVATION_COUNT="$(catalog_closure_census reserved_reservations)"
+EXPECT_SOURCE_DISPOSITION_COUNT="$(catalog_closure_census source_dispositions)"
+EXPECT_TOP_LEVEL_CANDIDATE_COUNT="$(catalog_closure_census top_level_candidates)"
+EXPECT_REFERENCE_ONLY_SYMBOL_COUNT="$(catalog_closure_census reference_only_symbols)"
+EXPECT_APPENDIX_STRUCTURAL_SYMBOL_COUNT="$(catalog_closure_census appendix_structural_symbols)"
+EXPECT_SOURCE_LOCATION_PAIR_COUNT="$(catalog_closure_census source_location_pairs)"
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
     '"target_count":'"$EXPECT_TARGET_COUNT" \
@@ -239,23 +313,31 @@ if [ "$APPENDIX_PROJECTION_PASSES" -eq 6 ]; then
 else
   die "expected six passing Appendix A projections, found $APPENDIX_PROJECTION_PASSES"
 fi
+# THE RULE FOR THIS EVENT, so the next author does not have to re-derive it:
+# a field whose value is the size of a growing catalog is DERIVED above, and a
+# field whose correct value is a law is written here. The laws are the four
+# empty completion layers, the empty outside-structural bucket, the four
+# completion-layer schemas, and the 35-row G0 projection slice -- none of which
+# moved across the 40 Appendix A commits before this one, while every derived
+# field did. A law that moves is an event and should red this gate; a census
+# that moves is Tuesday.
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_closure_checked"' \
     '"reservations":'"$EXPECT_RESERVATION_COUNT" \
     '"existing_reservations":'"$EXPECT_EXISTING_RESERVATION_COUNT" \
     '"reserved_reservations":'"$EXPECT_RESERVED_RESERVATION_COUNT" \
-    '"source_dispositions":848' \
-    '"top_level_candidates":1231' \
+    '"source_dispositions":'"$EXPECT_SOURCE_DISPOSITION_COUNT" \
+    '"top_level_candidates":'"$EXPECT_TOP_LEVEL_CANDIDATE_COUNT" \
     '"targets":'"$EXPECT_TARGET_COUNT" \
     '"completion_layer_schemas":4' \
     '"annotations":0' \
     '"semantic_bindings":0' \
     '"expansion_bindings":0' \
     '"evidence_rows":0' \
-    '"reference_only_symbols":343' \
-    '"appendix_structural_symbols":314' \
+    '"reference_only_symbols":'"$EXPECT_REFERENCE_ONLY_SYMBOL_COUNT" \
+    '"appendix_structural_symbols":'"$EXPECT_APPENDIX_STRUCTURAL_SYMBOL_COUNT" \
     '"outside_structural_symbols":0' \
-    '"source_location_pairs":1999' \
+    '"source_location_pairs":'"$EXPECT_SOURCE_LOCATION_PAIR_COUNT" \
     '"g0_projection_dispositions":35' \
     '"outcome":"pass"'; then
   ok "Appendix A source/target/owner/evidence scaffold closure is exact"
@@ -271,15 +353,15 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"projection_rows":'"$EXPECT_TARGET_COUNT" \
     '"projection_files":6' \
     '"reservations":'"$EXPECT_RESERVATION_COUNT" \
-    '"source_dispositions":848' \
-    '"top_level_candidates":1231' \
+    '"source_dispositions":'"$EXPECT_SOURCE_DISPOSITION_COUNT" \
+    '"top_level_candidates":'"$EXPECT_TOP_LEVEL_CANDIDATE_COUNT" \
     '"targets":'"$EXPECT_TARGET_COUNT" \
     '"completion_layer_schemas":4' \
     '"annotations":0' \
     '"semantic_bindings":0' \
     '"expansion_bindings":0' \
     '"evidence_rows":0' \
-    '"reference_only_symbols":343' \
+    '"reference_only_symbols":'"$EXPECT_REFERENCE_ONLY_SYMBOL_COUNT" \
     '"violations":0' \
     '"outcome":"pass"'; then
   ok "Appendix A catalog closure is exact"
