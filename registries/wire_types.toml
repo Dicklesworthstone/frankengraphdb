@@ -5244,3 +5244,21 @@ status = "reserved"
 encoding_context = "a14:2039 by-value element of MandatoryInventory.ordered_entries[MandatoryInventoryEntry]; the entry is embedded in the inventory body rather than referenced, so it is registered on the wire path and carries no field rows of its own"
 allowed_containing_schemas = ["MandatoryInventory"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0522
+name = "LifecycleScaffoldingNotRequired"
+kind = "record"
+status = "reserved"
+encoding_context = "a21:2619 exact inline {evidence:NonRequiredAuditEvidence::LifecycleScaffolding} value; 16 source occurrences embed it by value across the exact 14-schema consumer closure, no reference wrapper immediately targets it, and the record path therefore owns no field rows"
+allowed_containing_schemas = ["AuditSigningAttemptSupersedeSpec", "AuditTerminalFreezeSpec", "AuditTerminalPlanAbandonSpec", "CertificateAttemptAbandonSpec", "GlobalAttemptRegistrationSpec", "GlobalBeginReservationSpec", "GlobalFinalCertificationReserveSpec", "GlobalPrepareAdmissionSpec", "GlobalStatementRegistrationSpec", "LocalBeginReservationSpec", "LocalFinalCertificationReserveSpec", "LocalPrepareAdmissionSpec", "LocalStatementRegistrationSpec", "TimeIssuanceAdmissionFreezeSpec"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0523
+name = "StructuralAuditExemption"
+kind = "record"
+status = "reserved"
+encoding_context = "a21:2619 generated inline singleton {spec_tag,system_authority_class,compatibility_row_id}; AuthorizationAuditGate and TerminalAuditGate embed it by value, no reference wrapper immediately targets it, and the record path therefore owns no field rows"
+allowed_containing_schemas = ["AuthorizationAuditGate", "TerminalAuditGate"]
+max_size_bytes = 16777216

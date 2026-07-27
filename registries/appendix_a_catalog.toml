@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "ae40064992d27bd2772130802ec594b2f1238856fd561366d92fe46e6ae1ab93"
 
 [target_manifest]
-target_count = 3314
+target_count = 3316
 projection_fallback_count = 111
-target_source_assignment_sha256 = "6a08317b93600524fb57aced546d94133cc7bec78593e13f5aba0f3e5e19946b"
+target_source_assignment_sha256 = "4fcbf9ec8b84473364094e81ec91a2300aaa0aa4d2f5637c28763e77d5d1e0d0"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -53068,7 +53068,7 @@ symbol = "LifecycleScaffoldingNotRequired"
 generic_signature = ""
 source_key = "top|LifecycleScaffoldingNotRequired"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2619"]
 
 [[top_level_candidate]]
@@ -59648,7 +59648,7 @@ symbol = "StructuralAuditExemption"
 generic_signature = ""
 source_key = "top|StructuralAuditExemption"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a21:2619"]
 
 [[top_level_candidate]]
@@ -102828,6 +102828,28 @@ encoding_context = "a14:2039 by-value element of MandatoryInventory.ordered_entr
 allowed_containing_schemas = ["MandatoryInventory"]
 max_size_bytes = 16777216
 
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:lifecycle-scaffolding-not-required"
+wire_type_id = 0x0522
+name = "LifecycleScaffoldingNotRequired"
+kind = "record"
+status = "reserved"
+encoding_context = "a21:2619 exact inline {evidence:NonRequiredAuditEvidence::LifecycleScaffolding} value; 16 source occurrences embed it by value across the exact 14-schema consumer closure, no reference wrapper immediately targets it, and the record path therefore owns no field rows"
+allowed_containing_schemas = ["AuditSigningAttemptSupersedeSpec", "AuditTerminalFreezeSpec", "AuditTerminalPlanAbandonSpec", "CertificateAttemptAbandonSpec", "GlobalAttemptRegistrationSpec", "GlobalBeginReservationSpec", "GlobalFinalCertificationReserveSpec", "GlobalPrepareAdmissionSpec", "GlobalStatementRegistrationSpec", "LocalBeginReservationSpec", "LocalFinalCertificationReserveSpec", "LocalPrepareAdmissionSpec", "LocalStatementRegistrationSpec", "TimeIssuanceAdmissionFreezeSpec"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a21"
+row_id = "a21:wire-type:structural-audit-exemption"
+wire_type_id = 0x0523
+name = "StructuralAuditExemption"
+kind = "record"
+status = "reserved"
+encoding_context = "a21:2619 generated inline singleton {spec_tag,system_authority_class,compatibility_row_id}; AuthorizationAuditGate and TerminalAuditGate embed it by value, no reference wrapper immediately targets it, and the record path therefore owns no field rows"
+allowed_containing_schemas = ["AuthorizationAuditGate", "TerminalAuditGate"]
+max_size_bytes = 16777216
+
 [[union]]
 slice_id = "a02"
 row_id = "a02:union:location-form-aaca262488997d87"
@@ -104080,4 +104102,20 @@ target_row_id = "a13:field:key-envelope-node-source-root-ciphertext-digest"
 slice_id = "a13"
 source_key = "field|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_ciphertext_digest|source_root_ciphertext_digest"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-lifecycle-scaffolding-not-required"
+target_row_id = "a21:wire-type:lifecycle-scaffolding-not-required"
+slice_id = "a21"
+source_key = "top|LifecycleScaffoldingNotRequired"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a21:target:wire-type-structural-audit-exemption"
+target_row_id = "a21:wire-type:structural-audit-exemption"
+slice_id = "a21"
+source_key = "top|StructuralAuditExemption"
+target_kind = "wire-type"
 definition_status = "declared"
