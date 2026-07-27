@@ -540,26 +540,111 @@ stage_except() { # stage_except <name> <basename> -> leave one output uncreated
   done
 }
 
+# LINKED_MANIFEST — "<sha256>  <staged-path>", one row per hard-linked input.
+#
+# THE SUBJECT IS THE FIXTURE, NOT $ROOT, and that is the whole correction
+# (fgdb-g0-root-guard-beads-blind-c7oe). The root before/after snapshot excludes
+# './.beads' and './.beads/*' — added by fgdb-flbb so that a peer bead flush
+# mid-run would not fire it — but .beads/issues.jsonl is 8,203 KB of the ~10 MB
+# linkable set, so the guard was blind to roughly three quarters of the bytes
+# whose safety it is cited for. Excluding .git was right; excluding .beads
+# blinded the instrument to its own subject.
+#
+# WIDENING THE ROOT SNAPSHOT IS THE WRONG FIX. It would re-introduce the false
+# positive flbb removed. The two things that touch .beads are NOT the same:
+#
+#   COORDINATION CHURN     a peer runs `br update` / `br sync --flush-only`
+#   WRITE-THROUGH DAMAGE   a fixture writes a path it hard-links
+#
+# MEASURED 2026-07-27, and this is what separates them: `br` replaces the file
+# rather than rewriting it. Staging a link at nlink=2 and then letting a peer
+# write produced real-file digest 00b40f54 -> 4ead27df ON A NEW INODE, while the
+# fixture's digest stayed 00b40f54 on the old inode at nlink=1. So coordination
+# churn DETACHES the fixture; it cannot alter it. Write-through damage, by
+# contrast, mutates the shared inode and therefore shows up in the FIXTURE.
+# Digesting the fixture side is immune to peer churn BY CONSTRUCTION, and it
+# measures the actual law — "no fixture wrote a linked inode after staging" —
+# instead of a proxy for it.
+LINKED_MANIFEST="$WORK/.linked-manifest"
+
+link_support() { # link_support <source-file> <destination-dir-or-file>
+  local source="$1" destination="$2"
+  cp -l "$source" "$destination"
+  [ -d "$destination" ] && destination="${destination%/}/${source##*/}"
+  sha256sum "$destination" >> "$LINKED_MANIFEST"
+}
+
 stage_appendix_support() { # stage_appendix_support <name> -> non-registry proof inputs
   local name="$1"
-  local manifest relative
+  local manifest relative source
   mkdir -p "$WORK/$name/.beads"
   # These support inputs are read-only after staging. Hard-linking them avoids
   # duplicating ~10 MB per fixture; registries and the plan remain real copies
-  # because fixtures mutate those paths.
-  cp -l "$ROOT/.beads/issues.jsonl" "$WORK/$name/.beads/"
+  # because fixtures mutate those paths. Every `cp -l` here goes through
+  # link_support so the linked set is DERIVED rather than declared — see
+  # assert_linked_manifest_complete for why a declared list is not enough.
+  link_support "$ROOT/.beads/issues.jsonl" "$WORK/$name/.beads/"
   cp "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" "$WORK/$name/"
-  cp -l "$ROOT/Cargo.toml" "$WORK/$name/"
+  link_support "$ROOT/Cargo.toml" "$WORK/$name/"
   for manifest in "$ROOT"/crates/*/Cargo.toml "$ROOT"/tools/*/Cargo.toml; do
     [ -f "$manifest" ] || continue
     relative="${manifest#"$ROOT"/}"
     mkdir -p "$WORK/$name/${relative%/*}"
-    cp -l "$manifest" "$WORK/$name/$relative"
+    link_support "$manifest" "$WORK/$name/$relative"
   done
   mkdir -p "$WORK/$name/scripts" "$WORK/$name/tools/registry-check/src"
-  cp -l "$ROOT/scripts/g0_identity_e2e.sh" "$WORK/$name/scripts/"
-  cp -l "$ROOT"/tools/registry-check/src/*.rs \
-    "$WORK/$name/tools/registry-check/src/"
+  link_support "$ROOT/scripts/g0_identity_e2e.sh" "$WORK/$name/scripts/"
+  for source in "$ROOT"/tools/registry-check/src/*.rs; do
+    link_support "$source" "$WORK/$name/tools/registry-check/src/"
+  done
+  assert_linked_manifest_complete "$WORK/$name"
+}
+
+# assert_linked_manifest_complete <fixture-root>
+#
+# THE COMPLETENESS GUARD, AND IT FAILS CLOSED. It does not trust link_support to
+# have been called: it ENUMERATES every multiply-linked regular file under the
+# fixture and requires each to appear in the manifest. A future `cp -l` added to
+# stage_appendix_support without a record is caught here, rather than escaping
+# verification in exactly the way .beads escapes the root snapshot today — that
+# is this bead's own defect one layer up, so the guard has to be derived, not
+# declared.
+#
+# Enumeration happens AT STAGING, not at exit, and deliberately: a peer write
+# during the run drops the real file's link count, so `-links +1` stops being a
+# reliable enumerator once the run is under way.
+assert_linked_manifest_complete() { # assert_linked_manifest_complete <fixture-root>
+  local fixture_root="$1" path unrecorded=0
+  while IFS= read -r -d '' path; do
+    if ! grep -Fqx -- "$(sha256sum "$path")" "$LINKED_MANIFEST"; then
+      echo "ERROR: g0_linked_input_unrecorded: $path is hard-linked into the" >&2
+      echo "  fixture but carries no manifest row, so nothing would notice if a" >&2
+      echo "  fixture wrote through it. Stage it with link_support." >&2
+      unrecorded=1
+    fi
+  done < <(find "$fixture_root" -type f -links +1 -print0)
+  [ "$unrecorded" -eq 0 ] || die "g0_linked_input_unrecorded"
+}
+
+# assert_linked_inputs_unwritten
+#
+# THE INTEGRITY GUARD. Every recorded fixture path must still hash to what it
+# hashed at staging. This is the law the root snapshot was standing in for, and
+# unlike that snapshot it sees .beads/issues.jsonl — 76.7% of the linkable bytes.
+assert_linked_inputs_unwritten() {
+  local rechecked=0 recorded=0
+  if [ ! -s "$LINKED_MANIFEST" ]; then
+    die "g0_linked_manifest_empty: no linked inputs were recorded, so the \
+write-through guard verified nothing"
+  fi
+  recorded=$(wc -l < "$LINKED_MANIFEST")
+  if LC_ALL=C sha256sum -c --quiet "$LINKED_MANIFEST" >"$WORK/.linked-recheck.log" 2>&1; then
+    rechecked=$recorded
+    ok "linked inputs unwritten: $rechecked/$recorded staged paths byte-identical"
+  else
+    cat "$WORK/.linked-recheck.log" >&2
+    die "g0_linked_input_written: a fixture wrote through a hard-linked input"
+  fi
 }
 
 stage_appendix() { # stage_appendix <name> -> complete isolated Appendix root
@@ -1829,6 +1914,10 @@ if [ "$ROOT_SNAPSHOT_BEFORE" != "$ROOT_SNAPSHOT_AFTER" ]; then
 else
   ok "source root unchanged during evidence gate"
 fi
+# The root snapshot above still excludes .beads on purpose — peer coordination
+# churn there is not a defect and firing on it is what fgdb-flbb fixed. The
+# linked-input check is the instrument that actually covers those bytes.
+assert_linked_inputs_unwritten
 log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-reference-union-name-collision,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-completion-schema,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second,appendix-regenerate-first,appendix-regenerate-second,appendix-regenerate-third}.jsonl"
 VERDICT_REACHED=1
 gate_verdict || exit 1
