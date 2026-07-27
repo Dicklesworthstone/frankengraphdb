@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "b04701610581f864d42f59362411b8863512b2d75d00f59fabf1b2a7b195b302";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3327;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3328;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "fa1d8f649060e0b184e7385652afae6d1b8f08336e40da12c30adc0afc475c97";
+    "73571ab7a898847a95d87612f37b678cb4b20a891fd33766050058e466a2e59e";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 111;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "2b333383da27ce64db34b178c37b1232a6fd7a184851756d636cf4651a953016";
+    "eaeeca820dad1051bc8e672468cc161a37b3e0b9941c250229f4b93e542e460f";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -60,9 +60,9 @@ pub const COMPLETION_LAYER_SCHEMA_VERSION: i64 = 1;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT: usize = 4;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 439;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 440;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "a5a090c9e71f85888f18891c670be1233d305c1ce881b525aaa31264cff38afe";
+    "ab347fd43203f28121e59c8760bf6c5c08790ba451ceb2b7e3c1aaacfdb3a6c8";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 437;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 376;
@@ -347,7 +347,7 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 0] = [];
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
-static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 439] = [
+static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 440] = [
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459",
         slice_id: "a01",
@@ -4891,6 +4891,17 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 439] 
             "field|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|complete_target_set_digest",
         ],
         rationale: "A15 fixes the committed set as the unique sorted canonical KeyDestructionTarget identities and keeps this commitment distinct from operation IDs and the canonical operation-root digest. The owner ruling therefore selects one nonretaining digest256 carrying field with digest_class=transcript, never a plan-named wire type: BLAKE3(utf8(\"fgdb:key-destruction-target-set:v1\") || 0x00 || u32_le(target_count) || each u32_le(32) || target_identity[32] in ascending byte order), rejecting overflow and duplicates before hashing. No source law requires authenticated membership proofs, so Merkle/tree shape is excluded and any recipe change requires a new transcript version.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a15:ambiguity-adjudication:b62b76d8465a74e44a868d3ea1cabd3eb3b9ca6e970d47ea69f35e21c7cd5e29",
+        slice_id: "a15",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.expected_prospective_configuration_set_digest|877f5418670957c09d0bf720cc0261685bc722dc4bd3d122c8326bb45fbf0bd3|1|a794de91ec9bd16bb9b12179b09ccc6f8f1116344d5ec708f81a7ab01108d3d4|shorthand field has no exact type",
+        source_locations: &["a15:2059"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|KeyDestroyProposal|KeyDestroyProposal.expected_prospective_configuration_set_digest|expected_prospective_configuration_set_digest",
+        ],
+        rationale: "A15 requires proposal creation and finalization to compare the exact current prospective configuration set while carrying the current ConfigurationState separately. The owner ruling selects one nonretaining digest256 field with digest_class=transcript, never a plan-named wire type. The transcript commits the unique sorted set of prospective ConfigurationState ObjectIds under a versioned domain, explicit count and per-identity length framing; each content-addressed ObjectId already commits its canonical body, so rehashing bodies would introduce a redundant second serialization contract without adding authority. The current configuration, duplicates, and nonidentity configuration components are excluded, the empty set is explicit, and any recipe change requires a new transcript version.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:9d87b7faa3ae557cc0b0eb4aecf03219a98f5758e0e5607b1fa28c5d7eb3d55f",

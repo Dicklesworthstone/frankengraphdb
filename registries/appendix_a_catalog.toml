@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
 
 [target_manifest]
-target_count = 3327
+target_count = 3328
 projection_fallback_count = 111
-target_source_assignment_sha256 = "2b333383da27ce64db34b178c37b1232a6fd7a184851756d636cf4651a953016"
+target_source_assignment_sha256 = "eaeeca820dad1051bc8e672468cc161a37b3e0b9941c250229f4b93e542e460f"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 39
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 73
+registry_epoch = 74
 
 [[logical_kind]]
 slice_id = "a03"
@@ -17190,6 +17190,24 @@ role_predicate = "role-local"
 retention_and_cut_rule = "strong reference to the exact current ConfigurationState expected by the proposal; retained with the proposal, and the acyclic order 5 <= 80 keeps the reference backward-only (a15:2059)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-expected-prospective-configuration-set-digest"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x0005
+stable_name = "expected_prospective_configuration_set_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "nonretaining compare-and-swap transcript over every and only currently rooted prospective ConfigurationState identity for the proposal's role and group; the separately carried current configuration is excluded, no configuration is retained through this field, proposal validation and finalization byte-match the digest, and any set change invalidates the proposal (a15:2059-2067)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(utf8(\"fgdb:key-destroy-prospective-configuration-set:v1\") || 0x00 || u32_le(configuration_count) || for each ConfigurationState ObjectId in ascending lexicographic 32-byte order: u32_le(32) || configuration_identity[32]); the set contains every and only currently rooted prospective ConfigurationState for the proposal's role and group, excludes the separately carried current configuration, rejects configuration_count > u32::MAX and duplicate identities before hashing, and treats the empty set as configuration_count=0 with no entries; ConfigurationState canonical bodies, member lists, epochs, fence values, and transition nonces are committed only through each content-addressed ConfigurationState ObjectId; any domain, framing, membership, exclusion, sort, duplicate, or identity rule change requires a new transcript version"
 
 [[field]]
 slice_id = "a15"
@@ -99968,6 +99986,15 @@ resolved_source_keys = ["field|KeyDestroyProposal|KeyDestroyProposal.complete_ta
 rationale = "A15 fixes the committed set as the unique sorted canonical KeyDestructionTarget identities and keeps this commitment distinct from operation IDs and the canonical operation-root digest. The owner ruling therefore selects one nonretaining digest256 carrying field with digest_class=transcript, never a plan-named wire type: BLAKE3(utf8(\"fgdb:key-destruction-target-set:v1\") || 0x00 || u32_le(target_count) || each u32_le(32) || target_identity[32] in ascending byte order), rejecting overflow and duplicates before hashing. No source law requires authenticated membership proofs, so Merkle/tree shape is excluded and any recipe change requires a new transcript version."
 
 [[ambiguity_adjudication]]
+row_id = "a15:ambiguity-adjudication:b62b76d8465a74e44a868d3ea1cabd3eb3b9ca6e970d47ea69f35e21c7cd5e29"
+slice_id = "a15"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.expected_prospective_configuration_set_digest|877f5418670957c09d0bf720cc0261685bc722dc4bd3d122c8326bb45fbf0bd3|1|a794de91ec9bd16bb9b12179b09ccc6f8f1116344d5ec708f81a7ab01108d3d4|shorthand field has no exact type"
+source_locations = ["a15:2059"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|KeyDestroyProposal|KeyDestroyProposal.expected_prospective_configuration_set_digest|expected_prospective_configuration_set_digest"]
+rationale = "A15 requires proposal creation and finalization to compare the exact current prospective configuration set while carrying the current ConfigurationState separately. The owner ruling selects one nonretaining digest256 field with digest_class=transcript, never a plan-named wire type. The transcript commits the unique sorted set of prospective ConfigurationState ObjectIds under a versioned domain, explicit count and per-identity length framing; each content-addressed ObjectId already commits its canonical body, so rehashing bodies would introduce a redundant second serialization contract without adding authority. The current configuration, duplicates, and nonidentity configuration components are excluded, the empty set is explicit, and any recipe change requires a new transcript version."
+
+[[ambiguity_adjudication]]
 row_id = "a15:ambiguity-adjudication:9d87b7faa3ae557cc0b0eb4aecf03219a98f5758e0e5607b1fa28c5d7eb3d55f"
 slice_id = "a15"
 ambiguity_source_key = "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|98f99be66a4f7e6dae8d94497c1dec6b36cde1de9f37ac488ffa72adbea0c4fe|1|b0269c814fc42bacf204d73a5e53a2a6bd6f885daed52569cd738538190972c1|shorthand field has no exact type"
@@ -104379,5 +104406,13 @@ row_id = "a15:target:field-key-destroy-proposal-exact-root-slot-generations"
 target_row_id = "a15:field:key-destroy-proposal-exact-root-slot-generations"
 slice_id = "a15"
 source_key = "field|KeyDestroyProposal|KeyDestroyProposal.exact_root_slot_generations|exact_root_slot_generations"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a15:target:field-key-destroy-proposal-expected-prospective-configuration-set-digest"
+target_row_id = "a15:field:key-destroy-proposal-expected-prospective-configuration-set-digest"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.expected_prospective_configuration_set_digest|expected_prospective_configuration_set_digest"
 target_kind = "field"
 definition_status = "declared"

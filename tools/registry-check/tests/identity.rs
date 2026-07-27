@@ -4900,6 +4900,17 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "5 <= 80",
         ),
         (
+            0x0005,
+            "expected_prospective_configuration_set_digest",
+            "digest256",
+            "one",
+            "inline",
+            "none",
+            None,
+            32,
+            "currently rooted prospective ConfigurationState identity",
+        ),
+        (
             0x0006,
             "exact_root_slot_generations",
             "RootSlotGenerationPair",
@@ -5136,6 +5147,10 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "a15:field:key-destroy-proposal-expected-current-configuration-ref",
         ),
         (
+            "field|KeyDestroyProposal|KeyDestroyProposal.expected_prospective_configuration_set_digest|expected_prospective_configuration_set_digest",
+            "a15:field:key-destroy-proposal-expected-prospective-configuration-set-digest",
+        ),
+        (
             "field|KeyDestroyProposal|KeyDestroyProposal.expected_key_state|expected_key_state",
             "a15:field:key-destroy-proposal-expected-key-state",
         ),
@@ -5348,28 +5363,106 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         proposal_adjudications,
         vec![
             "field|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|complete_target_set_digest",
+            "field|KeyDestroyProposal|KeyDestroyProposal.expected_prospective_configuration_set_digest|expected_prospective_configuration_set_digest",
             "field|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|expected_state_conditions",
             "field|KeyDestroyProposal|KeyDestroyProposal.key_identity|key_identity",
             "field|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|terminal_audit_gate",
         ],
-        "only the four source-forced shorthand fields may be adjudicated"
+        "only the five source-forced shorthand fields may be adjudicated"
     );
-    for unresolved in ["expected_prospective_configuration_set_digest"] {
-        assert!(
-            !identity.fields.iter().any(|field| {
-                field.containing_schema == "KeyDestroyProposal" && field.stable_name == unresolved
-            }),
-            "{unresolved} must remain absent pending its producer/transcript ruling"
-        );
-        assert!(
-            !catalog.ambiguity_adjudications.iter().any(|row| {
-                row.resolved_source_keys
-                    .iter()
-                    .any(|source_key| source_key.contains(&format!(".{unresolved}|")))
-            }),
-            "{unresolved} must remain unadjudicated"
-        );
-    }
+
+    const PROSPECTIVE_CONFIGURATION_SET_RECIPE: &str = "BLAKE3(utf8(\"fgdb:key-destroy-prospective-configuration-set:v1\") || 0x00 || u32_le(configuration_count) || for each ConfigurationState ObjectId in ascending lexicographic 32-byte order: u32_le(32) || configuration_identity[32]); the set contains every and only currently rooted prospective ConfigurationState for the proposal's role and group, excludes the separately carried current configuration, rejects configuration_count > u32::MAX and duplicate identities before hashing, and treats the empty set as configuration_count=0 with no entries; ConfigurationState canonical bodies, member lists, epochs, fence values, and transition nonces are committed only through each content-addressed ConfigurationState ObjectId; any domain, framing, membership, exclusion, sort, duplicate, or identity rule change requires a new transcript version";
+    let prospective_digest = identity
+        .fields
+        .iter()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "expected_prospective_configuration_set_digest"
+        })
+        .expect("prospective-configuration set digest carrier exists");
+    assert_eq!(prospective_digest.exact_wire_type, "digest256");
+    assert_eq!(
+        prospective_digest.digest_class.as_deref(),
+        Some("transcript")
+    );
+    assert_eq!(
+        prospective_digest.transcript_recipe.as_deref(),
+        Some(PROSPECTIVE_CONFIGURATION_SET_RECIPE)
+    );
+    assert_eq!(prospective_digest.identity_class, "inline");
+    assert_eq!(prospective_digest.reference_semantics, "none");
+    assert_eq!(prospective_digest.target_schema_id, None);
+    assert!(
+        !identity
+            .wire
+            .iter()
+            .any(|wire| wire.name == "ProspectiveConfigurationSetDigest"),
+        "the plan-named digest must remain metadata on its digest256 carrier, never a wire type"
+    );
+
+    let recipe_law = |field: &FieldRow| {
+        field.exact_wire_type == "digest256"
+            && field.digest_class.as_deref() == Some("transcript")
+            && field.transcript_recipe.as_deref() == Some(PROSPECTIVE_CONFIGURATION_SET_RECIPE)
+    };
+    assert!(recipe_law(prospective_digest));
+    let mut canonical_body_fork = prospective_digest.clone();
+    canonical_body_fork.transcript_recipe = Some(PROSPECTIVE_CONFIGURATION_SET_RECIPE.replacen(
+        "for each ConfigurationState ObjectId",
+        "for each canonical ConfigurationState body",
+        1,
+    ));
+    assert!(
+        !recipe_law(&canonical_body_fork),
+        "negative control: changing the selected identity-set transcript to the rejected canonical-body fork must fire"
+    );
+
+    let mut missing_class = identity.clone();
+    missing_class
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "expected_prospective_configuration_set_digest"
+        })
+        .expect("digest control field exists")
+        .digest_class = None;
+    assert!(
+        codes_without_assignment_drift(&missing_class).contains(&"digest_missing_class".to_owned()),
+        "negative control: digest256 without digest_class must fire"
+    );
+
+    let mut missing_recipe = identity.clone();
+    missing_recipe
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "expected_prospective_configuration_set_digest"
+        })
+        .expect("digest control field exists")
+        .transcript_recipe = None;
+    assert!(
+        codes_without_assignment_drift(&missing_recipe)
+            .contains(&"digest_missing_recipe".to_owned()),
+        "negative control: transcript digest without its recipe must fire"
+    );
+
+    let mut wrong_order = identity.clone();
+    wrong_order
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "expected_prospective_configuration_set_digest"
+        })
+        .expect("digest control field exists")
+        .construction_order = 79;
+    assert!(
+        codes_without_assignment_drift(&wrong_order)
+            .contains(&"field_construction_order_mismatch".to_owned()),
+        "negative control: a field order different from its host must fire"
+    );
 
     use registry_check::appendix_source::{
         DefinitionKind, SchemaOwnerStatus, SourceSliceSpec, census_appendix_source,
@@ -7525,6 +7618,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 name,
                 "key_identity"
                     | "complete_target_set_digest"
+                    | "expected_prospective_configuration_set_digest"
                     | "expected_key_state"
                     | "basis_state"
                     | "expected_current_configuration_ref"
@@ -8679,7 +8773,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 574,
+        pre_erratum.fields.len() + 575,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A12 residue tranche"
     );

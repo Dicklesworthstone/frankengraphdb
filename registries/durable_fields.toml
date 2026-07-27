@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 73
+registry_epoch = 74
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -3881,6 +3881,22 @@ role_predicate = "role-local"
 retention_and_cut_rule = "strong reference to the exact current ConfigurationState expected by the proposal; retained with the proposal, and the acyclic order 5 <= 80 keeps the reference backward-only (a15:2059)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x0005
+stable_name = "expected_prospective_configuration_set_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "nonretaining compare-and-swap transcript over every and only currently rooted prospective ConfigurationState identity for the proposal's role and group; the separately carried current configuration is excluded, no configuration is retained through this field, proposal validation and finalization byte-match the digest, and any set change invalidates the proposal (a15:2059-2067)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(utf8(\"fgdb:key-destroy-prospective-configuration-set:v1\") || 0x00 || u32_le(configuration_count) || for each ConfigurationState ObjectId in ascending lexicographic 32-byte order: u32_le(32) || configuration_identity[32]); the set contains every and only currently rooted prospective ConfigurationState for the proposal's role and group, excludes the separately carried current configuration, rejects configuration_count > u32::MAX and duplicate identities before hashing, and treats the empty set as configuration_count=0 with no entries; ConfigurationState canonical bodies, member lists, epochs, fence values, and transition nonces are committed only through each content-addressed ConfigurationState ObjectId; any domain, framing, membership, exclusion, sort, duplicate, or identity rule change requires a new transcript version"
 
 [[field]]
 containing_schema = "KeyDestroyProposal"
