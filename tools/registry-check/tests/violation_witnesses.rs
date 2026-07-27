@@ -88,10 +88,20 @@ fn assert_code(codes: &[String], expected: &str) {
 #[test]
 fn missing_appendix_projection_is_seen_to_fire() {
     let catalog = appendix_catalog();
-    let control = appendix_a::verify_projections(&repo_root(), &catalog);
+    // SCOPED, not global (fgdb-guard-disabled-by-its-own-trigger-70q9). This test is
+    // the ONLY witness that `projection_read` can fire, and a global emptiness
+    // precondition made it unavailable whenever ANY unrelated violation was present --
+    // including that code itself, so the guard was absent in exactly the circumstance it
+    // was built for. The differential keeps what the global form was protecting: a
+    // validator that silently returns nothing still fails the assertion below, because
+    // the code must be ADDED by the mutation rather than merely present.
+    let baseline = appendix_a::verify_projections(&repo_root(), &catalog);
     assert!(
-        control.is_empty(),
-        "unmodified projection control must pass: {control:?}"
+        !baseline
+            .iter()
+            .any(|violation| violation.code == "projection_read"),
+        "projection_read is already present without the mutation, so the witness below would pass \
+         without the planted defect contributing anything: {baseline:?}"
     );
 
     let absent_root = std::env::temp_dir().join(format!(
@@ -112,10 +122,20 @@ fn missing_appendix_projection_is_seen_to_fire() {
 #[test]
 fn appendix_target_identity_mismatch_is_seen_to_fire() {
     let mut catalog = appendix_catalog();
-    let control = appendix_a::validate_catalog(&catalog);
+    // SCOPED, not global (fgdb-guard-disabled-by-its-own-trigger-70q9). This test is
+    // the ONLY witness that `catalog_target_identity_mismatch` can fire, and a global emptiness
+    // precondition made it unavailable whenever ANY unrelated violation was present --
+    // including that code itself, so the guard was absent in exactly the circumstance it
+    // was built for. The differential keeps what the global form was protecting: a
+    // validator that silently returns nothing still fails the assertion below, because
+    // the code must be ADDED by the mutation rather than merely present.
+    let baseline = appendix_a::validate_catalog(&catalog);
     assert!(
-        control.is_empty(),
-        "unmodified catalog control must pass: {control:?}"
+        !baseline
+            .iter()
+            .any(|violation| violation.code == "catalog_target_identity_mismatch"),
+        "catalog_target_identity_mismatch is already present without the mutation, so the witness below would pass \
+         without the planted defect contributing anything: {baseline:?}"
     );
 
     catalog
@@ -134,10 +154,20 @@ fn appendix_target_identity_mismatch_is_seen_to_fire() {
 #[test]
 fn unexpected_appendix_projection_class_is_seen_to_fire() {
     let mut catalog = appendix_catalog();
-    let control = appendix_a::validate_catalog(&catalog);
+    // SCOPED, not global (fgdb-guard-disabled-by-its-own-trigger-70q9). This test is
+    // the ONLY witness that `catalog_projection_unexpected` can fire, and a global emptiness
+    // precondition made it unavailable whenever ANY unrelated violation was present --
+    // including that code itself, so the guard was absent in exactly the circumstance it
+    // was built for. The differential keeps what the global form was protecting: a
+    // validator that silently returns nothing still fails the assertion below, because
+    // the code must be ADDED by the mutation rather than merely present.
+    let baseline = appendix_a::validate_catalog(&catalog);
     assert!(
-        control.is_empty(),
-        "unmodified catalog control must pass: {control:?}"
+        !baseline
+            .iter()
+            .any(|violation| violation.code == "catalog_projection_unexpected"),
+        "catalog_projection_unexpected is already present without the mutation, so the witness below would pass \
+         without the planted defect contributing anything: {baseline:?}"
     );
 
     let row = catalog
@@ -157,10 +187,20 @@ fn unexpected_appendix_projection_class_is_seen_to_fire() {
 fn workspace_unsafe_lint_drift_is_seen_to_fire() {
     let root = repo_root();
     let mut registry = topology::load_from_repo(&root).expect("unmodified topology registry loads");
-    let control = topology::validate_topology(&registry, &root);
+    // SCOPED, not global (fgdb-guard-disabled-by-its-own-trigger-70q9). This test is
+    // the ONLY witness that `workspace_unsafe_lint_drift` can fire, and a global emptiness
+    // precondition made it unavailable whenever ANY unrelated violation was present --
+    // including that code itself, so the guard was absent in exactly the circumstance it
+    // was built for. The differential keeps what the global form was protecting: a
+    // validator that silently returns nothing still fails the assertion below, because
+    // the code must be ADDED by the mutation rather than merely present.
+    let baseline = topology::validate_topology(&registry, &root);
     assert!(
-        control.is_empty(),
-        "unmodified topology control must pass: {control:?}"
+        !baseline
+            .iter()
+            .any(|violation| violation.code == "workspace_unsafe_lint_drift"),
+        "workspace_unsafe_lint_drift is already present without the mutation, so the witness below would pass \
+         without the planted defect contributing anything: {baseline:?}"
     );
 
     registry.registry.workspace_unsafe_lint = "deny".to_owned();
@@ -175,10 +215,20 @@ fn workspace_unsafe_lint_drift_is_seen_to_fire() {
 fn security_identity_wire_tag_collision_is_seen_to_fire() {
     let root = repo_root();
     let mut registry = threat::load_from_repo(&root).expect("unmodified threat registry loads");
-    let control = threat::validate_threat(&registry, &root);
+    // SCOPED, not global (fgdb-guard-disabled-by-its-own-trigger-70q9). This test is
+    // the ONLY witness that `identity_wire_tag_collision` can fire, and a global emptiness
+    // precondition made it unavailable whenever ANY unrelated violation was present --
+    // including that code itself, so the guard was absent in exactly the circumstance it
+    // was built for. The differential keeps what the global form was protecting: a
+    // validator that silently returns nothing still fails the assertion below, because
+    // the code must be ADDED by the mutation rather than merely present.
+    let baseline = threat::validate_threat(&registry, &root);
     assert!(
-        control.is_empty(),
-        "unmodified threat-model control must pass: {control:?}"
+        !baseline
+            .iter()
+            .any(|violation| violation.code == "identity_wire_tag_collision"),
+        "identity_wire_tag_collision is already present without the mutation, so the witness below would pass \
+         without the planted defect contributing anything: {baseline:?}"
     );
 
     let duplicate_tag = registry
