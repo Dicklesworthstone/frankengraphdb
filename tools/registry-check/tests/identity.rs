@@ -1899,12 +1899,33 @@ fn appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events() {
         );
     }
     let root = repo_root();
-    if !root.join(".beads/issues.jsonl").is_file() {
-        // Remote compilation workers may deliberately omit hidden runtime
-        // state. Unit tests cover the deterministic index-level branches;
-        // the CLI E2E stages the authoritative Beads file explicitly.
-        return;
-    }
+    // UNRUN, not passed. This assertion replaces a bare `return;` that reported
+    // `ok` when the corpus was absent (fgdb-guard-disabled-by-its-own-trigger-70q9).
+    // Measured 2026-07-27: six of this test's seven assertions and the ONLY witness
+    // for ten violation codes sat after that return, and two quiet roots differing
+    // only by `--exclude='.beads/*'` ran 5.23s and 1.06s while both reported
+    // `ok. 1 passed`. The trigger is routine and ours — rch remote workers do not
+    // sync `.beads`, so every offloaded run of this test was silently vacuous.
+    //
+    // The verdict vocabulary is scripts/lib/gate_verdict.sh (fgdb-udco): UNRUN is
+    // reported BESIDE a failure, never instead of one, so "did not run" is
+    // distinguishable from "ran and failed" by TOKEN while never being green.
+    // fgdb-1nqb is the same doctrine for guards. A skipped precondition may not
+    // borrow the passing token.
+    assert!(
+        root.join(".beads/issues.jsonl").is_file(),
+        "UNRUN appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events: \
+         the repository-existence layer requires the real Beads corpus at \
+         `.beads/issues.jsonl`, and it is absent — so the six assertions below, and the \
+         only witness for catalog_semantic_owner_bead_unresolved, \
+         catalog_semantic_owner_crate_unresolved, catalog_semantic_live_owner_crate_unresolved, \
+         catalog_semantic_consumer_crate_unresolved, catalog_evidence_owner_bead_unresolved, \
+         catalog_evidence_checker_unresolved, catalog_live_evidence_checker_not_live, \
+         catalog_evidence_scenario_unresolved, catalog_evidence_event_unresolved and \
+         catalog_evidence_gate_invalid, did not execute. This is UNRUN, not a failure of \
+         the code under test: run this suite LOCALLY rather than through rch, or stage \
+         `.beads/` on the worker. [fgdb-guard-disabled-by-its-own-trigger-70q9, fgdb-1nqb]"
+    );
     let resolved = appendix_a::verify_repository_bindings(&root, &catalog);
     assert!(
         resolved.is_empty(),

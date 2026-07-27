@@ -294,11 +294,79 @@ run_shell_lint() {
   echo "    shellcheck: 0 SC2015 across ${#shell_files[@]} file(s)"
 }
 
+# gate_tracked_sources <pathspec>... -> NUL-separated tracked paths on stdout
+#
+# THE INPUT-SET LAW, and it is general, not a UBS workaround: a gate's domain
+# must be DERIVED FROM THE TRACKED SET, never discovered by walking a directory.
+# A tool pointed at a directory answers a different question from the one its
+# name asks, and the difference does not appear anywhere in the verdict.
+#
+# MEASURED 2026-07-27 on this repository (fgdb-ubs-scans-directory-not-tracked-set-hdyv).
+# `ubs --only=rust --ci .` walked 1043.3 MB, of which 1019.6 MB — 97.7% — was
+# untracked tool state:
+#     .beads/.br_history        816.2 MB   78.2% of the scan
+#     .beads/.br_recovery       121.1 MB   11.6%
+#     libregistry_check.rlib     66.1 MB    6.3%  (untracked, gitignored, stray)
+#     .beads/beads.db            16.3 MB    1.6%
+# The tracked Rust this gate is NAMED for is 6.6 MB across 119 files, so stated
+# domain and actual domain differed by 159x. UBS hit its 1000 MB safety limit
+# and REFUSED TO START — so a gate called "UBS over every tracked Rust source"
+# reported a colour while inspecting ZERO Rust.
+#
+# AND THAT COLOUR TRACKED THE SIZE OF A LOG FILE. `.beads/.br_history` alone is
+# 78% of the scan, so rotating it would flip this gate green having changed
+# nothing whatsoever about the code. A gate whose verdict is a function of an
+# irrelevant magnitude is not a gate. Raising UBS_MAX_DIR_SIZE_MB was therefore
+# the WRONG fix: it would make the gate scan a gigabyte of tool state
+# successfully, which is worse than failing, because it looks like success.
+#
+# FAILS CLOSED, WITH NO FALLBACK. If the tracked set cannot be derived — not a
+# work tree, git unavailable, enumeration fails, or the result is empty — this
+# returns nonzero and the caller MUST fail its gate. It never degrades to
+# scanning whatever is on disk. Proceeding on a different, smaller input set
+# while reporting the same verdict IS the defect, one level up: the same shape
+# as a test that returns PASS when the corpus it reads is simply absent.
+gate_tracked_sources() {
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  local -a found=()
+  # `git ls-files -z` is the only enumeration allowed here. Note the exit status
+  # is taken from git via the process substitution's own guard below, because
+  # `readarray < <(cmd)` reports READARRAY's status, not cmd's — that is exactly
+  # the "third branch attributed to the wrong command" trap this file already
+  # warns about for SC2015.
+  local tmp="${TMPDIR:-/tmp}/gate-tracked-$$"
+  git ls-files -z -- "$@" > "$tmp" || { rm -f "$tmp"; return 1; }
+  readarray -d '' -t found < "$tmp"
+  rm -f "$tmp"
+  [ "${#found[@]}" -gt 0 ] || return 1
+  printf '%s\0' "${found[@]}"
+}
+
 run_ubs() {
   local log="$GATE_LOG_DIR/core-ubs.log"
+  local list="$GATE_LOG_DIR/core-ubs.sources"
   local ubs_rc
+  local -a rust_sources=()
 
-  ubs --only=rust --ci . 2>&1 | tee "$log"
+  # The domain is the TRACKED Rust set — precisely what this gate's name claims
+  # — and not the directory the gate happens to run in. See gate_tracked_sources
+  # for the measurement that forced this and for why there is no fallback.
+  if ! gate_tracked_sources '*.rs' > "$list"; then
+    echo "ERROR: the tracked Rust source set could not be derived from git." >&2
+    echo "  This gate scans the TRACKED SET, never a directory, and it does not" >&2
+    echo "  fall back. Scanning whatever is present would answer a different" >&2
+    echo "  question under this gate's name — which is how it came to inspect" >&2
+    echo "  zero Rust while reporting a colour (hdyv)." >&2
+    return 1
+  fi
+  readarray -d '' -t rust_sources < "$list"
+  if [ "${#rust_sources[@]}" -eq 0 ]; then
+    echo "ERROR: the tracked Rust source set is empty; refusing to report a verdict." >&2
+    return 1
+  fi
+  echo "    domain: ${#rust_sources[@]} tracked Rust source(s), from git ls-files"
+
+  ubs --only=rust --ci "${rust_sources[@]}" 2>&1 | tee "$log"
   ubs_rc=${PIPESTATUS[0]}
   if [ "$ubs_rc" -ne 0 ]; then
     return "$ubs_rc"
