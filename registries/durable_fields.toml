@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 64
+registry_epoch = 65
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -934,6 +934,78 @@ role_predicate = "role-local"
 retention_and_cut_rule = "obligation roots stay until exact terminal release (FG-INV-14/16); generated checkpoint-vector walker input"
 version_status = "reserved"
 max_size_bytes = 268435456
+
+[[field]]
+containing_schema = "CiphertextRecord"
+field_tag = 0x0001
+stable_name = "descriptor"
+exact_wire_type = "CipherDescriptorWithoutDigest"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "complete canonical cipher descriptor embedded by value; retained with the ciphertext record, contributes to CiphertextId, and creates no graph reachability edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 256
+
+[[field]]
+containing_schema = "CiphertextRecord"
+field_tag = 0x0002
+stable_name = "ciphertext_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "physical CiphertextId recomputed from descriptor, ciphertext bytes, and object tag; retained with the ciphertext record and never followed as a logical edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "CiphertextRecord"
+field_tag = 0x0003
+stable_name = "ciphertext_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the exact ciphertext bytes; retained with the ciphertext record for byte verification and creates no reachability edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "CiphertextRecord"
+field_tag = 0x0004
+stable_name = "object_tag_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the profile-sized object authentication tag; retained with the ciphertext record for byte verification and creates no reachability edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "CiphertextRecord"
+field_tag = 0x0005
+stable_name = "protected_length"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "exact protected ciphertext-plus-tag length scalar; retained with and cross-checked by the ciphertext record (a02:1449)"
+version_status = "active"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "ClosedAttemptCompactionFloorRecord"
@@ -4772,6 +4844,34 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the TopologyState this ParticipantRoutingDerivationProof names; retained while the referrer is retained, and the non-strict acyclic order keeps the reference backward-only (a08:1824)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "PlacementRecord"
+field_tag = 0x0001
+stable_name = "placement_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "physical PlacementId recomputed from the placement domain/version and exact descriptor; retained with the placement record and never followed as a logical edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "PlacementRecord"
+field_tag = 0x0002
+stable_name = "descriptor"
+exact_wire_type = "PlacementDescriptorWithoutId"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "complete canonical placement descriptor embedded by value; retained with and cross-checked by the placement record and creates no graph reachability edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 65536
 
 [[field]]
 containing_schema = "PortableRestoreSourceLeaseLineageProof"
@@ -10085,6 +10185,272 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the exact Shard inventory discharged by this proof; retained while the proof is retained, with the generic-free family target preserving the source-bound Shard instantiation and the acyclic order 33 <= 36 (a16:2207)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0001
+stable_name = "magic"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "fixed four-byte FGEC framing literal authenticated by the symbol MAC and retained with the symbol record (a02:1453)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0002
+stable_name = "format_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "symbol-record format version authenticated by the symbol MAC and retained with the symbol record (a02:1453)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0003
+stable_name = "header_len"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact header length authenticated by the symbol MAC and retained with the symbol record (a02:1453)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0004
+stable_name = "record_len"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact total record length authenticated by the symbol MAC and retained with the symbol record (a02:1453)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0005
+stable_name = "logical_oid"
+exact_wire_type = "oid256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "logical ObjectId identity authenticated by the symbol MAC; comparison and ownership metadata only, never an independent retaining edge from a physical symbol (a02:1454)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0006
+stable_name = "ciphertext_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "physical CiphertextId authenticated by the symbol MAC; retained as encoding identity metadata and creates no graph reachability edge (a02:1454)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0007
+stable_name = "encoding_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "physical EncodingId authenticated by the symbol MAC and bound into K_symbol; retained as coordinate identity metadata and creates no graph reachability edge (a02:1454)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0008
+stable_name = "object_kind"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "logical object-kind code authenticated by the symbol MAC and retained with the symbol record (a02:1455)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0009
+stable_name = "source_block"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "RaptorQ source-block coordinate authenticated by the symbol MAC and retained with the symbol record (a02:1455)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x000a
+stable_name = "esi"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "encoding-symbol identifier authenticated by the symbol MAC and retained with the symbol record (a02:1455)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x000b
+stable_name = "symbol_len"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact payload length authenticated by the symbol MAC and retained with the symbol record (a02:1455)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x000c
+stable_name = "transfer_length"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "complete encoding transfer length authenticated by the symbol MAC and retained with the symbol record (a02:1456)"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x000d
+stable_name = "oti_common"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "RaptorQ common OTI authenticated by the symbol MAC and retained with the symbol record (a02:1456)"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x000e
+stable_name = "oti_scheme"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "RaptorQ scheme-specific OTI authenticated by the symbol MAC and retained with the symbol record (a02:1456)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x000f
+stable_name = "flags"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "registered symbol flags authenticated by the symbol MAC and retained with the symbol record (a02:1456)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0010
+stable_name = "symbol_mac_profile"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "registered symbol-authentication profile authenticated by the symbol MAC and retained with the symbol record (a02:1457)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0011
+stable_name = "symbol_mac_len"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact symbol-MAC length authenticated by the symbol MAC transcript and retained with the symbol record (a02:1457)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0012
+stable_name = "payload"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact symbol_len payload bytes authenticated after every serialized header field; retained with the symbol record and never self-authorizing (a02:1458-1460)"
+version_status = "active"
+max_size_bytes = 1048576
+
+[[field]]
+containing_schema = "SymbolRecord"
+field_tag = 0x0013
+stable_name = "symbol_mac"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact symbol_mac_len authentication bytes over the registered header-plus-payload transcript; retained with the symbol record and excluded from their own MAC input (a02:1458-1460)"
+version_status = "active"
+max_size_bytes = 65535
 
 [[field]]
 containing_schema = "TerminalAbortAuthority<Role:AuthorityOwningRole>"

@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "4fdc494ad32c25576b92134c92e7822e114f3d1c679afd2c8249791f4ceb1181";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3238;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3264;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "b0baeee356a21edb587c7ceac0c5e897166bbb3f9f837fbb36cafd2ac030af58";
+    "e3d4fea182c05625b377f034fa8d88f313498b9aee4701408796445a38864e9c";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 109;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "2f8dfaf33c24407bb08fd0473711c490f75d4601281448f512bcca563ffbdc71";
+    "4e9ba73438219681a3542b22877666217129c7a7d926d2c6a8401033ceebb349";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -62,7 +62,7 @@ pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 433;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "eec455aa5d038c8a64aee5ed6f37b80f4197edcae7562efdd36f86ee6b25514a";
+    "e093eaa56f40ecc5917229ce4c145d9ce48e6c4050a5746d274b3839fd81cca8";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 434;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 379;
@@ -4044,53 +4044,53 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 433] 
         slice_id: "a02",
         ambiguity_source_key: "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.ciphertext_digest|639e8bce8cd2107b20eb748abd7a4fa29f62ecd3752dab46977890694061e0f8|1|722428c1c230790a9ac59413eb117bf65c1e1d75b4ece333f40960ed2d569777|shorthand field has no exact type",
         source_locations: &["a02:1449"],
-        resolution: "not-a-durable-schema",
+        resolution: "maps-to-source",
         resolved_source_keys: &[
             "field|CiphertextRecord|CiphertextRecord.ciphertext_digest|ciphertext_digest",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema.",
+        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes ciphertext_digest to source tag 0x0003, exact type digest256, cardinality one and digest_class=target; the affected census key maps to that exact row.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:e30d0e52a9b56177e2817418658afed5827dadf120553f44103643ee0f1aae7d",
         slice_id: "a02",
         ambiguity_source_key: "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.ciphertext_id|47142c70021a01c228028cf69cea5c897a6985a67f0ff4234f8aa3bea11a523e|1|be43e8869204157592abe4620b1fc0e68e0b32807ce41252d8dfe1dcb6f5ae6f|shorthand field has no exact type",
         source_locations: &["a02:1449"],
-        resolution: "not-a-durable-schema",
+        resolution: "maps-to-source",
         resolved_source_keys: &[
             "field|CiphertextRecord|CiphertextRecord.ciphertext_id|ciphertext_id",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema.",
+        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes ciphertext_id to source tag 0x0002, exact type id256, cardinality one and physical identity class; the affected census key maps to that exact row.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:0b3b432489be5ce60147873ff27823f6a116229dfdc512f64024a49580237c8c",
         slice_id: "a02",
         ambiguity_source_key: "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.descriptor|194b520dc30384b3fc233e123778835e2adc362d91c6e33015ed3db2379d7ea1|1|7436baa9a7e0b2e6206451cbdb69f1f2c764e50b84881992c5d6fe3a5eb63684|shorthand field has no exact type",
         source_locations: &["a02:1449"],
-        resolution: "not-a-durable-schema",
+        resolution: "maps-to-source",
         resolved_source_keys: &["field|CiphertextRecord|CiphertextRecord.descriptor|descriptor"],
-        rationale: "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema.",
+        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes descriptor to source tag 0x0001, exact type CipherDescriptorWithoutDigest and cardinality one; the affected census key maps to that exact row.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:7e38b5617e877b4c4d04aab2aceb9038d3998e272786e35c565ea11a61fc8402",
         slice_id: "a02",
         ambiguity_source_key: "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.object_tag_digest|01382560e2e7615b048ea5367238388ac8c3f98760dcf5aa408bc874969d60e8|1|36b19f8caa5cbb18ae76302874307e79ed8bff813495ac462c6650761add05d5|shorthand field has no exact type",
         source_locations: &["a02:1449"],
-        resolution: "not-a-durable-schema",
+        resolution: "maps-to-source",
         resolved_source_keys: &[
             "field|CiphertextRecord|CiphertextRecord.object_tag_digest|object_tag_digest",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema.",
+        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes object_tag_digest to source tag 0x0004, exact type digest256, cardinality one and digest_class=target; the affected census key maps to that exact row.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:0239498a2cba36ac46ba1927f4162f60e75399abfbb660542f8d307745300617",
         slice_id: "a02",
         ambiguity_source_key: "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.protected_length|5df4272c5f39dcef78c410b10c536a5704975cc8d6689dc6fbbcbeaed688ecf1|1|3c4a8e7fc8a685980c7a6dc0b8a30b64843e61ab27c873fc7557b449b3f50bf9|shorthand field has no exact type",
         source_locations: &["a02:1449"],
-        resolution: "not-a-durable-schema",
+        resolution: "maps-to-source",
         resolved_source_keys: &[
             "field|CiphertextRecord|CiphertextRecord.protected_length|protected_length",
         ],
-        rationale: "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema.",
+        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes protected_length to source tag 0x0005, exact type u64 and cardinality one; the affected census key maps to that exact row.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:58efaec60718539e0d6fe9e4a1d057dd06ac699ceb1a3ab48e932808c2fa8133",
@@ -4482,18 +4482,18 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 433] 
         slice_id: "a02",
         ambiguity_source_key: "ambiguity|field-type-ambiguous|PlacementRecord|PlacementRecord.descriptor|194b520dc30384b3fc233e123778835e2adc362d91c6e33015ed3db2379d7ea1|1|9c9c3dd11d91a87637869a7d6463af494cacd6233a48a3b1322b9bba895dcabc|shorthand field has no exact type",
         source_locations: &["a02:1449"],
-        resolution: "not-a-durable-schema",
+        resolution: "maps-to-source",
         resolved_source_keys: &["field|PlacementRecord|PlacementRecord.descriptor|descriptor"],
-        rationale: "a02:1449: shorthand member carries no inline exact type. Its owner `PlacementRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema.",
+        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes descriptor to source tag 0x0002, exact type PlacementDescriptorWithoutId and cardinality one; the affected census key maps to that exact row.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:f7c039dd333ca9b1bd1e78736d84f3afe200de8795e7791698012f017f5f5f5a",
         slice_id: "a02",
         ambiguity_source_key: "ambiguity|field-type-ambiguous|PlacementRecord|PlacementRecord.placement_id|862e3bc66e01bc7a9dcedb6247960e1e5a9698e6810cb1a0950981231f908ec5|1|c3e5aeaf40b208c2ad9e3dd1981ca72c82afeb04eaa9a0067daa8d8c64bec5b4|shorthand field has no exact type",
         source_locations: &["a02:1449"],
-        resolution: "not-a-durable-schema",
+        resolution: "maps-to-source",
         resolved_source_keys: &["field|PlacementRecord|PlacementRecord.placement_id|placement_id"],
-        rationale: "a02:1449: shorthand member carries no inline exact type. Its owner `PlacementRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema.",
+        rationale: "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes placement_id to source tag 0x0001, exact type id256, cardinality one and physical identity class; the affected census key maps to that exact row.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:34cf0a3cb4495aaffdd79a0489e1b6a8caa672ad4ed267b7e32b2c42f13e59b1",

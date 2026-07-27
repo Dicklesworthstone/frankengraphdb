@@ -128,7 +128,7 @@ fn declared_field_reference_semantics(exact_wire_type: &str) -> Option<&'static 
 /// reference union `CommandRef`. No codec or user data existed; the erratum
 /// renamed only the generated union to `LogicalCommandInputRef`, without
 /// changing tags, targets, reachability, lifecycle, or encoded representation.
-pub const A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN: &str = "fnv1a64:bdbcdc27ccd92518";
+pub const A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN: &str = "fnv1a64:236efa5babe190fe";
 
 /// One NAMED union-arm payload shape governed by the StrongRef-only
 /// arm-payload law (`STRONGREF_ONLY_ARM_PAYLOAD_SHAPES`).
@@ -1197,7 +1197,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
     const WIRE: &str = "fnv1a64:9956c7e8eb1d81e7";
-    const FIELDS: &str = "fnv1a64:1b0a644f7ea81ada";
+    const FIELDS: &str = "fnv1a64:fe2a6341f1d4eb8e";
 
     let logical = rows_pin(
         r.logical
@@ -1354,7 +1354,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 64,
+            expected_epoch: 65,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,

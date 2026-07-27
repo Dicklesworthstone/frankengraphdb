@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 64
+registry_epoch = 65
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 64);
+    assert_eq!(epoch, 65);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -3695,6 +3695,195 @@ fn idr_a02_location_form_is_source_ordered_and_wire_backed() {
 }
 
 #[test]
+fn idr_a02_physical_record_fields_are_source_ordered_and_digest_typed() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+
+    let field_signature = |schema: &str| {
+        identity
+            .fields
+            .iter()
+            .filter(|field| field.containing_schema == schema)
+            .map(|field| {
+                (
+                    field.field_tag,
+                    field.stable_name.as_str(),
+                    field.exact_wire_type.as_str(),
+                    field.identity_class.as_str(),
+                    field.construction_order,
+                    field.digest_class.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        field_signature("CiphertextRecord"),
+        vec![
+            (
+                0x0001,
+                "descriptor",
+                "CipherDescriptorWithoutDigest",
+                "inline",
+                10,
+                None,
+            ),
+            (0x0002, "ciphertext_id", "id256", "physical", 10, None,),
+            (
+                0x0003,
+                "ciphertext_digest",
+                "digest256",
+                "inline",
+                10,
+                Some("target"),
+            ),
+            (
+                0x0004,
+                "object_tag_digest",
+                "digest256",
+                "inline",
+                10,
+                Some("target"),
+            ),
+            (0x0005, "protected_length", "u64", "scalar", 10, None,),
+        ],
+        "CiphertextRecord tags follow descriptor, ciphertext_id, ciphertext_digest, object_tag_digest, protected_length source order"
+    );
+    assert_eq!(
+        field_signature("SymbolRecord"),
+        vec![
+            (0x0001, "magic", "bytes", "scalar", 20, None),
+            (0x0002, "format_version", "u16", "scalar", 20, None),
+            (0x0003, "header_len", "u16", "scalar", 20, None),
+            (0x0004, "record_len", "u32", "scalar", 20, None),
+            (0x0005, "logical_oid", "oid256", "logical", 20, None),
+            (0x0006, "ciphertext_id", "id256", "physical", 20, None),
+            (0x0007, "encoding_id", "id256", "physical", 20, None),
+            (0x0008, "object_kind", "u16", "scalar", 20, None),
+            (0x0009, "source_block", "u32", "scalar", 20, None),
+            (0x000a, "esi", "u32", "scalar", 20, None),
+            (0x000b, "symbol_len", "u32", "scalar", 20, None),
+            (0x000c, "transfer_length", "u64", "scalar", 20, None),
+            (0x000d, "oti_common", "u64", "scalar", 20, None),
+            (0x000e, "oti_scheme", "u32", "scalar", 20, None),
+            (0x000f, "flags", "u32", "scalar", 20, None),
+            (0x0010, "symbol_mac_profile", "u16", "scalar", 20, None,),
+            (0x0011, "symbol_mac_len", "u16", "scalar", 20, None),
+            (0x0012, "payload", "bytes", "inline", 20, None),
+            (0x0013, "symbol_mac", "bytes", "inline", 20, None),
+        ],
+        "the fenced SymbolRecord source order, not the alphabetical census, assigns tags"
+    );
+    assert_eq!(
+        field_signature("PlacementRecord"),
+        vec![
+            (0x0001, "placement_id", "id256", "physical", 30, None,),
+            (
+                0x0002,
+                "descriptor",
+                "PlacementDescriptorWithoutId",
+                "inline",
+                30,
+                None,
+            ),
+        ],
+        "PlacementRecord tags follow placement_id then descriptor source order"
+    );
+
+    let a02_fields = identity
+        .fields
+        .iter()
+        .filter(|field| {
+            matches!(
+                field.containing_schema.as_str(),
+                "CiphertextRecord" | "PlacementRecord" | "SymbolRecord"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(a02_fields.len(), 26);
+    assert!(a02_fields.iter().all(|field| {
+        field.cardinality == "one"
+            && field.reference_semantics == "none"
+            && field.target_schema_id.is_none()
+            && field.version_status == "active"
+    }));
+    assert!(
+        !identity.fields.iter().any(|field| {
+            matches!(
+                field.containing_schema.as_str(),
+                "CipherDescriptorWithoutDigest"
+                    | "EncodingDescriptorWithoutId"
+                    | "FilesystemDurabilityProfile"
+                    | "FilesystemInstanceRecord"
+                    | "LocationForm"
+                    | "PlacementDescriptorWithoutId"
+            )
+        }),
+        "wire envelopes commit their interiors and can never own field rows"
+    );
+    assert!(
+        !identity.wire.iter().any(|wire| matches!(
+            wire.name.as_str(),
+            "ciphertext_digest" | "object_tag_digest"
+        )),
+        "plan-named digests stay digest256 fields rather than becoming wire types"
+    );
+
+    let a02_field_targets = catalog
+        .targets
+        .iter()
+        .filter(|target| {
+            target.slice_id == "a02"
+                && target.target_kind == "field"
+                && (target.source_key.starts_with("field|CiphertextRecord|")
+                    || target.source_key.starts_with("field|PlacementRecord|")
+                    || target.source_key.starts_with("field|SymbolRecord|"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(a02_field_targets.len(), 26);
+    assert!(
+        a02_field_targets
+            .iter()
+            .all(|target| target.definition_status == "declared")
+    );
+    let physical_host_adjudications = catalog
+        .ambiguity_adjudications
+        .iter()
+        .filter(|row| {
+            row.slice_id == "a02"
+                && row.resolved_source_keys.iter().any(|key| {
+                    key.starts_with("field|CiphertextRecord|")
+                        || key.starts_with("field|PlacementRecord|")
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(physical_host_adjudications.len(), 7);
+    assert!(
+        physical_host_adjudications
+            .iter()
+            .all(|row| row.resolution == "maps-to-source"),
+        "the seven formerly misclassified physical-host ambiguities map to their owner-authored field rows"
+    );
+
+    let mut wire_host_mutation = identity.clone();
+    wire_host_mutation
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "CiphertextRecord" && field.stable_name == "descriptor"
+        })
+        .expect("CiphertextRecord descriptor field exists")
+        .containing_schema = "CipherDescriptorWithoutDigest".to_owned();
+    let violations = identity::validate_identity(&wire_host_mutation);
+    assert!(
+        violations.iter().any(|violation| {
+            violation.code == "field_unresolved_schema"
+                && violation.msg.contains("resolves as a WIRE type")
+        }),
+        "negative control: moving a candidate field onto its wire-only descriptor host must fire"
+    );
+}
+
+#[test]
 fn idr_a18_reserved_reference_targets_and_strong_fields_are_exact() {
     let identity = real_identity();
     let catalog = real_appendix_catalog();
@@ -6056,7 +6245,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     let r = real_identity();
     assert_eq!(
         identity::A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN,
-        "fnv1a64:bdbcdc27ccd92518",
+        "fnv1a64:236efa5babe190fe",
         "the pre-codec A10 CommandRef erratum witness must remain explicit"
     );
     let mut pre_erratum = r.clone();

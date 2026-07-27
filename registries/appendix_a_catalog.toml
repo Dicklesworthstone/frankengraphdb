@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3238
+target_count = 3264
 projection_fallback_count = 109
-target_source_assignment_sha256 = "2f8dfaf33c24407bb08fd0473711c490f75d4601281448f512bcca563ffbdc71"
+target_source_assignment_sha256 = "4e9ba73438219681a3542b22877666217129c7a7d926d2c6a8401033ceebb349"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 38
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 64
+registry_epoch = 65
 
 [[logical_kind]]
 slice_id = "a03"
@@ -91963,45 +91963,45 @@ row_id = "a02:ambiguity-adjudication:21b51c04904bd6d0f06771ddd3fcff1e8f7dc47b406
 slice_id = "a02"
 ambiguity_source_key = "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.ciphertext_digest|639e8bce8cd2107b20eb748abd7a4fa29f62ecd3752dab46977890694061e0f8|1|722428c1c230790a9ac59413eb117bf65c1e1d75b4ece333f40960ed2d569777|shorthand field has no exact type"
 source_locations = ["a02:1449"]
-resolution = "not-a-durable-schema"
+resolution = "maps-to-source"
 resolved_source_keys = ["field|CiphertextRecord|CiphertextRecord.ciphertext_digest|ciphertext_digest"]
-rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+rationale = "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes ciphertext_digest to source tag 0x0003, exact type digest256, cardinality one and digest_class=target; the affected census key maps to that exact row."
 
 [[ambiguity_adjudication]]
 row_id = "a02:ambiguity-adjudication:e30d0e52a9b56177e2817418658afed5827dadf120553f44103643ee0f1aae7d"
 slice_id = "a02"
 ambiguity_source_key = "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.ciphertext_id|47142c70021a01c228028cf69cea5c897a6985a67f0ff4234f8aa3bea11a523e|1|be43e8869204157592abe4620b1fc0e68e0b32807ce41252d8dfe1dcb6f5ae6f|shorthand field has no exact type"
 source_locations = ["a02:1449"]
-resolution = "not-a-durable-schema"
+resolution = "maps-to-source"
 resolved_source_keys = ["field|CiphertextRecord|CiphertextRecord.ciphertext_id|ciphertext_id"]
-rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+rationale = "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes ciphertext_id to source tag 0x0002, exact type id256, cardinality one and physical identity class; the affected census key maps to that exact row."
 
 [[ambiguity_adjudication]]
 row_id = "a02:ambiguity-adjudication:0b3b432489be5ce60147873ff27823f6a116229dfdc512f64024a49580237c8c"
 slice_id = "a02"
 ambiguity_source_key = "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.descriptor|194b520dc30384b3fc233e123778835e2adc362d91c6e33015ed3db2379d7ea1|1|7436baa9a7e0b2e6206451cbdb69f1f2c764e50b84881992c5d6fe3a5eb63684|shorthand field has no exact type"
 source_locations = ["a02:1449"]
-resolution = "not-a-durable-schema"
+resolution = "maps-to-source"
 resolved_source_keys = ["field|CiphertextRecord|CiphertextRecord.descriptor|descriptor"]
-rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+rationale = "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes descriptor to source tag 0x0001, exact type CipherDescriptorWithoutDigest and cardinality one; the affected census key maps to that exact row."
 
 [[ambiguity_adjudication]]
 row_id = "a02:ambiguity-adjudication:7e38b5617e877b4c4d04aab2aceb9038d3998e272786e35c565ea11a61fc8402"
 slice_id = "a02"
 ambiguity_source_key = "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.object_tag_digest|01382560e2e7615b048ea5367238388ac8c3f98760dcf5aa408bc874969d60e8|1|36b19f8caa5cbb18ae76302874307e79ed8bff813495ac462c6650761add05d5|shorthand field has no exact type"
 source_locations = ["a02:1449"]
-resolution = "not-a-durable-schema"
+resolution = "maps-to-source"
 resolved_source_keys = ["field|CiphertextRecord|CiphertextRecord.object_tag_digest|object_tag_digest"]
-rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+rationale = "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes object_tag_digest to source tag 0x0004, exact type digest256, cardinality one and digest_class=target; the affected census key maps to that exact row."
 
 [[ambiguity_adjudication]]
 row_id = "a02:ambiguity-adjudication:0239498a2cba36ac46ba1927f4162f60e75399abfbb660542f8d307745300617"
 slice_id = "a02"
 ambiguity_source_key = "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.protected_length|5df4272c5f39dcef78c410b10c536a5704975cc8d6689dc6fbbcbeaed688ecf1|1|3c4a8e7fc8a685980c7a6dc0b8a30b64843e61ab27c873fc7557b449b3f50bf9|shorthand field has no exact type"
 source_locations = ["a02:1449"]
-resolution = "not-a-durable-schema"
+resolution = "maps-to-source"
 resolved_source_keys = ["field|CiphertextRecord|CiphertextRecord.protected_length|protected_length"]
-rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `CiphertextRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+rationale = "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes protected_length to source tag 0x0005, exact type u64 and cardinality one; the affected census key maps to that exact row."
 
 [[ambiguity_adjudication]]
 row_id = "a02:ambiguity-adjudication:58efaec60718539e0d6fe9e4a1d057dd06ac699ceb1a3ab48e932808c2fa8133"
@@ -92323,18 +92323,18 @@ row_id = "a02:ambiguity-adjudication:200f2d59a98b49a305f74582c258b6b32316c146f35
 slice_id = "a02"
 ambiguity_source_key = "ambiguity|field-type-ambiguous|PlacementRecord|PlacementRecord.descriptor|194b520dc30384b3fc233e123778835e2adc362d91c6e33015ed3db2379d7ea1|1|9c9c3dd11d91a87637869a7d6463af494cacd6233a48a3b1322b9bba895dcabc|shorthand field has no exact type"
 source_locations = ["a02:1449"]
-resolution = "not-a-durable-schema"
+resolution = "maps-to-source"
 resolved_source_keys = ["field|PlacementRecord|PlacementRecord.descriptor|descriptor"]
-rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `PlacementRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+rationale = "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes descriptor to source tag 0x0002, exact type PlacementDescriptorWithoutId and cardinality one; the affected census key maps to that exact row."
 
 [[ambiguity_adjudication]]
 row_id = "a02:ambiguity-adjudication:f7c039dd333ca9b1bd1e78736d84f3afe200de8795e7791698012f017f5f5f5a"
 slice_id = "a02"
 ambiguity_source_key = "ambiguity|field-type-ambiguous|PlacementRecord|PlacementRecord.placement_id|862e3bc66e01bc7a9dcedb6247960e1e5a9698e6810cb1a0950981231f908ec5|1|c3e5aeaf40b208c2ad9e3dd1981ca72c82afeb04eaa9a0067daa8d8c64bec5b4|shorthand field has no exact type"
 source_locations = ["a02:1449"]
-resolution = "not-a-durable-schema"
+resolution = "maps-to-source"
 resolved_source_keys = ["field|PlacementRecord|PlacementRecord.placement_id|placement_id"]
-rationale = "a02:1449: shorthand member carries no inline exact type. Its owner `PlacementRecord` is a registered PHYSICAL kind, whose members are committed by the registered transcript and identity law rather than by a durable_fields row — catalog-wide all 53 field-row owners are logical kinds, and zero of 7 physical kinds carry any. The affected census field key is therefore not a durable schema."
+rationale = "a02:1449: shorthand member carries no inline exact type, and its registered PHYSICAL owner is a field-owning host under `field_unresolved_schema`. The owner-authored durable field fixes placement_id to source tag 0x0001, exact type id256, cardinality one and physical identity class; the affected census key maps to that exact row."
 
 [[ambiguity_adjudication]]
 row_id = "a09:ambiguity-adjudication:34cf0a3cb4495aaffdd79a0489e1b6a8caa672ad4ed267b7e32b2c42f13e59b1"
@@ -102181,5 +102181,631 @@ row_id = "a03:target:field-admitted-txn-abort-command-authority-bound-header"
 target_row_id = "a03:field:admitted-txn-abort-command-authority-bound-header"
 slice_id = "a03"
 source_key = "field|AdmittedTxnAbortCommand|AdmittedTxnAbortCommand.authority_bound_header|authority_bound_header"
+target_kind = "field"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:ciphertext-record-descriptor"
+containing_schema = "CiphertextRecord"
+field_tag = 0x0001
+stable_name = "descriptor"
+exact_wire_type = "CipherDescriptorWithoutDigest"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "complete canonical cipher descriptor embedded by value; retained with the ciphertext record, contributes to CiphertextId, and creates no graph reachability edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 256
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:ciphertext-record-ciphertext-id"
+containing_schema = "CiphertextRecord"
+field_tag = 0x0002
+stable_name = "ciphertext_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "physical CiphertextId recomputed from descriptor, ciphertext bytes, and object tag; retained with the ciphertext record and never followed as a logical edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:ciphertext-record-ciphertext-digest"
+containing_schema = "CiphertextRecord"
+field_tag = 0x0003
+stable_name = "ciphertext_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the exact ciphertext bytes; retained with the ciphertext record for byte verification and creates no reachability edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:ciphertext-record-object-tag-digest"
+containing_schema = "CiphertextRecord"
+field_tag = 0x0004
+stable_name = "object_tag_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "target digest of the profile-sized object authentication tag; retained with the ciphertext record for byte verification and creates no reachability edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:ciphertext-record-protected-length"
+containing_schema = "CiphertextRecord"
+field_tag = 0x0005
+stable_name = "protected_length"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "exact protected ciphertext-plus-tag length scalar; retained with and cross-checked by the ciphertext record (a02:1449)"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:placement-record-placement-id"
+containing_schema = "PlacementRecord"
+field_tag = 0x0001
+stable_name = "placement_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "physical PlacementId recomputed from the placement domain/version and exact descriptor; retained with the placement record and never followed as a logical edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:placement-record-descriptor"
+containing_schema = "PlacementRecord"
+field_tag = 0x0002
+stable_name = "descriptor"
+exact_wire_type = "PlacementDescriptorWithoutId"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "complete canonical placement descriptor embedded by value; retained with and cross-checked by the placement record and creates no graph reachability edge (a02:1449)"
+version_status = "active"
+max_size_bytes = 65536
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-magic"
+containing_schema = "SymbolRecord"
+field_tag = 0x0001
+stable_name = "magic"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "fixed four-byte FGEC framing literal authenticated by the symbol MAC and retained with the symbol record (a02:1453)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-format-version"
+containing_schema = "SymbolRecord"
+field_tag = 0x0002
+stable_name = "format_version"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "symbol-record format version authenticated by the symbol MAC and retained with the symbol record (a02:1453)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-header-len"
+containing_schema = "SymbolRecord"
+field_tag = 0x0003
+stable_name = "header_len"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact header length authenticated by the symbol MAC and retained with the symbol record (a02:1453)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-record-len"
+containing_schema = "SymbolRecord"
+field_tag = 0x0004
+stable_name = "record_len"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact total record length authenticated by the symbol MAC and retained with the symbol record (a02:1453)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-logical-oid"
+containing_schema = "SymbolRecord"
+field_tag = 0x0005
+stable_name = "logical_oid"
+exact_wire_type = "oid256"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "logical ObjectId identity authenticated by the symbol MAC; comparison and ownership metadata only, never an independent retaining edge from a physical symbol (a02:1454)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-ciphertext-id"
+containing_schema = "SymbolRecord"
+field_tag = 0x0006
+stable_name = "ciphertext_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "physical CiphertextId authenticated by the symbol MAC; retained as encoding identity metadata and creates no graph reachability edge (a02:1454)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-encoding-id"
+containing_schema = "SymbolRecord"
+field_tag = 0x0007
+stable_name = "encoding_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "physical"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "physical EncodingId authenticated by the symbol MAC and bound into K_symbol; retained as coordinate identity metadata and creates no graph reachability edge (a02:1454)"
+version_status = "active"
+max_size_bytes = 32
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-object-kind"
+containing_schema = "SymbolRecord"
+field_tag = 0x0008
+stable_name = "object_kind"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "logical object-kind code authenticated by the symbol MAC and retained with the symbol record (a02:1455)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-source-block"
+containing_schema = "SymbolRecord"
+field_tag = 0x0009
+stable_name = "source_block"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "RaptorQ source-block coordinate authenticated by the symbol MAC and retained with the symbol record (a02:1455)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-esi"
+containing_schema = "SymbolRecord"
+field_tag = 0x000a
+stable_name = "esi"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "encoding-symbol identifier authenticated by the symbol MAC and retained with the symbol record (a02:1455)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-symbol-len"
+containing_schema = "SymbolRecord"
+field_tag = 0x000b
+stable_name = "symbol_len"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact payload length authenticated by the symbol MAC and retained with the symbol record (a02:1455)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-transfer-length"
+containing_schema = "SymbolRecord"
+field_tag = 0x000c
+stable_name = "transfer_length"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "complete encoding transfer length authenticated by the symbol MAC and retained with the symbol record (a02:1456)"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-oti-common"
+containing_schema = "SymbolRecord"
+field_tag = 0x000d
+stable_name = "oti_common"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "RaptorQ common OTI authenticated by the symbol MAC and retained with the symbol record (a02:1456)"
+version_status = "active"
+max_size_bytes = 8
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-oti-scheme"
+containing_schema = "SymbolRecord"
+field_tag = 0x000e
+stable_name = "oti_scheme"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "RaptorQ scheme-specific OTI authenticated by the symbol MAC and retained with the symbol record (a02:1456)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-flags"
+containing_schema = "SymbolRecord"
+field_tag = 0x000f
+stable_name = "flags"
+exact_wire_type = "u32"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "registered symbol flags authenticated by the symbol MAC and retained with the symbol record (a02:1456)"
+version_status = "active"
+max_size_bytes = 4
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-symbol-mac-profile"
+containing_schema = "SymbolRecord"
+field_tag = 0x0010
+stable_name = "symbol_mac_profile"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "registered symbol-authentication profile authenticated by the symbol MAC and retained with the symbol record (a02:1457)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-symbol-mac-len"
+containing_schema = "SymbolRecord"
+field_tag = 0x0011
+stable_name = "symbol_mac_len"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact symbol-MAC length authenticated by the symbol MAC transcript and retained with the symbol record (a02:1457)"
+version_status = "active"
+max_size_bytes = 2
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-payload"
+containing_schema = "SymbolRecord"
+field_tag = 0x0012
+stable_name = "payload"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact symbol_len payload bytes authenticated after every serialized header field; retained with the symbol record and never self-authorizing (a02:1458-1460)"
+version_status = "active"
+max_size_bytes = 1048576
+
+[[field]]
+slice_id = "a02"
+row_id = "a02:field:symbol-record-symbol-mac"
+containing_schema = "SymbolRecord"
+field_tag = 0x0013
+stable_name = "symbol_mac"
+exact_wire_type = "bytes"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "exact symbol_mac_len authentication bytes over the registered header-plus-payload transcript; retained with the symbol record and excluded from their own MAC input (a02:1458-1460)"
+version_status = "active"
+max_size_bytes = 65535
+
+[[target]]
+row_id = "a02:target:field-ciphertext-record-descriptor"
+target_row_id = "a02:field:ciphertext-record-descriptor"
+slice_id = "a02"
+source_key = "field|CiphertextRecord|CiphertextRecord.descriptor|descriptor"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-ciphertext-record-ciphertext-id"
+target_row_id = "a02:field:ciphertext-record-ciphertext-id"
+slice_id = "a02"
+source_key = "field|CiphertextRecord|CiphertextRecord.ciphertext_id|ciphertext_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-ciphertext-record-ciphertext-digest"
+target_row_id = "a02:field:ciphertext-record-ciphertext-digest"
+slice_id = "a02"
+source_key = "field|CiphertextRecord|CiphertextRecord.ciphertext_digest|ciphertext_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-ciphertext-record-object-tag-digest"
+target_row_id = "a02:field:ciphertext-record-object-tag-digest"
+slice_id = "a02"
+source_key = "field|CiphertextRecord|CiphertextRecord.object_tag_digest|object_tag_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-ciphertext-record-protected-length"
+target_row_id = "a02:field:ciphertext-record-protected-length"
+slice_id = "a02"
+source_key = "field|CiphertextRecord|CiphertextRecord.protected_length|protected_length"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-placement-record-placement-id"
+target_row_id = "a02:field:placement-record-placement-id"
+slice_id = "a02"
+source_key = "field|PlacementRecord|PlacementRecord.placement_id|placement_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-placement-record-descriptor"
+target_row_id = "a02:field:placement-record-descriptor"
+slice_id = "a02"
+source_key = "field|PlacementRecord|PlacementRecord.descriptor|descriptor"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-magic"
+target_row_id = "a02:field:symbol-record-magic"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.magic|magic"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-format-version"
+target_row_id = "a02:field:symbol-record-format-version"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.format_version|format_version"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-header-len"
+target_row_id = "a02:field:symbol-record-header-len"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.header_len|header_len"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-record-len"
+target_row_id = "a02:field:symbol-record-record-len"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.record_len|record_len"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-logical-oid"
+target_row_id = "a02:field:symbol-record-logical-oid"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.logical_oid|logical_oid"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-ciphertext-id"
+target_row_id = "a02:field:symbol-record-ciphertext-id"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.ciphertext_id|ciphertext_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-encoding-id"
+target_row_id = "a02:field:symbol-record-encoding-id"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.encoding_id|encoding_id"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-object-kind"
+target_row_id = "a02:field:symbol-record-object-kind"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.object_kind|object_kind"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-source-block"
+target_row_id = "a02:field:symbol-record-source-block"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.source_block|source_block"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-esi"
+target_row_id = "a02:field:symbol-record-esi"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.esi|esi"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-symbol-len"
+target_row_id = "a02:field:symbol-record-symbol-len"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.symbol_len|symbol_len"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-transfer-length"
+target_row_id = "a02:field:symbol-record-transfer-length"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.transfer_length|transfer_length"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-oti-common"
+target_row_id = "a02:field:symbol-record-oti-common"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.oti_common|oti_common"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-oti-scheme"
+target_row_id = "a02:field:symbol-record-oti-scheme"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.oti_scheme|oti_scheme"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-flags"
+target_row_id = "a02:field:symbol-record-flags"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.flags|flags"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-symbol-mac-profile"
+target_row_id = "a02:field:symbol-record-symbol-mac-profile"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.symbol_mac_profile|symbol_mac_profile"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-symbol-mac-len"
+target_row_id = "a02:field:symbol-record-symbol-mac-len"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.symbol_mac_len|symbol_mac_len"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-payload"
+target_row_id = "a02:field:symbol-record-payload"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.payload|payload"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a02:target:field-symbol-record-symbol-mac"
+target_row_id = "a02:field:symbol-record-symbol-mac"
+slice_id = "a02"
+source_key = "field|SymbolRecord|SymbolRecord.symbol_mac|symbol_mac"
 target_kind = "field"
 definition_status = "declared"
