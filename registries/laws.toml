@@ -56,7 +56,13 @@
 #   statement       = "..."              # what the rule actually says
 #   enforcement     = "..."              # REQUIRED when status = "registered"
 #   status          = "registered" | "unadjudicated" | "fabrication-candidate"
+#   cited_as        = ["..."]            # optional alternate surface phrasings
 #   note            = "..."              # optional adjudication record
+#
+# `cited_as` SHARES THE `name` NAMESPACE. One rule can be cited under more than
+# one wording, and the citation guard resolves a surface phrase against names
+# and aliases alike, so an alias colliding with any other name or alias is
+# rejected: a citation must not resolve to two laws.
 #
 # Unknown keys are REJECTED, not ignored: a future field added to some rows and
 # silently dropped on others is the same failure mode this registry exists to
@@ -97,7 +103,8 @@ source_location = "a10:1914"
 statement = "Every typed sequence-neutral spec is canonically encoded once as SequenceNeutralSpec<Tag> {wire_tag, schema_version, body, terminal_audit_freeze, terminal_audit_gate}. Appendix prose flattens the body fields into the surrounding braces for readability, so a shown audit field is a wrapper field and not a field inside the body."
 enforcement = "Appendix A census attributes wrapper fields to the wrapper rather than to the body; exercised by `registry-check appendix`."
 status = "registered"
-note = "Cited both as \"the SequenceNeutralSpec law\" and \"the SequenceNeutralSpec wrapper law\"; both name this rule."
+cited_as = ["SequenceNeutralSpec wrapper"]
+note = "Cited both as \"the SequenceNeutralSpec law\" and \"the SequenceNeutralSpec wrapper law\"; both name this rule. The second phrasing is declared in cited_as so the citation guard resolves it by registry lookup: rewriting the catalog instead would be a coordinated edit across the catalog and every projection generated from it."
 
 [[law]]
 id = "FG-LAW-05"

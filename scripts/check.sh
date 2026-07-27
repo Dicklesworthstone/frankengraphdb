@@ -156,7 +156,7 @@ coverage_of() {
     # EXACT, not the `registries/*.toml` glob below. laws.toml is validated by
     # a cargo test, not by `registry-check all`, so the glob would claim a gate
     # that never opens the file -- the fail-open this row's own comment names.
-    registries/laws.toml)                echo "cargo test --workspace (tools/registry-check/tests/laws.rs: schema, plan-anchor resolution, 12 mutation fixtures)" ;;
+    registries/laws.toml)                echo "cargo test --workspace (tools/registry-check/tests/laws.rs: schema, plan-anchor resolution, the law-citation guard over registries/appendix_a_catalog.toml, 27 mutation fixtures)" ;;
     registries/*.toml)                   echo "registry-check all" ;;
     .beads/issues.jsonl)                 echo "architecture-check (parses every record; malformed line fails file:line)" ;;
     docs/ARCHITECTURE_DECISION_RECORD.md) echo "architecture-check (generated document)" ;;
