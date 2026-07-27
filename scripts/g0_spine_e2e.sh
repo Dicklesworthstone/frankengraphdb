@@ -52,55 +52,36 @@ log "work directory: $WORK"
 mkdir -p "$WORK/bin"
 
 # --- The subject artifact ----------------------------------------------------
-# BIN used to be "${CARGO_TARGET_DIR:-$ROOT/target}/debug/registry-check",
-# gated only on `[ -x "$BIN" ]`, with a build step whose exit status nothing
-# read. /data/tmp/cargo-target is written by six panes and three other
-# projects, so that path names an artifact compiled from a state this repo may
-# never have had, and the build step could not fail the run.
-#
-# MEASURED (2026-07-26, bead iy7e): one such artifact carried
-# `wire_types` pin fnv1a64:0f3dcd03f7a9eaf7 — a value that occurs nowhere in
-# the tracked tree and nowhere in identity.rs history — and reported 24
-# violations against a green tree. Sharper still: this script returned
-# "7 passed, 3 failed" at 19:22 and "8 passed, 2 failed" at 19:24 with no
-# change to the repo between the runs, because another pane rebuilt the shared
-# artifact in between. A verdict that moves when the subject does not is not a
-# measurement of the subject.
-#
-# registry-check is std-only by constitution (FG-CON-01: the closed dependency
-# universe applies to the tooling that enforces it), so it has no dependencies
-# to resolve and the gate compiles it straight from this tree with rustc into
-# $WORK — no cargo, no shared directory, no package-cache lock, ~8s. Running
-# from $ROOT makes rustup honour rust-toolchain.toml.
-#
-# The price of that hermeticity is disk: a private build cannot share the
-# swarm's artifact, so each run leaves 73MB in its workdir (a 64MB rlib the
-# `-C strip=symbols` below cannot shrink, plus an 8MB binary it takes from
-# 18MB). Measured 2026-07-26 on a filesystem at 95% with 9594 stale
-# `/data/tmp/tmp.*` directories from every gate that mktemps. Reaping those is
-# swarm hygiene, not this gate's business — and this script deletes nothing.
+# Compiled from THIS tree into $WORK by scripts/lib/private_subject.sh, which
+# is the single implementation shared with g0_claims_e2e.sh and
+# g0_identity_e2e.sh — three copies would be three readers to drift, which is
+# the defect this bead exists to fix. That file carries the measurement, the
+# reason cargo is not used, and the 73MB-per-run disk price.
+# shellcheck source=lib/private_subject.sh
+. "$ROOT/scripts/lib/private_subject.sh"
+
 log "building registry-check from this tree into $WORK/bin"
-if ! (cd "$ROOT" \
-      && rustc --edition 2024 --crate-type rlib --crate-name registry_check \
-           -C strip=symbols \
-           tools/registry-check/src/lib.rs -o "$WORK/bin/libregistry_check.rlib" \
-      && rustc --edition 2024 -C strip=symbols tools/registry-check/src/main.rs \
-           --extern "registry_check=$WORK/bin/libregistry_check.rlib" \
-           -o "$BIN") >"$WORK/build.log" 2>&1; then
-  log "FATAL: building registry-check from this tree failed (see $WORK/build.log)"
+if ! subject_build "$ROOT" "$WORK/bin"; then
+  log "FATAL: building registry-check from this tree failed (see $WORK/bin/build.log)"
   exit 2
 fi
-[ -x "$BIN" ] || { log "FATAL: no subject artifact at $BIN after a build that reported success"; exit 2; }
-
-# Freshness is asserted, not assumed. This is the exact property the old build
-# step lacked: cargo printed an error, exited 0, left a stale artifact in
-# place, and the gate proceeded to report on it.
-NEWEST_SRC="$(ls -t "$ROOT"/tools/registry-check/src/*.rs "$ROOT"/tools/registry-check/src/bin/*.rs | head -1)"
-[ "$BIN" -nt "$NEWEST_SRC" ] || {
-  log "FATAL: $BIN is not newer than $NEWEST_SRC — the build did not produce this tree's artifact"
+subject_is_fresh "$BIN" "$ROOT" || {
+  log "FATAL: $BIN is not newer than $(subject_newest_source "$ROOT") — the build did not produce this tree's artifact"
   exit 2
 }
-log "subject artifact: $BIN (newer than $NEWEST_SRC)"
+log "subject artifact: $BIN (newer than $(subject_newest_source "$ROOT"))"
+
+# THIS SCRIPT'S OWN control over the shared predicate, counted in this script's
+# own tally. The precondition above is what stops a foreign or stale artifact
+# from producing a verdict; this proves that precondition can actually fire,
+# here, rather than inheriting credit from the other two gates that source the
+# same library. Weaken subject_is_fresh to a constant and all three go red.
+subject_write_stale_probe "$WORK/bin/stale-probe"
+if subject_is_fresh "$BIN" "$ROOT" && ! subject_is_fresh "$WORK/bin/stale-probe" "$ROOT"; then
+  ok "control: the freshness rule accepts this run's artifact and rejects a backdated one"
+else
+  die "control: the freshness rule does not separate a fresh artifact from a stale one; this script's subject is unproven"
+fi
 
 # --- Phase 1: materialized spine passes validate + hash + closure ------------
 log "phase 1: materialized spine (validate + hash + closure baseline)"
