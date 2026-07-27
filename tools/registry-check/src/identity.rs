@@ -1982,6 +1982,30 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 ),
             ));
         }
+        // Completeness guard for laws over registered wire members: a field
+        // that names a registered wire type must resolve to one of the closed
+        // wire-kind vocabulary, never an unclassified future kind.
+        if let Some(wire_type) = wire_by_name.get(f.exact_wire_type.as_str())
+            && !matches!(
+                wire_type.kind.as_str(),
+                "record"
+                    | "union"
+                    | "union_variant"
+                    | "reference_wrapper"
+                    | "discriminant"
+                    | "framing"
+            )
+        {
+            out.push(v(
+                "field_wire_kind_unclassified",
+                "durable_fields",
+                &row_id,
+                format!(
+                    "exact_wire_type {:?} resolves to unclassified wire kind {:?}",
+                    f.exact_wire_type, wire_type.kind
+                ),
+            ));
+        }
         // LAW: reference_semantics is FORCED by exact_wire_type.
         //
         // Direction 1 — a type that declares a strength admits exactly that
@@ -2146,6 +2170,19 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             )),
             None => {}
             Some(class) => {
+                if !digest_typed
+                    && !(class == "transcript" && f.exact_wire_type == "u64")
+                {
+                    out.push(v(
+                        "digest_class_wire_type_mismatch",
+                        "durable_fields",
+                        &row_id,
+                        format!(
+                            "digest_class {:?} is not permitted for exact_wire_type {:?}",
+                            class, f.exact_wire_type
+                        ),
+                    ));
+                }
                 match class.as_str() {
                     "target" | "weak_identity" => {
                         if !digest_typed {

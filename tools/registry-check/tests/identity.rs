@@ -13579,6 +13579,44 @@ fn idr_non_reference_wire_members_require_inline_identity_class() {
     );
 }
 
+#[test]
+fn idr_digest_class_is_function_of_exact_wire_type_and_wire_kinds_are_closed() {
+    let base = real_identity();
+    let digest_rows = base
+        .fields
+        .iter()
+        .filter(|field| field.digest_class.is_some())
+        .count();
+    assert!(
+        digest_rows >= 100,
+        "digest-class population shrank: {digest_rows}"
+    );
+
+    let mut digest_mutation = base.clone();
+    let index = digest_mutation
+        .fields
+        .iter()
+        .position(|field| field.digest_class.is_none() && field.exact_wire_type == "u64")
+        .expect("non-digest field mutation subject");
+    digest_mutation.fields[index].digest_class = Some("target".into());
+    assert!(
+        codes(&digest_mutation).contains(&"digest_class_wire_type_mismatch".to_string()),
+        "digest class on a non-digest wire type must fire"
+    );
+
+    let mut kind_mutation = base;
+    let wire = kind_mutation
+        .wire
+        .iter_mut()
+        .find(|wire| wire.kind == "record")
+        .expect("registered wire-kind mutation subject");
+    wire.kind = "future_kind".into();
+    assert!(
+        codes(&kind_mutation).contains(&"field_wire_kind_unclassified".to_string()),
+        "unknown registered wire kind must not pass closed-world validation"
+    );
+}
+
 /// The two artifacts share ONE table. Every strength the Appendix A catalog can
 /// declare must have a legal field-level spelling, or a row could be required to
 /// carry a value `bad_field` rejects.
