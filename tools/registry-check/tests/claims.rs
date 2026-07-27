@@ -642,13 +642,30 @@ impl LintFixture {
     }
 
     fn write_config(&self, scan: &[&str], excludes: &str, unmarked_rows: &[&str]) {
+        self.write_config_roots(&[".", "docs"], scan, excludes, unmarked_rows);
+    }
+
+    /// Same, with the closure roots under the test's control. Only the roots
+    /// law needs this; every other test wants the default pair.
+    fn write_config_roots(
+        &self,
+        roots: &[&str],
+        scan: &[&str],
+        excludes: &str,
+        unmarked_rows: &[&str],
+    ) {
         let quoted = |v: &[&str]| {
             v.iter()
                 .map(|s| format!("  {:?},\n", s))
                 .collect::<String>()
         };
+        let roots_toml = roots
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let text = format!(
-            "schema_version = 1\n\n[lint]\nmarker_pattern = \"{}\"\nscan = [\n{}]\nclosure_dirs = [\".\", \"docs\"]\n\n[[gate_table]]\nfile = \"README.md\"\nheading = \"## Performance\"\nowner_bead = \"fgdb-fixture\"\nunmarked_rows = [\n{}]\n\n{excludes}",
+            "schema_version = 1\n\n[lint]\nmarker_pattern = \"{}\"\nscan = [\n{}]\nclosure_dirs = [{roots_toml}]\n\n[[gate_table]]\nfile = \"README.md\"\nheading = \"## Performance\"\nowner_bead = \"fgdb-fixture\"\nunmarked_rows = [\n{}]\n\n{excludes}",
             lint::SUPPORTED_MARKER_PATTERN,
             quoted(scan),
             quoted(unmarked_rows),
@@ -919,6 +936,80 @@ fn claims_closure_prune_narrows_the_walk_and_must_stay_live() {
         &["Cold bulk load", "Point reads"],
     );
     assert!(f.hits_of(lint::HitKind::DeadPrune).is_empty());
+}
+
+#[test]
+fn claims_neg_uncovered_closure_root() {
+    // THE ROOTS ARE DATA TOO. fd7d169 made the walk recursive, so everything
+    // under a root is accounted for. It said nothing about WHICH roots, and
+    // `closure_dirs` is the one scan root in this crate that a registry edit can
+    // narrow: MEASURED 2026-07-27, of seven `read_dir` sites, five take their
+    // root from `Cargo.toml [workspace] members` (removing one member reds
+    // topology-check with `active_not_a_member`) and one is the code constant
+    // `scripts/`, guarded against its own emptiness by `script_scan_empty`.
+    //
+    // The emptiness guard already in this walk does NOT cover this: a root set
+    // that holds prose passes it while covering the wrong thing. On the real
+    // tree, `closure_dirs = ["docs"]` left `registry-check lint` at exit 0,
+    // hits 0, prose_files_seen 3 -- with AGENTS.md, README.md and the 1.7MB
+    // merged plan silently outside the closure.
+    let f = LintFixture::build("uncovered-root");
+    std::fs::create_dir_all(f.root.join("crates/demo")).expect("nested dirs");
+
+    // Roots that reach neither the repository root's own prose nor `crates/`.
+    // `docs` holds prose, so the pre-existing emptiness guard is satisfied and
+    // this law is the only thing that can fire.
+    f.write_config_roots(
+        &["docs"],
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    let hits = f.hits_of(lint::HitKind::UncoveredClosureRoot);
+    let named: Vec<&str> = hits.iter().map(|h| h.subject.as_str()).collect();
+    // README.md and HISTORY.md are root prose no root reaches; `crates` and
+    // `registries` are top-level directories no root reaches and no prune
+    // excuses. `docs` is absent from the list because it IS a root.
+    assert_eq!(
+        named,
+        vec!["HISTORY.md", "README.md", "crates", "registries"],
+        "{hits:?}"
+    );
+    assert_eq!(hits[0].kind.code(), "uncovered_closure_root");
+
+    // A prune is the declared excuse for a directory, exactly as it is for the
+    // walk: both directories drop out, the two root documents do not, because a
+    // prune names directories and a file at the repository root is reachable
+    // only from a `.` root.
+    f.write_config_roots(
+        &["docs"],
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n\n\
+         [[closure_prune]]\ndir = \"crates\"\nreason = \"not prose\"\n\n\
+         [[closure_prune]]\ndir = \"registries\"\nreason = \"not prose\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    let named: Vec<String> = f
+        .hits_of(lint::HitKind::UncoveredClosureRoot)
+        .into_iter()
+        .map(|h| h.subject)
+        .collect();
+    assert_eq!(named, vec!["HISTORY.md", "README.md"]);
+
+    // Restoring the repository root as a closure root settles all of it: 3 of 3
+    // named entries drop to none, and no other law starts complaining.
+    f.write_config(
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    let (hits, census) = f.run().expect("lint runs");
+    assert!(
+        hits.iter()
+            .all(|h| h.kind != lint::HitKind::UncoveredClosureRoot),
+        "{hits:?}"
+    );
+    assert_eq!(census.prose_files_seen, 3, "{census:?}");
 }
 
 #[test]

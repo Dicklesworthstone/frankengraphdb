@@ -124,6 +124,10 @@ pub enum HitKind {
     /// A `presence = "required"` closure prune names a directory that does not
     /// exist: the walk is narrowed by a rule that no longer narrows anything.
     DeadPrune,
+    /// A non-hidden top-level entry that no closure root reaches and no prune
+    /// excuses. The walk cannot see it, so no other law in this file can
+    /// either: `unclaimed_prose` only accuses files the walk FOUND.
+    UncoveredClosureRoot,
 }
 
 impl HitKind {
@@ -135,6 +139,7 @@ impl HitKind {
             HitKind::UnclaimedProse => "unclaimed_prose",
             HitKind::DeadExclude => "dead_exclude",
             HitKind::DeadPrune => "dead_closure_prune",
+            HitKind::UncoveredClosureRoot => "uncovered_closure_root",
         }
     }
 }
@@ -721,6 +726,70 @@ pub fn run(
                 text: "closure prune names a directory that does not exist; delete it rather than carrying a rule that narrows nothing".into(),
             });
         }
+    }
+
+    // ---- the closure ROOTS: the walk must be able to reach the repository ----
+    //
+    // `closure_dirs` is declared data, and until this law it was the one scan
+    // root in the checker that a registry edit could narrow with nothing
+    // noticing. MEASURED 2026-07-27: seven `read_dir` sites exist in this
+    // crate; five take their root from `Cargo.toml [workspace] members` (and
+    // removing one member reds topology-check with `active_not_a_member`), one
+    // is the code constant `scripts/` (guarded against its own emptiness by
+    // `script_scan_empty`), and this was the seventh.
+    //
+    // The existing emptiness guard above -- "closure directory holds no prose"
+    // -- does NOT cover this. `closure_dirs = ["docs"]` holds three prose files,
+    // so it passes, while the eight root documents (AGENTS.md, README.md, the
+    // merged plan) silently stop being closure obligations.
+    //
+    // ONE law, not two. "closure_dirs must contain `.`" was the obvious rule and
+    // is deliberately NOT written that way: a companion rule about top-level
+    // directories could then only fail when the first already had, and a check
+    // that cannot fail reports enforcement that is not happening. A `.md` at the
+    // repository root is reachable only from a `.` root, so this law subsumes
+    // the obvious one and still binds on a future multi-root config.
+    let roots: BTreeSet<&str> = config.closure_dirs.iter().map(String::as_str).collect();
+    let walks_repository_root = roots.contains(".");
+    let entries = std::fs::read_dir(root).map_err(|e| LintError {
+        msg: format!("{}: repository root cannot be read: {e}", root.display()),
+    })?;
+    let mut uncovered = BTreeSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| LintError {
+            msg: format!("{}: {e}", root.display()),
+        })?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let ft = entry.file_type().map_err(|e| LintError {
+            msg: format!("{}: {e}", entry.path().display()),
+        })?;
+        if ft.is_dir() {
+            if walks_repository_root
+                || roots.contains(name.as_str())
+                || pruned.contains(name.as_str())
+            {
+                continue;
+            }
+        } else {
+            // Only prose is this lint's business; a top-level LICENSE or
+            // Cargo.toml being unreachable says nothing about claim markers.
+            if !ft.is_file() || !name.ends_with(".md") || walks_repository_root {
+                continue;
+            }
+        }
+        uncovered.insert(name);
+    }
+    for name in uncovered {
+        hits.push(LintHit {
+            kind: HitKind::UncoveredClosureRoot,
+            file: "registries/claims_lint.toml".into(),
+            line: 0,
+            subject: name,
+            text: "no claims_lint.toml lint.closure_dirs root reaches this top-level entry and no [[closure_prune]] excuses it, so the closure walk can never see what is inside it".into(),
+        });
     }
 
     hits.sort_by(|a, b| {
