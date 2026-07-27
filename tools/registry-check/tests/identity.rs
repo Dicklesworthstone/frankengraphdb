@@ -168,13 +168,17 @@ fn kind(code: i64, name: &str, status: &str, order: i64) -> LogicalKind {
     }
 }
 
-fn ordinary_top_level_union_fixture() -> IdentityRegistries {
-    let source = r#"
+/// The synthetic ordinary-union corpus, with the durable-fields epoch left as a
+/// placeholder that is substituted from the SHIPPED registry.
+///
+/// `@EPOCH@` is not valid TOML, so a substitution that stops happening is a loud
+/// parse failure rather than a silent divergence.
+const ORDINARY_UNION_FIXTURE_SOURCE: &str = r#"
 schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 72
+registry_epoch = @EPOCH@
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -212,11 +216,29 @@ role_predicate = "true"
 version_status = "active"
 max_size_bytes = 127
 "#;
-    let table = registry_check::toml::parse(source).expect("ordinary-union fixture parses");
+
+/// Real identity plus one synthetic top-level union, for the eleven tests that
+/// mutate that union and assert the code it draws.
+///
+/// THE EPOCH IS DERIVED, NEVER RETYPED (fgdb-un4g). It was a literal, and the
+/// cost was measured: `durable_fields` advanced 68 -> 69 and eleven consumers of
+/// this fixture went red at once, because the stitching below overwrites
+/// `identity.fields_epoch` with the fixture's value and every consumer then saw
+/// a `registry_epoch_mismatch` it was never testing for. Reproduced on demand at
+/// b77982e -- put the literal back and exactly those eleven fail again, no more
+/// and no fewer. Advancing the literal by hand fixed one epoch and left the next
+/// to reproduce it: 8e5cd57 bumped 68 -> 69 and bf9604c had to bump 69 -> 70 the
+/// same night. The value now comes from the registry, so there is no next bump.
+fn ordinary_top_level_union_fixture() -> IdentityRegistries {
+    let mut identity = real_identity();
+    let source =
+        ORDINARY_UNION_FIXTURE_SOURCE.replace("@EPOCH@", &identity.fields_epoch.to_string());
+    let table = registry_check::toml::parse(&source).expect("ordinary-union fixture parses");
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 72);
+    // No literal to assert against: `epoch == identity.fields_epoch` holds by
+    // construction, and the placeholder makes a lost substitution a parse error.
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -231,13 +253,24 @@ max_size_bytes = 127
         Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
     );
 
-    let mut identity = real_identity();
+    // An identity now, not an override -- kept so the fixture still states which
+    // epoch its rows belong to, and so that a future deliberate divergence has
+    // one obvious place to happen.
     identity.fields_epoch = epoch;
     // Keep the real ordinary unions so their anchor fields still resolve; the
     // synthetic fixture union stays at index 0 for the mutation tests.
     let mut all_unions = ordinary_unions;
     all_unions.append(&mut identity.ordinary_unions);
     identity.ordinary_unions = all_unions;
+    // The index-0 claim in the comment above is load-bearing and was unchecked:
+    // `wire_backed_top_level_union_fixture` and the embedded-union fixtures all
+    // reach for `ordinary_unions[0]` by index, so a stitch-order change would
+    // silently point every wire-backed test at a REAL union and they would go on
+    // passing while testing the wrong object.
+    assert_eq!(
+        identity.ordinary_unions[0].union_name, "FixtureTopLevelUnion",
+        "the synthetic union must stay at index 0; every fixture built on this one indexes it"
+    );
     identity
 }
 
