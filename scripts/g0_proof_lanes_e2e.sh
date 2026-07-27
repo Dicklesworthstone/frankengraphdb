@@ -42,6 +42,12 @@ FAIL=0
 CHECKED_SEEN=0
 TALLY_PRINTED=0
 
+# ONE READER of "what does an admitted Lean proof look like". The self-test below
+# and the detector in the lean branch must use the SAME string, or the self-test
+# only proves its own copy works while the detector rots independently — which is
+# exactly what red-proof caught when this was three separate literals.
+ADMIT_PATTERN="declaration uses .sorry."
+
 pass() { PASS=$((PASS + 1)); printf '    ok    %s\n' "$1"; }
 fail() { FAIL=$((FAIL + 1)); printf '    FAIL  %s\n' "$1" >&2; }
 
@@ -80,6 +86,17 @@ if [ "$TOTAL_LANES" -eq 0 ]; then
 fi
 echo "  $TOTAL_LANES lane(s) registered"
 
+# CONTROL for the admit matcher used on every accepted Lean proof. Its wording
+# is the prover's, not ours, and it HAS already changed between two versions
+# installed on this host. If the matcher silently stopped matching, "no admits
+# found" and "the matcher is broken" would be indistinguishable, and every
+# `pass` below would be unlicensed. Both measured spellings must fire.
+for spelling in "declaration uses 'sorry'" 'declaration uses `sorry`'; do
+  if ! printf '%s\n' "$spelling" | grep -qE "$ADMIT_PATTERN"; then
+    fail "admit-matcher self-test FAILED: it no longer matches [$spelling]. Every accepted proof below would be unlicensed."
+  fi
+done
+
 while IFS=$'\t' read -r id kind artifact status; do
   [ -z "$id" ] && continue
   [ "$status" != "checked" ] && continue
@@ -96,7 +113,43 @@ while IFS=$'\t' read -r id kind artifact status; do
         fail "$id: lean is not installed; the proof was NOT checked. Refusing to report green on an unrun prover."
         continue
       fi
-      if lean "$ROOT/$artifact" >/tmp/lane_$$.log 2>&1; then
+
+      # THE TOOLCHAIN PIN. A proof that holds only under whatever Lean happened
+      # to be installed is not a reproducible claim, and Doctrine #1 requires
+      # pinned versions. `elan` resolves the toolchain by searching upward from
+      # the CWD, so the prover is invoked from the artifact's own directory and
+      # `formal/lean/lean-toolchain` is what selects the version. That file is
+      # the single reader of "which Lean": this gate does not carry a second
+      # copy of the version, it checks that the prover elan actually produced
+      # matches the pin.
+      #
+      # MEASURED, not assumed: setting the pin to v4.32.0 makes `lean --version`
+      # report 4.32.0 from that directory, so the file is load-bearing rather
+      # than decorative. 4.7.0 also happens to be this host's elan default,
+      # which is exactly why the pin must be checked rather than trusted — on a
+      # host with a different default, an unpinned run silently changes prover.
+      lane_dir="$(dirname "$ROOT/$artifact")"
+      lane_file="$(basename "$artifact")"
+      if [ ! -f "$lane_dir/lean-toolchain" ]; then
+        fail "$id: no lean-toolchain beside $artifact — the prover version would float with whatever elan defaults to. Refusing to report a proof as reproducible when nothing pins the prover."
+        continue
+      fi
+      pin="$(tr -d '[:space:]' < "$lane_dir/lean-toolchain")"
+      pin_version="${pin##*:v}"
+      if [ -z "$pin_version" ] || [ "$pin_version" = "$pin" ]; then
+        fail "$id: lean-toolchain does not name a pinned version: '$pin' (expected e.g. leanprover/lean4:v4.7.0)"
+        continue
+      fi
+      actual_version="$(cd "$lane_dir" && lean --version 2>&1 | head -1)"
+      case "$actual_version" in
+        *"version $pin_version,"*) ;;
+        *)
+          fail "$id: TOOLCHAIN PIN DRIFT — lean-toolchain pins $pin_version but the prover is: $actual_version"
+          continue
+          ;;
+      esac
+
+      if (cd "$lane_dir" && lean "$lane_file") >/tmp/lane_$$.log 2>&1; then
         # LEAN EXITS 0 ON `sorry`. It is a warning, not an error: a file whose
         # every theorem is admitted typechecks and returns success. Measured by
         # red-proof — appending `theorem cheat : False := by sorry` left this
@@ -107,10 +160,15 @@ while IFS=$'\t' read -r id kind artifact status; do
         # second reader of that fact: it reads the PROVER'S VERDICT, which is
         # the authority, and catches admits no text scan can see (a `sorry`
         # produced by a macro, or `sorryAx` reached through elaboration).
-        if grep -q "declaration uses 'sorry'" /tmp/lane_$$.log; then
-          fail "$id: lean exited 0 but the proof is ADMITTED — $(grep -c "declaration uses 'sorry'" /tmp/lane_$$.log) declaration(s) use \`sorry\`"
+        # The wording is VERSION-DEPENDENT: 4.7.0 emits `declaration uses
+        # 'sorry'` and 4.32.0 emits it with backticks. A matcher hard-coded to
+        # one spelling silently stops detecting admits when the prover moves,
+        # which is why the pin above exists and why this pattern accepts either
+        # quoting. Both spellings are measured, not guessed.
+        if grep -qE "$ADMIT_PATTERN" /tmp/lane_$$.log; then
+          fail "$id: lean exited 0 but the proof is ADMITTED — $(grep -cE "$ADMIT_PATTERN" /tmp/lane_$$.log) declaration(s) use sorry"
         else
-          pass "$id: lean accepted $artifact ($(lean --version | head -1))"
+          pass "$id: lean accepted $artifact under pinned $pin_version"
         fi
       else
         fail "$id: lean REJECTED $artifact"

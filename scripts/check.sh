@@ -111,6 +111,7 @@ coverage_of() {
     # row above. A new .lean file lands unclaimed and reds this step until
     # somebody says which lane checks it.
     formal/lean/VersionChain.lean)       echo "g0_proof_lanes_e2e (runs \`lean\` on it; lane lean-version-chain is status=checked)" ;;
+    formal/lean/lean-toolchain)          echo "g0_proof_lanes_e2e (the prover pin: the gate reds if it is missing, malformed, or does not match the lean that actually ran)" ;;
     COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md)
                                          echo "registry-check (source_block pins + claims-lint)" ;;
     README.md)                           echo "registry-check lint (claim markers, + every §Performance gate row must cite one)" ;;
