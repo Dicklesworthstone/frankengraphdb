@@ -572,6 +572,8 @@ snapshot_nonprojection_tree() { # snapshot_nonprojection_tree <staged-root>
   (
     cd "$staged_root"
     find . \
+      ! -path './.git' ! -path './.git/*' \
+      ! -path './.beads' ! -path './.beads/*' \
       ! -path './registries/logical_object_kinds.toml' \
       ! -path './registries/physical_record_kinds.toml' \
       ! -path './registries/bootstrap_frames.toml' \
@@ -580,6 +582,8 @@ snapshot_nonprojection_tree() { # snapshot_nonprojection_tree <staged-root>
       ! -path './registries/durable_fields.toml' \
       -printf '%y|%m|%p|%l\n' | LC_ALL=C sort
     find . -type f \
+      ! -path './.git' ! -path './.git/*' \
+      ! -path './.beads' ! -path './.beads/*' \
       ! -path './registries/logical_object_kinds.toml' \
       ! -path './registries/physical_record_kinds.toml' \
       ! -path './registries/bootstrap_frames.toml' \
