@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 71
+registry_epoch = 72
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -3968,6 +3968,22 @@ role_predicate = "role-local"
 retention_and_cut_rule = "inline authorization recipes sorted by canonical target identity with no duplicate target or operation ID; retained and cut with the proposal (a15:2057-2059)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x000d
+stable_name = "complete_target_set_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "nonretaining complete target-set transcript: BLAKE3(utf8(\"fgdb:key-destruction-target-set:v1\") || 0x00 || u32_le(target_count) || for each canonical KeyDestructionTarget identity in ascending lexicographic 32-byte order: u32_le(32) || target_identity[32]); reject target_count > u32::MAX and duplicate target identities before hashing; the proposal, quarantine, completion-bijection proof, finalize input, and destroy record byte-match this digest while operation IDs, request transcripts, receipt identities, the canonical operation-root digest, and Merkle/tree shape are excluded; walkers never follow it (a15:2057-2067)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(utf8(\"fgdb:key-destruction-target-set:v1\") || 0x00 || u32_le(target_count) || for each canonical KeyDestructionTarget identity in ascending lexicographic 32-byte order: u32_le(32) || target_identity[32]); reject target_count > u32::MAX and duplicate target identities before hashing; operation IDs, request transcripts, receipt identities, canonical operation-root digest, and Merkle/tree shape are excluded; any domain, framing, sort, or duplicate rule change requires a new transcript version"
 
 [[field]]
 containing_schema = "KeyDestroyProposal"

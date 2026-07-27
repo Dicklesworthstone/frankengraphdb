@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "c715512f6adf746157692028a3fdf001dd5ce4f5dfb54b4d87a2f1957d92298a"
 
 [target_manifest]
-target_count = 3318
+target_count = 3319
 projection_fallback_count = 111
-target_source_assignment_sha256 = "ea4bb314b26e1d35f71869223c3efb7d60c2fcbb3a454699beda45e8bb80440a"
+target_source_assignment_sha256 = "fc6cdd2a77bba32e4840757e4f17b22b18c75b006dfba91530b18c36d7867eb2"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 38
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 71
+registry_epoch = 72
 
 [[logical_kind]]
 slice_id = "a03"
@@ -17155,6 +17155,24 @@ role_predicate = "role-local"
 retention_and_cut_rule = "closed one-byte key-lifecycle compare-and-swap tag; exactly 0x04=RetainedDecryptOnly is legal in a proposal, 0x01..=0x07 are the complete source-ordered lifecycle discriminants, and 0x00/0x08..=0xff and every non-0x04 proposal value fail before scanning or apply; never carries the later DestroyPending payload and is retained and cut with the proposal (a15:2059)"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-complete-target-set-digest"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x000d
+stable_name = "complete_target_set_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "nonretaining complete target-set transcript: BLAKE3(utf8(\"fgdb:key-destruction-target-set:v1\") || 0x00 || u32_le(target_count) || for each canonical KeyDestructionTarget identity in ascending lexicographic 32-byte order: u32_le(32) || target_identity[32]); reject target_count > u32::MAX and duplicate target identities before hashing; the proposal, quarantine, completion-bijection proof, finalize input, and destroy record byte-match this digest while operation IDs, request transcripts, receipt identities, the canonical operation-root digest, and Merkle/tree shape are excluded; walkers never follow it (a15:2057-2067)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(utf8(\"fgdb:key-destruction-target-set:v1\") || 0x00 || u32_le(target_count) || for each canonical KeyDestructionTarget identity in ascending lexicographic 32-byte order: u32_le(32) || target_identity[32]); reject target_count > u32::MAX and duplicate target identities before hashing; operation IDs, request transcripts, receipt identities, canonical operation-root digest, and Merkle/tree shape are excluded; any domain, framing, sort, or duplicate rule change requires a new transcript version"
 
 [[field]]
 slice_id = "a15"
@@ -99874,6 +99892,14 @@ target_kind = "field"
 definition_status = "declared"
 
 [[target]]
+row_id = "a15:target:field-key-destroy-proposal-complete-target-set-digest"
+target_row_id = "a15:field:key-destroy-proposal-complete-target-set-digest"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|complete_target_set_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
 row_id = "a15:target:field-key-destroy-proposal-basis-state"
 target_row_id = "a15:field:key-destroy-proposal-basis-state"
 slice_id = "a15"
@@ -99905,6 +99931,15 @@ source_locations = ["a15:2059"]
 resolution = "maps-to-source"
 resolved_source_keys = ["field|KeyDestroyProposal|KeyDestroyProposal.key_identity|key_identity"]
 rationale = "A15 repeatedly requires byte-equal key_identity projections but spells neither a KeyIdentity structural producer nor a StrongRef/typed by-value use that would license one. The owner ruling therefore selects the builtin opaque id256 form, not a fabricated record and not WeakStateIdentity/WeakDigest. Its canonical bytes are BLAKE3(\"fgdb:key-identity:v1\" || canonical(0x0001 database_security_namespace_id:id256, 0x0002 material_class:u16, 0x0003 key_id:id256, 0x0004 key_epoch:u64)); the namespace makes clone identities distinct while same-identity restore remains stable, and excluding physical targets keeps rewrap/replication/relocation from changing the logical key identity."
+
+[[ambiguity_adjudication]]
+row_id = "a15:ambiguity-adjudication:c4b54a063bd35e654e0c35628c05ea2005055123fe1fbb308e31054cd4be76b7"
+slice_id = "a15"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|4acbdf6f60172ecc877aa3d15608c48e82d2197f341fcd332fa8675e0ea76490|1|e20e1ee8d595c3b80349d5d2cf785578c0a2447bd0a8a4af81767169a99a57e2|shorthand field has no exact type"
+source_locations = ["a15:2059"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|complete_target_set_digest"]
+rationale = "A15 fixes the committed set as the unique sorted canonical KeyDestructionTarget identities and keeps this commitment distinct from operation IDs and the canonical operation-root digest. The owner ruling therefore selects one nonretaining digest256 carrying field with digest_class=transcript, never a plan-named wire type: BLAKE3(utf8(\"fgdb:key-destruction-target-set:v1\") || 0x00 || u32_le(target_count) || each u32_le(32) || target_identity[32] in ascending byte order), rejecting overflow and duplicates before hashing. No source law requires authenticated membership proofs, so Merkle/tree shape is excluded and any recipe change requires a new transcript version."
 
 [[ambiguity_adjudication]]
 row_id = "a15:ambiguity-adjudication:9d87b7faa3ae557cc0b0eb4aecf03219a98f5758e0e5607b1fa28c5d7eb3d55f"

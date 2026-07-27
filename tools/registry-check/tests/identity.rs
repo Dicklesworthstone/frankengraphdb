@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 71
+registry_epoch = 72
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 71);
+    assert_eq!(epoch, 72);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -4932,6 +4932,17 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "no duplicate target or operation ID",
         ),
         (
+            0x000d,
+            "complete_target_set_digest",
+            "digest256",
+            "one",
+            "inline",
+            "none",
+            None,
+            32,
+            "fgdb:key-destruction-target-set:v1",
+        ),
+        (
             0x000e,
             "expected_state_conditions",
             "ExpectedStateCondition",
@@ -5066,6 +5077,10 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         (
             "field|KeyDestroyProposal|KeyDestroyProposal.checkpoint_and_configuration_floor_refs|checkpoint_and_configuration_floor_refs",
             "a15:field:key-destroy-proposal-checkpoint-and-configuration-floor-refs",
+        ),
+        (
+            "field|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|complete_target_set_digest",
+            "a15:field:key-destroy-proposal-complete-target-set-digest",
         ),
         (
             "field|KeyDestroyProposal|KeyDestroyProposal.expected_current_configuration_ref|expected_current_configuration_ref",
@@ -5283,16 +5298,16 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     assert_eq!(
         proposal_adjudications,
         vec![
+            "field|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|complete_target_set_digest",
             "field|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|expected_state_conditions",
             "field|KeyDestroyProposal|KeyDestroyProposal.key_identity|key_identity",
             "field|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|terminal_audit_gate",
         ],
-        "only the three source-forced shorthand fields may be adjudicated"
+        "only the four source-forced shorthand fields may be adjudicated"
     );
     for unresolved in [
         "expected_prospective_configuration_set_digest",
         "exact_root_slot_generations",
-        "complete_target_set_digest",
     ] {
         assert!(
             !identity.fields.iter().any(|field| {
@@ -5495,6 +5510,102 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         codes_without_assignment_drift(&invented_structured_producer)
             .contains(&"field_unresolved_wire_type".to_owned()),
         "negative control: an invented structured KeyIdentity producer must fire"
+    );
+
+    let target_set_digest = identity
+        .fields
+        .iter()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "complete_target_set_digest"
+        })
+        .expect("KeyDestroyProposal.complete_target_set_digest exists");
+    assert_eq!(target_set_digest.exact_wire_type, "digest256");
+    assert_eq!(
+        target_set_digest.digest_class.as_deref(),
+        Some("transcript")
+    );
+    assert_eq!(
+        target_set_digest.transcript_recipe.as_deref(),
+        Some(
+            "BLAKE3(utf8(\"fgdb:key-destruction-target-set:v1\") || 0x00 || \
+             u32_le(target_count) || for each canonical KeyDestructionTarget identity in \
+             ascending lexicographic 32-byte order: u32_le(32) || target_identity[32]); \
+             reject target_count > u32::MAX and duplicate target identities before hashing; \
+             operation IDs, request transcripts, receipt identities, canonical operation-root \
+             digest, and Merkle/tree shape are excluded; any domain, framing, sort, or duplicate \
+             rule change requires a new transcript version"
+        ),
+        "the complete target-set digest must retain its exact versioned flat transcript"
+    );
+    assert!(
+        target_set_digest
+            .retention_and_cut_rule
+            .contains("proposal, quarantine, completion-bijection proof, finalize input, and destroy record byte-match"),
+        "all target-set digest projections must byte-match"
+    );
+    assert!(
+        !identity
+            .wire
+            .iter()
+            .any(|row| row.name == "CompleteTargetSetDigest")
+            && !identity
+                .logical
+                .iter()
+                .any(|row| row.name == "CompleteTargetSetDigest")
+            && !catalog
+                .reservations
+                .iter()
+                .any(|row| row.symbol == "CompleteTargetSetDigest"),
+        "a plan-named digest must stay on the carrying field, never become a producer or reservation"
+    );
+
+    let mut missing_digest_class = identity.clone();
+    missing_digest_class
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "complete_target_set_digest"
+        })
+        .expect("KeyDestroyProposal.complete_target_set_digest exists")
+        .digest_class = None;
+    assert!(
+        codes_without_assignment_drift(&missing_digest_class)
+            .contains(&"digest_missing_class".to_owned()),
+        "negative control: digest256 without digest_class must fire"
+    );
+
+    let mut missing_transcript_recipe = identity.clone();
+    missing_transcript_recipe
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "complete_target_set_digest"
+        })
+        .expect("KeyDestroyProposal.complete_target_set_digest exists")
+        .transcript_recipe = None;
+    assert!(
+        codes_without_assignment_drift(&missing_transcript_recipe)
+            .contains(&"digest_missing_recipe".to_owned()),
+        "negative control: transcript digest without a recipe must fire"
+    );
+
+    let mut invented_plan_named_wire_type = identity.clone();
+    invented_plan_named_wire_type
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal"
+                && field.stable_name == "complete_target_set_digest"
+        })
+        .expect("KeyDestroyProposal.complete_target_set_digest exists")
+        .exact_wire_type = "CompleteTargetSetDigest".to_owned();
+    assert!(
+        codes_without_assignment_drift(&invented_plan_named_wire_type)
+            .contains(&"field_unresolved_wire_type".to_owned()),
+        "negative control: a plan-named digest wire type must fire"
     );
 }
 
@@ -7128,8 +7239,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         )
     };
     // A15 adds the first seven fully resolved KeyDestroyProposal members, the
-    // source-forced WeakStateIdentity basis, n45i's opaque key identity, and
-    // wh81's closed one-byte expected lifecycle-state tag.
+    // source-forced WeakStateIdentity basis, n45i's opaque key identity,
+    // wh81's closed one-byte expected lifecycle-state tag, and re18's
+    // carrying target-set transcript digest.
     // The two shared-union consumer fields are already removed through
     // `post_erratum_union`. Remove the remaining cohort so the historical witness still
     // reconstructs the exact namespace predating every post-erratum field
@@ -7139,6 +7251,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && matches!(
                 name,
                 "key_identity"
+                    | "complete_target_set_digest"
                     | "expected_key_state"
                     | "basis_state"
                     | "expected_current_configuration_ref"
@@ -8292,7 +8405,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 572,
+        pre_erratum.fields.len() + 573,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A12 residue tranche"
     );

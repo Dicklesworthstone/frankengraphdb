@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "2c2c119c8b627601933c73c60a161dcca041119034a1b657a6a44c1dbd10d06b";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3318;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3319;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "571ffd2d825d1b41af007ccd28ff88eb3d5faa4776e2eef5f2be0ded7114ff1d";
+    "ae85fb3235595df85af0d090c6900b0c91fc9551c8f37e2b2afd09d788f33a31";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 111;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "ea4bb314b26e1d35f71869223c3efb7d60c2fcbb3a454699beda45e8bb80440a";
+    "fc6cdd2a77bba32e4840757e4f17b22b18c75b006dfba91530b18c36d7867eb2";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -60,9 +60,9 @@ pub const COMPLETION_LAYER_SCHEMA_VERSION: i64 = 1;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT: usize = 4;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 438;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 439;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "3f18c603462fda3f7cf4420426e445cf787128bc3ee668d49fdb466f34578db5";
+    "a5a090c9e71f85888f18891c670be1233d305c1ce881b525aaa31264cff38afe";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 437;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 376;
@@ -347,7 +347,7 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 0] = [];
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
-static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 438] = [
+static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 439] = [
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459",
         slice_id: "a01",
@@ -4880,6 +4880,17 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 438] 
             "field|KeyDestroyProposal|KeyDestroyProposal.key_identity|key_identity",
         ],
         rationale: "A15 repeatedly requires byte-equal key_identity projections but spells neither a KeyIdentity structural producer nor a StrongRef/typed by-value use that would license one. The owner ruling therefore selects the builtin opaque id256 form, not a fabricated record and not WeakStateIdentity/WeakDigest. Its canonical bytes are BLAKE3(\"fgdb:key-identity:v1\" || canonical(0x0001 database_security_namespace_id:id256, 0x0002 material_class:u16, 0x0003 key_id:id256, 0x0004 key_epoch:u64)); the namespace makes clone identities distinct while same-identity restore remains stable, and excluding physical targets keeps rewrap/replication/relocation from changing the logical key identity.",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a15:ambiguity-adjudication:c4b54a063bd35e654e0c35628c05ea2005055123fe1fbb308e31054cd4be76b7",
+        slice_id: "a15",
+        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|4acbdf6f60172ecc877aa3d15608c48e82d2197f341fcd332fa8675e0ea76490|1|e20e1ee8d595c3b80349d5d2cf785578c0a2447bd0a8a4af81767169a99a57e2|shorthand field has no exact type",
+        source_locations: &["a15:2059"],
+        resolution: "maps-to-source",
+        resolved_source_keys: &[
+            "field|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|complete_target_set_digest",
+        ],
+        rationale: "A15 fixes the committed set as the unique sorted canonical KeyDestructionTarget identities and keeps this commitment distinct from operation IDs and the canonical operation-root digest. The owner ruling therefore selects one nonretaining digest256 carrying field with digest_class=transcript, never a plan-named wire type: BLAKE3(utf8(\"fgdb:key-destruction-target-set:v1\") || 0x00 || u32_le(target_count) || each u32_le(32) || target_identity[32] in ascending byte order), rejecting overflow and duplicates before hashing. No source law requires authenticated membership proofs, so Merkle/tree shape is excluded and any recipe change requires a new transcript version.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:9d87b7faa3ae557cc0b0eb4aecf03219a98f5758e0e5607b1fa28c5d7eb3d55f",
