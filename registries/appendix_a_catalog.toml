@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
 
 [target_manifest]
-target_count = 3533
+target_count = 3534
 projection_fallback_count = 111
-target_source_assignment_sha256 = "322f49d7457e5557735a6d3407589f87e83e0b3eaffbb0bccba9642bb91a1a6d"
+target_source_assignment_sha256 = "800ae40142293847dc5effb53f17991ee88bf5b12c6d5c8c195057d772efc2f6"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "33e8d9c5f6eb7447608290da8112ba21e20f826b19faaf36b098b2e3
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 59
+registry_epoch = 60
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -60423,7 +60423,7 @@ symbol = "TransparencyCheckpointValidationRecord"
 generic_signature = "<Role:AuthorityOwningRole>"
 source_key = "top|TransparencyCheckpointValidationRecord<Role:AuthorityOwningRole>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a21:2723"]
 
 [[top_level_candidate]]
@@ -109193,4 +109193,23 @@ target_row_id = "a05:field:sharding-role-transition-plan-legacy-retention-author
 slice_id = "a05"
 source_key = "field|ShardingRoleTransitionPlan|ShardingRoleTransitionPlan.legacy_retention_authority_transfer_plan_ref|legacy_retention_authority_transfer_plan_ref"
 target_kind = "field"
+definition_status = "declared"
+
+[[logical_kind]]
+slice_id = "a21"
+row_id = "a21:logical-kind:transparency-checkpoint-validation-record"
+object_kind = 0x0570
+name = "TransparencyCheckpointValidationRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_checkpoint_validation_record/"
+
+[[target]]
+row_id = "a21:target:logical-kind-transparency-checkpoint-validation-record"
+target_row_id = "a21:logical-kind:transparency-checkpoint-validation-record"
+slice_id = "a21"
+source_key = "top|TransparencyCheckpointValidationRecord<Role:AuthorityOwningRole>"
+target_kind = "logical-kind"
 definition_status = "declared"

@@ -13503,6 +13503,43 @@ fn idr_a21_audit_ticket_admission_spec_is_wire_envelope() {
 }
 
 #[test]
+fn idr_a21_transparency_checkpoint_validation_record_is_logical() {
+    let r = real_identity();
+    let name = "TransparencyCheckpointValidationRecord";
+    let logical = r
+        .logical
+        .iter()
+        .find(|row| row.name == name)
+        .expect("missing ruled a21 Transparency logical host");
+    assert_eq!(logical.object_kind, 0x0570, "Transparency code drift");
+    assert_eq!(logical.status, "reserved");
+    assert_eq!(logical.construction_order, 40);
+    assert_eq!(logical.role_predicate, "role-local");
+    assert!(
+        r.wire.iter().all(|row| row.name != name),
+        "Transparency must not gain a WIRE identity"
+    );
+
+    let catalog = real_appendix_catalog();
+    let source_key = "top|TransparencyCheckpointValidationRecord<Role:AuthorityOwningRole>";
+    let source = catalog
+        .top_level_candidates
+        .iter()
+        .find(|row| row.source_key == source_key)
+        .expect("Transparency source candidate exists");
+    assert_eq!(source.identity_class, "logical");
+    assert!(catalog.targets.iter().any(|row| {
+        row.source_key == source_key
+            && row.target_row_id == "a21:logical-kind:transparency-checkpoint-validation-record"
+            && row.target_kind == "logical-kind"
+    }));
+    assert!(
+        catalog.reservations.iter().all(|row| row.symbol != name),
+        "non-StrongRef family must not gain a reservation"
+    );
+}
+
+#[test]
 fn idr_a21_silent_resolution_unions_are_wire_envelopes() {
     let r = real_identity();
     let catalog = real_appendix_catalog();

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 59
+registry_epoch = 60
 
 [[kind]]
 object_kind = 0x0001
@@ -4795,3 +4795,12 @@ construction_order = 20
 role_predicate = "role-local || role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/resource_ledger_transition_spec/"
+
+[[kind]]
+object_kind = 0x0570
+name = "TransparencyCheckpointValidationRecord"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/transparency_checkpoint_validation_record/"
