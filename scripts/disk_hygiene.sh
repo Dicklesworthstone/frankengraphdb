@@ -11,11 +11,21 @@ classify() {
     *uug4*) printf 'pane3\tfgdb-uug4\tCLOSED\t[B]';;
     *njpk*) printf 'pane5\tfgdb-njpk\tCLOSED\t[B]';;
     *ymqm*) printf 'pane7\tfgdb-ymqm\tCLOSED\t[B]';;
-    *dkjg*) printf 'pane5\tfgdb-dkjg\tIN_PROGRESS\t[R]~7s';;
+    *dkjg*) printf 'pane5\tfgdb-dkjg\tCLOSED\t[B]';;
     *) printf 'unknown\tunknown\tUNKNOWN\t[!]';;
   esac
 }
 printf 'KB\tPATH\tOWNER\tBEAD\tSTATUS\tDISPOSITION\n'
+closed_kb=0
+closed_paths=''
 while IFS=$'\t' read -r kb path; do
-  printf '%s\t%s\t%s\n' "$kb" "$path" "$(classify "$path")"
+  meta=$(classify "$path")
+  printf '%s\t%s\t%s\n' "$kb" "$path" "$meta"
+  if [[ "$meta" == *$'\tCLOSED\t'* ]]; then
+    closed_kb=$((closed_kb + kb))
+    closed_paths+="$path\n"
+  fi
 done < <(du -sk "$root"/* 2>/dev/null | awk '$1 >= 51200' | sort -nr)
+printf 'CLOSED_SUBTOTAL_KB\t%s\n' "$closed_kb"
+printf 'CLOSED_PATHS\n%b' "$closed_paths"
+printf 'POLICY\tstatus+ownership+recoverability liveness; never age-only\n'
