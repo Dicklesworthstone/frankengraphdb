@@ -506,13 +506,13 @@ fn architecture_neg_rule_tables_and_resolution_pins() {
     let mut count = real_registry();
     count.bead_provenance.bead_count_floor = observed_total + 1;
     let codes = violation_codes(&count);
-    assert!(codes.contains("bead_count_pin"));
+    assert!(codes.contains("bead_floor_pin"));
     assert!(codes.contains("bead_source_count_below_floor"));
 
     let mut class_count = real_registry();
     class_count.bead_provenance.direct_owner_floor = observed_direct + 1;
     let codes = violation_codes(&class_count);
-    assert!(codes.contains("bead_count_pin"));
+    assert!(codes.contains("bead_floor_pin"));
     assert!(codes.contains("bead_resolution_class_count_below_floor"));
 
     let mut family_count = real_registry();
@@ -568,7 +568,7 @@ fn architecture_neg_bead_family_floor_rebalance_is_pinned() {
     let codes = violation_codes(&rebalanced);
     assert!(codes.contains("bead_family_floor_pin"), "{codes:?}");
     assert!(
-        !codes.contains("bead_family_expected_total"),
+        !codes.contains("bead_family_floor_total"),
         "the aggregate law must stay green here, or this negative is redundant: {codes:?}"
     );
 }

@@ -2948,7 +2948,7 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
     ] {
         if actual != expected {
             violations.push(Violation::global(
-                "bead_count_pin",
+                "bead_floor_pin",
                 "bead_provenance",
                 format!("{field} is {actual}, independently pinned value is {expected}"),
             ));
@@ -3024,7 +3024,7 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
         .collect();
     let mut family_ids = BTreeSet::new();
     let mut family_patterns = BTreeSet::new();
-    let mut expected_family_total = 0usize;
+    let mut declared_family_floor_total = 0usize;
     for family in &registry.bead_families {
         if family.id.trim().is_empty() || !family_ids.insert(family.id.as_str()) {
             violations.push(Violation::global(
@@ -3076,7 +3076,8 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
             }
             _ => {}
         }
-        expected_family_total = expected_family_total.saturating_add(family.min_match_count);
+        declared_family_floor_total =
+            declared_family_floor_total.saturating_add(family.min_match_count);
         if family.decision_ids.is_empty()
             || !blank_items(&family.decision_ids).is_empty()
             || !duplicates(&family.decision_ids).is_empty()
@@ -3114,12 +3115,12 @@ fn validate_bead_policy_shape(registry: &ArchitectureRegistry, violations: &mut 
             }
         }
     }
-    if expected_family_total != policy.family_rule_floor {
+    if declared_family_floor_total != policy.family_rule_floor {
         violations.push(Violation::global(
-            "bead_family_expected_total",
+            "bead_family_floor_total",
             "bead_provenance",
             format!(
-                "bead_family min_match_count values sum to {expected_family_total}, declared family_rule_floor is {}",
+                "bead_family min_match_count values sum to {declared_family_floor_total}, declared family_rule_floor is {}",
                 policy.family_rule_floor
             ),
         ));
