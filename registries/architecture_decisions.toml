@@ -167,12 +167,24 @@ count = 138
 source_path = ".beads/issues.jsonl"
 resolution_precedence = ["direct_owner", "bet_label", "exact_override", "family_rule"]
 allowed_bet_labels = ["b1", "b2", "b3", "b4", "b5", "b6"]
+# THESE FIVE COUNTS ARE FLOORS (`>=`), NOT EQUALITIES. `.beads/issues.jsonl`
+# has N writers; a pin that asserts its exact cardinality cannot be stable under
+# N>1, because any pane's `br create` invalidates every other pane's just-frozen
+# pins. Creating a bead can therefore never move these — do NOT "re-freeze" them
+# after a `br create`, there is nothing to re-freeze. They exist to catch the
+# opposite event: records disappearing (an import deletes DB rows absent from
+# this file). Raising a floor to the observed count is an optional ratchet, is
+# never required to make the tree green, and is the one operation here that can
+# red a pane that has not yet pulled — so batch it at a quiet point.
 bead_count = 401
 direct_owner_count = 98
 bet_label_count = 245
 exact_override_count = 19
 family_rule_count = 39
-binding_hash = "fnv1a64:92e9aeb73fc6e1f8"
+# Keyed by RULE, not by bead: a hash over every bead's binding was an equality
+# over the same shared-mutable corpus and broke exactly as hard. This one is a
+# function of the rules alone, so no bead can move it and a rule edit must.
+binding_hash = "fnv1a64:66a303ca1f79e606"
 
 [[bead_family]]
 id = "appendix-a-catalog"

@@ -51,14 +51,19 @@ bead_policy_value() {
     END { if (!found) { print "bead_provenance key " key " not found" > "/dev/stderr"; exit 42 } }
   ' "$ADR_TOML"
 }
-EXPECT_BEAD_COUNT="$(bead_policy_value bead_count)"
-EXPECT_BEAD_BINDING_HASH="$(bead_policy_value binding_hash)"
+EXPECT_BEAD_FLOOR="$(bead_policy_value bead_count)"
+EXPECT_RULE_BINDING_HASH="$(bead_policy_value binding_hash)"
 
 echo "==> assert deterministic event and provenance coverage"
 test "$(rg -c '"event":"architecture_decision_checked"' "$FIRST")" -eq 256
 test "$(rg -c '"event":"source_block_checked"' "$FIRST")" -eq 2
-test "$(rg -c '"event":"architecture_bead_provenance_indexed"' "$FIRST")" -eq "$EXPECT_BEAD_COUNT"
-rg -q '"event":"architecture_registry_checked".*"decision_count":256.*"bead_count":'"$EXPECT_BEAD_COUNT"'.*"bead_binding_hash":"'"$EXPECT_BEAD_BINDING_HASH"'".*"violations":0.*"outcome":"pass"' "$FIRST"
+# `-ge`, not `-eq`. `bead_count` is a FLOOR over a corpus every pane writes; an
+# equality here would be a second copy of the defect fgdb-lzol fixes, in a gate
+# rather than in the checker, and would red this script for every pane the
+# moment any pane ran `br create`. What must hold exactly is the RULE-keyed
+# binding hash, which no bead can move.
+test "$(rg -c '"event":"architecture_bead_provenance_indexed"' "$FIRST")" -ge "$EXPECT_BEAD_FLOOR"
+rg -q '"event":"architecture_registry_checked".*"decision_count":256.*"bead_rule_binding_hash":"'"$EXPECT_RULE_BINDING_HASH"'".*"violations":0.*"outcome":"pass"' "$FIRST"
 rg -q '"event":"source_block_checked".*"exact_match":true.*"outcome":"pass"' "$FIRST"
 rg -q '"event":"architecture_decision_checked".*"decision_id":"FG-ADR-BET-B1".*"owner_bead":"fgdb-w2-commit-protocol-9w3u".*"owner_crate":"fgdb-branch".*"profile_id":"FG-ADR-PROFILE-CONSTITUTIONAL".*"rationale":.*"contradiction_class":"none".*"replay_command":.*"outcome":"pass"' "$FIRST"
 for owner_kind in bead crate checker evidence; do
@@ -125,23 +130,39 @@ counts = collections.Counter(event["event"] for event in events)
 assert counts["architecture_registry_checked"] == 1, counts
 assert counts["architecture_decision_checked"] == 256, counts
 assert counts["source_block_checked"] == 2, counts
-assert counts["architecture_bead_provenance_indexed"] == int(POLICY["bead_count"]), counts
+# Floors, not equalities: `.beads/issues.jsonl` has N writers, so any pane's
+# `br create` legitimately raises these. Only the rule-keyed binding hash is
+# exact, because it is a function of the registry alone.
+assert counts["architecture_bead_provenance_indexed"] >= int(POLICY["bead_count"]), counts
 assert counts["architecture_violation"] == 0, counts
 
 registry = next(event for event in events if event["event"] == "architecture_registry_checked")
 assert registry["decision_count"] == 256, registry
-assert registry["bead_count"] == int(POLICY["bead_count"]), registry
-assert registry["bead_binding_hash"] == POLICY["binding_hash"], registry
+assert registry["bead_count"] >= int(POLICY["bead_count"]), registry
+assert registry["bead_rule_binding_hash"] == POLICY["binding_hash"], registry
 assert registry["violations"] == 0 and registry["outcome"] == "pass", registry
 
 beads = [event for event in events if event["event"] == "architecture_bead_provenance_indexed"]
 class_counts = collections.Counter(event["resolution_class"] for event in beads)
-assert class_counts == {
-    "direct_owner": int(POLICY["direct_owner_count"]),
-    "bet_label": int(POLICY["bet_label_count"]),
-    "exact_override": int(POLICY["exact_override_count"]),
-    "family_rule": int(POLICY["family_rule_count"]),
+for resolution_class, floor_key in (
+    ("direct_owner", "direct_owner_count"),
+    ("bet_label", "bet_label_count"),
+    ("exact_override", "exact_override_count"),
+    ("family_rule", "family_rule_count"),
+):
+    assert class_counts[resolution_class] >= int(POLICY[floor_key]), (
+        resolution_class,
+        class_counts,
+    )
+# Every resolved bead must land in one of the four declared classes; a fifth
+# would otherwise hide behind the per-class floors.
+assert set(class_counts) <= {
+    "direct_owner",
+    "bet_label",
+    "exact_override",
+    "family_rule",
 }, class_counts
+assert sum(class_counts.values()) == len(beads), class_counts
 for bead in beads:
     assert bead["bead_id"].startswith("fgdb-"), bead
     assert bead["rule_id"], bead

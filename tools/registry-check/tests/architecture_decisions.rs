@@ -161,7 +161,13 @@ fn architecture_bead_provenance_is_total_pinned_and_bidirectional() {
         first, second,
         "provenance order and contents must be stable"
     );
-    assert_eq!(first.len(), PINNED_BEAD_COUNT);
+    // A floor: another pane's `br create` may legitimately have grown the
+    // corpus since this pin was frozen, and that must not fail the suite.
+    assert!(
+        first.len() >= PINNED_BEAD_COUNT,
+        "resolved {} beads, floor is {PINNED_BEAD_COUNT}",
+        first.len()
+    );
     assert!(
         first
             .windows(2)
@@ -221,22 +227,31 @@ fn architecture_bead_provenance_is_total_pinned_and_bidirectional() {
             );
         }
     }
+    for (class, floor) in [
+        ("bet_label", PINNED_BET_LABEL_COUNT),
+        ("direct_owner", PINNED_DIRECT_OWNER_COUNT),
+        ("exact_override", PINNED_EXACT_OVERRIDE_COUNT),
+        ("family_rule", PINNED_FAMILY_RULE_COUNT),
+    ] {
+        let actual = class_counts.get(class).copied().unwrap_or(0);
+        assert!(
+            actual >= floor,
+            "resolution class {class:?} has {actual} rows, floor is {floor}"
+        );
+    }
+    // Keyed by rule, so this is an EQUALITY: no bead can move it, and a rule
+    // edit must. The corpus-wide binding hash below is a projection, not a pin.
     assert_eq!(
-        class_counts,
-        BTreeMap::from([
-            ("bet_label", PINNED_BET_LABEL_COUNT),
-            ("direct_owner", PINNED_DIRECT_OWNER_COUNT),
-            ("exact_override", PINNED_EXACT_OVERRIDE_COUNT),
-            ("family_rule", PINNED_FAMILY_RULE_COUNT),
-        ])
-    );
-    assert_eq!(
-        architecture::recompute_bead_binding_hash(&first),
+        architecture::recompute_rule_binding_hash(&registry),
         PINNED_BEAD_BINDING_HASH
     );
     assert_eq!(
         registry.bead_provenance.binding_hash,
         PINNED_BEAD_BINDING_HASH
+    );
+    assert!(
+        architecture::recompute_bead_binding_hash(&first).starts_with("fnv1a64:"),
+        "the corpus projection must still compute"
     );
 
     let entries: BTreeMap<&str, &architecture::BeadProvenanceEntry> = first
@@ -453,25 +468,51 @@ fn architecture_neg_rule_tables_and_resolution_pins() {
         .decision_ids = vec!["FG-ADR-CON-02".into()];
     assert_eq!(
         violation_codes(&zero_match_rule),
-        BTreeSet::from(["semantic_contract_hash_mismatch".to_string()]),
-        "even currently zero-match routing rules are independently pinned"
+        BTreeSet::from([
+            "semantic_contract_hash_mismatch".to_string(),
+            "bead_rule_binding_hash_mismatch".to_string(),
+            "independent_bead_rule_binding_hash_mismatch".to_string(),
+        ]),
+        "even currently zero-match routing rules are independently pinned, and \
+         retargeting one now also moves the rule-keyed binding hash"
     );
 
     let mut binding = real_registry();
     binding.bead_provenance.binding_hash = "fnv1a64:0000000000000000".into();
-    assert_code(&binding, "bead_binding_hash_mismatch");
+    assert_code(&binding, "bead_rule_binding_hash_mismatch");
+
+    // Raising a floor ABOVE the observed corpus must still fire. This is the
+    // vacuity control for the floors: a bound nothing can violate protects
+    // nothing, and `<` would silently pass every one of these.
+    //
+    // Each mutation is derived from the OBSERVED count, not from the declared
+    // floor. Another pane's `br create` legitimately lifts the corpus above the
+    // floor, and `declared + 1` then lands at or under the actual — which is
+    // how this control first went vacuous the moment the corpus reached 402
+    // against a floor of 401.
+    let observed = architecture::bead_provenance_index(&real_registry(), &repo_root())
+        .expect("provenance resolves");
+    let observed_total = observed.len();
+    let observed_direct = observed
+        .iter()
+        .filter(|entry| entry.resolution_class == "direct_owner")
+        .count();
+    let observed_risk = observed
+        .iter()
+        .filter(|entry| entry.rule_id == "risk-governance")
+        .count();
 
     let mut count = real_registry();
-    count.bead_provenance.bead_count += 1;
+    count.bead_provenance.bead_count = observed_total + 1;
     let codes = violation_codes(&count);
     assert!(codes.contains("bead_count_pin"));
-    assert!(codes.contains("bead_source_count"));
+    assert!(codes.contains("bead_source_count_below_floor"));
 
     let mut class_count = real_registry();
-    class_count.bead_provenance.direct_owner_count += 1;
+    class_count.bead_provenance.direct_owner_count = observed_direct + 1;
     let codes = violation_codes(&class_count);
     assert!(codes.contains("bead_count_pin"));
-    assert!(codes.contains("bead_resolution_class_count"));
+    assert!(codes.contains("bead_resolution_class_count_below_floor"));
 
     let mut family_count = real_registry();
     family_count
@@ -479,8 +520,8 @@ fn architecture_neg_rule_tables_and_resolution_pins() {
         .iter_mut()
         .find(|family| family.id == "risk-governance")
         .expect("risk family exists")
-        .expected_match_count += 1;
-    assert_code(&family_count, "bead_family_match_count");
+        .expected_match_count = observed_risk + 1;
+    assert_code(&family_count, "bead_family_match_count_below_floor");
 }
 
 #[test]
@@ -827,5 +868,85 @@ fn architecture_neg_planned_and_governance_entrypoints_cannot_claim_implementati
     assert!(
         !implementation.contains(&"cargo-test:architecture_decisions".to_string()),
         "scope mismatch must fail closed rather than laundering governance as implementation"
+    );
+}
+
+/// The concurrent-writer lock for fgdb-lzol.
+///
+/// `.beads/issues.jsonl` has N writers. Under the old equality pins, a bead
+/// created by ANY pane invalidated every other pane's just-frozen pins, so a
+/// correct pane racing another correct pane still went red. That defect only
+/// exists under N>1, so a single-writer test cannot see it.
+///
+/// The reachable states of "pane A freezes while pane B creates" are exactly
+/// the corpora that are supersets of what A read. This walks a prefix of that
+/// space with real files and the real validator, and the deletion control at
+/// the end proves the floors are not vacuously satisfied.
+#[cfg(unix)]
+#[test]
+fn concurrent_bead_creation_cannot_red_another_panes_tree() {
+    use std::fs;
+
+    let root = repo_root();
+    let corpus = fs::read_to_string(root.join(".beads/issues.jsonl")).expect("corpus reads");
+
+    // A pid-scoped fixture: a shared fixture name lets a concurrent pane's run
+    // delete this one's tree mid-test and fail a different assertion each time.
+    let fixture = std::env::temp_dir().join(format!(
+        "fgdb-lzol-concurrent-writers-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(fixture.join(".beads")).expect("fixture root");
+    for entry in fs::read_dir(&root).expect("repo root reads") {
+        let entry = entry.expect("entry");
+        if entry.file_name() == ".beads" {
+            continue;
+        }
+        let link = fixture.join(entry.file_name());
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(entry.path(), &link).ok();
+    }
+    let beads = fixture.join(".beads/issues.jsonl");
+
+    let write_and_validate = |text: &str| -> Vec<String> {
+        fs::write(&beads, text).expect("fixture corpus writes");
+        let registry = architecture::load_from_repo(&fixture).expect("fixture registry loads");
+        architecture::validate_architecture(&registry, &fixture)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect()
+    };
+
+    // Control: the fixture must reproduce the repo's own verdict. Without this,
+    // an empty violation set could mean the fixture is not being read at all.
+    assert!(
+        write_and_validate(&corpus).is_empty(),
+        "the unmodified fixture must be as green as the repo it mirrors"
+    );
+
+    // Pane B creates k beads while pane A holds a freeze taken before any of
+    // them landed. Every k must leave pane A's tree green.
+    for k in 1..=5 {
+        let mut grown = corpus.clone();
+        for i in 0..k {
+            grown.push_str(&format!(
+                "{{\"id\":\"fgdb-lzolrace{i}\",\"title\":\"concurrent create\",\"status\":\"open\",\"labels\":[\"b1\"]}}\n"
+            ));
+        }
+        let codes = write_and_validate(&grown);
+        assert!(
+            codes.is_empty(),
+            "{k} concurrently created bead(s) red the tree: {codes:?}"
+        );
+    }
+
+    // Vacuity control. Floors that never fire would pass every assertion above
+    // while protecting nothing, so losing a record MUST still be caught.
+    let first_line_end = corpus.find('\n').expect("corpus has a first record") + 1;
+    let shrunk = corpus[first_line_end..].to_string();
+    let codes = write_and_validate(&shrunk);
+    assert!(
+        codes.iter().any(|code| code.ends_with("_below_floor")),
+        "deleting a bead must trip a floor, got {codes:?}"
     );
 }

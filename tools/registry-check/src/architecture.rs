@@ -72,6 +72,9 @@ pub const BEAD_RESOLUTION_PRECEDENCE: [&str; 4] =
     ["direct_owner", "bet_label", "exact_override", "family_rule"];
 pub const ALLOWED_BET_LABELS: [&str; 6] = ["b1", "b2", "b3", "b4", "b5", "b6"];
 pub const ALLOWED_FAMILY_MATCH_KINDS: [&str; 2] = ["prefix", "appendix_a"];
+/// Corpus-cardinality FLOORS, not equalities — see `validate_bead_resolution`.
+/// A `br create` in any pane can only raise the observed counts, so it never
+/// moves these; only records disappearing does.
 pub const PINNED_BEAD_COUNT: usize = 401;
 pub const PINNED_DIRECT_OWNER_COUNT: usize = 98;
 pub const PINNED_BET_LABEL_COUNT: usize = 245;
@@ -79,7 +82,7 @@ pub const PINNED_EXACT_OVERRIDE_COUNT: usize = 19;
 pub const PINNED_FAMILY_RULE_COUNT: usize = 39;
 pub const PINNED_BEAD_FAMILY_TABLE_COUNT: usize = 14;
 pub const PINNED_BEAD_OVERRIDE_TABLE_COUNT: usize = 19;
-pub const PINNED_BEAD_BINDING_HASH: &str = "fnv1a64:92e9aeb73fc6e1f8";
+pub const PINNED_BEAD_BINDING_HASH: &str = "fnv1a64:66a303ca1f79e606";
 
 pub const PLANNED_CRATES: [&str; 70] = [
     "fgdb-types",
@@ -163,7 +166,7 @@ pub const PINNED_EXTERNAL_REVIEW_DECISION_COUNT: usize = 64;
 pub const PINNED_DECISION_ID_HASH: &str = "fnv1a64:21402ba5834603dd";
 pub const PINNED_BIBLIOGRAPHY_ID_HASH: &str = "fnv1a64:212896d82dc8caf7";
 pub const PINNED_BIBLIOGRAPHY_ANCHOR_HASH: &str = "fnv1a64:35bc497bde8cd1d4";
-pub const PINNED_SEMANTIC_CONTRACT_HASH: &str = "fnv1a64:b673378a10c5d7ee";
+pub const PINNED_SEMANTIC_CONTRACT_HASH: &str = "fnv1a64:6a1d00e11b6f3f77";
 // Filled from the independently reviewed append-only source/review transcript.
 // This is intentionally separate from `PINNED_SEMANTIC_CONTRACT_HASH`.
 pub const PINNED_EXTERNAL_REVIEW_HISTORY_HASH: &str = "fnv1a64:5e15e3d99eec84ac";
@@ -2427,9 +2430,66 @@ pub fn bead_provenance_index(
     resolve_bead_provenance(registry, root)
 }
 
+/// Canonical pin over the rules that decide provenance, keyed by RULE rather
+/// than by bead.  Every input is a registry field; `.beads/issues.jsonl` is
+/// never read, so no pane's `br create` can move it and a rule edit always
+/// does.  This is the pin that replaced the corpus-wide binding hash, which
+/// could not be stable across N writers whatever its form.
+pub fn recompute_rule_binding_hash(registry: &ArchitectureRegistry) -> String {
+    let mut transcript = Vec::new();
+    for (rule_id, decision_ids) in rule_decision_map(registry) {
+        transcript_field(&mut transcript, "rule.id", &rule_id);
+        transcript_array(&mut transcript, "rule.decision_ids", &decision_ids);
+    }
+    format!("fnv1a64:{:016x}", fnv1a64(&transcript))
+}
+
+/// Every provenance rule the resolver can select, with the decisions it binds
+/// to, in a canonical order.  A rule that gains, loses, or retargets a decision
+/// changes exactly one row here.
+fn rule_decision_map(registry: &ArchitectureRegistry) -> BTreeMap<String, Vec<String>> {
+    let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (bead, decision_ids) in owner_decision_index(registry) {
+        let mut ids = decision_ids;
+        ids.sort();
+        ids.dedup();
+        map.insert(format!("direct_owner:{bead}"), ids);
+    }
+    for label in ALLOWED_BET_LABELS {
+        map.insert(
+            format!("label:{label}"),
+            vec![format!("FG-ADR-BET-B{}", &label[1..])],
+        );
+    }
+    for rule in &registry.bead_overrides {
+        let mut ids = rule.decision_ids.clone();
+        ids.sort();
+        ids.dedup();
+        map.insert(format!("exact_override:{}:{}", rule.id, rule.bead_id), ids);
+    }
+    for family in &registry.bead_families {
+        let mut ids = family.decision_ids.clone();
+        ids.sort();
+        ids.dedup();
+        map.insert(
+            format!(
+                "family:{}:{}:{}",
+                family.id, family.match_kind, family.pattern
+            ),
+            ids,
+        );
+    }
+    map
+}
+
 /// Canonical pin over total Beads-to-ADR resolution.  Bead lifecycle status
 /// and derived prose are intentionally excluded; the stable binding identity,
 /// rule, and sorted ADR targets are included.
+///
+/// Retained as a reporting/diagnostic projection of the resolved corpus.  It is
+/// deliberately NOT a gate: it quantifies over `.beads/issues.jsonl`, which
+/// every pane writes, so pinning it made a legal `br create` in any pane red
+/// every other pane's tree.  [`recompute_rule_binding_hash`] is the gate.
 pub fn recompute_bead_binding_hash(entries: &[BeadProvenanceEntry]) -> String {
     let mut entries: Vec<&BeadProvenanceEntry> = entries.iter().collect();
     entries.sort_by(|left, right| left.bead_id.cmp(&right.bead_id));
@@ -2991,12 +3051,22 @@ fn validate_bead_resolution(
             issue.message,
         ));
     }
-    if beads.len() != registry.bead_provenance.bead_count || beads.len() != PINNED_BEAD_COUNT {
+    // FLOOR, not equality. `.beads/issues.jsonl` has N writers, so a pin that
+    // asserts a corpus CARDINALITY cannot be stable under N>1: any pane's
+    // `br create` invalidates every other pane's just-frozen pins, and correct
+    // panes racing correctly still go red. Every state reachable from an
+    // interleaving of creates against a freeze is a SUPERSET of what the
+    // freezing pane read, so a lower bound is exactly the shape that survives
+    // the race while still catching the hazard the pin exists for: silent loss
+    // of records (`br sync --import-only` deletes DB rows absent from the
+    // JSONL). Raising a floor is a deliberate ratchet and is never required to
+    // make the tree green.
+    if beads.len() < registry.bead_provenance.bead_count || beads.len() < PINNED_BEAD_COUNT {
         violations.push(Violation::global(
-            "bead_source_count",
+            "bead_source_count_below_floor",
             "bead_provenance",
             format!(
-                "{} has {} distinct records, declared count is {}, independently pinned count is {PINNED_BEAD_COUNT}",
+                "{} has {} distinct records, declared floor is {}, independently pinned floor is {PINNED_BEAD_COUNT}",
                 registry.bead_provenance.source_path,
                 beads.len(),
                 registry.bead_provenance.bead_count
@@ -3037,12 +3107,12 @@ fn validate_bead_resolution(
         ),
     ] {
         let actual = resolution.class_counts.get(class).copied().unwrap_or(0);
-        if actual != declared || actual != pinned {
+        if actual < declared || actual < pinned {
             violations.push(Violation::global(
-                "bead_resolution_class_count",
+                "bead_resolution_class_count_below_floor",
                 "bead_provenance",
                 format!(
-                    "resolution class {class:?} has {actual} rows, declared {declared}, pinned {pinned}"
+                    "resolution class {class:?} has {actual} rows, declared floor {declared}, pinned floor {pinned}"
                 ),
             ));
         }
@@ -3053,34 +3123,41 @@ fn validate_bead_resolution(
             .get(&family.id)
             .copied()
             .unwrap_or(0);
-        if actual != family.expected_match_count {
+        if actual < family.expected_match_count {
             violations.push(Violation::global(
-                "bead_family_match_count",
+                "bead_family_match_count_below_floor",
                 "bead_provenance",
                 format!(
-                    "family {:?} selected {actual} beads, expected {}",
+                    "family {:?} selected {actual} beads, floor is {}",
                     family.id, family.expected_match_count
                 ),
             ));
         }
     }
-    let binding_hash = recompute_bead_binding_hash(&resolution.entries);
-    if registry.bead_provenance.binding_hash != binding_hash {
+    // The corpus-wide binding hash is gone. Content-addressing was never the
+    // cure: a hash over every bead's binding is an EQUALITY over the same
+    // shared-mutable set as the counts, and broke on a legal `br create` just
+    // as hard. What it was actually protecting -- "the rules that decide
+    // provenance did not move" -- is a property of the REGISTRY, so it is
+    // pinned here as a function of the rules alone, keyed by rule rather than
+    // by bead. No pane's bead can move it; a rule edit still must.
+    let rule_hash = recompute_rule_binding_hash(registry);
+    if registry.bead_provenance.binding_hash != rule_hash {
         violations.push(Violation::global(
-            "bead_binding_hash_mismatch",
+            "bead_rule_binding_hash_mismatch",
             "bead_provenance",
             format!(
-                "registry binding hash {:?}, recomputed {binding_hash:?}",
+                "registry rule-binding hash {:?}, recomputed {rule_hash:?}",
                 registry.bead_provenance.binding_hash
             ),
         ));
     }
-    if binding_hash != PINNED_BEAD_BINDING_HASH {
+    if rule_hash != PINNED_BEAD_BINDING_HASH {
         violations.push(Violation::global(
-            "independent_bead_binding_hash_mismatch",
+            "independent_bead_rule_binding_hash_mismatch",
             "bead_provenance",
             format!(
-                "recomputed binding hash {binding_hash:?} differs from code pin {PINNED_BEAD_BINDING_HASH:?}"
+                "recomputed rule-binding hash {rule_hash:?} differs from code pin {PINNED_BEAD_BINDING_HASH:?}"
             ),
         ));
     }
@@ -3645,29 +3722,12 @@ pub fn recompute_semantic_contract_hash(registry: &ArchitectureRegistry) -> Stri
         "bead_provenance.source_path",
         &policy.source_path,
     );
-    for (name, value) in [
-        ("bead_provenance.bead_count", policy.bead_count),
-        (
-            "bead_provenance.direct_owner_count",
-            policy.direct_owner_count,
-        ),
-        ("bead_provenance.bet_label_count", policy.bet_label_count),
-        (
-            "bead_provenance.exact_override_count",
-            policy.exact_override_count,
-        ),
-        (
-            "bead_provenance.family_rule_count",
-            policy.family_rule_count,
-        ),
-    ] {
-        transcript_field(&mut transcript, name, &value.to_string());
-    }
-    transcript_field(
-        &mut transcript,
-        "bead_provenance.binding_hash",
-        &policy.binding_hash,
-    );
+    // The cardinality floors and the rule-binding hash are deliberately NOT in
+    // this transcript. This hash answers "did the ADR semantic contract move";
+    // the floors are operational tripwire state over a corpus every pane
+    // writes. Mixing them made 44 of this hash's 45 historical movements bead
+    // churn rather than a semantic edit, which is a change-detector with no
+    // signal left. The floors keep their own TOML-vs-const equality below.
     transcript_array(
         &mut transcript,
         "bead_provenance.resolution_precedence",
@@ -3688,11 +3748,6 @@ pub fn recompute_semantic_contract_hash(registry: &ArchitectureRegistry) -> Stri
         ] {
             transcript_field(&mut transcript, name, value);
         }
-        transcript_field(
-            &mut transcript,
-            "bead_family.expected_match_count",
-            &family.expected_match_count.to_string(),
-        );
         transcript_array(
             &mut transcript,
             "bead_family.decision_ids",

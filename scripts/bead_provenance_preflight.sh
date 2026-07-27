@@ -2,26 +2,27 @@
 # =============================================================================
 # bead_provenance_preflight.sh — what will this bead cost the tree?
 #
-# Bead provenance is TOTAL and PINNED by design: every bead in
-# `.beads/issues.jsonl` must resolve to a direct owner, bet label, exact
-# override, or `[[bead_family]]` rule in `registries/architecture_decisions.toml`,
-# and each family additionally pins `expected_match_count`. That binding is what
-# ties beads to architecture decisions, so it is not a bug.
+# Bead provenance is TOTAL by design: every bead in `.beads/issues.jsonl` must
+# resolve to a direct owner, bet label, exact override, or `[[bead_family]]`
+# rule in `registries/architecture_decisions.toml`. That binding is what ties
+# beads to architecture decisions, so it is not a bug. Each family also carries
+# an `expected_match_count`, which is a FLOOR on how many beads it selects.
 #
-# The tax is that BOTH outcomes of `br create` red the tree for every pane, and
-# nothing says so at creation time:
+# ONLY ONE OUTCOME OF `br create` NOW REDS THE TREE (changed by fgdb-lzol):
 #
 #   bead matches NO family      -> bead_provenance_orphan
-#                               -> bead_provenance_not_total
-#   bead matches a KNOWN family -> that family's expected_match_count drifts
-#                               -> bead_binding_hash_mismatch
+#                               -> bead_provenance_not_total       STILL RED
+#   bead matches a KNOWN family -> counts rise above their floors    GREEN
 #
-# Five tests go red until someone re-freezes by hand — measured at HEAD aa17857:
-#   architecture_decisions.rs  architecture_registry_parses_and_validates
-#                              architecture_bead_provenance_is_total_pinned_and_bidirectional
-#                              architecture_neg_rule_tables_and_resolution_pins
-#                              architecture_neg_semantic_change_with_stable_id
-#   identity.rs                appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events
+# The cardinality pins used to be equalities over `.beads/issues.jsonl`, a file
+# with N writers, so a bead created by ANY pane invalidated every other pane's
+# just-frozen pins and five tests went red until someone re-froze by hand. They
+# are floors now: creation can only raise them, so there is nothing to
+# re-freeze after a `br create`. Do not add one back.
+#
+# What still needs a human is the orphan branch, and that is the branch this
+# script exists for: giving a bead a home is a judgement about which ADRs it
+# binds to, and cannot be automated without fabricating provenance.
 #
 # NOT affected, contrary to a natural guess: `appendix_a::binding_contract_tests`.
 # Those call `load_catalog_file`, which is structural+semantic only. Only
@@ -102,17 +103,19 @@ fi
 echo "$out"
 cat <<'MSG'
 
-Committing .beads/ in this state reds five tests for EVERY pane:
+Committing .beads/ in this state reds these tests for EVERY pane:
   architecture_decisions.rs  architecture_registry_parses_and_validates
                              architecture_bead_provenance_is_total_pinned_and_bidirectional
-                             architecture_neg_rule_tables_and_resolution_pins
-                             architecture_neg_semantic_change_with_stable_id
   identity.rs                appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events
 
 REQUIRED EDIT in registries/architecture_decisions.toml: give each unresolved
 bead a home (a [[bead_family]] rule, direct owner, bet label, or exact
-override), then re-freeze the bead pins base-derived from the loader's drift.
-Which ADRs a bead binds to is a judgement call and cannot be automated without
-fabricating provenance.
+override). Which ADRs a bead binds to is a judgement call and cannot be
+automated without fabricating provenance.
+
+You do NOT need to re-freeze the cardinality pins afterwards: they are floors,
+and creation only raises the observed counts. If you find yourself editing
+bead_count after a `br create`, stop — that is the equality behaviour fgdb-lzol
+removed, and putting it back reds every other pane.
 MSG
 exit 1

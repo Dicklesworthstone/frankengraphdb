@@ -336,6 +336,10 @@ fn run(root: &std::path::Path, registry_path: Option<&std::path::Path>) -> Resul
                 s(architecture::recompute_semantic_contract_hash(&registry)),
             ),
             (
+                "bead_rule_binding_hash",
+                s(architecture::recompute_rule_binding_hash(&registry)),
+            ),
+            (
                 "bead_binding_hash",
                 s(architecture::recompute_bead_binding_hash(&bead_entries)),
             ),
