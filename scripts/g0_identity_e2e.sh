@@ -261,9 +261,17 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
 else
   die "Appendix A source-manifest event is missing or drifted"
 fi
+# The reference manifest's target_count is the same reservation total the
+# closure event reports -- appendix_a.rs:9887 compares it to
+# EXPECTED_TYPE_RESERVATION_COUNT -- so it is derived from the rows for the same
+# reason. It has held at 813 across the whole window only because no new
+# StrongRef family has needed a reservation minted; the bijection law permits
+# that to move, and a sixth typed copy of the census in this file would go stale
+# the first time it does.
+EXPECT_RESERVATION_COUNT="$(catalog_closure_census reservations)"
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_reference_manifest"' \
-    '"target_count":813' \
+    '"target_count":'"$EXPECT_RESERVATION_COUNT" \
     '"target_ids_sha256":"84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"' \
     '"occurrence_count":2458' \
     '"occurrence_transcript_sha256":"027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"' \
@@ -275,7 +283,6 @@ fi
 EXPECT_TARGET_COUNT="$(catalog_manifest_value target_count)"
 EXPECT_FALLBACK_COUNT="$(catalog_manifest_value projection_fallback_count)"
 EXPECT_TARGET_ASSIGNMENT_SHA="$(catalog_manifest_value target_source_assignment_sha256)"
-EXPECT_RESERVATION_COUNT="$(catalog_closure_census reservations)"
 EXPECT_EXISTING_RESERVATION_COUNT="$(catalog_closure_census existing_reservations)"
 EXPECT_RESERVED_RESERVATION_COUNT="$(catalog_closure_census reserved_reservations)"
 EXPECT_SOURCE_DISPOSITION_COUNT="$(catalog_closure_census source_dispositions)"
