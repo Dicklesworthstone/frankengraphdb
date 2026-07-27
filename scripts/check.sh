@@ -1474,6 +1474,24 @@ cd "$ROOT" || exit 1
 GATE_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-check-gates.XXXXXX")"
 echo "gate logs: $GATE_LOG_DIR"
 
+# Hold the landing lease for this run (fgdb-eesn). gate_init acquires it and the
+# EXIT trap gives it back, so the window is exactly this process's lifetime.
+#
+# WHY THE WHOLE RUN AND NOT JUST THE CARGO PHASES. The two-clocks exposure spans
+# `cargo check`/`clippy` (which BAKE pins in at compile time via include_str!)
+# through `cargo test` (which READS the corpus at run time) and on through
+# run_registered_gates, because g0_identity_e2e reads .beads at run time too.
+# That is everything below except the three fast closure gates, so leasing only
+# the cargo block would block landings for nearly the same wall-clock while
+# protecting strictly less. Measured from the run order, not assumed.
+#
+# INERT WITHOUT THE HOOK. This only takes a token; nothing enforces it until
+# scripts/git_hooks/install.sh has been run. And a lease is broken only by a
+# failed liveness test, never by a clock, so if this process dies the lease
+# becomes breakable immediately rather than stranding every other pane.
+export FGDB_LANDING_LEASE=1
+export FGDB_LANDING_NAME="${FGDB_LANDING_NAME:-check.sh-$$}"
+
 # Installed here, not at load: --self-test runs fixtures in subshells, and a
 # bash subshell inherits and fires the parent's EXIT trap.
 gate_init "check.sh"
