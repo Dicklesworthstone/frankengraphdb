@@ -230,7 +230,6 @@ struct ExpansionBindingContractPin {
 struct AmbiguityAdjudicationContractPin {
     row_id: &'static str,
     slice_id: &'static str,
-    ambiguity_source_key: &'static str,
     source_locations: &'static [&'static str],
     resolution: &'static str,
     resolved_source_keys: &'static [&'static str],
@@ -351,7 +350,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ExportLeaf|ExportLeaf<T>.authority_ledger_floor|c4bc39c591a9d281324c07f586b397d3f220f760fd3a710901241bb520821a36|1|b38933c6686aeb4d3685cd28e45711bba35d89372cdc71fbbe206366f4c8d5fe|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -362,7 +360,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:99a87928b4e9051fadedb901f4799986579d307add86f64e1c8848d530e53adf",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|CertifiedRemoteStrongRef|CertifiedRemoteStrongRef<T>|b39fefc96a603234b2dc09f7edf2008ca2d1feb141cd96771a98ef3e16761e41|1|5e088929034b341574f29a45686cdf1d5d9557cda5f89b7dd5e7916593213374|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|CertifiedRemoteStrongRef<T>"],
@@ -371,7 +368,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b73053d5a89314ce34bf5ab28ab0942c5ba8aa5c2d1cd43a6f59ff4449e15438",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|ConditionalGlobalCommandRef|ConditionalGlobalCommandRef|1c70ec29af199b478f5d1baad846385bccc9c8edf1fc9f7f9508bf8a5c5219d5|1|18cd870256f63617ce81239b64eb7facf86b7b9c86f83b103dd860e14d94fb69|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ConditionalGlobalCommandRef"],
@@ -380,7 +376,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6b485c80a37d34cd7e268be5fa2499117ce1c88914eaafab9bc9ee53e32cc15f",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|ConditionalGlobalTxnInputRef|ConditionalGlobalTxnInputRef|d4a3bb436c751796fe3fb6c545137f95f7652b8c0d31ab5f6fcf505851d80db9|1|87eb43319218196e5ebfb267fd6508096f1a4a7c506cff1673f136d4b93854a2|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ConditionalGlobalTxnInputRef"],
@@ -389,7 +384,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c1de29a1f04f3d29608d42035d829d168499200bf1449172de752428a74f6ba4",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|unparsed-trailing-tokens|ConditionalMarkerRef|ConditionalMarkerRef.axis.Branch|432cef30c5ade11e7f90c50e8dc1cbb9de5b48248640ae73638235160159ea5d|1|d3c6d14c50bec6f204c2f7e4935cb8a075836aa77c10910db544f330ae064655|tokens after a union arm name are not part of the closed source grammar",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["arm|ConditionalMarkerRef|ConditionalMarkerRef.axis|Branch"],
@@ -398,7 +392,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e5067c1188355a4aeedc045cd474f780b8f80e01a0e129dcfd0569e5dbf960c0",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|ConditionalShardCommandRef|ConditionalShardCommandRef|6c093c951aaa6a1f6ac0d7c10df11df3f43dd684da1a7e7dfc26d3b848f95137|1|a43c710d12c846a7f45f8d5d43b5b8ff208be33d1601089bc6afd3248b01a353|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ConditionalShardCommandRef"],
@@ -407,7 +400,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6a6f71c5287f6e68eedbe69fa907319d95baf3c892ae49eb331e73f76a5a81bb",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|ExportLeaf|ExportLeaf<T>|2a6149ec6651f4d0d7c096f1be0e9bf960b418fa297725dedbd9ce60427b72d0|1|9a28b0dd7bda9622920d201883d9d5e96eba4f6546f8b80fd13fbfa5d9b79e3d|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ExportLeaf<T>"],
@@ -416,7 +408,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f6b057d813024d9cdae86474e26e70f832b8b56ea96997303e2ea6e8d9fb180f",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|MarkerRef|MarkerRef|bf34630f476a4a5651ddc0bb643f4c3c8ca734034ddf965e1928b3675cbebcfc|1|d3da3893e9e3d9cc0fb28faaaf071e15df018a5ff9c918f0503e2f2fccda5de0|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|MarkerRef"],
@@ -425,7 +416,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:19071118724e502558c8001fc247894ad3c6e95f24063c3c06a7259543443905",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId|70c0603c29e5e1356b75d95097c8c6169aa4caf40488b24a7890938f164cf6a1|1|7b328a6974a5d4010e974e3c5ed04ed52d1942ce154471d6544eead1534710b8|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1443"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PlacementDescriptorWithoutId"],
@@ -434,7 +424,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c4d2564bf7c395c7b349e663138fcb4c1e4361690d3c26044b1aecf73e43ec0e",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry|a5e981301589a1520aca35647fa484dc71349aa0420c1e4b4a1609bf1cdc8110|1|c7e39cfafaac6f72e3689ce663cb1ff19b0c66b694880edeaca387ac0874529a|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteReleaseSummaryEntry"],
@@ -443,7 +432,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0da0b826f748cf4bd8faa497654351a2a9764542ea6982b41924de7afa6d745f",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|RemoteRetentionAckPublishRecord|RemoteRetentionAckPublishRecord|b135cc54161d56875ec002ba4886b7dbe72fe7e3ef6e505624c30f49a239a02f|1|c2980268d682dbb341097c95de3d1595b76ac4c7aafde14709fffcd917a5f92d|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionAckPublishRecord"],
@@ -452,7 +440,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f91e77715cb9aae0faef9408747017b3a72f0d8d8c57bc1ab44771bba3169884",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|RemoteRetentionConsumeAckRecord|RemoteRetentionConsumeAckRecord|e12ec4268849c30da06a685d3160d4d4c01ae6e6197c835a2f301bf80aa6a5b2|1|95541dcaf7f3351ca22b6bc8ccfacc1bdd2f499457c1883ad4e1e491c75533c1|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionConsumeAckRecord"],
@@ -461,7 +448,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:4286033216d0e30f33f3289adca37f9ae9dbd4cdcfb89adbc1b94aa8cf488b43",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence|ae9272fed9c1926d9dd22ee518136372998b6d6473da1f395f8e68839d57a7a4|1|657b3abd8db11dbb6f0da4b18e0f7a5308b2aa35e1bc3f6519fef33f7507a7f5|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionGrantEvidence"],
@@ -470,7 +456,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ca4727cb8f2c1151bad56af9e8998591d000a55bf9cf95566c5ddcafb4911df2",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|RemoteRetentionGrantRecord|RemoteRetentionGrantRecord|63cf2d41141b954ad102692841aeb1339b95eb0aab3343333dff25c65ff8e259|1|23fe225999d1d4c0b9a69c357b96198f579c2002eb6b622bf77078ebe3ec79b1|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionGrantRecord"],
@@ -479,7 +464,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9201ddc13a840cea2d41c1df2285130c96caaf6c76b5d87456ebd7632f93fb5d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate|9503797f73ba221918b99a5e6110154b4a2be19ee360d0f5d80935dfda5b766d|1|b0baa8c4a8438d18729d8427b18e3d858484938a9e72e731b91c5d5a337d75b7|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseAckCertificate"],
@@ -488,7 +472,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3e6f76af12b99912355abdcc8a766637447f32aa917a064eb14bfce535122caa",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec|f9712652dd2d96b3250a5c9644bf4aa5b25ed72780f701f815424862821ac4b6|1|c37f4c468412d1813cc72ba13fcfb6d46205da890cc15413897bb9608a10462e|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseApplySpec"],
@@ -497,7 +480,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:64ced526a660b98827cbc3ef997b177b68c4a84a15985fafd6640a432f68a5d3",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate|aa7c90ebdbe86775bf9fc1ec490b5877728d8d5bb78ae63606e924be64a24919|1|abe5a713343b96a497b548dd4d0d27df433230303dbb43716e0a9fd9635c83fa|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseRequestCertificate"],
@@ -506,7 +488,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:7a55234f5fdc43b6974252edcd0de7eba52e436ac217f10f8401ef6885ae9941",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|RemoteRetentionReleaseRequestRecord|RemoteRetentionReleaseRequestRecord|61530d8643d85319f1cb388802fdc52e9129c256a3d30de91eac7beec88df354|1|30b24af58989d99905dba44a649accae29ddac62d70449c69bd0eae64d493f37|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseRequestRecord"],
@@ -515,7 +496,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:18d5436cd38b00236a2ca12e02bdeac86602803425abe2d1fa455996f2ad7f59",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec|7e7fc554f76b1ab633f3ce5abd6f1f383582a4ae95c842bcaaab9ba6f6d358da|1|2fe7a232f60901b8e08d8d9b67dd68e1702d4bb7b7754649245b487de98b2838|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseRequestSpec"],
@@ -524,7 +504,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e120bc8a45d1cffd3c567b730d1c1c94e3efc66dfdec7c758fc8a7a7ab7bd8af",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|RemoteRetentionReleaseTombstone|RemoteRetentionReleaseTombstone|b3a56e67486b815efd605b198f74ee4c385529f4bb2cab6eb7bff97f03e2fe8d|1|2d9fe3cc679b241d3b6a8180364a187e7f4de76f77eccc5ec43b1a078e08b86c|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseTombstone"],
@@ -533,7 +512,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:159ccf72cd3fb33feaaa8a683be064682e50c25785f7cbe598da6b0be0087f92",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|StrongCiphertextRef|StrongCiphertextRef<T>|82193dbf61cc4670f7c7e102979b2f092d28d05fd794a407e80c816d419a38c0|1|654fd967a2ec23010eae0f5a93a68ce28a850893e2fb54070dad57922d656a97|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1410"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|StrongCiphertextRef<T>"],
@@ -542,7 +520,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b88b270c8e81a91838a8ad22b084d5f62869bfc4017064ffb7017275d923a751",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|StrongGlobalCommandRef|StrongGlobalCommandRef|ab717bb56140dfc383b871d4b743b3c16b70455638346b2124482ad78b4b3399|1|73185a853b4f6b2c1b0f618018b807b434a60601f41bc6abcd2f8ab532c20494|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|StrongGlobalCommandRef"],
@@ -551,7 +528,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f2ff70af4b775f5145f4f900f742808ffade01b29c77ed78fafb5b4338eb7c37",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ExportLeaf|ExportLeaf<T>.export_projection_version|f623dca97e62855892441afc7df4e85ebcd3de07982e27f7067c0da193b1a433|1|7b8897ff7a937be87f571e969cc4e57a33b88b343f6f59b55f7c6e41d7ef92f7|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -562,7 +538,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f415e1d2a5f705c55cb0e824abed15b2718e4379274f36ef4173e7fbcdc07b56",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|StrongShardCommandRef|StrongShardCommandRef|adb6a69116e2579e5bb7b4a468c1a52798cc7eb85de04cf95d693c18144b31f5|1|e0e4b624813a9836962d2891bf1e4c7337957238f458e8f9e4df216bde1796a3|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|StrongShardCommandRef"],
@@ -571,7 +546,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c7ce81e2e7f285a53c0c12aead439bc99a21ae05d08f9e8cdae9acf3a09e857d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|WeakGlobalCommandIdentity|WeakGlobalCommandIdentity|46370ba4d0accf8846aed85909c57493f0d3268760ef88b4afb7f98dae7a6875|1|295e8aa5e1ba5fe360e1b1886b14c21d150e04cde511fbd5fd5de83343688325|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|WeakGlobalCommandIdentity"],
@@ -580,7 +554,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:1268173b9b0e90db9b8c6ff9e5fecbccc41c62c0f6eca9a75bcc274bc78c89df",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|WeakShardCommandIdentity|WeakShardCommandIdentity|aaefc54798aaa1b017c44e9478b4bd3e4d6028ecc01c71f9638f28bd5fa64da4|1|840cddfe963bbc285fbf55f8377752676d0d6c5d871b97658605712304a77283|leading named record has no explicit top-level ownership cue",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|WeakShardCommandIdentity"],
@@ -589,7 +562,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c3451eba691ae2bb32b935e0e2f4f563b7ab458f675c0418e8af0b3a7a86b418",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|conflicting-candidate-evidence|ConditionalGlobalTxnInputRef|ConditionalGlobalTxnInputRef|d4a3bb436c751796fe3fb6c545137f95f7652b8c0d31ab5f6fcf505851d80db9|1|87eb43319218196e5ebfb267fd6508096f1a4a7c506cff1673f136d4b93854a2|the same schema source key has divergent structural bodies",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ConditionalGlobalTxnInputRef"],
@@ -598,7 +570,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:83653995aca02322485f58cf8cc3a4937305ef9f84d50c6659fc2cd9004e136e",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|conflicting-candidate-evidence|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId|70c0603c29e5e1356b75d95097c8c6169aa4caf40488b24a7890938f164cf6a1|1|7b328a6974a5d4010e974e3c5ed04ed52d1942ce154471d6544eead1534710b8|the same schema source key has divergent structural bodies",
         source_locations: &["a01:1443"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PlacementDescriptorWithoutId"],
@@ -607,7 +578,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:892b85a96dad0e9766ca9fbef78fc37c5df29d469861d7b1bc9d6b1f7c567182",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|definition-without-structural-body|CanonicalScalarProfile||9e68621b328e90a3c62c448f0ac3fb6d570b290d8e77d707a9d5229961305985|1|50a8b8f79acb19697da1f4247e24fff423714fd5bdccccb34455eb9f0c8e52e7|definitional prose names a type but supplies no adjacent structural expression",
         source_locations: &["a01:1392"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|CanonicalScalarProfile"],
@@ -616,7 +586,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:608b425da6fb9c8cda3d49a78aae9a3e8c02fc48b30e613e1b2c417b202ae14c",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|definition-without-structural-body|None||dc937b59892604f5a86ac96936cd7ff09e25f18ae6b758e8014a24c7fa039e91|1|34a69cd2df6dbb2fad842df2213bde5d8cde2f78b5164d3cef45e8c1506b6710|definitional prose names a type but supplies no adjacent structural expression",
         source_locations: &["a01:1390", "a21:2649"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|None"],
@@ -625,7 +594,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:5c7c00068e6786930898a4cd7ca0936d1be398fa90428449bc501db193221292",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|definition-without-structural-body|PayloadAvailabilityCertificateRef||41a4a35c700e7b646ca05717d32a19a6d5d3344589a4e4f359ff850097b0bf24|1|bfb70c0a25e19f1744aaf7f55673ae5d4f9c9f7e132b57588104160371e93bb8|definitional prose names a type but supplies no adjacent structural expression",
         source_locations: &["a01:1410"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|PayloadAvailabilityCertificateRef<T>"],
@@ -634,7 +602,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:05d7e3bb322be80fda931743566a01b05d3b38cf82f7b0d5c40fd940d655af1c",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|definition-without-structural-body|RemoteConfigurationRef||8a877c85a0180443d74fd85afcf7e2c5acbf1302eaf95d0c9680c218ffbe6d41|1|0a078aeeb4201c5125f6e26b1e10e060d0e6b0afd994b55fc1ec4985032e546c|definitional prose names a type but supplies no adjacent structural expression",
         source_locations: &["a01:1398"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|RemoteConfigurationRef"],
@@ -643,7 +610,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:36c38b8690c34ce658b11fd0ddde6ac14aa37b8c84284910f9de561091d317e3",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|definition-without-structural-body|RemoteGrantTargetRef||406be18c12e881c605056f4a9f85648955bdcd6082efb78523d69b963e5af073|1|4439a561ba8a7ba891553f732c92cb874f8d697b266a050475dd2861fc7a423a|definitional prose names a type but supplies no adjacent structural expression",
         source_locations: &["a01:1402", "a04:1578"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|RemoteGrantTargetRef"],
@@ -652,7 +618,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:bf3f4910c7babb04019eba3e8a9d5ff90e67cf04fb39ccb54ac7192b1d4ff437",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.adoption_log_prefix_digest|3f6d1ca92a6b5d63424fa952e288dd1682e1120c21cb7308e4da28cd12a9f801|1|94346efcd01e685e0b97191bd948a7030240485414b08046ab67b6c40d716cf9|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -663,7 +628,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9ef85f201456d54979f092bb31b1777aaaf90d831e425af9b6701f465bb99d80",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.canonical_configuration_bytes|fc68df4a8100b5e2b3b389194ea8ade0b962901978b0ec30dd7f7665d486a622|1|9a2b0f21be3b76f8d76bf6633a711e6d17f8e04c379e0ac44c67920f4a2ad276|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -674,7 +638,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:44d2f6bcfdaa7e6ac3780a200d27f10a33a0b638fb0615f3c96f5e98d64c6592",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_adoption_raft_index|a6200217fa40abef3d7b65e7e4f187b24e3bab46d99adab5e8ebf760f742514c|1|ac36053b2b2fa43a5e22eaf635396bf8a31bf1f63d6b6b2ef39553c7b9262ccc|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -685,7 +648,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:af7e299a09a52c513493942368959abef28db73ce3341a288576b8eb4b53c0f4",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_canonical_digest|ffc6a08972e5e120808c77c98e1682e03807c4a921aeeb61b247ced1bf467bf9|1|ab9b1b2d93c3e647152e98bced47888245368afc05d56612da99313881a7b2d2|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -696,7 +658,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:86202e40010f1afc8012891816b8808b7e6c8ce542ab9892b8cf0b01af0dd23d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_oid|b4ba7337b02912dbdb1d2556f0f336781bb08d7b8de119e9e03387741a14bf29|1|2ac62ed0f8d3d87ab310c488ed5a9642a786d3aef57e1db582ce1b3d2fbbe12c|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -707,7 +668,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:bf26b9e5234ca109bef539c1a4c98e58925e1c2e3dd5e123f0b75fc633ef523e",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.configuration_quorum_signatures|5e039f2728144d7c6c0dbf60909319f1960786dbc0bd4c354b18466938513b83|1|05d20d4e0a20f87e623723a40753b4bd4d77d452a91c0b685e5841f2fcea7e91|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -718,7 +678,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0cbbda898da10fa9b89f900be61c7b9aed7bbd0934366e1e71f3abdde07956a0",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.member_verification_key_set|9228d0f8c89f45c97b207618a9296c8f8b7951c5168aefb3c15dd36a56e91f46|1|7b19c194224119cc46717130957596f006a55ca994850922b1ccf7b15dce5a7b|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -729,7 +688,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ee8990906ae0c1ecb94acbbe2f5723f319918c316d350f7108484833b54ba629",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.minimum_configuration_retention_floor|e56db1355acc784b116b7aabb64186db0bd720d85cddc92c8bfeb17afdfeb57b|1|02dfe7b844480a841425e8136513334e28c5c12f33cb808dcedea988f1900129|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -740,7 +698,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e9dc734b30ce92280487bf83e234b3face8e3ea47b93f841bf472a2ef76643a2",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.payload_predicate_digest|85b5b766cbd934ab08443a080c8789e6312c4e26e9fb42a97186c25fa3f46956|1|0e6034f8e22f941c5a067a2e7bd992b96d0a89ffb57a8e14b512d1cbbe4e4728|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -751,7 +708,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:785c16b82f46561a50e849315dd7e84c669b4f3b703746b32b4963ed6625b54e",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.signer_epoch|8a955431bf60ecd9ee861704046648542da9fb2d078520d940f63ef1398b4765|1|991d203f9334c99be8acd5d8d4b19dc6153578c08d25dab0b1aa4afcb7624c52|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -762,7 +718,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:89368ae55192e51984ac23f81f0afa52c478e1ce606f91c776060f4c8a595396",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.authority_quorum_signatures|56de356f4b1371c3c545ba560a7111f346594c418d015419dcb8fef7601d9a4d|1|facd33fc809fe34a79465328721f5f5274f0ffe9f76debdcd65d455d027cca40|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -773,7 +728,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:550459906367220aa9ba71ed7b8aab0f60f321bb09c75879e1d3deec8fb0f15d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.authority_retention_floor|faec9ce81314483ac776624bbef8b05e7ba973f3d5508e9a7f3f44608c236ae4|1|fba644be42a7b8337e44cbbef925fe49c41db010b749500a11365d7e00e76e43|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -784,7 +738,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0780dfaa7be7e082803da9d4d1d980f09c6ab855346e8a7f8638b7c5daea7ea9",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ExportLeaf|ExportLeaf<T>.target_closure_inventory_digest|e9f4ca6621f4e36a6c7058504702c6ef874721b67a2a9208b46097af61cc285a|1|2cc6119c3cc09cc413de2cba219108faa619dd605a0615a204f7dae1985d474d|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -795,7 +748,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:088c4ff91992149430ae731d5ff92818988720134060669d7f25967c8e35e59f",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.encoding_placement_coverage|9b55bcdb27d3c8b9d1c7e27801d59e7f86a64126eca571ae6a0826c753569db5|1|7724f2742410a6affc66d6564aeea475aacec16dce6b21091f2e26d5075016a2|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -806,7 +758,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:330ec263173ef0a9576a1913c6ba0487bf4138413b87bd18ecf4f7ed4b08fb49",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.failure_domains|3f3d759ddf7f238e5931f429d410022e227f5d84c9522fae6abf88088d6f1852|1|710e3a0d8f16d56e1e217dc10c0cf628484878501f43c7fb7cb5050871b36ac3|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -817,7 +768,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a3d03272c5e918952e4ac5c7fa89e97a8e29c5540a63623ff0ea776fea86e0ee",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.payload_predicate_digest|85b5b766cbd934ab08443a080c8789e6312c4e26e9fb42a97186c25fa3f46956|1|ec097a492f696a2d7af40e999272a7c0d2626b3120e7c4c9ece038872b205deb|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -828,7 +778,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:8891ee1b2dce0bcac481ecf3bb37e10b1194281a42f9f16bc24838fb04f87454",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.receipt_set_commitment|7a15be9ed109d3d4aec9d9a0345adfbfdfaf033eb7be0343f30980205ed815a6|1|86c1e22cf5e3cf16e7391afe6a3e393983e0ef029b466a8aab3537bf1b9b7359|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -839,7 +788,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:dadff94a138b7c32a653efd353155f880adab9d0a9d5bd1442b5faed58225b0c",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.signer_epoch|8a955431bf60ecd9ee861704046648542da9fb2d078520d940f63ef1398b4765|1|1a3f2922f3d2e330022c4d733c5f77156fadc78450705f768ad4cd8ba4352b8f|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -850,7 +798,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0b2170ebc0cdcae1b0a8fc5ae73c50e6539cbe87246be6773e4eca53e8c24b7f",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemotePayloadAvailabilityEvidence|RemotePayloadAvailabilityEvidence.target_closure_inventory_digest|e9f4ca6621f4e36a6c7058504702c6ef874721b67a2a9208b46097af61cc285a|1|52a91b1e32cbe3eaa440b93807aa03cd66e334e58e0b237d1378c2c6ef61ea90|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -861,7 +808,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:aba1b29d59bfb1146158d7c01d9f17f701b1a2f9aceaca04c3e15583a52481b3",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.ack_digest|26a0c8c280895f2a8a5fa2133a0c5da5e937e9ad91457a2cd1967d9b5dfec1e1|1|314c4125d4749187aa267f0fa56aedb9e5c05c635cd6f797a7ad3e52df5965be|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -872,7 +818,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ba383604b0f04fa552de5ca7b52083a58cec2bb816d9d50668b4cee84b8cb40e",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ExportLeaf|ExportLeaf<T>.object_specific_scalar_projection|db78957fc4e87eec0adcece6ae1bd57370e57206c74050f76c2ca8a3318c53d6|1|fc5ab2a4bb1ddee224c7ccc0bb65bc663b5f8f50dbc769f6266e22d2acb2149b|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -883,7 +828,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ba4b4e426fd4324114eaaad337e442b5ce7d6e038a34db56d1418c705e15954e",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.ack_leaf_identity|61de905f241e3ee171751c85c755cd05a255c541afcd5327ccf6b4e6e41af001|1|5aab29685cf0b0434adec2c3d5a9ab98ed8ca7c939b8a125daa9a590ee70862f|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -894,7 +838,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:23f9c08803b086cdbfc8c97b6f9659e8bb5c6e6a8c9cf04032f5f5d28e079408",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.authority_domain|68b123a21ae2a7c14c4ddc2e38626f5942b3f6ce93eeb69ab412c22694303766|1|ee4f77e22d96f2d4992820aff35712b464ef1264b4cb01676101707349f28530|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -905,7 +848,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:7d1a0cc415b4e6a6170783944fabb87802c0c72103c47fae6f2c414de670e118",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.authority_order_index|59013d383aab857a8fbabee16001fe972a1c5e4a6070b69079c2d83bf820ae1a|1|9ef1c20c7848d3d91e50f2d1f6aa39b7dd0a37ad3c68dec2f363931f63d362da|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -916,7 +858,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3ed46e16d278ca8758eb8f03cda81ec00cda011ecabf571c6efd9b1ced1f858d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.consumer_domain|df7455f547e1c8d13dd7f4a1bd780c9d151f3e8c1a2ce5a6b10eccc6c0fd75c3|1|c0b8c50d40d15e1926c2673e57b341268c3fe4e46e26c57da8167c4982b888cd|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -927,7 +868,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0a140168b441efaf4eba40cc6f5f32b10863296cf590c9a62de21e0694f64a5f",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.grant_id|27f6bd90fe7bdb302495d31830da1ce66c2fc2efdcae08a90cf59ccd517db115|1|a12f2caed8e900d0337e05eb274562db23bfc99ee8b889511b5bc9577b581ca3|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -938,7 +878,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:63373197a5998d375086fa33282c053b58e6273df62146964f86434530696359",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.permanent_release_proof_floor|4b71e9856404eedf9a7a222a9e6a34dc571cc71ef32c0e5d931842a06cde1246|1|b577bacbed11011141cd570bbdaa6b2e79943299d607aabe963fc0be7fdb2fba|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -949,7 +888,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9b5ce7da11e6c3031a9e2ff2d7f3f2c8868508ee8ee79cfe77c289a072e22a74",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.published_at_order_index|365c63a55f77f8b3dc2c90d4a1bbd93ac30870fd79a64e22a618b70ff8a1fb9d|1|355972555c580152bbddc34944d743c3beb62eca3788931b9240d02bab0ac86d|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -960,7 +898,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d010489d0119524a9d50b49a62f4f9944d175fac9a6ee4ad8de8128784e34969",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.release_nonce|15caa9e1be8b93b984ccbf175108151d96f095d573084525d7a4d1deacc79b06|1|2789b41382235330a3fdd089594badd72d22c4c2435b7c6d465e6be7f4ed818d|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -971,7 +908,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a8344545b02b95a838fadd3e5bbb725c3d60093f1ac88f08a2cc9acfcecff955",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteReleaseSummaryEntry|RemoteReleaseSummaryEntry.target_identity|ac43e82a633b092a515dd15ce3f767c9ab4cfb65bbb0d9ee4866264a2362c2ef|1|3ebb5e7b4bd24f0ec7ab3f29221174b1a9c1d942adbf73be389ffd43b78b63e2|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -982,7 +918,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:104955772015586008e43b5d3d99bd835f456ec5c11f29fce79c03c941ad0be3",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionAckPublishRecord|RemoteRetentionAckPublishRecord.summary_key|358a0abf4235506c63e1eae650b8a4a632095ee98e715c6e52613256d52fffed|1|0c33abc75e8f64d8f44a3d25a9a6535c5618056ddabc557b3d4bbd3d4a516f32|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -993,7 +928,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c63e45723d33f104675de8ed3e9a8417545aa6209c6ef981a9b04c56fcca5bd0",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionConsumeAckRecord|RemoteRetentionConsumeAckRecord.summary_key|358a0abf4235506c63e1eae650b8a4a632095ee98e715c6e52613256d52fffed|1|853b8fbba76f7afb9f08b567f44dbb34e73a91f65c11da08be3360b5fb00820d|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1004,7 +938,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3228dd0b5dd8875265298f3a724ef85adbebeb35fcbb5d05df62e87b91c40f82",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.authority_order_index|59013d383aab857a8fbabee16001fe972a1c5e4a6070b69079c2d83bf820ae1a|1|36fbee5324bd9ffa91aa689fbfa2387b5427f339ab0e06a385ea01cda0b0d871|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1015,7 +948,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f18419d17e8a08e7609f35ebbc6f4c09735a946a02c5e7512a3ab0406f72f8cd",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.authority_quorum_signatures|56de356f4b1371c3c545ba560a7111f346594c418d015419dcb8fef7601d9a4d|1|d49df532d66c735518769ecb06a268b3b764730d73666a333095acdc359b81ae|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1026,7 +958,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:fbd189543ad2fee10893b87f6f45d238a17c00595c70c1b415e5ab6dfd125b9a",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.grant_id|27f6bd90fe7bdb302495d31830da1ce66c2fc2efdcae08a90cf59ccd517db115|1|9f2ac593ad8126a942d92717bcd800ec86c12bb4742342ea8cde22b2be346636|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1037,7 +968,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d6336ec6c39141df42c4ed61b1cac308f22a269f73b8ff4aa55106247f19ce93",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.grant_nonce|4c576db69271ac2c50a56e9f678811f37464b495c81cce34016ed46c0ac6ad63|1|a8757c44786e19f6a52b62fe9093a6722d24b5a5a546b918b82d827ef8bbb83e|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1048,7 +978,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ee01aff30d2078379b503b7895ae8be464a00a752466263025dfbd0a45fdb667",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.minimum_authority_checkpoint_floor|20c3f12d6501ab5be2cb7969a9465f23511a3ea53238521aca406b02971096e2|1|2f9cb650301fb59f33481e2193836b7dc3579c77dae3920136827a04e9908271|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1059,7 +988,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a816a6e2f7d5f4db12015423d9bea5c670a3e072257be3f0931e3ed61d49bee7",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.signer_epoch|8a955431bf60ecd9ee861704046648542da9fb2d078520d940f63ef1398b4765|1|98a6867f372c0af40b38517ad2f64f3ca89fa28006533aff724a6fd48dade551|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1070,7 +998,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:86987e71c410029e676e72048d9e14928105ac680c68d7b8dd9b3fa3a1e5c49d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantEvidence|RemoteRetentionGrantEvidence.target_closure_inventory_digest|e9f4ca6621f4e36a6c7058504702c6ef874721b67a2a9208b46097af61cc285a|1|5b1625801033ae5993e0926054bc1a5a5f4bf62fabeaadfcc4f018ab2eef99d5|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1081,7 +1008,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0ea0c37a2094412a8669dca8c447980a4970f76b3485a3a4cdedc96d530f9740",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.grant_id|27f6bd90fe7bdb302495d31830da1ce66c2fc2efdcae08a90cf59ccd517db115|1|beee8fbb534b5334ebf765f3f348b249413add216fa7875a903745cad81f9e96|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1092,7 +1018,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d470f3413f5c4faa0a2bf88552faa881c88f926d15a1d7bbbe4ce71f53817a5d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.grant_nonce|4c576db69271ac2c50a56e9f678811f37464b495c81cce34016ed46c0ac6ad63|1|15213f89b32da1621b9d5e6325729cf09889ea8d5af5c258a7b320a100882c98|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1103,7 +1028,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e14ae8c12903b4309edf9249c9fe2bf44de6671a7cce5cd73ae3e05ff8478495",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.minimum_authority_checkpoint_floor|20c3f12d6501ab5be2cb7969a9465f23511a3ea53238521aca406b02971096e2|1|33cde523f3fd93cb4e0b61f96b67f43ed8dfa53715acac0f5dc6daa98a36027e|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1114,7 +1038,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ec608cc085dc6c92eb129bd6aaeaac5f75c75069834e27f23ce68b9733e6f445",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionGrantSpec|RemoteRetentionGrantSpec.target_closure_inventory_digest|e9f4ca6621f4e36a6c7058504702c6ef874721b67a2a9208b46097af61cc285a|1|6527dda0f73fba508c31022d5d9f2351c0441e8470d3f7e59efacc00805b64fe|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1125,7 +1048,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:38e1b1a453a2d78b3cd9b61fb722eb5dbee4e3ef16190d31191f4024a26a3d9e",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.authority_order_index|59013d383aab857a8fbabee16001fe972a1c5e4a6070b69079c2d83bf820ae1a|1|174469a7843c6453c2d41b92c182a89b868b5423e400a1e81ba8b77a29588e97|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1136,7 +1058,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:41ca748dc55b6431eaf3918bbe1b9a9734df2d1ca956d7e6f852cfb95efe5197",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.authority_state_root_digest|78e75b8b883d40522f329ac6895502ec7ca2cd9141bb0cd4b4cb303141ba6f1d|1|a0ea0bf11753016694ce3fa33b4d7c0e9ff753a6594017aa5b1234f71f6d36ce|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1147,7 +1068,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:7d5b5b36c4658a32b106702e723141f57156946818eca7b8170d5acbe23674ee",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.grant_id|27f6bd90fe7bdb302495d31830da1ce66c2fc2efdcae08a90cf59ccd517db115|1|0b6b5eb92810cd175fd678a707e39f34055f605b3e9156ad51461ea9baedf219|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1158,7 +1078,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ab27fb38ceb289b9a170a10a6a37c35180aea44221f333402b340661c320a043",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.quorum_signatures|4b7382d93588313ac60e777d7671792202dc4445f17d96d2882ed00971b64a35|1|412be3befdcb424ab5bc6bcef67962b647c8644365372e9cfb45c93c1f9b6615|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1169,7 +1088,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:4bff13c8b469f1d738a8680dbae3d6c5f816043ad51d34dd0bd69416985ff533",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate.release_nonce|15caa9e1be8b93b984ccbf175108151d96f095d573084525d7a4d1deacc79b06|1|eba2bea3631e67ba3fbb167d8d27171e26461363879e337724545743a403e777|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1180,7 +1098,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:2d325be7f8f0ffbecc4dcd60c205c8760a79e9e0f90ddbded5e1c491881921b5",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.expected_active_grant_digest|932d8a5a94aa8d19454cefb284ce6ee239b930fd0bf76be1add154de91aa54ff|1|0d61982ca6bd952a2c69dda70e942399093b34267b7c325788017f634c8d7636|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1191,7 +1108,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:edc4e45136d059b93d4d936f23332275c3cb4bde7ea64a96fe190c8170a56355",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.successor_transfer_proof|1d3ca7a2e079efd5915d2cfddf2174e951cf49856f1bd7209bba195b2ccd117a|1|8d289995242dd40b765139849e92f169f2de0a1cbf4058c623cf66c8d22572a5|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1202,7 +1118,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ad98d0bc880733e386ee6412e07437998406030d9bdb0efaff2e3793cb529ad4",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseApplySpec|RemoteRetentionReleaseApplySpec.verified_consumer_no_reference_floor|1067a6e6201ee71729b93d84143d7e4e80e91fcd831d1dd6718e14792741c458|1|0255e6bf55508186e7d79d094c363a62af350099d652082c0e70febdf44726bd|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1213,7 +1128,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6f795daeb8ab9c6f9256b4c88ddb79c7fe051c84ffd60b6c0d97a9e9cf557467",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.complete_consumer_root_digest|d76cefdc4c84ad41fa28af991a009ff6b7c12a96fa2d7b7e94bf9afe426ce014|1|6589f24162651b31d5d30e3c6f40a245693595cf8ffd27e738acd76f03c04342|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1224,7 +1138,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d0d66f4d6ea6017ab754904e8928b724aa730a3d5dc0354290c5e0f370981533",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.consumer_no_reference_floor_digest|7c7e6486114525898ec198a0f5957a9c584b2bb75acecf76bec19012a493401e|1|f34090437a8669307664a600f72358824566f0bdd4c29e70c61e5db88d6e5486|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1235,7 +1148,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b16fd118a0a64392b8ae28941eaaaf3b910196151732a38fe44b7fba9d08cc54",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.quorum_signatures|4b7382d93588313ac60e777d7671792202dc4445f17d96d2882ed00971b64a35|1|b3153c51c7cf9aa357701d7c669b7c1c394b427b4b93998c7a6b39b55a043bfb|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1246,7 +1158,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a5377c0f69a2ceeaea82196dd3cfdfe3b5bc4106771c28224f4a6a90a1c46aae",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.release_nonce|15caa9e1be8b93b984ccbf175108151d96f095d573084525d7a4d1deacc79b06|1|30471b9242da4a6b8657376fd6077c75689154253fe08238ad96a002ec9d03b5|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1257,7 +1168,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f08db86581e0fafa4b2e38638a61d8ecda6371c9da72cdb671f1b34212da455f",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate.successor_grant_identity|e559ba44b5afd503205b24d3c679fdca23610df1575bc64fe7e5f5773118e1f6|1|118e8077069af1876246e3678b616327a8c4056454e3e815e4cacd18c8e23d9c|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1268,7 +1178,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:4bbdb01f00f659a0e01412ae5d5cbaa2ddbc312ce44a5997149d1a2cd6d4ce0f",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestRecord|RemoteRetentionReleaseRequestRecord.consumer_no_reference_floor_digest|7c7e6486114525898ec198a0f5957a9c584b2bb75acecf76bec19012a493401e|1|7160448bd81d9eb338dea42663f47cccfbef36cd2a711fcad20995f8c07d33e0|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1279,7 +1188,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:05940c088f9ba416398714a189357ee97c8e2c7e728a68eb8f4bb9291e8e7c13",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.complete_consumer_root_digest|d76cefdc4c84ad41fa28af991a009ff6b7c12a96fa2d7b7e94bf9afe426ce014|1|a782dab5228e38ea5b02deb69bb1adce6d918cb5f1589b90913b8e7533c20d09|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1290,7 +1198,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:cb107c3b25092a752db12aa072dceaae7e10ce08c8500f44d0e944ec974e7da6",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.consumer_checkpoint_floor|20d326c95db5860b56f58c0f4ad4bf8260cb19da3c43fc0a8845ebd041f5f7a1|1|b36a5d704aa591d2fb41f3f0e317a3bdbee04e0a24c1a63e7cee5e08a22c2027|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1301,7 +1208,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:08913cde0840a5415b20c38f4728fca9d06781a479e6bcaf770b368c5488df0f",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseRequestSpec|RemoteRetentionReleaseRequestSpec.release_nonce|15caa9e1be8b93b984ccbf175108151d96f095d573084525d7a4d1deacc79b06|1|ee09324f4574faaf0e63d84a9fa02e14c5a72906341d42170d91c6ed77da7d83|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1312,7 +1218,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ce182745bb770c96a671b0eba846d4d9a672cefa40a51f10cc88575445bd0e3c",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseTombstone|RemoteRetentionReleaseTombstone.authority_order_index|59013d383aab857a8fbabee16001fe972a1c5e4a6070b69079c2d83bf820ae1a|1|61db89f3a0d04a6578a4919aa5d7f08ffab70ded556386537fad94838625325c|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1323,7 +1228,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:259538a996b4f52d0906e85b5e35436eee1012e4ada44589405094738a8b2725",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteRetentionReleaseTombstone|RemoteRetentionReleaseTombstone.release_nonce|15caa9e1be8b93b984ccbf175108151d96f095d573084525d7a4d1deacc79b06|1|11caeb4e5116643b8fa8bf716ade43294f1b42ea169ff786462dd63f3c0c4556|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1334,7 +1238,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0cea5eb3bef0bc9ab4c17b1671ce03661e717d8ec0742dffff4e0566a2255868",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustArtifact|RootAuthorityTrustArtifact.canonical_root_authority_signature_set|98656fd6440f1cb7c354f38d4ab363e0b9d6b6f4cc17fdb4ddf4343fd48ba65d|1|4b3c19c2935b07e62452c4a5aa64d334c807143614e5c8724c42b65897d07a14|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1345,7 +1248,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:47fbac16db79678402e6382624522139d902f97907bd56096457c3c53d502918",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.canonical_genesis_or_transition_bytes|2130574491455002d6300d91957a195dc794ab30602dfe7cc22fb1b59e86b92e|1|b30e4155c3a2c5987dee01958c2958939b1d14faf7b20330a952baca2418234d|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1356,7 +1258,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b458a33eb43d02f3b156bc7d4539c5ebbb3740aa8e13dc2d369d5d203d0873ef",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.expected_root_verification_key_set_digest|efdea27d33fb35f504475a8016e2c08830d7d8821a91932d9af0f78ee8d3da97|1|d0d0ce8938ccb50960925f5e72244dc5900ea4c4fec934a1a3f5bb16d6e54f46|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1367,7 +1268,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:caddd2e243775866bb52f8da1e62fa89adabfb26042229cc138a2f2eb194b950",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.externally_pinned_root_policy_id|e8f6004ed65e68f7aaf9189d8bd6f45231419ffb9374d8243d1e7ca10cd01f85|1|dbe55110c3b038e62b341a3788242a1302eb8677491b832cf53186b4711a99fc|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1378,7 +1278,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3fce4db02d1cb690e1e7204de1499f3ed1982f8f8eaecd41e1629b4c5403375a",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.source_identity_or_transition_continuity_commitment|07351b0457a3192f79b692fd77f43abf48f011f2011cb671db6a99c0601078d7|1|8a2ea05d7f1acac68a37a0dd3e9383bcf03be5c8aea01cfcd9a1fc358c4f910b|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1389,7 +1288,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0cfced7abb4163ebdcf4ffead214a475ffd662cb43bf1bb54c9848ce3cd137e6",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.target_configuration_canonical_digest|9e05bab4fd4b345b34909a5ed5ddc34f57c92871ab6bc29359c797fa7b6ac9b0|1|832303e888adbe3a970adf13e41562404abdae3ae45cf0bb46b11760942b46db|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1400,7 +1298,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ef9a226efe47962957214937e4f1158545bb53682355abfc8ee4b464438e32e4",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.target_configuration_oid|c6b33eecff1094498dea48db10f759d2e16c17fd71abc5105caf65d69d692075|1|72691e6346a8ce2af6a541072f3cb42a777fd24bba45571fcbfa4882e9cf57c0|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1411,7 +1308,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:396e4c7dcfc6962ef4e1b741b23543a382260c4385a4430104792dd47f60108a",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RootAuthorityTrustBody|RootAuthorityTrustBody.threshold|497e22fe854a24bcfb8aa568e454fa262cdb64a109e01dabf5793b46326144da|1|af27d97f9068cd10a2fb16ad91626df62a57de1ec00c2f9b4a5187ad20f12392|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1422,7 +1318,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ad518b83fc93d2e002e29f0b04c6997a3f4f7db95c0332b3396c97abdddbabce",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RootSlot|RootSlot.reserved_zeroes|430d9b368a63615aab93e1e5a992a6a175e06817ef96d624b1f3e71a3e13dfd3|1|6c638c353afa417955bdd8749fccfd8d0540ad7c312c09e6c694089eb17537c1|shorthand field has no exact type",
         source_locations: &["a01:1425"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|RootSlot|RootSlot.reserved_zeroes|reserved_zeroes"],
@@ -1431,7 +1326,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:09e59fe9e8d42990d61d08b6b8f2c7edb2526c89f0fdb20fae7745ef014a81e8",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|unowned-structural-fragment|||a10a1ee126cf3abfd9b71b87a6e94119944d8bf9383e56c30c3b5311ab4502eb|0|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|schema-like notation has no owner under the conservative source grammar",
         source_locations: &["a01:1398"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &[],
@@ -1440,7 +1334,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:34577cda100fc597ce5020921e7520ccf2ff9ea71a5bee91bcfed896e09733cc",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|unowned-structural-fragment|||ca9f00a3b8cc175b18ae5563499e963fe0f48db8a7463a85055ad81180bb5f6d|0|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|schema-like notation has no owner under the conservative source grammar",
         source_locations: &["a01:1406"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &[],
@@ -1449,7 +1342,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0d9fa91b6888b1d850b7dc8d59eabdf2aa50b4782f6cfe5d9abec75bd9127586",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|unparsed-record-item|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId|e22b532e93a1d233404c44401b800debc6e640d28c0156ee6adf06f9cd9907a2|1|7b328a6974a5d4010e974e3c5ed04ed52d1942ce154471d6544eead1534710b8|record item does not begin with a lowercase stable field name",
         source_locations: &["a01:1443"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PlacementDescriptorWithoutId"],
@@ -1458,7 +1350,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d7a9a4eb5a85dfb74c358f357b30941729f34bcffd4a4a80e5acbe984df5ca50",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|unparsed-record-item|RemoteRetentionReleaseAckCertificate|RemoteRetentionReleaseAckCertificate|dec1da9246adf963002710d7196c7ac12701ceb27c317b96f62bdf586e7e16a4|1|b0baa8c4a8438d18729d8427b18e3d858484938a9e72e731b91c5d5a337d75b7|record item does not begin with a lowercase stable field name",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseAckCertificate"],
@@ -1467,7 +1358,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b309ff017e04d9e2ad7b7d57dd82659a085c5ed58fb994ea08f5ca857aeb8b80",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|unparsed-record-item|RemoteRetentionReleaseRequestCertificate|RemoteRetentionReleaseRequestCertificate|dec1da9246adf963002710d7196c7ac12701ceb27c317b96f62bdf586e7e16a4|1|abe5a713343b96a497b548dd4d0d27df433230303dbb43716e0a9fd9635c83fa|record item does not begin with a lowercase stable field name",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|RemoteRetentionReleaseRequestCertificate"],
@@ -1476,7 +1366,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ba8e5e4bfced370e72e8c5f2de3110ca3176fc081dcbdf0ebbf5070c8109f914",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AppliedAbortRef|AppliedAbortRef.LocalControl.logical_command_seq|6772e0b779a88c182d3c72658ff39117288f1e21888b6d645f18cbfaf31f4f07|1|020316d94da326c610f0b897f752c5ac34e9bff4c12f6680f768d43cca180259|shorthand field has no exact type",
         source_locations: &["a01:1408"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1487,7 +1376,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:da6796d82ec8f0ad13cb7e98a3dd5027e081d6166fb25010f34fc1d3f942face",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AppliedAbortRef|AppliedAbortRef.LocalTxn.logical_command_seq|6772e0b779a88c182d3c72658ff39117288f1e21888b6d645f18cbfaf31f4f07|1|28934fb3533f5bb21a32c45c48cfce245328d1c6558f4f857e28975fc21f3c5c|shorthand field has no exact type",
         source_locations: &["a01:1408"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1498,7 +1386,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:cd5263e4e5a623d18abf05fd873322bd2aed0ecf4101650b392c8ac0dfe83342",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AppliedAbortRef|AppliedAbortRef.MetaControl.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|a435b6b799e25900fad7061a75eb6f72e70c9ad0ece40effecd5ed88c14175fe|shorthand field has no exact type",
         source_locations: &["a01:1408"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1509,7 +1396,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:86c7e179248aaf7991f43a1f3327c09353cf813cc01b8b33a36e4fa7bc70c63d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AppliedAbortRef|AppliedAbortRef.MetaTxn.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|b6e63e586168ac30d40e23ccf6af531fefe10ee078b9496e0ddc5f30c3b33f11|shorthand field has no exact type",
         source_locations: &["a01:1408"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1520,7 +1406,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:5a6fd0f3b82c7f0e25cc7f2e54a6979556e86845159ade0fc5db84f20a68ce39",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AppliedControlRef|AppliedControlRef.Local.logical_command_seq|6772e0b779a88c182d3c72658ff39117288f1e21888b6d645f18cbfaf31f4f07|1|e45f2177fcf44b32e9a17193ed8aabe669bb9347daeb8ebf57e3dc4764f21d4f|shorthand field has no exact type",
         source_locations: &["a01:1408"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1531,7 +1416,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:2d3a238643d53101c5c0b1b76309f7842bac2fde143198374ce80f7a28460922",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AppliedControlRef|AppliedControlRef.Meta.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|aeac36594abe2c36dd398f6201e669b186e27be64300033893a5d0f18c6b5f88|shorthand field has no exact type",
         source_locations: &["a01:1408"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1542,7 +1426,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:4cd9ff504a8f45737e9059b60893933afd7d86625b7e0c02f1f076120253317b",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AuditCandidateRef|AuditCandidateRef.Local.blocked_after_logical_command_seq|eb3a91041e06c8ea6319585162eaa84725fc15980da9200e158bf1d836e1a29b|1|e7358e9b2beddda6abf89fee4da29c07f3f46809579c6c1424cb72fc058646a3|shorthand field has no exact type",
         source_locations: &["a01:1408"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1553,7 +1436,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:000a7ee23e3de7a2a40e0eeaed2ea1b2597bf1afc47a0fa82604885626570e48",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AuditCandidateRef|AuditCandidateRef.Meta.blocked_after_global_logical_command_seq|21d0e2c97da51ac81a638f3cefee1f55ac8b34162861e2f77161732dfbe8a3da|1|ade225fa1453a73fd4a109654d8a9b203d45e6674cd67c6dfdbfcc88b5826c23|shorthand field has no exact type",
         source_locations: &["a01:1408"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1564,7 +1446,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3f8943e11fe38023572621016d3bd2736d76845c6fa86ca01ab11c963ac3d295",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AuthorityAppliedRef|AuthorityAppliedRef.Local.logical_command_seq|6772e0b779a88c182d3c72658ff39117288f1e21888b6d645f18cbfaf31f4f07|1|1dc8eb7afed586eafdf11f9a589affc8f2eef276b63cc8498fe4365d7d63921e|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1575,7 +1456,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:cd8a157343d76e480a778f55bb074c26f2b450fe8d1a019afcb01160605d0736",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AuthorityAppliedRef|AuthorityAppliedRef.Meta.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|c3480c2d81d0422a6ec095c619f951e715c2452ab223c567bac96566a5a8c8aa|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1586,7 +1466,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:645cd3190c29d6877e5b52fbd9a7eb2d12617be3015867f30ebf73aff4d632f6",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AuthorityAppliedRef|AuthorityAppliedRef.Shard.shard_raft_index|a27fa693b624fba3783550d90e89ab5aefe7ea90b62eb261b9121ba0e77873bb|1|76400cead191ecb9b721044ced97ee7880c32ff12f233ae14e615c9f1562b0a8|shorthand field has no exact type",
         source_locations: &["a01:1404"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1597,7 +1476,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:4798d0e4d5005fcd185c72d5e213ed7330f55d1af1d633542b7eab63fe45cf84",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CertifiedRemoteStrongRef|CertifiedRemoteStrongRef<T>.target_closure_inventory_digest|e9f4ca6621f4e36a6c7058504702c6ef874721b67a2a9208b46097af61cc285a|1|fb1eb2de82450003407412e48333584d6f8cc08dcafcda43f4db07459d0843af|shorthand field has no exact type",
         source_locations: &["a01:1402"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1608,7 +1486,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:8d3b56aa3a767ea542872bc1ba3fd0ab477a7ed2ca662c337ee1bf8949583e7d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalCommandRef|ConditionalCommandRef.command_ref|9b2ddb763a7736180dd65c3329ab8a347e9b3bee70006fb913700f8103032b71|1|a132328a25427bbdcde954a714f2d5a843cf5c92931bf4bbac824f5ce8d195bd|shorthand field has no exact type",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1619,7 +1496,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:35bc46ce1fd0d6c8b7488a044ef386504bc03fbd5d1ec2b770e86ab030a492d5",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalCoordinateRef|ConditionalCoordinateRef.branch|f38c764c8aa00b6578f4254a4dc6d9b50f88fa926e270ea7859bd1b707cd8662|1|1e5045ee3f3d13cdfac05bd4ccd2bddf5bfd776336d72ea79fc4ca5d60a7900c|shorthand field has no exact type",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1630,7 +1506,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:8bb17f7c3ce721f479db1a83c8e7dda855ec98c2eb641e4e187851f8c7c82723",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalCoordinateRef|ConditionalCoordinateRef.graph|eef93e1d14482804277fca0172464032d1a4fdbcc338524059fa1e861454ad4d|1|eb7d455bcbaf58f754c886d524cc8c717e267921b3e96e794c34600989d7db90|shorthand field has no exact type",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1641,7 +1516,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:71b82ee0c32114b11f3406e639c01a44934215169bc01a02acd1b77d779ffe60",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalCoordinateRef|ConditionalCoordinateRef.oid|68c55cdc265db5ebdce885c914c4774fedeb3d824fc79837cad12cf1f10ccff7|1|ea03546b1b30d85877d6cd7fd0310b7d76fea91a96aa3e1efdc53ee9a10ed340|shorthand field has no exact type",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|ConditionalCoordinateRef|ConditionalCoordinateRef.oid|oid"],
@@ -1650,7 +1524,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ce9bbf77be4d878c886864f08776365de232040b4d71c98b3322860c517e225c",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalGlobalCommandRef|ConditionalGlobalCommandRef.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|a9d7f5f81bf89596e7cc49849c1741fb7a4383595590a0f8aa724f9346d69a16|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1661,7 +1534,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:91b4ecfbd59471f33fe1b99f790946e8559c552ac794ffb308e1dd109479fff3",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalGlobalCommandRef|ConditionalGlobalCommandRef.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|42d2719c29923363b9c82618a46102016ab373c389e80057d0ded691ef2165b0|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1672,7 +1544,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:fef8d53fe305b0feaba6773e11a19e89f6adbe510b9f58cb35907fed8fdda0ce",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalGlobalTxnInputRef|ConditionalGlobalTxnInputRef.assigned_global_logical_command_seq|a90c74bd92f9b5a2c59d35690153d7e7c4c3dd44d58e40532083e4871f436cdd|1|52b1140a2dbc8ecb37ffff58f0a0a0a38fe249b26f3bf13e919c1dcf6a8a32ac|shorthand field has no exact type",
         source_locations: &["a01:1406", "a11:1962"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1683,7 +1554,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:55674524425476cfb59b374d5d338c633a98488fde9d76d879b29e5b956b138c",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ExportLeaf|ExportLeaf<T>.quorum_signatures|4b7382d93588313ac60e777d7671792202dc4445f17d96d2882ed00971b64a35|1|00791af63539c54ccad5d808edf1263c3f05f4e540e9d33fb0355ebd9e8d79ba|shorthand field has no exact type",
         source_locations: &["a01:1400"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1694,7 +1564,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:56ab0b78574dcc4cc8ada1e27d64228256633d327386f25f3e31c79b082b93d3",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalGlobalTxnInputRef|ConditionalGlobalTxnInputRef.command_oid|4de54ef750635a0f9ebc9384f55c1f1b8e9300e65229bd3df6de781c6a1ce55f|1|db5267d46771c819d5d4a720d074a536fc5e3d9cc8cddf5cd34e8ed62fe919a5|shorthand field has no exact type",
         source_locations: &["a01:1406", "a11:1962"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1705,7 +1574,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:c9eacf0a0499722ac0abbf874b419638446536d586ed009714f01c2fe685713e",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalMarkerRef|ConditionalMarkerRef.marker_ref|8bd7f0937c09a3668e61f28badb35e6deb398cd9a5a4f9665f8015146106a3a0|1|a272df58881c324a3bef40b3bd63b15d8691ab09dba39f7e7e0eac85bb9ce3e0|shorthand field has no exact type",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1716,7 +1584,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:287525289d2fc48c53af7935b122ec99d01330bf6bc8e7acb3484a796c7b2dc1",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalShardCommandRef|ConditionalShardCommandRef.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|94074dd77fd021f951a4f00d7d1ce2f918f17bf62e465a71f84c5bd92a25064b|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1727,7 +1594,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:27f66e75e71751e7776eb0bf7f45d44cc30ae3153b29daccd9d65a3d1341a0df",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalShardCommandRef|ConditionalShardCommandRef.shard_id|b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0|1|c78dbe4d2d901dd6ce837744cfd507b9c9bc982ad496371310ce2bca90d145f0|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1738,7 +1604,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:448fd4c780118dedd261ff04c0d3fdbb837394d31386becb8935f9bb5a7477f2",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConditionalShardCommandRef|ConditionalShardCommandRef.shard_raft_index|a27fa693b624fba3783550d90e89ab5aefe7ea90b62eb261b9121ba0e77873bb|1|368064c8af700831b0a48f4d438e1a1fe3b1cb69ffcc778a073290fabaa77479|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1749,7 +1614,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:51fde1eb845f5b657f68fc1295946c8f2077008b1f8310d772b449ee0959a974",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConsensusDomain|ConsensusDomain.cluster_incarnation|9d7c51a25eaf4da545c58407190cf355ea305487ea49cf6146f19f577bad1073|1|2ae0033d470b6c79d27264123e549a61dedf776ca0c61f5f80b5c422c10378ed|shorthand field has no exact type",
         source_locations: &["a01:1396"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1760,7 +1624,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:06e4b97e0d741edd0bb8d618d48df3daf7f39f7ff5f2b1aa0d2571b1cede5c2d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConsensusDomain|ConsensusDomain.database_id|731e26be806308135ef676088749224ec417f251d99bb827ed4432e121e2f02b|1|062255e5fc291d68f45dac76138bc7e780c24dfd530db1316ae12302bb9a2710|shorthand field has no exact type",
         source_locations: &["a01:1396"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|ConsensusDomain|ConsensusDomain.database_id|database_id"],
@@ -1769,7 +1632,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:bc4a928f57e4004abc66ef087f1484f9d14c2fa3ba3f740e52124e669b091bf2",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConsensusDomain|ConsensusDomain.database_security_namespace_id|27c2c87b407320770f92abe612b2dbea8c1711a0f5fbb2d2464ade311812a4b7|1|3f59203559c5ade5cb13c917378768436c361c17b2bd65f9dab37be776c60448|shorthand field has no exact type",
         source_locations: &["a01:1396"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1780,7 +1642,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e03210167c369f94d93dc4c8253d36d29ac78011864a802f5843834bf284c4fb",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConsensusDomain|ConsensusDomain.group_id|abf8a60fbb818f7405d613d3760a68a8e794a415546761e42340661f7351f74b|1|aaf70e2f4fcf7470b24711c2607553342fbdad07f6db37d64c8b66540b71d196|shorthand field has no exact type",
         source_locations: &["a01:1396"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|ConsensusDomain|ConsensusDomain.group_id|group_id"],
@@ -1789,7 +1650,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:afbc344d70d6cc6795f928f6378d234d4c01c0738c49b479437ecd307b85b863",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConsensusDomain|ConsensusDomain.group_role.Shard.shard_id|b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0|1|cf674780f1d985fa5834a46425a25bbbb7ec14144b426419b56ffd5bc50e4651|shorthand field has no exact type",
         source_locations: &["a01:1396"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1800,7 +1660,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:5d0a9654f53322e956d33010ca7df5afc44cb67dbde765dcef51425db02dac13",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.encoding_id|85d360220cc757431dd090a481da78fba2018975f0a2e5ea5fa5e161b7a16177|1|c7e57e032723c3f855ce48be060adea813e685683290a30ad36f3a7648869b0a|shorthand field has no exact type",
         source_locations: &["a01:1443", "a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1811,7 +1670,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d24695012d4044e09c759f8614fa9a032db2cbec2fc3c93e77ab749ce5a608d8",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.failure_domain_policy_id|04709b2bb4927b600fac8deadfcf2eb5843fb528b15e1ad340a5a4439a9fc3ef|1|dc06ab84e3bce9c11070d01a52853ca7bca4f68cffeaf5d0a78c1aaceacf76ea|shorthand field has no exact type",
         source_locations: &["a01:1443"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1822,7 +1680,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:43d2f0e65a4dc39f329e611ac733251f6188cb5cc544e93beef46e135474beab",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.root_placement_epoch|e7a5dbd0ab1abef202352d60c1b4f5eca3f71b78f494476a4f54a55091c321f0|1|17de7b8f543ef7b2715baeaaf819e8ea35de5ae7fc3a81edecd16c549d972b6b|shorthand field has no exact type",
         source_locations: &["a01:1443"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1833,7 +1690,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e1c52d6dcbd8885faf4eba1c8406864266ea081cd420b677c5467c4a97d9100b",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest|0d19b9043ba1e24e570c9ddb7f4952666ee2a7d62116d617b987fb4a75d0ac4f|1|b83c51729087fffa1fe3e3b3452234e78f5d92ec86b35d7df4fe1979b46f5fc5|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1844,7 +1700,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:404a1f5ffca0b239e6d6304f019a320bfbb2f771e8d8f75075ea4aa41d31fbc6",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript|3a5b732b143e059fa75e5e80c97a6391ec5d5ba9b14e780d2b45b0d92e4f5c78|1|a6c99b864aa1ae5d26e3b7f26bd3c2c19c359c8ce07579d8919793f47ec4d476|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1855,7 +1710,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6150ede1e1b9372211d8fcedffd089371e78f6ef8bdf839499417b25f27d9e22",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures|274b2dfe7211b3a80c9d1a48ae7215b3a4e08741d73544a3c68555075e759568|1|15edeb75aa867f73d56562652894b4b13d03cc4fa747ee6ea6d470f97905be0c|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1866,7 +1720,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:af2b5edb93577dd590386a385295f80a7ae01d42de718097a430f50357d49612",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures|4d3d631c393e2608fc220dc9ccc5b46c2ccf2f5adeee9792c26fe42cdae2eff3|1|8826373f9b0b5f49b16452b1d2ea787a1624cda9faa348937d0e6cec7f3540d1|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1877,7 +1730,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:299ee60ab1337573ea4994c60bdbe86a53c9be1ecf08fd2f189e0a4f025be75e",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest|0d19b9043ba1e24e570c9ddb7f4952666ee2a7d62116d617b987fb4a75d0ac4f|1|1b2384171b391a46d17735555abbd4c7d6734f3d2b3c0539a90069ea6782324a|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1888,7 +1740,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3543ce46e3d146757ff29ca8552c7c2c03766d34c11e9c4b2e70e47446a29da2",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript|3a5b732b143e059fa75e5e80c97a6391ec5d5ba9b14e780d2b45b0d92e4f5c78|1|3baab0cda94ea5af5cd9fd2d99923856924760ac9a5703f7d876d0404f122cb4|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1899,7 +1750,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9bac05f943c14519aa377b05808e57bfa117279607768581f79fb2720b221f99",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures|274b2dfe7211b3a80c9d1a48ae7215b3a4e08741d73544a3c68555075e759568|1|547c7a0fd6a457595fa224c7f5b6a20d8ca308b182fd6270ed8097129182b109|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1910,7 +1760,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:08cbc807047e544cd6c1e2598630e187feb142c28fc295cc0a7696e8d36dc68f",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures|4d3d631c393e2608fc220dc9ccc5b46c2ccf2f5adeee9792c26fe42cdae2eff3|1|74220eeea6d3b639145b77c67549571b2ed637d340b8c74474f1f76b0d9db17e|shorthand field has no exact type",
         source_locations: &["a01:1398"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1921,7 +1770,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:107590809bb6e12167b2f2dd3e8f10051a169c3a28357753e2ddaeb18d7deb20",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteObjectIdentity|RemoteObjectIdentity.canonical_digest|cb716809bc72c2ad62ef437f82f63bd9bafe47dacf9a8df9b303efdedaa22434|1|f497359ffb570c42d350b2e5ed98ed737eed86381e950dc84fa1cd9af98d9737|shorthand field has no exact type",
         source_locations: &["a01:1396"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1932,7 +1780,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:bd6a0a183874f88db3ea3ec0302152530c28df45a9f5dd4897784ea8a85ec3a4",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteObjectIdentity|RemoteObjectIdentity.object_kind|f79080c76579371982ec2dfc62593cfbe282dd0d9ec076e5638251fc9ce30909|1|d04c9ba70a928a52dec5b4ea457f6fd768aada2b4dc4ff009110b89fd8fbb6b9|shorthand field has no exact type",
         source_locations: &["a01:1396"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1943,7 +1790,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b5662f79036ce591940334355f520642a72b0634d4a15befe4513b36e25d90ba",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RemoteObjectIdentity|RemoteObjectIdentity.object_oid|48f28b7b97e516c375e4651abda6b4d059ae71b431f5c7c360b8416382ec0830|1|fcdf56ca4807125d4919d0849d9cbb4cf5b050fa8fad9acda6bbbd5ab7372a21|shorthand field has no exact type",
         source_locations: &["a01:1396"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1954,7 +1800,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6047adc7965b7865e94cb7668b9a58beefe4bc5ccad991358a95c9be0bc29aab",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Meta.migration_nonce|2b49d522166d09d8de34067bca5548329dbf4485bfe4f55e1f898ccfb886ca6d|1|380da794623fa2dfc4970c85a7c3067446b22af883a5b006a7c580845b5f6127|shorthand field has no exact type",
         source_locations: &["a01:1390"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1965,7 +1810,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:20a8a347b7c249c90e09deab30ed8ff464b44114e205bbef6f1852afb27419c5",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Meta.phase.Complete.seal_release_state|37b2b3c60ca176d712f9e8320059a0b33f0f391506e7684f64f71ea9bb161e3c|1|4d726a2e5d1b209a1fc23d05f7646b58bad370dcccf8e993c2785ee4bb0b98e3|shorthand field has no exact type",
         source_locations: &["a01:1390"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1976,7 +1820,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:ae9bc8dd611d9feec022771782f885fbc37718ed23bab487b4189f9841d51822",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Meta.target_service_visibility_epoch|a2197f22ecc6ffa08da8cee13fd767dd6acbb65efad9a4e75b1e5796d68df04c|1|809e5a9011863b4811a832204015b4490ab210e4628cbc9a9927c8e51307851e|shorthand field has no exact type",
         source_locations: &["a01:1390"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1987,7 +1830,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6fa3a8b63ee9d48d3658e670f75400ea12f03518bd4fea540eda6f1d8dc62f94",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Shard.migration_nonce|2b49d522166d09d8de34067bca5548329dbf4485bfe4f55e1f898ccfb886ca6d|1|0b3edf990adbfed6d06979e1d6ad385deff9f3277d26963d49c17913e456b399|shorthand field has no exact type",
         source_locations: &["a01:1390"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -1998,7 +1840,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:530ab398113ef1b97858212d423b792e306d68ce291da23fdb3ae00831158d3a",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Shard.phase.Complete.seal_release_state|37b2b3c60ca176d712f9e8320059a0b33f0f391506e7684f64f71ea9bb161e3c|1|dc1a7c1492c3109347f66575756f3b75912b6c3cb046e8a7e9297211f28409ee|shorthand field has no exact type",
         source_locations: &["a01:1390"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2009,7 +1850,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0dbcee60eff18a6b83fbfca6710c56cef320a2b09b9eacdd495000f524007939",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Shard.shard_id|b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0|1|01e2ac2f4f732616d71c01cbab47af4595f9fdbe36b4b1561537fd26024edd71|shorthand field has no exact type",
         source_locations: &["a01:1390"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2020,7 +1860,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:2b3f0d0dc9a723abcaf65c604e43b62aa250900a9806fc691b61ad743557b433",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTransitionActivationState|RoleTransitionActivationState.Shard.target_service_visibility_epoch|a2197f22ecc6ffa08da8cee13fd767dd6acbb65efad9a4e75b1e5796d68df04c|1|cac11bc6b4c7baf91ebc39623cf8e63e2b0d3b36b4ee939334b7aa2c4a4df488|shorthand field has no exact type",
         source_locations: &["a01:1390"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2031,7 +1870,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:cb5825c40682074cd88d59caa2f46d67c9b6115be7ebbe0208b97da0b45d74c9",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.ciphertext_digest|639e8bce8cd2107b20eb748abd7a4fa29f62ecd3752dab46977890694061e0f8|1|842aaaf6f38e22319299a7cdd6e722024a97dca6e218981ba15530401820482f|shorthand field has no exact type",
         source_locations: &["a01:1410"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2042,7 +1880,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:b7504277054b04c1cf2ceed042250c26449c0452fd4d7c8e99ea4b9f75bdb846",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.ciphertext_id|47142c70021a01c228028cf69cea5c897a6985a67f0ff4234f8aa3bea11a523e|1|096d0abb87e92295bbdc4f05d7ab4753be474e6bbee0d5cedb0bbe6c41fd1cc7|shorthand field has no exact type",
         source_locations: &["a01:1410"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2053,7 +1890,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:0d955780da7823b64d2ac4832293cb252f40d4f7d23421df903e14e41dc3cab5",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.dek_id|8af69fe8b94da3d64b510caa0dab1b7e9030eae0b4bb2faac1b7680fc9a7edb1|1|5d5d4c629230065df34c5eef58af70ca02eb34716fca83994a29596faad119f1|shorthand field has no exact type",
         source_locations: &["a01:1410"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2064,7 +1900,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a584b1e1a58dc60fff87a8bae2f09810790db317ac3222eccc0058ee781b6f6b",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.logical_oid|fdd9a74312ec7ab8a436466dbb215bc937ed5e6accb9d7b85a22c9c095a2d444|1|2c3bd464b139f8a31336a89e1897c252d80501b8b8f92aebd479383e0f883b56|shorthand field has no exact type",
         source_locations: &["a01:1410"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2075,7 +1910,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:1e315e718c1dc57fdb221a62568115435bbd13f2273a677b758dcd6bc444e86d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.protected_length|5df4272c5f39dcef78c410b10c536a5704975cc8d6689dc6fbbcbeaed688ecf1|1|3e9b36e60da97f4543cfc50850f35e26cd72a01de7eb5127152027457f6dc462|shorthand field has no exact type",
         source_locations: &["a01:1410"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2086,7 +1920,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:652c475ecabc6c9b76ce0f9c6fc7e5158ce7db6433cbdfd4edd2e8013d9fcb04",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongCiphertextRef|StrongCiphertextRef<T>.recoverability_profile|6871207b09a5b8ea4e3e5059bafceaf24232761332d71407cccc6f45ec96b6e7|1|646b4ed076e19f40c0cf64ae193965d4f401462a33a6c5e37caa9878506aa5ac|shorthand field has no exact type",
         source_locations: &["a01:1410"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2097,7 +1930,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:bf14b1da59063849fedae6811820b7eac779d226996884d50707d7a33b9016e4",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongCommandRef|StrongCommandRef.command_ref|9b2ddb763a7736180dd65c3329ab8a347e9b3bee70006fb913700f8103032b71|1|4c0e7b3a074b759317ddb4a97054ddcf7bffb77b47748f11cf4cc0eb2170c5a2|shorthand field has no exact type",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|StrongCommandRef|StrongCommandRef.command_ref|command_ref"],
@@ -2106,7 +1938,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6eb7a154015a5376477a8c84497a17f9adcb3359e3f533d0547e2cc9c40a8799",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongGlobalCommandRef|StrongGlobalCommandRef.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|3785c1a77c1091e7462f5cf64078b3905406763659c8364c7cd884406c8ec7c7|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2117,7 +1948,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:acf6c339daf3a326175b85aabd84678e241367cdc7b5c946db9157b194a6ab34",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongGlobalCommandRef|StrongGlobalCommandRef.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|25ea8ff46587c2a3d0bdd8d51de58654bc73b12355eb28c244d84165779f2452|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2128,7 +1958,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:cd64b0149d18dc9934a66167c0937515a7618074d137a31ebb79344501932118",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongMarkerRef|StrongMarkerRef.marker_ref|8bd7f0937c09a3668e61f28badb35e6deb398cd9a5a4f9665f8015146106a3a0|1|2475f4c2be72c94970090faa3947bfd8ad0c0b5f742dc6cdb3e579dfa6314e06|shorthand field has no exact type",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|StrongMarkerRef|StrongMarkerRef.marker_ref|marker_ref"],
@@ -2137,7 +1966,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:3f8f3176a7718116cb6f1545bd688ad47df7968959d783ff0267d18843369182",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongRef|StrongRef.oid|68c55cdc265db5ebdce885c914c4774fedeb3d824fc79837cad12cf1f10ccff7|1|3fc8080058ece4f672ffa97feb30b98be37bb1f21e59b59fd529f867ddb53257|shorthand field has no exact type",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|StrongRef|StrongRef.oid|oid"],
@@ -2146,7 +1974,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:a6fb8ede356a5dcb049d10c0e248c928bc56e5eaedc09be55230e95f73c77310",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongShardCommandRef|StrongShardCommandRef.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|99cb4e03942a97d67c9f3b53a90023900a21f8d4e7c6779b69f97311da137dee|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2157,7 +1984,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6b31b163a80c3768fbba1b6cdbfd63504b7796fd719f38e655aa60e1c4c7ed20",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongShardCommandRef|StrongShardCommandRef.shard_id|b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0|1|dcf6603296a32f7c751f560b3506e3a05f95155abd0d3561b2db1ae5790fa463|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2168,7 +1994,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:f84e8e64b2b57ad03afd6a8b703c0a8b7ed1979e0ecad941a601b2f9d4d39077",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|StrongShardCommandRef|StrongShardCommandRef.shard_raft_index|a27fa693b624fba3783550d90e89ab5aefe7ea90b62eb261b9121ba0e77873bb|1|1fcbeb355c0ea83b77cf928f2b329b24fa0b5236194fcd94813b17530734271e|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2179,7 +2004,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:50cbfe932bcfbb0429e3ec0a3f025fff8b69d37555f229b96b6bff6191c7bdb3",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|WeakDigest|WeakDigest.digest|0bf474896363505e5ea5e5d6ace8ebfb13a760a409b1fb467d428fc716f9f284|1|ac0260b36244a13f921e613b03c09fa4839d98967fade94e64f17d87989e6f60|shorthand field has no exact type",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|WeakDigest|WeakDigest.digest|digest"],
@@ -2188,7 +2012,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:139510a77fde9ead91fa0ec2678ea00991c4e70d1df84f8ab78848677f222a67",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|WeakGlobalCommandIdentity|WeakGlobalCommandIdentity.global_logical_command_seq|3f7b656911969255fdb48c3d3fae9686c1aa03fe2303a5840f7718879dabf821|1|0d0ca5c0470c50842d2b12212f14adb2f5744f3436bb903c77e6d9fe893e7196|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2199,7 +2022,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:7cad9b9c94e36c6ae8838f509fc3020a94487b0f21ebdd0de8116fbb71d64a82",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|WeakGlobalCommandIdentity|WeakGlobalCommandIdentity.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|429832236062df73658c420bd53c6eb1aeb25389c6f3dc6f4c0c6f015534330f|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2210,7 +2032,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9f08c1c75203bd3827179ad5f4a0310ca62537ca1fdc04fa423a491b8b53bf7d",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|WeakMarkerIdentity|WeakMarkerIdentity.commit_seq|e2893bd6c4461488df900513741a96335d5e7a20ec2ae2a99aa75835ba663ae2|1|099cc63b339b0492ca7dca7a29b5cbafc7d33af7ce3814ea1e95617f2dffa1ba|shorthand field has no exact type",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2221,7 +2042,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:e838c4e8c16f22e447b9f945df464fd6d6cbcccf0c9eaf87d67d9aaffd2dfc19",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|WeakMarkerIdentity|WeakMarkerIdentity.marker_oid|423c2869afb80889ddfc734cfcc992e00323c5ddc5774daf84d12374b7bd4ed0|1|9e2138ddab1831d94d123f97d5f31b18247add4c6f48efc01826940865b67d92|shorthand field has no exact type",
         source_locations: &["a01:1394"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2232,7 +2052,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:71357f9cccbb9858750afa743c8c43e767f73a60ed20110a01be6f4aa2558826",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|WeakShardCommandIdentity|WeakShardCommandIdentity.record_oid|8082f11a53f90519af8045e1538bf1c7f7cccaecff31c30e8a1f3c1dd2365e1d|1|9199d2431fdd33a1d4f1d09a13360c666944a5839ed03c7eb2251e2dae6d68a2|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2243,7 +2062,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:d8cf9ed9c05e68dcf47540f49cf5e166b3e8a251f9c64c5f62afd135b057d125",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|WeakShardCommandIdentity|WeakShardCommandIdentity.shard_id|b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0|1|f9994109430d2cd07ea86ed53b692b86d5f774a3401194dd6505df72961531ad|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2254,7 +2072,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:6025faae5c1c51f71fecd00802a3336e4a8d6697a2073a9bab4340fbc38bea46",
         slice_id: "a01",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|WeakShardCommandIdentity|WeakShardCommandIdentity.shard_raft_index|a27fa693b624fba3783550d90e89ab5aefe7ea90b62eb261b9121ba0e77873bb|1|acdd45487fd9d74f5837d87d7b30d0c400ed7ccb0395dd8af27dbf2bf55fa14e|shorthand field has no exact type",
         source_locations: &["a01:1406"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2265,7 +2082,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:460202d74810b05f3b369b22e66dd2f8b4a2ee578ae502a4359404a71187455e",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ContinuityAuthorityCurrentBasis|ContinuityAuthorityCurrentBasis<Role>.Local.current_root_manifest_and_slot_identity|ca00f36878beee32c8a5e1df1ba578220ef65af8b69d26790e83f124f67de5e8|1|a0c83299f4c743eb09c17d215b669a9f21e3cda97ba5970b097ed30c2b20eeca|shorthand field has no exact type",
         source_locations: &["a16:2225"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2276,7 +2092,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:d84bc693fde08ebdb0e53e54492f602de34d43c66e1286a0c750b8c2eee55df8",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ContinuityAuthorityCurrentBasis|ContinuityAuthorityCurrentBasis<Role>.Local.writer_fence_epoch|084299aa27b15cc16f8e6a51ef83f7e90ba971a6bdc72476ea25ace38bae1be5|1|b931364d7e7d4047b15bd850be65fcb409e866a9bf17f1b6a4455a33a0711679|shorthand field has no exact type",
         source_locations: &["a16:2225"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2287,7 +2102,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:87dfaf6e9cc2b8bbde832f18efa9fa3fb950f304d9dd594b8d9e3aa230e9a2d9",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ContinuityAuthorityCurrentBasis|ContinuityAuthorityCurrentBasis<Role>.Meta.current_root_manifest_and_slot_identity|ca00f36878beee32c8a5e1df1ba578220ef65af8b69d26790e83f124f67de5e8|1|4b13ebd23e22b353e2ac7e87f8f3f40fea1fd37f0126b56e43995455c29c78e1|shorthand field has no exact type",
         source_locations: &["a16:2225"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2298,7 +2112,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:40f683d4ca2d305185386c3a0779f4a2d359d5d3164c77de96ce2995d4237908",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ContinuityAuthorityCurrentBasis|ContinuityAuthorityCurrentBasis<Role>.Meta.writer_fence_epoch|084299aa27b15cc16f8e6a51ef83f7e90ba971a6bdc72476ea25ace38bae1be5|1|331f4c37256d72366922925461b4827cc93f088c62d36a92059df28533b50d9a|shorthand field has no exact type",
         source_locations: &["a16:2225"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2309,7 +2122,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ce48b3992c5f79c6151433b0ac626110de8d73a50c9bebde4be1cbcb81201af7",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ContinuityAuthorityCurrentBasis|ContinuityAuthorityCurrentBasis<Role>.Shard.current_root_manifest_and_slot_identity|ca00f36878beee32c8a5e1df1ba578220ef65af8b69d26790e83f124f67de5e8|1|7ff794697f2741e3e009f39bf70e92030883a8dc85f4d28de3c3de9c13181751|shorthand field has no exact type",
         source_locations: &["a16:2225"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2320,7 +2132,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f90c20349a918a0e970ca304cc68f78df1783ea71ac6293d72f2fcc573aa80e2",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ContinuityAuthorityCurrentBasis|ContinuityAuthorityCurrentBasis<Role>.Shard.source_meta_prefix_and_configuration|40a2adce98bea5856808f54f68c99eb99b447effb92348d3eab3393b4a2969c4|1|a7afc0a516e9409e5232f80faa7eb73e02358620820ed650a632f58513eec321|shorthand field has no exact type",
         source_locations: &["a16:2225"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2331,7 +2142,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:b7eb51a05d5214237786f8e4895601cd889cd204a9fdbbcc964daaa2d3b8d58b",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ContinuityAuthorityCurrentBasis|ContinuityAuthorityCurrentBasis<Role>.Shard.writer_fence_epoch|084299aa27b15cc16f8e6a51ef83f7e90ba971a6bdc72476ea25ace38bae1be5|1|7324dd2675d6571b6ca1a25ca74174362b84bd8283d4f091526e060bb80a3236|shorthand field has no exact type",
         source_locations: &["a16:2225"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2342,7 +2152,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:0c0b4a16ce9bdbeccf7ec454b8e52e722e171bcf812d4c4413aeb99efccfa625",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.archive_authority_signature|630a95ce21fdf0eff207a3bba353b26c2fb552e499efb57081251e2b231d0158|1|f11a1b03d0c409fb9fb66e44ba9c5cb4f82fe3722da618d6d32423683582112d|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2353,7 +2162,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2b2dd91a2b492e9de178a0dbc850077f422ae4397974f295f38128ee4d3be64a",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.checked_domain_mapping|fa117dfab034779cf32e7ce0296885400f13e6e1c66aee2e25430526ac7714eb|1|0aa118f944603411e30e6a97e7d3a451cbe455e34d4156e5c2c232708fab9d33|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2364,7 +2172,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:55f3b93319481ae5515b4979cbc26b3e5cf0fc60b472b45749710d0654a7ac77",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.dual_signed_transition_proof|5ef06ad71fd742f38243b652c5b25c3394bd3ed21e9adf03eeefe45cad9ba50b|1|bbf3c52136cd476714f5283a97a504030d3b6cb01b061413f944b5233fbba881|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2375,7 +2182,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4604a342b681ed605409625ef352daad3d54bb49066723f90210c5ace15c52dd",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.lease_identity|f99f826b7e8995b00dcf585c7d218e6a5724fca1c2a76501b717ee328cfd10e5|1|d1a128506b190039221dbb50c54a1e501e6dd1c2bae066fac0d2ab4555b0f081|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2386,7 +2192,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:134d0d4d4be731d4cf4487b042d933a79b058435563c7e9211e3f67d19dc2bfe",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.no_gap_coverage_proof|54cebd5f04b997fb4f3602663147eba44901998934ce981b158316144e8a3e82|1|a11e9f8e32cd0750adbf355e2739cf7f742f3d65a326d30912f51f65b9570cec|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2397,7 +2202,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e71935c154a5a543fea65cb5dcf070475bffd2fb48f6867e2aeda5bbf4bec6b5",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.old_and_new_profile_identities|381063ee178d952a3fc0e75d22cde76734b080b50b609aa307ec615c83949be4|1|d6e8496819029c6f060ae28e00bb0b089f392df5d6698630ffa43860d7716495|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2408,7 +2212,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:49fe4ea025fa3b41520aa2c736d9cc92c2ef522a87438d53b4eddce5c15404c8",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.CrossEpochHandoff.prior_and_successor_generations|32bf996640bd3860db0204d03d6d54cb9b30ba03b362868b97f6fe79f148765e|1|c2d56714d5b73bc91829e2846aa89842a8478bd5e904ca5811b4e468667ff5e3|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2419,7 +2222,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f87519086a8f536dc713ab1365a4bfb83c62192a8d0b5ce8cf81771d2963fe76",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.archive_authority_signature|630a95ce21fdf0eff207a3bba353b26c2fb552e499efb57081251e2b231d0158|1|35dcc275cae276e136ae4c554ad689df94bb44d8ce447ec82163f1986922aa2c|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2430,7 +2232,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8d2ffdea256c376ad5b0006705b27ca6b51ccba5006c908129895cacd22ab53c",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.checked_nonshrinking_bounds_and_counter|b2f8db730f46136fa8ed5eb8e00b107033b7e270446b8eb2101d23a3cdfc2c8c|1|294aae920c882299af719ca63ac9b14203a2a03f14bc054ed890cd72bd08fbd6|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2441,7 +2242,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:fa0cd7bad70d2a11070d4ac7aa07c6e9594bb9a2b1b1420b8b80bfc7457471de",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.lease_identity|f99f826b7e8995b00dcf585c7d218e6a5724fca1c2a76501b717ee328cfd10e5|1|bfcf0c04e713bb7577164ad8dd30526d2ab18473082144c72e137136af718cf0|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2452,7 +2252,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:829355fb5b65191691f8664c311fc856ec13d034e717af269cea446ad14c4216",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.prior_and_successor_bounds|7a9eac9c366cabd42ac6c78a6e700575fb8b8753687b6d2f867eeb7f3eb83f65|1|28b0fa6a90948bcd0db096826db6086419c94468be8e087924a0faa882fc8a5c|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2463,7 +2262,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8ebc993bcd786c4f58842b7f4a0482a6606d5a09b3569a869089a37f43916d4a",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.prior_and_successor_generations|32bf996640bd3860db0204d03d6d54cb9b30ba03b362868b97f6fe79f148765e|1|929ae095b851b5be90fc86273d9807d1e7f6cc79d4aa618acb413147c773762a|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2474,7 +2272,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:85dbeb0516fa252e9be5a5de75cd32741741e2125a82a450fc8729828675599e",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LeaseWindowSuccessorProof|LeaseWindowSuccessorProof.SameEpochNonshrinking.same_profile_domain_epoch|a0642ee43509d4a33780cd018b20c6ed58751e201a6334393a905dd65b9ca1c0|1|a1a813eb53db658568e9d58b89ea5810e869a93012423dd5a8286373bd9cb19d|shorthand field has no exact type",
         source_locations: &["a16:2235"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2485,7 +2282,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:631e05ec22d5bd0bd47535c6abea08a9afbf9bc2da7cf2fa67d12ee696cdfcb7",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.claim_id|28f7247f6ea57b4f8368f42c08fe392559ec182a717dfbbaedac6a548058d137|1|adae3088872b736da00228ebb0783256c286fa39bd7de46519e74f6ddeb1548f|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2496,7 +2292,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:684dd613cf8d1b1d36038b3422de453aef92d6186e5e77525f46313e3752d1cb",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.claimant_identity|22894119e49df78f411ad0b3f0aa2c2f7517513c1e9937b92bc2792ff9e957c2|1|4354df61cd0895b48efa0d52cedc9d35406c4e8ef92ad472ca39fbbb785ed042|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2507,7 +2302,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:351b5f727acb44a2cc22dcf886346f73878a40a476ba55b19266bc15b0ead3b8",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.directory_bound_creation_evidence_recipe_digest|10d80d0f683a8963bf219ec8e81bdd7fc4af0e5d38030ee58d6c2ef8c1592da0|1|b633776d2372e68c5efc1237267f447a788f0bbfe6810c91ec50cab23b2b4cd9|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2518,7 +2312,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:d51096cf7233f6066f047ab25034303514696d9f1745cd29920e9630706a3a7d",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.filesystem_profile_id|c6d610525410c1e89be47fce9fbf0dd191200c7f4e12883bb82c0d655c8f67d0|1|13bf7c36f238e29318228addafd641505001675449763f7b778bec04e2ff00e7|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2529,7 +2322,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:db72c08571d804730fdad3aa7a4fee4ad481a4e9670b5c46439cd44392a7c819",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.fixed_local_continuity_recipe_and_digest|9cc083ecb3ef04318db43777b92d8c3cdd5c0be3ccc371b83161bae08fc223cd|1|195c0b1dc8b9617a9450226049e25b20f21cf96e928e70627f8c68fc0cfad57e|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2540,7 +2332,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:59e07a8fce6020b3269432fb6b921c8987cb1938688030616a2f5a342f2a62d5",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.mount_device_directory_and_target_manifest_inode_identity|73ff157ae04225cdd50b8aeac29463bbaf7fc5253a187ee3b8e9635fb4f75607|1|980af3db635dda436320f47a44e86468901a4ca8c25a54c98514531e4584a109|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2551,7 +2342,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:66fda3d55f20ffbd14f2a44e4671916cb011e2911f4415fc6b7878dbc49d8df2",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.parent_directory_durability_recipe|5e813fa99dfc3788500db837776d4cd0322cc7024c1126089d59ed6c805353ab|1|b467e6a8bb7944b8540a1b4c80a2cc73ec7c540b036e94f822289011762e4dc4|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2562,7 +2352,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:710de412e21d880e486ff97a204979df9b5f70a5b586e886d210c20c4617b4e6",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.target_manifest_staging_inode_creation_nonce_digest|d7d9a0b435248b3010c90a9eeb7bd8d87d18c2d4ee3e2c0839eeb1de49cd48f6|1|be9ee00a04b26d6810e8c8c223c02910df460b3cf88ed337c1155b7724592e90|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2573,7 +2362,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:3cb12c928a14326b5ba0c022926f4558be38a6ff547679081daf0d3e498163d4",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.whole_inode_fence_identity|843c779a7ccc145699aaaef02185f99597de5f95aacf04a7b11a99cb0a65203f|1|5d52c54efe1f2155d1027f7b8c675ac4dd3b99d8099dc924e56cf9823239dd1d|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2584,7 +2372,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:31ee4abcd164b58e192c76a563d2ddb710c49d224988e73ec9356854643b5400",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.DirectoryBound.zero_existing_root_slot_proof_recipe|c46cec78770d95b98ef47da5932cb4cf50d4641a3dcc8b0e626220e9ee2f4b76|1|d40f9fb2a94cf9beeb17b35b054305425897f185e81bd53a63ce17cc98885be1|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2595,7 +2382,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:3c53ffd2cdd6a62ddcbd58a34a2a90572ba753ab1df0b4b3e713f47ca11af4e3",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.ExternalCas.enter_clone_reserved_operation_recipe|a0a095fc7bb1c73ca8c09981086c1263e0ab2cfb74c23c0aecdf2b76924a3b51|1|8518425ffddcd4193149eb48cf3b85b72b0c370f62155703eea2616550529cad|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2606,7 +2392,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:9412f6cc59223ce1a66a34d89a55e685ef653105e6973d6c11215986ca6b9ca0",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.ExternalCas.expected_continuity_predecessor_digest_and_cas_version|81f354285ab3e55056286a7644dcff56ee3f4d591b1f47ec5dd1058a0bb80dbc|1|172676fcc66dfcca3477e6822a5901932fe3ec64d3a4f84a1bc23509132109b6|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2617,7 +2402,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8c4b21b6111a8db073ffe5a7a4eedc10e207ce1654f25df674e05a2de987125a",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.continuity_profile.ExternalCas.recovery_only_lease_recipe|49345734dd62b27c3736a470044afa490bd85d9c3d8d422b7bdfbacc07153ff8|1|3a406404b59fd8a0edca706f81dfb5424b7ad795a22f7ca55a1cb6be96807e45|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2628,7 +2412,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:01d951dd11d6fdaa8d31623cd9fd3539f67d2fcfbbdf285096fe10e57dc62baa",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.expected_reserved_head_digest_and_cas_version|e1af7c8ae26f2c9ccd4dadfe9ad09769938edcc771c700959fce52e11fcf3813|1|aebad033551be000e0f09d57b22664c9099bd86fadf975c48326501e952e412e|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2639,7 +2422,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:1c12d7fe225198c1beef3b67c21b25d50ce94eb39c141f0000aed764d117f1f6",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.identity_reservation_id|1b3b785a538bba87227cdaf20318995dd69dccc219a21ce926861f90f773be6f|1|5913ee80784fdfc7106b5f21841361c7bd24b5c671c5612de0de5cdd4648d92f|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2650,7 +2432,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f6359a728522f27ef940fb7dd42aaf5347f9d0c6abe54b411fd0830de7ff3166",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.recovery_writer_authority_digest|e052491427ae4e9cdcdf9dd58fdb7f7187c9d95782ab9faac12a1ba95706ef1f|1|41f6fc2013bfd05360dc42486d9cc032a71f2da1562b87e2c509418a01808d11|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2661,7 +2442,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:cdaa27bf799002729bb11c5025f5d7e89547de30c3d1a4d0d837d82f9033eda4",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.service_visibility_epoch|671bd793460b210d0e24a28527a99986582b2db1e22c53b3263a2bd250df9881|1|1ae844382f56c8c18e0bf3702d8f66d242d1557a4305833109dceccd6db3b379|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2672,7 +2452,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:0560e2a9ebe97b9c931583bcbf356f270ce83d735769b1d8b38f2868a68ec1c1",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.target_database_and_security_identity|eda1f9dc030a6db3a97b0ecf0097a2f935a9bdff94f884c14c8b7f12345aaf5c|1|7471f870cdc36971331b18b8def9189dc0dc61183965458602ac09e5d495ab69|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2683,7 +2462,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:6343dff659cb84cb85d6b0f03a664cd385bd0c8157c51f995279634d6d013393",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.CloneNewIdentity.target_incarnation|774c4bf2a28f126d2350fe40b5e43a0fcb2e0422a00d0276c5e4a391319bba78|1|89733f2134b5308039fd858917d1388f4fb037da715a21abd5639fac26f9a791|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2694,7 +2472,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:fa8524d7c15de0f18cd494343c8fcb407f67fa565408d7adbe01ef387b1b7a93",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.expected_operational_or_fence_predecessor_digest_and_cas_version|1ee2c302d97a016a367680975958a28a3c10dc5ccbdbbc6be31cf15026e0cc29|1|18dccc1413a855510fca8be0a81cd07e0c451056689cdf82b950fe4de07bc454|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2705,7 +2482,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e8bf7c31fe0a21de42bdf6e964bcf7763272c4fb6b7baedbab94cbee0e13750e",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.planned_target_incarnation|673af9348a4b17978b49f868a6102284b005c09f80c886827309c822aa2dc6a0|1|d1c0d0fdc035ba837d0305c8853a098c92f5ee7b20a5c0f7cbb7d680dfe55e49|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2716,7 +2492,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2b5b4e394a7eedc0c7561d3bd52ecaa6bf8a74810759f105c9e56e85f6a012d6",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.prior_lease_fence_plan_commitment|f161d7399775084c4dbc5cbe0ff7c52bcaaa5a6e8b8eb8813d3c4aca5f2782dd|1|f08ab20ab526ca37cc613797ed549f36653fdd7e2311cca0993c8803b699b362|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2727,7 +2502,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:44c745c9b2fed3ed6f450d0c31b581e73b86745cdf4d0533e4092c82e0ce5365",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.recovery_writer_authority_digest|e052491427ae4e9cdcdf9dd58fdb7f7187c9d95782ab9faac12a1ba95706ef1f|1|76f3df84517ff6240ec6d273d8db9c4a44a9ab3603f469a58ae95713f0ecb556|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2738,7 +2512,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:9e773b8e490ee9a2dc1d72cd77ac727e2912b017c4009938b3e0ee2515f5f6f1",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.restore_id|4da0f3516fe3e06cbf41b72a22562f1cabb1146cebb7995204a4fc5d12784615|1|81ce31813ef48da639e4625f17df34ffe60c380fb417a5b856a52b59a96f0cbf|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2749,7 +2522,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4cac0529f2c92be614e26bf98adfa7d72d02a2da52f9875469ed1f10a5e71217",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.service_visibility_epoch|671bd793460b210d0e24a28527a99986582b2db1e22c53b3263a2bd250df9881|1|875578f0e7445a5c310cb349219ec40857ffe50e3ba8e60fe99cb54b57597b5c|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2760,7 +2532,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f32accebd587a2bdf96b2c104ac49bbd63086b664565bf3632aa97cd46327239",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreClaimedTargetAuthorityRecipe|RestoreClaimedTargetAuthorityRecipe.RecoverSameIdentity.source_backup_identity|a54b70332d95af1f6e3a6d7bdcbf630a8ccce80fa23e44cc6af9795971a6a10e|1|e3b3c2a61c4ff3e2ace17610daeef8c58d84db75320989cccd49802e64101b3a|shorthand field has no exact type",
         source_locations: &["a16:2245"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2771,7 +2542,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:eed1694e00ba2fe12597870d419b8963e8ab25f286676fac24006a93fbbf3354",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.distinct_namespace_proof|d50e1bc878f9ff347d98be395d9a24ec51f5190e504cd318f235b8f8da999e23|1|7aade153e952af046b14ac61e1bce459cf2f1f1457a908823ff2b861856992de|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2782,7 +2552,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8b134d2ad5fc8b1cd4eef543a1b695b76ead1ab868350cb12a1814eaf13fcee0",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.plan_digest|236c09445ed8b2a5d8e92431c48cb4cb99d9f3ce7a79d9063dfe95e138ff2f3c|1|7920059e09e47ba78795e81c7a5522dc5452555be9b35454a9048057be65e7ad|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2793,7 +2562,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:0ebce0aff84aa60ca53776c1924be86270c3f530e73ccc305f4289d3e2282d66",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.source_k_oid_source_open_only_commitment|b90e1eb0aed4ab2a470ebcab664ec6b2c216047a5e741061d9b2fa707a214bcd|1|bd8240147ebc1c763641f476ecdc8986da01601ba024a84b22395e616163f15c|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2804,7 +2572,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f79e5b28c484822b5d2c57cedff5b89df5eacaab7356c3354811dc31d886164b",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.source_key_nontransplant_proof|46326db0859a64028a81987f1478bbfa0882f68c441f4c8dfc40c8cd75e56d4f|1|5dc73fc7a126fff2c455e21ff3871cbe7f85cdfe9c1c9541cfa3f288279653c2|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2815,7 +2582,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4b15f18ca33a6bbd9618b4d86f6433d4edd1017e5aee708689ecffdf6fa71353",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.ClonedFreshIdentity.target_k_oid_commitment|d9609f2d5f7e57bdf0b886b386bce9719b2450659060e1226759e74a059dc92a|1|2e8733fb65cfbde1039597367eebb3555129cfc9c9e7e9e3241be21e9f854b84|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2826,7 +2592,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:aa8fc751eab932565dddac78db025e788a38646928ef0d5fdaf24f1e33f2f562",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.identical_namespace_proof|3dcab183d6b87691cf26b46fe4c57a4d4dde8f66a0dcf707948acf2eab59dfe1|1|f718fd8e6d212706e52581aa47a7fafb4481946c067f4b06214a2635ba0128ac|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2837,7 +2602,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4f9b9e06323cb762ffcac15cf6a71b19ae9f4bc981caf5ffbf4acbdb5d8c7509",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.key_equality_proof|6da8577ed7c5099063d9b8ce4f61f016626d7020815725c6039a4f1f691bef15|1|4494adebc596a9f84259cb589b6c001934bd20953df26d81c2490af32c50a10a|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2848,7 +2612,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:a06189964678768435533d90ee460e107015578db70cd22f78b6b892f3f56974",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.plan_digest|236c09445ed8b2a5d8e92431c48cb4cb99d9f3ce7a79d9063dfe95e138ff2f3c|1|4222634d8d95c9e0bd872510143ccc60b8eb9109b75c23a2a84d383312a8d85a|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2859,7 +2622,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:9560b9c40af5f326f253491aafff7807c693ff33021e16b3b17b466c128224d7",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.source_k_oid_commitment|44c6f825d2a928b8cefe33d3c8bdedea518934e75fed02fadf60c94d95159471|1|85b114c49c331054d581eb1ab4522219aed9b1c755f7b3de8e825b24d4506c35|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2870,7 +2632,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:733122f0708df91db6da6ba6643b262794c139f839bf00461e87caee8c9e32e8",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.target_rewrapped_k_oid_commitment|19de999a5cde7dd52e999f89bcac67cac9ce47b42a7ccaf63e882819177eceda|1|3f991ab5fbe972cb862e4f1e3e5a31d0846ed00e468d9c86ae24c52b2058608c|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2881,7 +2642,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2f946d8a8ebb11b3383ac3c166032aa77d9e95a55135417bea7fd2ee2ac13b34",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyDispositionEvidence|RestoreIdentityKeyDispositionEvidence.PreservedSameIdentity.zero_plaintext_persistence_proof|17fd8590a299277bc9c414870fdd930e0a98078eb68b5c701d4fcd5faf4ef656|1|c08aa18277953a6d75ede5e988dea38a833408aedd614da1267c089ee69e88f1|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2892,7 +2652,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f2a2e6ed9f1043d3703e55e55632f3435d305711b0cc99e87d1e620885911483",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.create_target_k_oid_operation_recipe|1fa886e03f1e7b0fb39dddebee092f2b49ed1f14b3dec04d795b211628def3e5|1|37d6720e9518ce46f19d67134b6644e62ae3ff4ea6d127fbee1122ba4a3b7383|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2903,7 +2662,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f3d13d2ca5b4dd2c2112c77da17209411b75ce69ccd1af10cbce488650a94d46",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.distinct_namespace_basis|958ad3f10b8429cd4ac0e9cdd6db0119cc9e994ed8792b8c8443aac2e7928894|1|78ee392b466ae9a026b2286f9843329fe21c512b2dd107620b8935dcb055e4d1|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2914,7 +2672,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:b0f6e5b9b71c069852886e98c69a257f258d0d87bf695be73b35d6cb8c223713",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.recover_source_k_oid_for_decode_operation_recipe|62ad006ef188f5e9b1e5f6b549bf29411a5e56312d661d3a0949e2603ce5404d|1|f31584d20d8a4852ebe5707528b91e50d67d00d7afe5de3b8bea93c461e3b20b|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2925,7 +2682,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:30dc167c4493d4c51e751a3d7e77af70c9c9a0e457eaf00ba57fff01dc0d235d",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.required_source_key_nontransplant_proof_profile|76f29b9213d9a915933579071b70076737f1ec9604e646be4eb985bbef67152f|1|d0fc7259267e8fe6c0e6f79d931a7b82dd8b80f86fa75ef9ea357892b35658e2|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2936,7 +2692,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:425f9c6202f370aebe6ca60eb1c8ceed11acfec76fd0d431e97a1ffd9684f5bb",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.source_k_oid_source_open_only_commitment|b90e1eb0aed4ab2a470ebcab664ec6b2c216047a5e741061d9b2fa707a214bcd|1|cd43247cf3084aa0020922e777f1027a96c6ad4ebdfee79cec1da4cbbef6b433|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2947,7 +2702,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4408fe8489bf3b8a56e92eddbd6a52f360583c3715cba3b3f83fb452245dd9aa",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.CloneFreshIdentity.target_k_oid_recipient_commitment|df8d130d09b0aece1dd9534d3110856f9a7b7e730756b239308edf8890539963|1|318c57e562377bb4bb282cba768aa8b365c1ed984d8f886c390a2855dfad4e4a|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2958,7 +2712,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:428f4a28cda62c0d2fe400327ee5371384d435132bac156a1160119d2ba2adf9",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.identical_namespace_basis|e230d138e7fc28d75f1285d6da2c2a2036ac8dff57f55efa94f0285e8e4c0ba9|1|125863a16aff9edd2a7fb2f0d273b9ef598a8e7ee1f2ecbbd4deff034c6e5e19|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2969,7 +2722,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:5808d0f941f3989cdc6937d82303a4f64634837f2be819f4ae0151e111a5b1de",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.recover_and_rewrap_operation_recipe|31897f30895da2f1e1e336645ffad9ca28b97c4c8c96b3f4516f06427fe5e0c9|1|a8f8e2414ed7e37e89d33a0cae0ee76caf0164ca294aa15038693e7e925a98a3|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2980,7 +2732,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:31cc6283f91ff4bf1c4175dfa89f4f612aa184914b4412d0aa7375a884ae6199",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.required_key_equality_proof_profile|adec260fba8b296cadad2f1929120d68d9f5654a2eb4e5c8574101ac0976db53|1|d2e641bdfbe5719c2e19c987da02ffdf8879e7e98fea4ee39cbac4505bd522fe|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -2991,7 +2742,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:a3cf39ce48c28bd30f39483bfc16e055768701adb3ccdfb88281f1aa8f2811cd",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.required_zero_plaintext_persistence_proof_profile|5fbadce5cbc2cdcfcb13c7f147f0c0ee2e3563077607362aadae43b7a81dd392|1|c89b86f53b227aa3d7cca3976514399913db2d972b4ea6d9943bb475a94dadae|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3002,7 +2752,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:60b0d02f6527985a2ede2d69f167c9ba7a85fc7b418df1e308f9bc9ae5ad4ebb",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.source_k_oid_identity_and_commitment|7680f99c6f0f8ae82b40efe68881c7519e51e1fa000ff0c40398ae980e652164|1|714a72ad8a54697a5c36ebbf1aff7846636b85378e39c53b3105dd720cd28921|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3013,7 +2762,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:30eb8375a7e592e229c0fd3c2610ca145d0b62e57e3f247d2234b443b3f7b01f",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreIdentityKeyPlan|RestoreIdentityKeyPlan.PreserveSameIdentity.target_rewrap_recipient_commitment|e46bd70d6f9d4c2f4120695f90159b8ac7dc7bbb128e76993c965bf64456fc5c|1|c65b06177d37cf0bc406506aaec9c39071ce461316fb48d12a28c349d443d9ec|shorthand field has no exact type",
         source_locations: &["a16:2243"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3024,7 +2772,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:51e1d45595605b09416540d8f2f7bfc577e100c7cfc34d62c3f8d31ea3b4cdf5",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleConfigurationRetentionBasis|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Local.configuration_set_digest|0cda49d9e490a8fae26b241fb5e5e586d304af3b8c491349b2439992ad8301f4|1|05ca5c32f88c41337d248a8bf6449095bf12a82044b2cfcb88c78a8f854abbe1|shorthand field has no exact type",
         source_locations: &["a16:2203"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3035,7 +2782,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:63fc7261e030989938c367bdb25963327b60d9ea1d9d24dbb85d7d2dbd41618e",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleConfigurationRetentionBasis|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Local.root_manifest_and_slot_cut|680949f991343776a254515a6ea0035cdaa9bc560298a7fc054389a1b77f7746|1|afc21c90e390dd1a5f7d4d380d2f7325bbe913a53619984f0e92c78393315a23|shorthand field has no exact type",
         source_locations: &["a16:2203"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3046,7 +2792,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:216034541841b4dc0a18c6a9056d541edf9220e6baa68bccd57d9ce2d8447dbe",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleConfigurationRetentionBasis|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Meta.configuration_set_digest|0cda49d9e490a8fae26b241fb5e5e586d304af3b8c491349b2439992ad8301f4|1|f1483c57249202c9cfd8204350aecd30e29d17a278b19668967613a8a30af8b1|shorthand field has no exact type",
         source_locations: &["a16:2203"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3057,7 +2802,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:80e7fb9081083f4cc82c9ab584105b308e38afb8978ba93b8c0e9b4a5fa010e7",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleConfigurationRetentionBasis|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Meta.exact_current_and_prospective_shard_configuration_commitment|8b376f600c2a41afbd371efd1b57075ea595f8e35f64047d1722313338e31af0|1|5a52faf182deb28437bfbd39fbd57971d9f161e12d6805baf03adf49eb0c0b81|shorthand field has no exact type",
         source_locations: &["a16:2203"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3068,7 +2812,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:dbb7edba8ea7628b68f176f2fdcf74df26e3460a1f61f937b6ccbe9ce860dd87",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleConfigurationRetentionBasis|RoleConfigurationRetentionBasis<Role:AuthorityOwningRole>.Meta.root_manifest_and_slot_cut|680949f991343776a254515a6ea0035cdaa9bc560298a7fc054389a1b77f7746|1|04b2fe06f05dbe2765af57aad63827b03091dc5f93d46ebc15b90bbddbe0837c|shorthand field has no exact type",
         source_locations: &["a16:2203"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3079,7 +2822,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:6dd465c2c940014a013bc003a9e661deadc21487ac6313f05a50cbecea9097d9",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeAuthorityRetirementFloorSet|RoleTimeAuthorityRetirementFloorSet<Role>.Local.checkpoint_ref|05fa3858ab9fd350ca08724045faa8f627a4d4cf1377528a317f00c5e1d01cf6|1|1a1e706a8faea4c441a0e719f5a8e5f5fdca95c955577b6dc29cd387defbd8e6|shorthand field has no exact type",
         source_locations: &["a16:2205"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3090,7 +2832,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:902d267153d8579147f02b8f03e991d7c32f9d7209fff31de61ba342ed72baf4",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeAuthorityRetirementFloorSet|RoleTimeAuthorityRetirementFloorSet<Role>.Local.config_payload_floor_ref|cfc39395925ea45519d4dcc753299ecfb3d1e9cc9e49ed91dc916c77849f3f7a|1|733d6226d8f85cc2cf6af011d1a27d73a1ca43dc98917c3d969aa21d0455a6aa|shorthand field has no exact type",
         source_locations: &["a16:2205"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3101,7 +2842,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:483a3d514dff97d1044b68ac3509def420cffaa13437bc8473568f75218b61ac",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeAuthorityRetirementFloorSet|RoleTimeAuthorityRetirementFloorSet<Role>.Local.configuration_ref|a65a4cadd73613e4303c434f3bb414d08dd11b5dbaaa75f5a4ac62e20a64ad1f|1|c0ee6d2d010bf5b15d1f560fba5d70bea8d76aa755182ce617f89093d0891891|shorthand field has no exact type",
         source_locations: &["a16:2205"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3112,7 +2852,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:1f20479cfd8941a0d1df5dcfce62960e4f5ef9dd4e3d41b65abd770d83777805",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeAuthorityRetirementFloorSet|RoleTimeAuthorityRetirementFloorSet<Role>.Meta.configuration_ref|a65a4cadd73613e4303c434f3bb414d08dd11b5dbaaa75f5a4ac62e20a64ad1f|1|bc47f7a5d2734a2251489d4c3688d69a533aa6181ab30ed6f4e8fc2ea24bb6f1|shorthand field has no exact type",
         source_locations: &["a16:2205"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3123,7 +2862,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:88ec0918d92724ea23c58210e0e16c0c04742f08c40f324c78c8a8f139dee4e6",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeAuthorityRetirementFloorSet|RoleTimeAuthorityRetirementFloorSet<Role>.Meta.global_checkpoint_ref|e92bdb0252bafab8b355f51bca2d32d7c5320794591820cd170304224102ac2c|1|ced483ebfc979d515d9fad8e6896e4ef258569ad175a3537946eb15aeb776344|shorthand field has no exact type",
         source_locations: &["a16:2205"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3134,7 +2872,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:b15497009f309c87fbd8f21e8d7d8c6242e4ab3b226e7da1e20b5ea465f1348c",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeAuthorityRetirementFloorSet|RoleTimeAuthorityRetirementFloorSet<Role>.Meta.meta_config_payload_floor_ref|19d180009a4446243748ba40d3c01d8be753c00d0ef118e190891825162e173d|1|52f61347afdb6179b33aaf197a5da02e1852bd9be4f3623363a7349498448939|shorthand field has no exact type",
         source_locations: &["a16:2205"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3145,7 +2882,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:14ebc1cef7254371a9290cabc9931aa7b0a06c7cb57527b89d15186776e7ec50",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeAuthorityRetirementFloorSet|RoleTimeAuthorityRetirementFloorSet<Role>.Meta.shutdown_receipt_ref|5e062f047be71f798471779dc5142d2ee4b066023bc48caf052f84950a8849cf|1|409cdcd90d4b26f3c31675b0612f23ae53a6de9001606ec85ab3f92c445d9af2|shorthand field has no exact type",
         source_locations: &["a16:2205"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3156,7 +2892,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e91e24a51392d6954d25959e9414a9ad41fbb3a557250c1c659af72b8d65fe35",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeAuthorityRetirementFloorSet|RoleTimeAuthorityRetirementFloorSet<Role>.Meta.verifier_retirement_floor_ref|fcc097004f5bcde950130cf491deaf0af6773dbddef8606054f831a65d5d9e9a|1|54097f3877d755d9238d716da9a420f1563d3415dd51619684954c4be29d1d70|shorthand field has no exact type",
         source_locations: &["a16:2205"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3167,7 +2902,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:b16ef0d3622c032199d593c58ccb018188ef9ba2bb7f11a09fc8be0dc80bf2f3",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeBoundSubjectInventoryClosure|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Local.closure_digest|be898c1de4b4b9688762a2507e264cfb2487049c1cfe7ad06bd45ffde5bb24b5|1|3b13ea8ca1453c0c98ea5a2f658781f27cef324b974fd5241ce659c8efcb4882|shorthand field has no exact type",
         source_locations: &["a16:2197"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3178,7 +2912,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:139736010760224ea01da42ec72d64e00f649760b94b82519832db88c20c87c4",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeBoundSubjectInventoryClosure|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Meta.aggregate_maximum_expiry_derivation_proof_ref|07a3744fa6da65338903116e9515041389f28866083086d02b23664e9299d547|1|c329501a5ff992e20791db0227d90f214d499e4ff1f86c7590eadabe517a7479|shorthand field has no exact type",
         source_locations: &["a16:2197"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3189,7 +2922,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ff4db66414518f7f1180ae56f9e0e1f62eff4eea91062e2e1a4e6021735c4525",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeBoundSubjectInventoryClosure|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Meta.closure_digest|be898c1de4b4b9688762a2507e264cfb2487049c1cfe7ad06bd45ffde5bb24b5|1|da5243d65f9ffc2177f8fa46573638f4550fe155f0daef4689493d7efedadffa|shorthand field has no exact type",
         source_locations: &["a16:2197"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3200,7 +2932,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:198d323e4bcdc1582896d21ce07fa233d15a72464c6d5234a96b053e4af44aba",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeBoundSubjectInventoryClosure|RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>.Meta.configured_group_inventory_bijection_proof_ref|51866ee8d9357d4fd64b9127da5fbd94a8809a8c8d8c44aa67c62ee2d70fa2f2|1|7e8838da3e3b43865c321acb2e6878bff9d00cd426ae93294d7cb6ee694d560b|shorthand field has no exact type",
         source_locations: &["a16:2197"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3211,7 +2942,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:36978d672f27a9404f4f2140e7de7b1f7d3cba5ba7395ba6247431031c873127",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeIssuanceReservationClosure|RoleTimeIssuanceReservationClosure<Role>.Local.own_complete_bijection_proof_ref|23344973f9a2bdffb3407c30c8530a59f41eaead9a449ac62645ff133fda080d|1|d0091f0d9e6ef5506d6e3b510af539c1dc8ba976722f656735d8a23e37c8ddef|shorthand field has no exact type",
         source_locations: &["a16:2193"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3222,7 +2952,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e6fe389daff9216daf5eae4a5e9f60371cfee06c2285bc5d94e43ae3d62cf9f2",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeIssuanceReservationClosure|RoleTimeIssuanceReservationClosure<Role>.Meta.configured_group_certificate_bijection_proof_ref|ea00986183ced10b0c4c932be3d9fcdeec8140cc9b4a234cece2b02182318417|1|a4f5e7d10a2c3f90e94ce153372119ffa96e2497031530a21ecb05b6aff03711|shorthand field has no exact type",
         source_locations: &["a16:2193"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3233,7 +2962,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:22afadae2a28ad5464ce9a4779f1939a81035f3992249a1a2a7f9c7eddb44e07",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RoleTimeIssuanceReservationClosure|RoleTimeIssuanceReservationClosure<Role>.Meta.own_group_certificate_ref|3a598979eb2a07ce4bdce6e91786a40e0b1c6adca06722a9319b879f6246e1cb|1|9d473b04dce098b78546704b58288c7603fdba8998d0fdbd5f968bade06042b4|shorthand field has no exact type",
         source_locations: &["a16:2193"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3244,7 +2972,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8fd0bb570ac876054b677e9705401329de512801ee439276dc674a407df02f8e",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ShardRestoreSourceLeaseProjectionSource|ShardRestoreSourceLeaseProjectionSource.Bootstrap.bootstrap_projection_identity_and_digest|6b747fc47dd4d022d466350b7ca40d70a4279220caca45f5eed772a373c5a1b5|1|3c96b4ad15b5652fe5504665e9c9655cb7da93c761b66003b5a938ebb19c938c|shorthand field has no exact type",
         source_locations: &["a16:2239"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3255,7 +2982,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:42d2a629736e07406ef6cec496247a08477fd4f24713e6b7f51b0756b4f5df63",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ShardRestoreSourceLeaseProjectionSource|ShardRestoreSourceLeaseProjectionSource.Bootstrap.source_lease_projection_payload_identity_and_digest|3655a3f0b2f36011e9f1e78c8922dbd1f657d9e3229abd039c536b91df50e705|1|0d98f387e36a8972ba7d160a13865f34c3c6eda1eebb4eea562163e25029842f|shorthand field has no exact type",
         source_locations: &["a16:2239"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3266,7 +2992,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:3662fa006e86638ee2ff3041186200f8ef75e915a62142622b013db772c927b7",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ShardRestoreSourceLeaseProjectionSource|ShardRestoreSourceLeaseProjectionSource.Refresh.typed_meta_projection_payload_identity_and_digest|ae297e5608bddf1b8c170a6a2b2a0f56ee57b3acd485718fadad7fbbc3904fd1|1|6aabf612d6af2673064d1bc72945493c8a51fa273074d0ea4fbadaaaaf38e6fe|shorthand field has no exact type",
         source_locations: &["a16:2239"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3277,7 +3002,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:6e7c4fbf5db3c3cf58224f222c31bb95b20241840a3ce0bb89ccb3e664407b8d",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Local.current_configuration_writer_fence_and_publication_commitment|9da91888d42803314cfcd8361404a1406dde03f633ad34851fabd694f8dcd169|1|79341167f13410bdeb41b8c08eef8fd0f986dc5ac5ae839554b8aca45a8d1d1a|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3288,7 +3012,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f84e5724e1fd386f4850343edec20569c16d3b71309a61c85c66fb582b071114",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Local.exact_profile_registry_and_transcript_match_digest|ecf6e32fd7ebcd04212b1669b4871d79d03fa3544ef4e76594a20be9ebceccd9|1|74e81866fc8b00376d75109fcb1b06bc18765d4dfcada8cc90f1b5f016807eeb|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3299,7 +3022,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:eb4c402fb998455475a495a575802f161a3caf327e654e1e2a2c6f0b08b55f15",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Local.imported_at_maintenance_identity|e2d41158e8ead6d3787feb00193b6cdc80fb410c03f4604bd555e72f01548f13|1|2965d70424673c8853b230556b9be20308fe597c56919eaa616ffacec8153e17|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3310,7 +3032,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2b88dd4fe39941051f81018d2005d684b7e0a9beec3622d0a86fce28dbb6f690",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Local.role_and_group|49e0c9c79a05b5bfc0e1e4bf80d85509470442f06c703cd7cc24022f86d4b0b8|1|4b3d1c1ade9821279ae138b8574b9372c0bf9d7f83092af49f1066414f18cf07|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3321,7 +3042,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8b5c7f1c7920620c2661b436a184d102ac583a25c8f6c251e25854579a6cde97",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Meta.current_configuration_writer_fence_and_publication_commitment|9da91888d42803314cfcd8361404a1406dde03f633ad34851fabd694f8dcd169|1|3fba7dced7264442ae9d0b853f2fc58314c76dc628f8b5acb1b52c0eff3f92a3|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3332,7 +3052,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:77cad945943965f6823afc4ce110982fc90b3f1b7bb55d835b30d45bf74ef876",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Meta.exact_profile_registry_and_transcript_match_digest|ecf6e32fd7ebcd04212b1669b4871d79d03fa3544ef4e76594a20be9ebceccd9|1|83da7c0a2095993df1dec28ec04237ca43e8a371447aaf1a1d63e8a410d7fbb7|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3343,7 +3062,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:bbe2ed9b1b6f16c3558175619522d9be6d442f099cc198c0d6b5e8ebcaa55cc0",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Meta.imported_at_maintenance_identity|e2d41158e8ead6d3787feb00193b6cdc80fb410c03f4604bd555e72f01548f13|1|e79c00b8e813d67571b1fff3c775d055853b29d9569dfc51d5181d9c1500bf13|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3354,7 +3072,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:4b38e383af6cd3b3152ee3fd60ab247bd488ac0fd1921055815d572c6406d0de",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Meta.role_and_group|49e0c9c79a05b5bfc0e1e4bf80d85509470442f06c703cd7cc24022f86d4b0b8|1|fd3172597a295962a6937fabff6eaf22d42ab72717be1bc957e5eeb6ff01d87f|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3365,7 +3082,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8682f99fbb0811dea1a3c1ff717c7f6e4692127e146efa48a985de59e93214e2",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Shard.current_configuration_writer_fence_and_publication_commitment|9da91888d42803314cfcd8361404a1406dde03f633ad34851fabd694f8dcd169|1|8a1755593fa83283f6c8858aff2c9b836247476cf5f7aa2b3182482407ea2b23|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3376,7 +3092,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:53da05c0fc82cf4701fb292f9907292c9088e287c6779e836840352920925ddc",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Shard.exact_profile_projection_and_transcript_match_digest|a24c38beb3b24ab4b92ccd61ace15d53aedaa62d7b8931fca34582af557c1eec|1|6e72dcccfa76d6d4747c1b4de4684d16690f5ec18d5925467b7ecf44aed53c59|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3387,7 +3102,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:300d344bf5abdbd2ba3786dcb2f2101f0f44a7aef6794b192d392bc0d5f8e2ad",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Shard.imported_at_maintenance_identity|e2d41158e8ead6d3787feb00193b6cdc80fb410c03f4604bd555e72f01548f13|1|ba800d96bd139a5c8c04aa47e6f47f81f92919a7fec8b99aa5ac3b6b30f7c642|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3398,7 +3112,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:60b6f049cbffd66661578e441fc181a08f56c8a19c041eea7846ee8e40b70c48",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeAuthorityObservationImport|TimeAuthorityObservationImport.Shard.role_and_group|49e0c9c79a05b5bfc0e1e4bf80d85509470442f06c703cd7cc24022f86d4b0b8|1|c6d60c656d1f90f8f2144efb16b7b5da291468265a22f08bc7b5944174ef314e|shorthand field has no exact type",
         source_locations: &["a16:2165"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3409,7 +3122,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:0e6c35f78172a67ce5d4652dfa17cca9cfd5c6d68b64ab0aa9f0dccb40305910",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectDisposition|TimeSubjectDisposition<Role>.Reissued.successor_subject_key|223b4a0780c0d5230921df4638a3391104fb9124152ca239ad1c09ed070e4dc7|1|3625e441f178a4fece58be8844ae636cc904ca136412210400d9892582b53aa6|shorthand field has no exact type",
         source_locations: &["a16:2201"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3420,7 +3132,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:c39a49d58a1e4f8383dcd973f24f1542a19b8b3a35edcfbb27e8ad08faade723",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Expired.portable_expiry_attestation_identity_and_digest|0e22bc1c37d7bd636722a290650acc760a2169ba3607e6b7466c94d0f860a3fc|1|1fe3c2bff4f80817fad8520b0d00badc0cc06ff074037ade63fa015001932de0|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3431,7 +3142,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:9e665016cb7a45f5ae6e4d68bb6455ff508789fe83d9e40fe4b0a599dd71bad6",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Expired.subject_body_and_profile_digest|0bd12997bb8d9fdbaf826b28ece45fa3b787ea37f15737c8fdbb3eb002e9ba82|1|3d6fa7b21f271bbd0bfd0fda91552a00413df1b4d0eb4f2e50f7084495937aa3|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3442,7 +3152,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:439880508061ce9206720a2ce11022658a71030cc4f8d519a52415f1aa558123",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Expired.subject_key|bcaa270cecc5c1dd9d8b1edc2218b3d91ddbc51e9f8a751535af1fcc83bc7013|1|011b5f8d5d69cc053b78dba8847ecf7a60ac9c35e5673a36274155b7e2a5bbaf|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3453,7 +3162,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:1df3c1bc531c4e2e02d5d3114aaf64b9f3a26aad276f789f75bde2445bca7cc7",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Expired.terminal_authority_commitment|be6a50f42d2083e950fa3ced6469243132be120727c64dbf25b1426f63ff8008|1|07974519074a7a7c5a62762da80c4cef5739d366f84b7c4d4876d08a51f8c68d|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3464,7 +3172,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:3235f879a698f52d63298366de7f6f35bea2adef2d55058df0350648a94af466",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Reissued.nonwidening_proof_digest|cbfdbe4b9eaf039f324f7a6cec100ae09adc4f7c508b9e30f612bba17ededb4c|1|30e6f231b97259cc2a5cce3fdd8777eb6105555d7ebb9e42f8df9f8bfb66471b|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3475,7 +3182,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:403123812a10492300994071d83a66ac3b7e056829d79bdc5ddd69eb9d110d10",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Reissued.old_body_and_profile_digest|15422618b999b4c7ded7c4a764deb957eabd89f49140d82ec693d4b3c3d3fd46|1|8001cc7771f5151406f5d5ade6a2e284fd8cefddb29e3be47fd6576c381cc14c|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3486,7 +3192,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2b515598a6fe76493393ac44fdc64bf6208f036442ef977ba94d33b6a110bdfa",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Reissued.old_identity_tombstone_digest|32ad57c02adcd5cb1262bad397b1a62f589c1fabb06352147a70af00d2ec10b0|1|b6c9b3a69eb3cf4e9b008901cb8001a92faea519f8187064e32afef284c87d08|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3497,7 +3202,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:2236fed6acd8eee82cfb48df29a034f919dd8aad900b0e20c6cdf98611ffec4a",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Reissued.old_subject_key|39adf495848e8d900cb9dacc8bba361ab194cd001d8cc595f4ca2958a7dd3225|1|95e1a32a65caca17dbbb8030f39d810616fd6f91815db9d861e5425902f29ed6|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3508,7 +3212,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ac681d7d9469b0042e8a114098420c4e08f9725dfffcd261b70a2c135d5b2f3f",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Reissued.successor_subject_key_and_public_commitment|f78ab0b74887acffce9661aa003f4fcf64a2bb606cd856b2a0d08e77b3acc2f6|1|065b73f48c8298334244b805c102214688d30a658dc767f4a656a7c5bd435a8c|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3519,7 +3222,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:64b787a35f64549ba2fe85e0c0b1ef8290bd992e6f1e28c1432f3af64ea89e86",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Terminal.subject_body_and_profile_digest|0bd12997bb8d9fdbaf826b28ece45fa3b787ea37f15737c8fdbb3eb002e9ba82|1|27cb7c67629172a9894b360f8adff968472925396b29f9fa340c956e6c01ceb8|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3530,7 +3232,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ec3ed5bd31064ce1d87e694da563bfefd7d5838d8b4b1b8a617a8dbabb76d4df",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Terminal.subject_key|bcaa270cecc5c1dd9d8b1edc2218b3d91ddbc51e9f8a751535af1fcc83bc7013|1|d3d0d92704bffa08cade3e9d86c52c03ac4fb40ae6cb4c843fcd4145623ac426|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3541,7 +3242,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:090cb31de86f72015dffe5b58eddba0fb6ae766050c7d28ee911059708895582",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Terminal.terminal_authority_commitment|be6a50f42d2083e950fa3ced6469243132be120727c64dbf25b1426f63ff8008|1|1aeed0beb4a3465d08700395fba03417d013ad5c59abc0d7c0c61a55ccb46c5b|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3552,7 +3252,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:412f94e68cbd3fafba3f239ad4edae688817333f62d5379772e577a74fb150ff",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectTerminalProjection|TimeSubjectTerminalProjection.Terminal.typed_terminal_evidence_identity_and_digest|c93c0aeb2f95eb0839bcb61b8c3e3aeda7aa5f3bc9c5d39efb9703740b3eb4aa|1|866df57554b43e47ef42014db3325a6181b9e322137cb9befb04186ea38afd58|shorthand field has no exact type",
         source_locations: &["a16:2209"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3563,7 +3262,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:fe273b4d125585f91d7775d7061204c113cf295fbd53b607ec0e0cade19f25d5",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|unparsed-record-item|ShardTimeAuthorityRetirementAck|ShardTimeAuthorityRetirementAck|dec1da9246adf963002710d7196c7ac12701ceb27c317b96f62bdf586e7e16a4|1|3393f67c657940a6c2170e811e620df24e1f001b648fcef0d81370d91756bed5|record item does not begin with a lowercase stable field name",
         source_locations: &["a16:2215"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ShardTimeAuthorityRetirementAck"],
@@ -3572,7 +3270,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:0799a80b9503af44762c89c9bd28c21ce8615b3e50872f14c3d718cfb6b855ff",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|unparsed-record-item|ShardTimeAuthorityRetirementFloor|ShardTimeAuthorityRetirementFloor|dec1da9246adf963002710d7196c7ac12701ceb27c317b96f62bdf586e7e16a4|1|0e114346b3fa410f12cdf76365090e95a30c4364d257c0f68bea0ad5f5fae4c5|record item does not begin with a lowercase stable field name",
         source_locations: &["a16:2205"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ShardTimeAuthorityRetirementFloor"],
@@ -3581,7 +3278,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:89eb7fcff73cdc05f717b5f8888b49680d0d11e5d8b7ac63fbaec93d118bfc84",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|unparsed-record-item|ShardTimeBoundSubjectInventoryCertificate|ShardTimeBoundSubjectInventoryCertificate|dec1da9246adf963002710d7196c7ac12701ceb27c317b96f62bdf586e7e16a4|1|351d39c67b9320fb2dcdfb512bb5355b92fca1f58712817e9a79da90713cd761|record item does not begin with a lowercase stable field name",
         source_locations: &["a16:2197"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ShardTimeBoundSubjectInventoryCertificate"],
@@ -3590,7 +3286,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e4cd82413f511826adaebd47c79e439c7cf26a366db7682136e3e70085ec8902",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|CrossLogTransparencyFreshness|CrossLogTransparencyFreshness|e6fd8551273da0e02996a19f76ba9b4c3837a35abec5cc962bb5043ee49ecd93|1|f6dfde41644028fec673fa4fb518aaa8f7b2aac8e44c9e1d07afc01778375316|leading named record has no explicit top-level ownership cue",
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|CrossLogTransparencyFreshness"],
@@ -3599,7 +3294,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:b9347cd7b769ace4ffbb1db74e730bbdbb736dccd01fa43aabc5f762322d4d2b",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|GroupTimeIssuanceQuiescenceCertificate|GroupTimeIssuanceQuiescenceCertificate|36f0884a28b9eeb213bbb37f209bef91784d68945130271a87f52761d4965079|1|579645ce8221ef09d5878e1545199e33baca205ee9dc323d9e78f18e9c664a1b|leading named record has no explicit top-level ownership cue",
         source_locations: &["a16:2193"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|GroupTimeIssuanceQuiescenceCertificate"],
@@ -3608,7 +3302,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:bbeb7610f005f870af91589e584a196b7b10d4898f7da64f0d8edc78dc7dbbdf",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|KeyEnvelopeGrantWindow|KeyEnvelopeGrantWindow<Role>|792a3cc43524383ab9cf5694b4105e048e6cc697c0f0472593386767ddb0fdfe|1|423c54c076440f11ceaef6a3e478ee849e95cf1ea107caad42d9c2d63cf77333|leading named record has no explicit top-level ownership cue",
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|KeyEnvelopeGrantWindow<Role>"],
@@ -3617,7 +3310,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:994a81b46f241832d3170159b4c71dd7083d9fefe89aa659273a1c4426970fab",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|PayloadReceiptProposalFreshnessBasis|PayloadReceiptProposalFreshnessBasis|f9743bcf9ae4e8a7f495f1b426f349e741b09141ccc8109f9e2febe9910350ec|1|bc84453d9e9f74e49df700727f384cddcf4dda6566f11c1549bcdcb7653a2197|leading named record has no explicit top-level ownership cue",
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PayloadReceiptProposalFreshnessBasis"],
@@ -3626,7 +3318,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:9c6c718123cf055dc9a456ace50120d2beaf8d0ba42cd7aabab639de7ecf9fd6",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|PriorIncarnationLeaseCohortWindow|PriorIncarnationLeaseCohortWindow|c75ca267ed4bae2e83ad03b73e40f06d59ecd716247848c9439e1580ad838f00|1|fc378d29f3624ee31ed9148d7b87aafc3d73105bb026754800e914248b204881|leading named record has no explicit top-level ownership cue",
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PriorIncarnationLeaseCohortWindow"],
@@ -3635,7 +3326,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:40b07c775488fa9786d84a11088f6f57e4b9a5c95299ad4ffc143fc696574286",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|ProtectedErrorReplayTimeBasis|ProtectedErrorReplayTimeBasis<Role>|26cf9349bc9b17363be804bcd25303ab48c9f23a7218ec98001aca86bf238e0e|1|87378e87ae67e1d42904291d0b6ea6d6cc3b86cc3e481e7cba34cfd0c0173442|leading named record has no explicit top-level ownership cue",
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|ProtectedErrorReplayTimeBasis<Role>"],
@@ -3644,7 +3334,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:eaa26b8f61958eeabd97319a5546c82f57bad2e255e80e863d3dcd1900482f97",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|TimeAuthorityIssuanceClosingReceipt|TimeAuthorityIssuanceClosingReceipt|76b81cdccf5723b11cf8d0fc37509f46605f86c67fe959a8b9bea1e2db9dca33|1|14d3f3f51ab2c3281374103f749f68477594b8196b5ae47f0b2ad9c0885b5368|leading named record has no explicit top-level ownership cue",
         source_locations: &["a16:2185"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|TimeAuthorityIssuanceClosingReceipt"],
@@ -3653,7 +3342,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8f06d57bcaee0a663a16812a9981d7bd2478b69706dd7c042f70ed8b137e8231",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|TimeAuthorityRegistryTransitionReceipt|TimeAuthorityRegistryTransitionReceipt|15cf30b4ba38da786924cab471d0556463ee03b4d39c5fec4382a625ca9e0bc2|1|41ef94c7e6eeeae332d601613c6ddfd7b4c3c9aeb90cdb2668eb9c726f03e90e|leading named record has no explicit top-level ownership cue",
         source_locations: &["a16:2217"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|TimeAuthorityRegistryTransitionReceipt"],
@@ -3662,7 +3350,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8382d602a7cfb3b34c9b3adc956a9aceaab94ee8e651d9eafad600a00a1f175a",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>|771d2b92737a0ffbea4d2763e85896a473b9a256c4e28ce67b87bc1583758b98|1|e98890295559e48247c398bdd64f7f6491a446e4a49fef5cc0cfd5dae7f7c634|leading named record has no explicit top-level ownership cue",
         source_locations: &["a16:2191"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|TimeSubjectIssuanceReservation<Role>"],
@@ -3671,7 +3358,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:a0148dfd5ecafa3bd5cdb3dbc1e191d682e5eeb8d6023b8bcd9e504b33ed85f6",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|ambiguous-schema-owner|TransparencyCheckpointFreshnessBasis|TransparencyCheckpointFreshnessBasis|50f716c3af5a611d94a39836045bfa9def062b77dce0d713a77ee24c05b38907|1|6c6fc662da2ca59132b5ffdef77364102448622cb5be904e9f731e86d2d7a955|leading named record has no explicit top-level ownership cue",
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|TransparencyCheckpointFreshnessBasis"],
@@ -3680,7 +3366,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f1c6073209ca7d229ae3f22e6b388d4775edd7625e3c0d7a08492cd3b091968d",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|conflicting-candidate-evidence|PriorIncarnationLeaseCohortWindow|PriorIncarnationLeaseCohortWindow|c75ca267ed4bae2e83ad03b73e40f06d59ecd716247848c9439e1580ad838f00|1|fc378d29f3624ee31ed9148d7b87aafc3d73105bb026754800e914248b204881|the same schema source key has divergent structural bodies",
         source_locations: &["a16:2171"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PriorIncarnationLeaseCohortWindow"],
@@ -3689,7 +3374,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:d0fbe5b2a75940c2e66ca399d38b8efa3ca39e33d44bf639a2c965fba6ef4e0b",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|unparsed-record-item|GroupTimeIssuanceQuiescenceCertificate|GroupTimeIssuanceQuiescenceCertificate|dec1da9246adf963002710d7196c7ac12701ceb27c317b96f62bdf586e7e16a4|1|579645ce8221ef09d5878e1545199e33baca205ee9dc323d9e78f18e9c664a1b|record item does not begin with a lowercase stable field name",
         source_locations: &["a16:2193"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|GroupTimeIssuanceQuiescenceCertificate"],
@@ -3698,7 +3382,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:f0d112a99c9db91ac5aacac17a50ab039e9d6dda70ea189fd0428ae7e5f6077e",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|MacaroonRootIssuanceRecord|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Expired.time_validation_evidence_ref|9b178669e1dc7f0c6d2955cbafb2c8e40e0bd2350b1dd724bbaa6d8d1c2ff9a8|1|010eafb9984659de247e640a4c9aa5663839b58689a69df38c522cdbe936f5bf|shorthand field has no exact type",
         source_locations: &["a16:2173"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3709,7 +3392,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:27b38b207a4da96fce9484e5d14596a5c429122c2e0b1828fc0d5a30b9df4ba1",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|MacaroonRootIssuanceRecord|MacaroonRootIssuanceRecord<Role:AuthorityOwningRole>.state.Revoked.revocation_evidence_ref|2fa228f026a9a831a9353e564a92726f6f9557538dafd535de64350017f7b4d6|1|d9e75f3b4f1e029d615b0bab0f11bd402e5f1df6f6f754e9c65ee030ba2d6be4|shorthand field has no exact type",
         source_locations: &["a16:2173"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3720,7 +3402,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:d3972d524264e6449e2528313a7976b508eac8acabf9593a4c8ce1ffe06f7c7c",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.receipt_digest|742a7427646cce07c66191aeda9a906cf766c459c8ac499ef03289eaf9d20070|1|38453b1353b2acfc78ce7c8b684a070bd7bc1eb0d9bf34fc5bc36eb5b7d88361|shorthand field has no exact type",
         source_locations: &["a16:2217"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3731,7 +3412,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:73143cf7fd34135bee48b34d7acfe28e8d8b7d465f7045f6d3aa6db79174a6f2",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_cas_version|2614fdcd6d71117b6761976ff6a5702485716e43d28a2374a3730418c9c76b0f|1|2d6828fe66bb097c080b4f852752b8a8f6ea8a82a36284371524410733dffa8f|shorthand field has no exact type",
         source_locations: &["a16:2217"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3742,7 +3422,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:40fc6209f306a671ccd4db75f22833ab2aa76d13d8442ebc25674a04196cb132",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.AlreadyApplied.returned_head_digest|e4656807a8ce7931810eff2747a30db1ddda8c35a08b7fe3c285f792610c1f58|1|01b14b25fdf3f7f62d3d52f289f55db6bee5bc3e1ed8c951d471a5e651a9d18b|shorthand field has no exact type",
         source_locations: &["a16:2217"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3753,7 +3432,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8058b555f1a86c8409f8539532fc03036c349fa2f6fee639571fad438e13358b",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.receipt_digest|742a7427646cce07c66191aeda9a906cf766c459c8ac499ef03289eaf9d20070|1|bb7af1fdc823918ec571e0a75a8e3b76d40faceb15df193831dc07366db4694d|shorthand field has no exact type",
         source_locations: &["a16:2217"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3764,7 +3442,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e62694631633aa73ecfadb4ad6d290ed730a138cc9e521583c2200708582fc9b",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_cas_version|2614fdcd6d71117b6761976ff6a5702485716e43d28a2374a3730418c9c76b0f|1|cca349f2e71310c743aada705f8e8b5b10f57ce021a2b7cfc856913e9db410ef|shorthand field has no exact type",
         source_locations: &["a16:2217"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3775,7 +3452,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:7cae16fadad1f0eaafdf3ebaded743a00bd755995d0a1d8db5d6a6d00507d90a",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PortableTimeAuthorityRegistryTransitionTerminalEvidence|PortableTimeAuthorityRegistryTransitionTerminalEvidence.terminal_disposition.Applied.returned_head_digest|e4656807a8ce7931810eff2747a30db1ddda8c35a08b7fe3c285f792610c1f58|1|d25ed4bc07e5387a6f0ba6ecff17291241209ff9efcc310755f63c886a0aff43|shorthand field has no exact type",
         source_locations: &["a16:2217"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3786,7 +3462,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:3f70b6d5956b91cbed5b83cf1c9a008e0582772e43187bbd4307c896c9a58b0f",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|RestoreSourceLeaseRecord|RestoreSourceLeaseRecord<Role:AuthorityOwningRole>.record_kind.AcquireImported.prebootstrap_owner_digest|f772d77a24d4e1d4c6c3692f21b0e41bcfa065760f941fc39d5af6d486aa3755|1|435248a0e8f4327001c517da8850d24f6bacf07fee8c8d06f544c57b7498ed26|shorthand field has no exact type",
         source_locations: &["a16:2237"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3797,7 +3472,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ee2a0d26ffa8fc46b9f93e2f68ff4faec17728d1615fa20416ac52779fb5fe24",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>.state.Burned.typed_no_publication_proof_ref|ee56aecfb1b4e9f2209c71f97b8c7b0c9f90b1004bad7a2242a8f8d3e4210c68|1|930dc77c2095e65fd0834f156b409bdfeb2cbe312b004afdea8ec9d04511e550|shorthand field has no exact type",
         source_locations: &["a16:2191"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3808,7 +3482,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:501aac0906acf541265937cca86f1d5e075cbecbad580e128e54fa76e93e0455",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>.state.Published.publication_cut|6b0cefb4f99834c5ae2db3afb18c4c1b0cf2f1a161b855d3b33aaa17aac05d13|1|06b854a977a010c34f23d5c1314135a47c441a3c78ed9be7b5b26ec56e638ae2|shorthand field has no exact type",
         source_locations: &["a16:2191"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3819,7 +3492,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:8762b46c4d850de631aa9c367c2e30c1f082d0306636f98323fdd1d17bfe7b52",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>.state.Published.subject_identity|f51fddc65b81c34d3d8b9598d6adb9315a097e48a82176c749ec4cf5f7e41e7d|1|47ec0cc76ae2a4c363613c7f6353283c688a84b129ed52de356db84bd24748be|shorthand field has no exact type",
         source_locations: &["a16:2191"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3830,7 +3502,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:47ca97c9c1b146df0c47c3f7591362bdb4b898f8ed393ece13b85c505d8d74ca",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>.state.Published.subject_membership_proof_ref|a916ace16d3918cacbdaa1db7231564d36c1b5bc56f7ff9c2f4816b740bc8954|1|447da631e6a613682838d2b959171a1c5dc8d642b80fbb63f06849a0fca44b31|shorthand field has no exact type",
         source_locations: &["a16:2191"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3841,7 +3512,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:fa23a8cbb7abc8dd79d1abab0b34316219cdace6a76e2bff9c4b1e0499a10650",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.Expired.expires_at|a2d000e1977254b1f6671cf27654b07ff556c38c9f077ca7d6c768a5372acc47|1|a7b3837d32fbccba247a581bc0a55e24ee33cdd6c26b1c9edc26b33a971bf3ce|shorthand field has no exact type",
         source_locations: &["a16:2167"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3852,7 +3522,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e3b83ea20d0ae098e66e43bf5c550af8f0ef4e5deb0611dff362dc221147dd87",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.NotYetValid.not_before|c7c6f927267eba0536df651c835769a72cd1cb27eca35e937f43af180c0334cb|1|60594276a20029409394d7a7be18b638f82cfe5457f298242da1f00d931a75ef|shorthand field has no exact type",
         source_locations: &["a16:2167"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3863,7 +3532,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:130c006a13e9ca83c0077198adc547325eef648f40464ca11c5b7c361ee50b78",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.expires_at|a2d000e1977254b1f6671cf27654b07ff556c38c9f077ca7d6c768a5372acc47|1|af3256eaf8af3ca7761c65289e9965d6a7fbbd5a4ce4a74c2cdff9ff2538b28e|shorthand field has no exact type",
         source_locations: &["a16:2167"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3874,7 +3542,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:ae09c78d9160d13ccf4f3c6dd11c1519b46645b455ad4719681f09b22eb4a015",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.guard_deadline_local_monotonic_tick|0579565d9bff49955e25c09b78bb899e0d20c48863c6228d6ba3621d3555460e|1|0e1fe264053c6d8844f36297113e0fe5506253b967f8c42d3d6371bdbba67076|shorthand field has no exact type",
         source_locations: &["a16:2167"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3885,7 +3552,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:92d41da0431b14a88135a2a3b5bbedbb281ab58af478f2ad2f04bcb383441774",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.not_before|c7c6f927267eba0536df651c835769a72cd1cb27eca35e937f43af180c0334cb|1|aeed0f574e2eb7e22718a9be2a67e97493fb29783b73ca2ee5ce33ddc08f728a|shorthand field has no exact type",
         source_locations: &["a16:2167"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3896,7 +3562,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:e2c84603e3f6477231e1f9b44471df57d2ca0197a763b02659b10b0d5da10fa0",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeValidationEvidence|TimeValidationEvidence.classification.Usable.validated_process_incarnation_id|3dbeb51887a08703989b5f9a90c13ea3afddf79183638cd200b944187e9fc35b|1|9b76deb6958748bcde12149dba73c45df715be95ff257e1750c02a941c861fa2|shorthand field has no exact type",
         source_locations: &["a16:2167"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3907,7 +3572,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:db66247a27fb86a8603024209e2ddd3fe88d0af75ee5f1ee02c68f9788142a3c",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|conflicting-candidate-evidence|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId|7abf48bb8920aecc18976e2a710332f888bce54c09cc1fdefa34905215fe0c6d|1|7b328a6974a5d4010e974e3c5ed04ed52d1942ce154471d6544eead1534710b8|the same schema source key has divergent structural bodies",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|PlacementDescriptorWithoutId"],
@@ -3916,7 +3580,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:44e6b6852bdc2c0f3336cc4a9f866a0430e83a64baa491610e066c4e9e0a113f",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|definition-without-structural-body|FenceToken||279c58bfcb8cc4560e8d008cca9c52f415afd2c6c327fdf548ee95c0522ed88f|1|3291acdb3936a932cf6ae42a0321f999254d8d265686d2a53e900d254b9aa853|definitional prose names a type but supplies no adjacent structural expression",
         source_locations: &["a02:1447"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|FenceToken"],
@@ -3925,7 +3588,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:b6f908b8122821b649d176365f4deb62078c49b328f0f9848bdec7b7dea770b2",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|definition-without-structural-body|PendingFenceGuard||1f0bc608faddc0c0ecfd60ca30b5a60b1d81d4daed7e54e38115901dde15fc35|1|3a54d9f90df6efa57d6e8a68e3a5c453e780d5b21775fbde9660cf57b943bddf|definitional prose names a type but supplies no adjacent structural expression",
         source_locations: &["a02:1447"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|PendingFenceGuard"],
@@ -3934,7 +3596,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:b7095531bad16e02ee36f522e449e2352c619acf383706f42d879b4794d93dc6",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|definition-without-structural-body|SymbolRecord||76d352859de8d9247d0da22ea015d1329c685cfee2bb089500bae5fe4a3f0809|1|48d293b8cad62c698fa7ac5f8249e75e497da321827118e81b20ba54decd8873|definitional prose names a type but supplies no adjacent structural expression",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|SymbolRecord"],
@@ -3943,7 +3604,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:4ccedc0588f7be74f4888666d503fde3bc7bc24371cf1ce1e3626a81d160c577",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.canonical_plaintext_len|c30cb16b42d94ab031378b967734814d2d1c336dfc0af2651fea26257790120e|1|5037208a13e4a9935e71160fa730ea4c9de79f26713d4c07585187e24999cb19|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3954,7 +3614,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:09e450db53ed431535948a0409580058cec35c34706c8d2e356e090ba0858523",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.codec_profile|8f6f3471944957612209cd358f31645a79a2c2296c30e7125da906126031b09c|1|b743b73c744d03bebfd399a599d24b036d1f8cfe3d6d3bddacd25dc6a9200b33|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3965,7 +3624,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:2107f6bb310d1738e09dbc78172590eb86e893bdc1122828d6c89b4872d0dd4c",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.compressed_len|4ca37ffa575d53985b9dc3052f1e93405068450122d22d72a543fcfbd684657d|1|cf0b7605ee455fbd64c805e210b7f2b0033c05da2d0abf5a70396e750858de48|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3976,7 +3634,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:78bc7d81d3ea77a5f7cbafe8087902fe5408ae96fd0196ccc8853add6213b849",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.data_crypto_profile|20e2fb1140e20ee7f6596d8ba740ce312d4f90980f91db1a1c3c58b41ecbf973|1|3cda350a963893c7dc1fb5b15eb72aa0b7d80bdd36caa19fbf8df058bd4116e9|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3987,7 +3644,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:01b0e2f905955e3f08d85feea3eaa8ece8b3733508e8bb5f32659f2c5665d2b7",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.dek_id|8af69fe8b94da3d64b510caa0dab1b7e9030eae0b4bb2faac1b7680fc9a7edb1|1|4ee41b6a1e48d72380f52deda275fa0a0199d03bcb9f9f97df92ff5cbfee3e12|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -3998,7 +3654,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:65f322cfd0c28b197696f849d53882d7a792fd2641775c105f7d6016bfcbdc67",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.logical_oid|fdd9a74312ec7ab8a436466dbb215bc937ed5e6accb9d7b85a22c9c095a2d444|1|305e96c8b0e200c9ffb871882c7f0c13064a8db41a9ba57cb6bcec9e5ce61648|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4009,7 +3664,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:aff152416fbd814b48c7e182decf54f4e4e8f31a7e39bf85bf7b2c8a35b39ed9",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_kind|f79080c76579371982ec2dfc62593cfbe282dd0d9ec076e5638251fc9ce30909|1|8e2ff580178eedaefde5b39810b1d77293a01f7331155ac6101cef690786555d|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4020,7 +3674,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:3b10032b12d68f801a7a16decacf694eed72525f8432d18257d23fa2974cb862",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_nonce_or_siv|9e3d1c5690ee69b7d69b2bbcda21fe89688d01e6638589bf0ba2201602fee7f3|1|e15fd8e5d6cc706620b71e60b0a6502d09c59127e211fc648c69751dd8402bad|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4031,7 +3684,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:70dd1ce6a619845e395216c30b5cc24523f715d660652f6c59233b2f4a1cdb3b",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CipherDescriptorWithoutDigest|CipherDescriptorWithoutDigest.object_tag_len|56a53094c14d9f87b12c0f75f816189bce109d403ce5ce4557ba55f62a3dc26d|1|9092af5856baa298d7c75230d71fa0adef8d34c510fdc058b609233cfcf5fe1f|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4042,7 +3694,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:21b51c04904bd6d0f06771ddd3fcff1e8f7dc47b406c10d1d817b81ceee93536",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.ciphertext_digest|639e8bce8cd2107b20eb748abd7a4fa29f62ecd3752dab46977890694061e0f8|1|722428c1c230790a9ac59413eb117bf65c1e1d75b4ece333f40960ed2d569777|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4053,7 +3704,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:e30d0e52a9b56177e2817418658afed5827dadf120553f44103643ee0f1aae7d",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.ciphertext_id|47142c70021a01c228028cf69cea5c897a6985a67f0ff4234f8aa3bea11a523e|1|be43e8869204157592abe4620b1fc0e68e0b32807ce41252d8dfe1dcb6f5ae6f|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4064,7 +3714,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:0b3b432489be5ce60147873ff27823f6a116229dfdc512f64024a49580237c8c",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.descriptor|194b520dc30384b3fc233e123778835e2adc362d91c6e33015ed3db2379d7ea1|1|7436baa9a7e0b2e6206451cbdb69f1f2c764e50b84881992c5d6fe3a5eb63684|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|CiphertextRecord|CiphertextRecord.descriptor|descriptor"],
@@ -4073,7 +3722,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:7e38b5617e877b4c4d04aab2aceb9038d3998e272786e35c565ea11a61fc8402",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.object_tag_digest|01382560e2e7615b048ea5367238388ac8c3f98760dcf5aa408bc874969d60e8|1|36b19f8caa5cbb18ae76302874307e79ed8bff813495ac462c6650761add05d5|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4084,7 +3732,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:0239498a2cba36ac46ba1927f4162f60e75399abfbb660542f8d307745300617",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|CiphertextRecord|CiphertextRecord.protected_length|5df4272c5f39dcef78c410b10c536a5704975cc8d6689dc6fbbcbeaed688ecf1|1|3c4a8e7fc8a685980c7a6dc0b8a30b64843e61ab27c873fc7557b449b3f50bf9|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4095,7 +3742,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:58efaec60718539e0d6fe9e4a1d057dd06ac699ceb1a3ab48e932808c2fa8133",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.ciphertext_id|47142c70021a01c228028cf69cea5c897a6985a67f0ff4234f8aa3bea11a523e|1|dd2cecd0e5dee5ca3e67bc3256c7c42bcabad0fdcd4ebb823854c9d018a162a0|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4106,7 +3752,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:c93e1bddb4c4026b3a846c187e67d3691154bb09a0d2c27549ed13d33c4faee3",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.fec_profile|74ccf82fa92b5a4e6c15745f28c3d0775462b0818f7aa93050d4f0568e8ed621|1|85dce6a6bc9d473b60140804d01abec258698c3b51da34bf2045c3a1aac134b1|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4117,7 +3762,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:36ce0f3f763b04170b64e17634530ae0b9f94d01676e993e5ed6cdf4f162bbf6",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.oti_common|0a77bbffbc0b36cce883b694852acdece87fb4fefb1006c2adbdc4f3a3297f46|1|d3927a94bcd8c143f407f4d8f237d3d8f99df9cf0476e74e7e467923a259c23a|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4128,7 +3772,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:0fd7f1abd9e2c65b77a7b222d54c3da2786eafb0c0a0ef19dbd85113383b17ff",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.oti_scheme|5788580e290dd22ee752c4a5a5215465706ca8ce39bd7e22b82b6d86515bf7ef|1|a30dc1fe345782d10c88ac2653e14e68a96a51feb26acf03cc2d734c9ddbf611|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4139,7 +3782,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:fc15e98ed9b83aca5947f32942eaef36bfe8ac25720614ccf5eccdd473462033",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.source_block_count|97724dac2757b7c0967f14c74e64d862e0f155784e8be5a51139d998ff7b5c2d|1|ce8a174aa4565cdd6f9bccfc9dd6bda35871faf3b5f093ef653f65bdff2bff8e|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4150,7 +3792,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:91902b26aa0a57dc07f52ad4d764ced91c8abdf107028a2ff451daf3f658b386",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.symbol_auth_profile|b5ca9a965730e32f4994a5ae5c74c26dd2be10d7a6ca2a8aa06d209eb872602e|1|62c55cc5c01501f15aaae35be55d9cac5e09888ac94a7a2e87877da9f074ba2e|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4161,7 +3802,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:74c44cccf917099778495230c0ec66ff6391deb20367e75fccd7315f3ac6b929",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.symbol_size|242fbd1d86c6ee2801babf811c61a4e92c7041af70ad90d5d389b77fc70b844e|1|511ef117f11cb794b1e2b938c1483fe5442fc1e0c5970cb88a0b8d26e0746a75|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4172,7 +3812,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:e5a35dd4fe8de0fb93b60737c11309eea3fee0445f97b87965f72b1440a46590",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|EncodingDescriptorWithoutId|EncodingDescriptorWithoutId.transfer_length|4e51c1a20220b0bf2903d73b9463e848aab990b6d0d91f58a75a6c3e7a657b56|1|f39cd190f2e4d525773a4f6fce08ac06bec7cb1fff6de92afee0d7225ac571a0|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4183,7 +3822,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:e950732c0153855d0e18984a9a8efc352d8856cc1fab0222138f4b42cc3bec9a",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.allowed_filesystems_and_mount_predicates|ce1818e711027d4422406814d37e193868e745c8877f1dfd11f476d42cda37d3|1|10d56fc38e379d9089becaa3d13f4665f1042b2645f9f1a392a436c87bd8c287|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4194,7 +3832,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:3ebc591c25f9c7eeab7a5df0a9850620fcfd9db848142c7c1de3a36f7915d444",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.cache_flush_assumption|9ff7c0f5828e08bc21e18592096512a0d15482208b7178f6cc44aae15502abbe|1|97fb758bc911d5b398581b2d6a4337dac20742e62665d4f3e0c3055748a485c5|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4205,7 +3842,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:4b63359434d412cb4e93da35ec045ceae13989d042b84d7ae6314386df91c871",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.directory_sync_rule|d4562636b62950c0c93e5c684279377698844ffe35d22292955b3dbc31101290|1|606bb654c8091f3d605242aa11bf527ef3f379ce1d52f17e4fdbec206d7879ee|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4216,7 +3852,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:8873904cf4efb6da4b32353b2091f387b40f93ceff6af9fcf79813cf5644c638",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.file_sync_rule|0371d05b6c37b7aac95282a3f22f6b1a9185ed908faf7cad5f4b426f7972b9a2|1|ed3b5c5d0beea85adbc88bdb964ecf88724ec85ed054b11ca90dc62199cfe9e3|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4227,7 +3862,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:17d6d325b40c98e821df86f2214f8769f1605d56941c6ee69ea933198cb37433",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|compressed-member-token|FilesystemDurabilityProfile|FilesystemDurabilityProfile|c8ebde079ef030df5a539237f8ed8d67364a0b71d0d416da37539dd12d1f4ffc|1|0531aa4480c9cb6dddffe3f1a12691f93785819a77443e3c817732b69d456a86|member position compresses several names with '/' and the source does not spell them",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|FilesystemDurabilityProfile"],
@@ -4236,7 +3870,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:c7416022d96db48fb8420248771537b28d29cffb1e9428859c9fb36ea4853cfe",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|compressed-member-token|FilesystemDurabilityProfile|FilesystemDurabilityProfile|ad40f30433f81ebb9114a3028258d2823275a69722d1f89e68174998ee803e5b|1|0531aa4480c9cb6dddffe3f1a12691f93785819a77443e3c817732b69d456a86|member position compresses several names with '/' and the source does not spell them",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|FilesystemDurabilityProfile"],
@@ -4245,7 +3878,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:eef13b4b7a2306d6fe972c7c2d821b7e62ba883e6ffb2a9e6fdd313323849073",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.owner_death_rule|fc404bbd2105c2c91734df8ab4e011dffda15f6824f15aa4598c02ef116721e4|1|245a5b4871bf927401a4179a46d4b7afebae153738d14957eadf82ac078b5ee4|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4256,7 +3888,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:f647dad9e7de474a5854ee8f2254e916bee0d666b285d71f678368395354f05d",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.probe_suite_oid|2f2dab6634a79d74afa2c93284569950921d596841ba5de22b91822b6d912f46|1|fc5c4ec760672d249d932845beacb64d66beba03783f857629f25683902ee44e|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4267,7 +3898,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:bc62521d65078a2781fe44d3efb08cd84e5d65e876b31ea864407d9332cd20fb",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.profile_id|ce3b035fb5251de7d68263e33bfd5b205d3b0f08700e47ddacfa15100e0f6449|1|ff74e4a802afbfdc42e3a73e06bc0694030406ffa5bf085b331852a8289fd74f|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4278,7 +3908,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:05ee487e0b125b8d10eb6d1c00f301fff764d0caa5dafe3ec9da98c6477584b9",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.profile_version|a3bd9ac79d5e412794ba14aaf62f1b98fe12272c515693c89bc300f7d05be43b|1|cd38905627aedc6d3b81036eab74c130c1be49f50c66b5f85c79f9008c9ff7d2|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4289,7 +3918,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:99f8784a375d4d11bb423cc86fc89929a0674791e65daad040c44ae0e2415060",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.rename_no_replace_rule|4c95eb0388174bd3c74e4c53f12ed2ab9d1be4edf98a0cbbba4b16ba9271fb8c|1|aaa4bedb20e476eb2c5ead883b0de9ceaad7e42c418debb8da9a8783c41bf90e|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4300,7 +3928,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:a846ae0b543e13fc45e6a5f69df06c09d4d13aef5289f4195c9e4490b97ccf67",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.required_lock_primitive|af5bb820b74db4e27f19cf09bace97ea2846f777690291c0d0c57f17cf411e99|1|300f0e69f60a3ae8305a7b222e843d87db40955366bf93137d1e30ba81e7886d|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4311,7 +3938,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:418f3bc0a20a19de8b690a2bf879b4eb13452aca56deb8885b70a3840edba3af",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.slot_write_rule|2023471cf2f8c98fea286195952923e325148c98fc362ac86e2066e1a07fe193|1|da436c3769714a5f3c7a4f6c67982fdf1c84973188e146bd103c2fce3a54d74f|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4322,7 +3948,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:010e36ee5de62c235893df457e3727287ec8a3c933e2350f364f259104b82659",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.stable_inode_rule|aa77a140806e960b8932787dd22941e275021bda2f79a25d815d1bb33382a88d|1|3ed4c5d7924a73ccd6426380b00ceae0268f5e636f1a613964ca25435592f091|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4333,7 +3958,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:dfc4ee027f44f5a6de4cbad5c1e1ea667efc9f0bb8caedc8f3c95090c0a1d3b1",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.canonical_mount_options|bc67468a48d0b2b25cd144358d22b2f9b28c7bbc5de3b255bf9940a232020725|1|462bb37401462e063a37f0f44f2d499128898cc5535e86466755675b5a1be9b8|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4344,7 +3968,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:59835471a2ee6ac1e9331216d06953e05c349a60ac9784235a02802c2514492c",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.checked_at|3a474f9d10ef022d46a4c5fa68916ab897d3f6df414fc20ded06d6ca6abe6ea2|1|56b07be3d307087ba910513571b5168a5a272dd357f0df7a5d9bfeb8fa8c1ff0|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4355,7 +3978,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:55cf4f7028a45ef7d65a28a261fa7d7a3516b7d830592ae65bf7df05e455db6a",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.device_chain_digest|c2dd30f3695cd344641bfc0edfb6a4d90ee8fc47f721a8e8113eaec7c3ab56da|1|8887394b58e771a0b4c269cab515b38550d548b857c6ec52bdf3b9b545d16ca5|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4366,7 +3988,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:75f019a44ff22a05c88a94feab810d4ea5e37d5d09199e38e376efb9b35325e5",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.directory_device_inode|9b5832dded09553bfd152b4efe0f762bccfa25c1efcb857c45aa45142942b722|1|daaeb30cc41eb93779ae445e8302b4e6da2c4f43e8acbcc3eaff50b1d9c625ca|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4377,7 +3998,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:187c4435bf8b3e3c71d4c9991d9f9aa365586d2a8f5d222afd7f1973e98bdad7",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.filesystem_type|894151384ef1a6b5a3607e2d5eec1a1e40a51dbc958ad5fb9cf488b773173a97|1|21bcb47b89cc7fc8ee5a47d25a55af0aa591b8b9548e773c5db72c627c5a0a2d|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4388,7 +4008,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:58e8995d6dff4c106bde4b883c447df2fb5f23741ff4b27a13dffe03b4f5a846",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.manifest_device_inode|2866e5f15ff1f2ed182e3364c86c9598e47b7902c6b726c47562a04c7f7c614b|1|9ac99f5e20865fd0427845edb373540eb817e56ba63ff43ce069f9a787e30a07|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4399,7 +4018,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:f0c77d4630f11fdfdb94e63f0eb32f9a5b62ec529eed748cb92e281f73c269d8",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.mount_id|3d420dbf2eb903c3acb9a49ca4fd47e3e1bf34cfd5931b83e92ad931720d3251|1|77dd1159d36ceea361e008570007bd2ada5cde5d3ffbc4c6bbe968dac22c463d|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4410,7 +4028,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:37dd75a6f44baa134b14e608eb509469c77653e9bf407141e9a2d456002e58dc",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.probe_suite_oid|2f2dab6634a79d74afa2c93284569950921d596841ba5de22b91822b6d912f46|1|dcbdf629020c7791e9acb9e126428f5d2537b9bd8beed56d3d0152b7021992c9|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4421,7 +4038,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:7493dcf2c9989d73978202b23a33520b3dae91d9b3322116b24d8c778479c089",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.profile_id|ce3b035fb5251de7d68263e33bfd5b205d3b0f08700e47ddacfa15100e0f6449|1|e164e2a9e2cba7e950c6b1728852dca2736a7bc2802eb305dd9ba80a6bb127e1|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4432,7 +4048,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:c9a8f5c62ed9dfd6d2bb96b7d0041ea2070123fe3a64def0a1341d7f47a1b9b7",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemInstanceRecord|FilesystemInstanceRecord.result_digest|7d571540e94c1ac7847e1d3dd315c957f211012bc6ea9f1c622de3af57026aa9|1|d5b325697ef247ef9ef6c0b2feb402bcbff017332ee233e16a96a5fd05acb377|shorthand field has no exact type",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4443,7 +4058,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:4589a1a610a23f057f6b5862ea7c6f0237c355edacd39c5d5b1795cf6b0cc5be",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.failure_domain_policy|cac086cbd127ca4950463583208f78f2b54e0a546a2ddf9f8dc803c73f509607|1|a2013f9c7e6167fa838b6210d0af5802a8bd05823d9302fb4972629a91721e74|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4454,7 +4068,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:1121451997661af6c018ac5cb8a92e35e459d9cea025b5dfb39f12bc16c38e20",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.location_form|ad90d7ce88045805125a73e6bc382283cee688f7588f54ad0934a1e549bd2f2e|1|245c1d32e02e982689bcb9f2450dd413eea1b427fb02a64c935f969298c2512b|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4465,7 +4078,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:d6eb0a856c857d051ccc3db1bbbdfc5333456257cab21d9eec3372302d2a44aa",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PlacementDescriptorWithoutId|PlacementDescriptorWithoutId.placement_epoch|731e2899b0f9a25c8d09c479b12d7b6535c525fa26005898a294c124f5a9605d|1|2ec38c824e850340c4637b45e960c2315b6eb9a9c6f7c71aaab883a1b6a5ee9c|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4476,7 +4088,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:200f2d59a98b49a305f74582c258b6b32316c146f35b4b436ec9620d319c2b52",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PlacementRecord|PlacementRecord.descriptor|194b520dc30384b3fc233e123778835e2adc362d91c6e33015ed3db2379d7ea1|1|9c9c3dd11d91a87637869a7d6463af494cacd6233a48a3b1322b9bba895dcabc|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|PlacementRecord|PlacementRecord.descriptor|descriptor"],
@@ -4485,7 +4096,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:f7c039dd333ca9b1bd1e78736d84f3afe200de8795e7791698012f017f5f5f5a",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PlacementRecord|PlacementRecord.placement_id|862e3bc66e01bc7a9dcedb6247960e1e5a9698e6810cb1a0950981231f908ec5|1|c3e5aeaf40b208c2ad9e3dd1981ca72c82afeb04eaa9a0067daa8d8c64bec5b4|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|PlacementRecord|PlacementRecord.placement_id|placement_id"],
@@ -4494,7 +4104,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:34cf0a3cb4495aaffdd79a0489e1b6a8caa672ad4ed267b7e32b2c42f13e59b1",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|alias-expression-unparsed|LocalFinalCertificationReserveSpec|LocalFinalCertificationReserveSpec|a32bbf40609069648836f761b1fb115433bc2242b4fa4298af19f4278fe9adf4|1|75484acecbb70003eedd8126b4b23fdfad84b05eff09d3b603bdbd9d01a2b071|alias body is neither a top-level pipe union nor a record body",
         source_locations: &["a09:1904"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|LocalFinalCertificationReserveSpec"],
@@ -4503,7 +4112,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:31cc7fb171ebf8e60218481acbf4ae4a9a46c47d0bf7e2636d2c44c14dbd5dcc",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|conflicting-candidate-evidence|LocalFinalCertificationReserveSpec|LocalFinalCertificationReserveSpec|a32bbf40609069648836f761b1fb115433bc2242b4fa4298af19f4278fe9adf4|1|75484acecbb70003eedd8126b4b23fdfad84b05eff09d3b603bdbd9d01a2b071|the same schema source key has divergent structural bodies",
         source_locations: &["a09:1904"],
         resolution: "maps-to-source",
         resolved_source_keys: &["top|LocalFinalCertificationReserveSpec"],
@@ -4512,7 +4120,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a03:ambiguity-adjudication:8c725fa15a9bc362be089cd1c4a8a996d6f4e20664fcac5528a2df62b880ef17",
         slice_id: "a03",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnOutcomeRecord|TxnOutcomeRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|3e4e3c9478ab77306a5f6dd8e456c8ffe9f19f18c63f88c98ffc9f366f3ca420|shorthand field has no exact type",
         source_locations: &["a03:1524"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4523,7 +4130,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a06:ambiguity-adjudication:8723ace590fa1a79389ba18bd5aab08bcc1d3ebe7eb3a17528e939386f05cd0c",
         slice_id: "a06",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|MetaPreparedCommandRecord|MetaPreparedCommandRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|983566e6334d24084c27747e97f61d5b4677f958e4b2495c3d00c72b06f52703|shorthand field has no exact type",
         source_locations: &["a06:1698"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4534,7 +4140,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a06:ambiguity-adjudication:d29cf70d19793cee02c2ad22e8df60d5ad6dd3357ba46123cc85f4d5728315f9",
         slice_id: "a06",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ShardPreparedPayloadRecord|ShardPreparedPayloadRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|b555581d9afcce502838c9520cafa55a9b3fc5571da2c91d1045c7acbf410e09|shorthand field has no exact type",
         source_locations: &["a06:1700"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4545,7 +4150,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a10:ambiguity-adjudication:a2ec9c9e4687c66ca7527a460cb9a9629e7e9297e0e9d39a307025de544f061f",
         slice_id: "a10",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|PreparedCommitRecord|PreparedCommitRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|13c8b4d84ea85afa96a67e30397af849c0c6d9af5702a2f53e2ce645100300c2|shorthand field has no exact type",
         source_locations: &["a10:1922"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4556,7 +4160,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a16:ambiguity-adjudication:733086702e6b63491e3b2a762e92e10d4e93ed043291c93f73edc4769a46c3d2",
         slice_id: "a16",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TimeSubjectIssuanceReservation|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|2c193dbc4032a49c21cf531f3f704a9e2cbc7fc8004bd836ecf285213b7d9b58|shorthand field has no exact type",
         source_locations: &["a16:2191"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4567,7 +4170,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a11:ambiguity-adjudication:98bfc2c6ef27ede75714946eaa38ebe9b92541fbd58e123d1e2f8a793ce2d21a",
         slice_id: "a11",
-        ambiguity_source_key: "ambiguity|definition-without-structural-body|InternalBaselineDigest||21b9e5bdccf75bbd741eda28d5e4c69babc291f8f7d533e512d3216292eb06b0|1|8a71fbb3663c36e570707db375a602127d9c3671f00da205559672fa509a1509|definitional prose names a type but supplies no adjacent structural expression",
         source_locations: &["a11:1932"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|InternalBaselineDigest"],
@@ -4576,7 +4178,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a11:ambiguity-adjudication:d93a7697a2040a94c9e91b9234c0c9ddf0f411dd9a4f6b67e3273e9205b2be4e",
         slice_id: "a11",
-        ambiguity_source_key: "ambiguity|definition-without-structural-body|PublicBaselineDigest||ac08a2a7a1e50ffe2d45b6abff8c0b4bb35099bdc438fe571d407cbe293be21c|1|efc0be4d6f6365de0c0a71d876c26c4adea64aa3a68f493fcff00a947d59569c|definitional prose names a type but supplies no adjacent structural expression",
         source_locations: &["a11:1932"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|PublicBaselineDigest"],
@@ -4585,7 +4186,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a11:ambiguity-adjudication:4a22f9a9db5d5ed1f2f62f6512dc1e2bcbeee6d916c46c48d39ef610cf35c613",
         slice_id: "a11",
-        ambiguity_source_key: "ambiguity|definition-without-structural-body|PublicDeliveryDigest||4b2a0fd8c888f8b43037adfe7ab086514605976366b8ce5f83d6327dcd6b163f|1|104811d277549ada29c1e06badd494e9224bc66cd8ea652e31a76112bff0a832|definitional prose names a type but supplies no adjacent structural expression",
         source_locations: &["a11:1934"],
         resolution: "not-a-durable-schema",
         resolved_source_keys: &["top|PublicDeliveryDigest"],
@@ -4594,7 +4194,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:7989140375531b62a0427337b27000ebb3a319364975a0a7de7635fd2990b18a",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.database_security_namespace_id|27c2c87b407320770f92abe612b2dbea8c1711a0f5fbb2d2464ade311812a4b7|1|8677c9c0a1d9da4b3f075d7489b931065778c6ffe638e14988861f6cf6b177f2|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4605,7 +4204,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:5eb46aa4d18d045fbab17d48d4fa4c2e04fe241b6339c21e60007af58b89dfef",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.allocation_epoch|d541ed3794809f0ef5d752c928d72ec1bcfd0c17cea449f10920a3d71b9edd9f|1|c3f7e0f218657bdc349ef2ef87e467a77add5df82107190fca1c77e59b0cb24a|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4616,7 +4214,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:5a108c87bcaf7af97c68b4de5140f580e0595077c32b9dc2101ce3020e0386ef",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.predecessor_digest|665396d9fd096bbae767069b80e0508b68fc19c46a0e57788888f2dc48248b24|1|19b500df548d61c71aa239ca707d6725cd4378bd7d508491c09ceb82d8092f3e|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4627,7 +4224,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:0fc76e8406b9a839f450c938eaff50007c961724ba28ce1f64977219c65d0d15",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.external_registry_id|6bc3502124fcbdca515e4eac242aaa8e585789ebe77287c6f69a9f052dcc856d|1|9316a06ce50767d4adef5b190f94d0c837a5bb0fd5c76cc0ed125fcdc869d106|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4638,7 +4234,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:7b44d5b03543471edf15dc99e30e657583e45f02cabaf48e320af54c665eb518",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.cas_version|b9189f9e121d3d4ffb094269c468178916a894df898061f41e68d344b94c3112|1|b1a9f78ea88b9c326aab11def768ab20a0a9557dd0373ac7862e537ff61e2fe7|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4649,7 +4244,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:35c1e0d07f3eb18d887676c63f91a58a9ee0a9a4009183bcd7ec016c3b660932",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.status|073c1634c496cdb649d1afe0a312bbb4b7e1741b271542e4a436c3b8824b1761|1|a0ff2e33d048dc5dbf1c464838eb8f6862680dd61a193291a66c3ba59f22617e|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4660,7 +4254,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:afddde1229bb99bc5b43ecf670fb764381aad05dd58da905f2068c9f7cf78f0b",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.issued_at|4d520ac53d4681a6c63ccae9c86713cd1c366506b5aa2b18fb4eb780db866fd9|1|6a184eaf4041cd4db1ee0521a2428cbd945dcc9f6735213307149b7772e3caf0|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4671,7 +4264,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:f6fead0d3b3c1a3cd04821d4626ca07675c108902deda2d4d50aea669073edf7",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.signer_set_epoch|c19a7f95576885cbbec6e343a4f083831384152b2b98871674234e0002ba8ece|1|0b673f179de73e02c2d3464be7f93694e48fb32baa2f16ee8475216b894dc698|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4682,7 +4274,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:3bc7da5d29eaeb33f284b3e0664cbfdcce0645a313b045f01ba12501ed2c26a8",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdentityContinuityRecord|IdentityContinuityRecord.threshold_signatures|b8f26912dae26e6b378bbddcb6cd586deb9c8e0124cbe3d36241043b853706ca|1|0b6923d384e539ad614caa9ac77f82ff4d10217b1fc13aca3708f5273147ffba|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4693,7 +4284,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:a56e96e992fa004d53648fff60577968c42e7eb1e76e061ec17ad916d8d3199b",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.lease_id|25200705cd3b9a83f430168138f12797f96abe50f85e871810e9dd56950249e2|1|623a488e9eb256c695b4f059ef267cf94f58472334f6673951a0658b2c4d49d7|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4704,7 +4294,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:3cbeed9a9ea13d29a959320cb4c972acdcc149cb61c03b43b64284e6ba669799",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.graph|eef93e1d14482804277fca0172464032d1a4fdbcc338524059fa1e861454ad4d|1|4533798dfbe9a49dee89a7caa466936d73dda3469563e93e24676741b2adde6a|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4715,7 +4304,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:a5247158af450d3874c3381f2ebb1a4bad5b01381a5db492e66e7ba3dbbd42cc",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.element_kind|aa088cbc779de075858de92bb259728767cb8746340b74c6f0f659846c225194|1|6364cd58f851495d3f6072444d06cab1a325c44c2758f6d982ea9e3f4c694b17|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4726,7 +4314,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:9a3fd9fdb09fd9fd8034325657de2cadf652ec3713ec11fe97391773744c5249",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.allocation_epoch|d541ed3794809f0ef5d752c928d72ec1bcfd0c17cea449f10920a3d71b9edd9f|1|469e63fb38a7c7d50df51b1f1bab75004b0107611bcabd3010d88b70b07a9d6d|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4737,7 +4324,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:99f471783470d1394c5e9b58102a4cbe715c18f5353e9784a913513b859235a7",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.partition|2df962d37ee229c547fb4ebef038a1eaecd0cd6f1c109746f4a9c1fa80329254|1|7c6108fea66dd7a0a06c2f0620185ca9faad96daeffec2a6a62dc2f415fb7244|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4748,7 +4334,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:24a3d803731ca838564933d4c189d3a334877983cff3b22faf085f146d49bfc4",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.half_open_range|eeb6be1e0f4c411cf21b96555377321300e43f22e511392c371bcb17d337b6bc|1|139a67ab5ae0ae008d03ef4ed71fcab6c2a2916dabd2734f222d9757ee05a3cc|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4759,7 +4344,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:ba4f137cd4482c720db3387c1f579bdd42a41c65b935a93ac146d42d369a3db5",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.time_authority_profile_oid|7d5d151447263b02b1178e7231040315f6002b33000de6b55f1779f43ef4e45c|1|0babcc1b128fed3dd610762d6f03c6dde986645590e0f1fe4c5001e20215d2fd|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4770,7 +4354,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:f92ecc970f0808864f6330f4bea378f455e73f83eac39266660daf596c273b56",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.issuance_not_before|da519880d46cf6df1ca5371629112c9dfab9dfe2bb692e7334ef360f70ca52ac|1|0144a9339f836b21255a552f3630d42927902ec5b16ce3e408c99bd8f78bfe63|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4781,7 +4364,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:e980cabf89166a1b611e2908e02485c320159dfb33dfb8b56bb34ad71c463614",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.issuance_not_after|8cf89b1793eef3266d1567e68225f252efc925a66afb922cbc7aa616f5328b4a|1|6ca377a14a681a5889b8e00d787b00108f709a752800beb2449e7345acd400a2|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4792,7 +4374,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:8df2a4c61a0630de9609946d1278eead5147d6512dbc752ce2fc5adc9f277e13",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.permanent_spent_commitment|01228fb28bd95f97a6b8ea907f31a525d933bb759796795370180ad6da3ea201|1|04fda4fa15c09836ebdf9c492055d1d1b44febe788d4397798a133288591a44c|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4803,7 +4384,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:4f3f680f6528cfc80f55800a442a3251b4075724849f4cd6740839215556c8bc",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|IdRangeLease|IdRangeLease<Role:AuthorityOwningRole>.body_digest|4a30636305daa7c44f8ca32d2d5fbd90130c1d25f94e7c863108d14ac0ae2c8e|1|8578c8f36068bce9b2b579db75d23e94712515c25d9a0b04c95ab03f5cc680fc|shorthand field has no exact type",
         source_locations: &["a09:1892"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4814,7 +4394,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:8de057a6c84c235bec83c7ba8237e7f991be0809d8863d347cffcf7932c6ed56",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnAllocationBindingRoot|TxnAllocationBindingRoot.generation|e661f4c935e8a5a83349afb5e347695c2e972e967b50efcd618f93b0b7b4c24b|1|413bf65f3f7168677a2366d715f0676ce18e5c4fc6dc80b2ac884060d5f928b4|shorthand field has no exact type",
         source_locations: &["a09:1900"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4825,7 +4404,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:dbc2d9bca1bafc5c870e00da7218b31231b1c64558f67415d710bf1f07c6464d",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnAllocationBindingRoot|TxnAllocationBindingRoot.attempt_identity|019debbed6eaf087554490210988f724f1d55f4dfb220b23b999763451f3dd75|1|dc46f014cf816414ce6eddeade40b21db2d31d4db6158377319a25da0cca28fd|shorthand field has no exact type",
         source_locations: &["a09:1900"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4836,7 +4414,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:4576279cf232c7845c55021c16aaf532138f3ef656c0e1d5532ad1bb978b191a",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnAllocationBindingRoot|TxnAllocationBindingRoot.through_statement_seq|d76561cc957c944e48f68de06c06a04367cadad5970a21a1aec710e5732ec277|1|84c53e547eb5276256badeaff5c745e1c47ba9eb7c59a2cbaf13b7ca47e181e1|shorthand field has no exact type",
         source_locations: &["a09:1900"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4847,7 +4424,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:43c3e5daf2b3bbd201ad393a918221d7137fd173c7abe6529878909c6e449b02",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnAllocationBindingRoot|TxnAllocationBindingRoot.sorted_spent_commitments|befc3a163e8404d6ebb0f347693b2df3f1f1f8df38bebe6e665a8824b56faabc|1|a5a4ca6372d9e4df081009744b80045be68b2425680d78c0ef9983725021a4e9|shorthand field has no exact type",
         source_locations: &["a09:1900"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4858,7 +4434,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a09:ambiguity-adjudication:a654ba46e405b504506c1ecaf92c7fe0f0e8de107a6da5f174150750abd2da5d",
         slice_id: "a09",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|TxnAllocationBindingRoot|TxnAllocationBindingRoot.root_digest|c08174a56840d52bb6d7b73ddadebb835c6b18ab21f844f75c149905b0fdad76|1|de96030b1a75d7708b17640d780510379c02b0795504bea70c915c610fe53649|shorthand field has no exact type",
         source_locations: &["a09:1900"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4869,7 +4444,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:9fcf021dbaea4ffe1daf6fb1ceac10df49ebc45b5b43054c0c5cf93eb4471643",
         slice_id: "a15",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.key_identity|98f155babf41c5cf0afa9139f8a96469570cc31dbd6f19ee80e0e280f313bd76|1|fe7a66011064c18fafdfae45be42a091a85d7403c11a2500cf4bba5d6d402590|shorthand field has no exact type",
         source_locations: &["a15:2059"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4880,7 +4454,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:c4b54a063bd35e654e0c35628c05ea2005055123fe1fbb308e31054cd4be76b7",
         slice_id: "a15",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.complete_target_set_digest|4acbdf6f60172ecc877aa3d15608c48e82d2197f341fcd332fa8675e0ea76490|1|e20e1ee8d595c3b80349d5d2cf785578c0a2447bd0a8a4af81767169a99a57e2|shorthand field has no exact type",
         source_locations: &["a15:2059"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4891,7 +4464,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:b62b76d8465a74e44a868d3ea1cabd3eb3b9ca6e970d47ea69f35e21c7cd5e29",
         slice_id: "a15",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.expected_prospective_configuration_set_digest|877f5418670957c09d0bf720cc0261685bc722dc4bd3d122c8326bb45fbf0bd3|1|a794de91ec9bd16bb9b12179b09ccc6f8f1116344d5ec708f81a7ab01108d3d4|shorthand field has no exact type",
         source_locations: &["a15:2059"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4902,7 +4474,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:9d87b7faa3ae557cc0b0eb4aecf03219a98f5758e0e5607b1fa28c5d7eb3d55f",
         slice_id: "a15",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|98f99be66a4f7e6dae8d94497c1dec6b36cde1de9f37ac488ffa72adbea0c4fe|1|b0269c814fc42bacf204d73a5e53a2a6bd6f885daed52569cd738538190972c1|shorthand field has no exact type",
         source_locations: &["a15:2059"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4913,7 +4484,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a15:ambiguity-adjudication:d14591312dc555272847ff5149204b97bfc8f5ff4ceef5736d45d6b91bf71dda",
         slice_id: "a15",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|03aa4f26c42ab045c593f45f87d78e0aa42c1f1e03198d96e839894c7ea7fb6f|1|69deea536c4e2a4367d3d22c27e70a3be3cc6b5d974b443f5109a571a5466530|shorthand field has no exact type",
         source_locations: &["a15:2059"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4924,7 +4494,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:670d6a3c6e1369d3bc38d6f3076252157264e695e05b76984089286770501c7b",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.ContiguousSpan.encoded_len|f62cdb86eea76acd78c8a2d88de6530dc788e524a08d3bd93597a7e1d76ddb2f|1|07d2e4fc78259c76944ac73467587e576594b8a2325c96aa42d57a63728c3d6c|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4935,7 +4504,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:cecf9025af9662200ebec0ca362365459431e220b7d0b989415630838a42ce3d",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.ContiguousSpan.failure_domain_id|b848bfdde1d634386de45aa3db6e6082c98954ee49caf3c79fea79ed511b6216|1|9626e9ce8d54d89e97bd245ae8d1ca4b8d84d773ab0b52f74603133b078643bc|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4946,7 +4514,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:1add14f68841c209d9602d82b0d4974f1c7e0307bdc4e70a11b7805ab03369fb",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.ContiguousSpan.offset|c1d60fe5815fb5b2d8eadc7c686a2ef228818eb63d14a58be0336c2d4dc3bb65|1|b4352fe740391bb11f5e6ba734ca50b9411f912bb11d37a693ea498c154d8fce|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &["field|LocationForm|LocationForm.ContiguousSpan.offset|offset"],
@@ -4955,7 +4522,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:cf1828242c9de970216388ce83137d5debc49b7b633a229d89e52d5409e41d76",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.ContiguousSpan.segment_id|067de3ca3742734d7c0fa30cab44ba12e439e6fdaf5a356d04eb34d144a48ad5|1|d9a60afcd14755ce9a68954b370ada06d91ca9c9f313cf3ca1c5e0009a2e4c5a|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4966,7 +4532,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:d73d40486b24cb361fcb957a65f0ceecc6a2c33196af11ea8ce9c8ef527936a7",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.ContiguousSpan.symbol_inventory_digest|76c183900154b95828c0ade4981fa8269fdfffbad83471425f467a23d1e81416|1|6c633af6219e605d4300160abddade3be536067603c6da4e10bc4a259c1ed994|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4977,7 +4542,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:f889bf772824c1a9353bbd3b25ee290a6aca8bba2a931a9fc09f3018a0ff3355",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.Explicit.failure_domains|3f3d759ddf7f238e5931f429d410022e227f5d84c9522fae6abf88088d6f1852|1|717f0fd1684324699149e55c86a7e7d2ae3c9d12be1ce93873020c0155f03b28|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4988,7 +4552,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:3186d0debf2fb0589fc0c814cd95c8fec9e6c4c4e3b1a3e09b8f284bee7515ae",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocationForm|LocationForm.Explicit.sorted_symbol_inventory_and_locators|44937ad7c4727b845192190b304679f6c4b9de05dc753b0d4ef253b65849247d|1|8778d463045738849c0d2164c71dcecfd6d72c5736c13365fe885fbe3c50e36c|shorthand field has no exact type",
         source_locations: &["a02:1449"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -4999,7 +4562,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a07:ambiguity-adjudication:ee23aced90506d99111b719ae0f8486df181ed161f5ec8a12c8214f574341d65",
         slice_id: "a07",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|GlobalTxnOutcomePreparationRecord|GlobalTxnOutcomePreparationRecord.expected_registered_outcome_digest|4cdd6ebe699aa3b89b0893897f37ab3454f3b8987b0f8b79608e8ff56e081377|1|ad30e2526f4a279dd72dd315bfabe92febf7e04cd8c027fe4307fc355cfbcbc0|shorthand field has no exact type",
         source_locations: &["a07:1780"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5010,7 +4572,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:37232bd950b2c30115d0e2e9a2c861fbf52ee2e33dfeff50914c944c05927b86",
         slice_id: "a08",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|NoTerminalSignatureOrOrderProof|NoTerminalSignatureOrOrderProof.freeze_digest|c00af86955aba5af4b7a66fbf8f4effb8029b4520f356181b08c41c24726f57d|1|923fb1d5ce42dfc81fff1073d744ce39733b18c2769fcd352e8185a23eba9e27|shorthand field has no exact type",
         source_locations: &["a08:1838"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5021,7 +4582,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a13:ambiguity-adjudication:3b42cf9567870731386d634a72ce4198def5da7fa1007e561b11c740bd67e521",
         slice_id: "a13",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_digest|eda96c96e62e2160110a85f02a2152fcba4da71b149f5a700a19f8b7d8f0b247|1|58807e0144c0e5c466ff6ab229699cac2322548e3ee7d276c66c5512d356afd2|shorthand field has no exact type",
         source_locations: &["a13:2006"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5032,7 +4592,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a13:ambiguity-adjudication:3d70fb474e157bb474917cb69259eb2374ba0bc450888830e9b9d4790efa4da3",
         slice_id: "a13",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyEnvelopeNode|KeyEnvelopeNode.inherited_roots.record.source_root_ciphertext_digest|83204203c8c59d3ab8f3d9d1dfb493f2c193dd411b9c1c18c8b2184026b72176|1|fc2f15f8bf55ca659ff0fe5b9308d88f0c057d6c2ba375d6e51c0230693412fb|shorthand field has no exact type",
         source_locations: &["a13:2006"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5043,7 +4602,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a03:ambiguity-adjudication:60ad7a389bdf6b49899267136a03d8d6dd1a05b01b06a859ed2a2daa3ca63872",
         slice_id: "a03",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|LocalTxnWorkspaceGeneration|LocalTxnWorkspaceGeneration.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|35b627fa6420bd77372677aab628b59d6e031ae5f31f045ea514315ef7d809ac|shorthand field has no exact type",
         source_locations: &["a03:1486"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5054,7 +4612,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a07:ambiguity-adjudication:2de6b2d328c5ebd2cd67822daa04d16386a948037599f4d4b2de7f5cdd49bd89",
         slice_id: "a07",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|GlobalTxnOutcomeRecord|GlobalTxnOutcomeRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|16c13b0a6e19d96bb31f5223e2f71f2baa7129f8940b72e136172eb2df5a19b9|shorthand field has no exact type",
         source_locations: &["a07:1782"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5065,7 +4622,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a07:ambiguity-adjudication:81afa6cb323423720d6188e180dfd25d3e6feefee35f8c726995bbfc0f88fcbe",
         slice_id: "a07",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|GlobalTxnWorkspaceGeneration|GlobalTxnWorkspaceGeneration.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|474a0fbf7f42da1cc236f0494be5ac7a230b715ec767e1ca14f82b407180ea6a|shorthand field has no exact type",
         source_locations: &["a07:1720"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5076,7 +4632,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:5e6422da03c18143ac7c23a26b0a04992d0a8fa2bccab560c67f15c966ad4244",
         slice_id: "a08",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AuditTerminalAttemptRecord|AuditTerminalAttemptRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|5f0b2cd03edaecd3e58c15ec71a293d8aaaf5cc2bdb5de17ae71c9279639b006|shorthand field has no exact type",
         source_locations: &["a08:1850"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5087,7 +4642,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:8b267282f9b1651ea6b6af6c075314f90f11513814db27e6ff5c3f0817c28f63",
         slice_id: "a08",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AuditTerminalFreezeRecord|AuditTerminalFreezeRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|fcf04e03c5cd650df234dae20db7459d5116f380bd1d22e9fba4fa5c9d3ada79|shorthand field has no exact type",
         source_locations: &["a08:1832"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5098,7 +4652,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:362433ba168c3c4c4b453872a778843309bbcf7d6cf4b7682f39291ba488de18",
         slice_id: "a08",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|AuditTerminalSigningPlan|AuditTerminalSigningPlan.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|9d84b5cb30ffc810c1464c1f318068662690613bb0d97d94f3c5aba3abd6f553|shorthand field has no exact type",
         source_locations: &["a08:1842"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5109,7 +4662,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:da107d6726829e70ab937238f9611c7724e392ab0377ca9f1b24e8998f107359",
         slice_id: "a08",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ConstraintReservationRecord|ConstraintReservationRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|62cfa148dc2cc9ca12b1bb796b663b78054d9247902d84a3e73b95317d372850|shorthand field has no exact type",
         source_locations: &["a08:1856"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5120,7 +4672,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:fecce341a8c91acf77a729277e6ab34a2304e63fbb997817e3afc16c71c31703",
         slice_id: "a08",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|MetaConstraintReservationRecord|MetaConstraintReservationRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|ac2febbad75a9a42a429120968ff5dab1215e005015a1e2a5de7ac1cca2b1875|shorthand field has no exact type",
         source_locations: &["a08:1858"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5131,7 +4682,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a08:ambiguity-adjudication:6628dd4541c84c2ed0068e1cc6629df1167e7b6d53c58da3a43e34946d1d2016",
         slice_id: "a08",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|ShardPrepareRecord|ShardPrepareRecord.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|f6e6b58a21ff9e00c36eccdd94bf1fb376f8dbcbf3c0ea2831d97cee7354cedb|shorthand field has no exact type",
         source_locations: &["a08:1854"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -5142,7 +4692,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
     AmbiguityAdjudicationContractPin {
         row_id: "a13:ambiguity-adjudication:bee0b07c2bcd39653dc4f186ca535b17c3e92d1df298f0695b4f2b211f5cc2db",
         slice_id: "a13",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|KeyEnvelopeGrantRecord|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.nonretaining_predecessor_digest|268064209a4df1dbcad1eb66b51e5cadcea9f4b19c5f92015c78ae58219e2557|1|1dfbaeef77cefe4fd7ef856b5ced80083a0f410a6478270fb847cefc0037f26d|shorthand field has no exact type",
         source_locations: &["a13:2027"],
         resolution: "maps-to-source",
         resolved_source_keys: &[
@@ -11024,7 +10573,22 @@ fn ambiguity_adjudication_contract_matches_with(
         return false;
     };
     row.slice_id == pin.slice_id
-        && row.ambiguity_source_key == pin.ambiguity_source_key
+        // The pin no longer carries a copy of `ambiguity_source_key`. It does
+        // not need one: `row_id` IS that field's digest, by the derivation law
+        // `validate_ambiguity_adjudication_rows` enforces, and the pin above was
+        // found by `row_id` equality. Re-deriving it HERE rather than leaning on
+        // that other validator keeps this an INDEPENDENT check -- the derivation
+        // law pushes a violation, it does not abort, so a caller reaching this
+        // function cannot assume it ran. Owner-authorised removal of 450 mirrored
+        // literals (fgdb-checker-mirrors-subject-prose-23u1, candidate 2): the
+        // copy answered existence queries about its own subject, and 766 of the
+        // file's 1264 distinct 64-hex digests appeared ONLY inside it.
+        && pin.row_id
+            == format!(
+                "{}:ambiguity-adjudication:{}",
+                row.slice_id,
+                sha256_hex(row.ambiguity_source_key.as_bytes())
+            )
         && row
             .source_locations
             .iter()
@@ -16388,10 +15952,14 @@ name = "Probe"
             resolved_source_keys: vec!["top|Sharded".to_owned()],
             rationale: rationale.to_owned(),
         });
+        // No `ambiguity_source_key` here: the pin no longer carries one, and this
+        // fixture is the proof that it need not. `row_id` above IS
+        // sha256(source_key) -- the fixture already satisfied the derivation law
+        // before that law was made load-bearing here, so the match still binds
+        // this pin to this key and nothing weakened.
         let pin = [AmbiguityAdjudicationContractPin {
             row_id,
             slice_id: "a20",
-            ambiguity_source_key: source_key,
             source_locations: &["a20:2575"],
             resolution: "not-a-durable-schema",
             resolved_source_keys: &["top|Sharded"],
