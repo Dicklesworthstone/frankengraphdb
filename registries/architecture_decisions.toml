@@ -167,12 +167,12 @@ count = 138
 source_path = ".beads/issues.jsonl"
 resolution_precedence = ["direct_owner", "bet_label", "exact_override", "family_rule"]
 allowed_bet_labels = ["b1", "b2", "b3", "b4", "b5", "b6"]
-bead_count = 398
+bead_count = 401
 direct_owner_count = 98
-bet_label_count = 243
-exact_override_count = 18
+bet_label_count = 245
+exact_override_count = 19
 family_rule_count = 39
-binding_hash = "fnv1a64:fe035bf5fa493626"
+binding_hash = "fnv1a64:92e9aeb73fc6e1f8"
 
 [[bead_family]]
 id = "appendix-a-catalog"
@@ -361,6 +361,17 @@ decision_ids = ["FG-ADR-CON-06"]
 id = "unsafe-islands-red-gates"
 bead_id = "fgdb-zwhh"
 decision_ids = ["FG-ADR-CON-11"]
+
+# Same class as "shell-lint-silent-no-op": a defect in the project's own
+# verification machinery rather than in a subsystem. The bead-provenance
+# cardinality pins are a change-detector typed as an invariant, so their alarm
+# cannot distinguish a legal `br create` from silent corpus loss (CON-11), and
+# the churn they force launders bead activity into the semantic-contract hash
+# that evidence closure depends on (BET-B5).
+[[bead_override]]
+id = "bead-provenance-pin-quantification"
+bead_id = "fgdb-lzol"
+decision_ids = ["FG-ADR-BET-B5", "FG-ADR-CON-11"]
 
 [[source_block]]
 id = "plan-thesis-foundations-sota-v1"
