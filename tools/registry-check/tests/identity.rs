@@ -15026,7 +15026,13 @@ fn idr_a12_genuine_residue_class_rulings_and_source_dispatch_are_nonvacuous() {
         .find(|row| row.name == "ControlCommand")
         .expect("ControlCommand is registered")
         .construction_order;
-    assert_eq!(transition_order, 15, "named outbound target order moved");
+    // fgdb-h1al moved this pin 15 -> 10, deliberately and once. It is the min-cut
+    // that retires the two census-DAG violations the bracket-array carrier was
+    // hiding: CommitCommand@10 and CommittedEffectCapsule@10 both retain
+    // ResourceLedgerTransition, so its window is [10, 10] -- 10 is FORCED by the
+    // lower bound of its own outbound edge to AuthorizationDecisionRecord@10, not
+    // chosen. The pin stays a tripwire so a future UNintended re-order still trips.
+    assert_eq!(transition_order, 10, "named outbound target order moved");
     assert_eq!(control_order, 10, "named inbound owner order moved");
 
     let spec_order = base
@@ -15047,7 +15053,16 @@ fn idr_a12_genuine_residue_class_rulings_and_source_dispatch_are_nonvacuous() {
     assert!(
         outbound.target_schema_id.as_deref() == Some("ResourceLedgerTransition")
             && outbound.construction_order == 20,
-        "the spec must retain transitions from order 20 to named target order 15"
+        "the spec must retain transitions from order 20 to the named target"
+    );
+    // The pins above are a snapshot; THIS is the law they stand for, so the test
+    // still enforces something after a licensed re-order rather than only noticing
+    // that a number changed (fgdb-h1al).
+    assert!(
+        transition_order <= outbound.construction_order,
+        "a retained target may not be constructed after its owner: \
+         ResourceLedgerTransition@{transition_order} vs the retaining spec field@{}",
+        outbound.construction_order
     );
     assert!(
         !base.fields.iter().any(|row| {
@@ -15072,22 +15087,29 @@ fn idr_a12_genuine_residue_class_rulings_and_source_dispatch_are_nonvacuous() {
         "vacuity control FIRED: forbidden ControlCommand@10 -> ResourceLedgerTransitionSpec@20: {forbidden_codes:?}"
     );
 
+    // DERIVED, not hard-coded. This control previously used a literal 14, chosen to
+    // sit just under ResourceLedgerTransition@15; when fgdb-h1al moved that target
+    // to 10 the control silently stopped being a control, because 14 retaining 10
+    // is perfectly legal. A control pinned to a neighbour's value decays the moment
+    // the neighbour moves, so take the value from the target itself.
+    let strictly_before_target = transition_order - 1;
     let mut too_early = base.clone();
     too_early
         .logical
         .iter_mut()
         .find(|row| row.name == "ResourceLedgerTransitionSpec")
         .expect("ResourceLedgerTransitionSpec exists")
-        .construction_order = 14;
+        .construction_order = strictly_before_target;
     for row in &mut too_early.fields {
         if row.containing_schema == "ResourceLedgerTransitionSpec" {
-            row.construction_order = 14;
+            row.construction_order = strictly_before_target;
         }
     }
     let too_early_codes = codes_without_assignment_drift(&too_early);
     assert!(
         too_early_codes.contains(&"dag_future_result".to_string()),
-        "outbound control FIRED: ResourceLedgerTransitionSpec@14 cannot retain ResourceLedgerTransition@15: {too_early_codes:?}"
+        "outbound control FIRED: ResourceLedgerTransitionSpec@{strictly_before_target} cannot \
+         retain ResourceLedgerTransition@{transition_order}: {too_early_codes:?}"
     );
 }
 

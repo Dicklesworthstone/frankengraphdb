@@ -7515,19 +7515,59 @@ enum CensusDagVerdict {
     Exception,
     /// A repair IS available and this waiver is temporary. `repair` states it
     /// exactly so the row can be retired rather than inherited.
+    ///
+    /// UNCONSTRUCTED SINCE fgdb-dbta, which retired the last Erratum row
+    /// (CommitCommand.capsule_ref -> CommittedEffectCapsule, repaired 30 -> 10).
+    /// The variant is KEPT, not deleted: `Exception` and `Erratum` are the two
+    /// verdicts this table exists to keep apart -- "there is no ordering repair"
+    /// versus "there is one and here it is" -- and the contract test below asserts
+    /// exactly that distinction. Errata are temporary by construction, so the next
+    /// one repopulates this variant; deleting it would delete the ability to say a
+    /// waiver is temporary at all.
+    ///
+    /// `expect`, not `allow`: the moment a row constructs `Erratum` again this
+    /// expectation goes unfulfilled and the build tells whoever added it to remove
+    /// the attribute, rather than silently carrying a stale suppression.
+    #[expect(dead_code, reason = "no Erratum row since fgdb-dbta; see doc comment")]
     Erratum,
 }
 
+/// The four metadata fields below are read ONLY by the `#[cfg(test)]` contract
+/// test that enforces waiver quality (an `Erratum` must carry its repair, an
+/// `Exception` must not). `verify_census_construction_dag` itself reads only
+/// `owner`/`stable_name`/`target`, so in a non-test build the rest are dead.
+///
+/// They are KEPT because the contract test is the whole reason a waiver may be
+/// written at all: a row without measured evidence and a named owning bead is an
+/// inherited excuse rather than a licensed exception. `expect` rather than
+/// `allow`, so that if live code ever starts reading one the suppression is
+/// reported as unfulfilled instead of lingering.
 #[derive(Debug, Clone, Copy)]
 struct CensusDagWaiver {
     owner: &'static str,
     stable_name: &'static str,
     target: &'static str,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the cfg(test) waiver-contract test")
+    )]
     verdict: CensusDagVerdict,
     /// The measured window, both directions, that produced the verdict.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the cfg(test) waiver-contract test")
+    )]
     evidence: &'static str,
     /// For an `Erratum`, the exact repair that retires this row.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the cfg(test) waiver-contract test")
+    )]
     repair: &'static str,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the cfg(test) waiver-contract test")
+    )]
     owning_bead: &'static str,
 }
 
@@ -7635,11 +7675,46 @@ fn verify_census_construction_dag(
             let Some(exact) = field.exact_types.first() else {
                 continue;
             };
-            let family = exact.split('<').next().unwrap_or(exact);
+            let (family, bracket_target) = census_reference_carrier(exact);
+            let row_id = format!("{}#{}", field.key.schema_owner, field.key.stable_name);
             if wrapper_kind.get(family).copied() != Some("reference_wrapper") {
+                // CARRIER CLOSURE GUARD — fails CLOSED on an unrecognised carrier.
+                //
+                // The bracket carrier below was silently dropped for the whole life
+                // of this law because the family split ran on the raw spelling, so
+                // `[StrongRef<T>]` yielded the family `"[StrongRef"`, missed the
+                // lookup, and `continue`d BEFORE reaching any guard. 139 census
+                // references died there, 2 of them violating. A skip that happens
+                // before the guard is not a narrowing, it is a hole.
+                //
+                // So: if the spelling MENTIONS a registered reference_wrapper at a
+                // flat path and no carrier shape above explained it, that is a new
+                // carrier and it must be classified rather than dropped. The only
+                // licensed exception is an inline AGGREGATE spelling (a sum `|` or
+                // a record `{...}`), whose references live in member/arm payloads
+                // that are their own census candidates at deeper paths -- 81 of
+                // them today, already covered by the arm-payload narrowing.
+                if field.key.path == format!("{}.{}", field.key.schema_owner, field.key.stable_name)
+                    && !exact.contains('|')
+                    && !exact.contains('{')
+                    && let Some(mentioned) = wrapper_kind.iter().find_map(|(name, kind)| {
+                        (*kind == "reference_wrapper" && exact.contains(&format!("{name}<")))
+                            .then_some(*name)
+                    })
+                {
+                    out.push(Violation::new(
+                        "census_reference_carrier_unrecognised",
+                        row_id,
+                        format!(
+                            "source spelling {exact:?} mentions registered reference_wrapper \
+                             {mentioned:?} but no recognised carrier shape (plain, bracket array, \
+                             or bracket map) derives a target from it: teach the carrier \
+                             derivation this shape rather than letting the edge vanish"
+                        ),
+                    ));
+                }
                 continue;
             }
-            let row_id = format!("{}#{}", field.key.schema_owner, field.key.stable_name);
             // COMPLETENESS GUARD — an unclassified wrapper fails CLOSED.
             let Some(semantics) = census_reference_strength(family) else {
                 out.push(Violation::new(
@@ -7663,14 +7738,7 @@ fn verify_census_construction_dag(
             if landed.contains(&(owner, field.key.stable_name.as_str())) {
                 continue;
             }
-            let Some(target) = exact
-                .strip_prefix(family)
-                .and_then(|rest| {
-                    rest.strip_prefix('<')
-                        .and_then(|rest| rest.strip_suffix('>'))
-                })
-                .map(|target| identity::generic_free_family(target.trim()))
-            else {
+            let Some(target) = bracket_target.map(identity::generic_free_family) else {
                 continue;
             };
             let (Some(&owner_order), Some(&target_order)) = (order.get(owner), order.get(target))
@@ -7717,6 +7785,50 @@ fn verify_census_construction_dag(
             format!("source construction-DAG cycle among census references: {cycle:?}"),
         ));
     }
+}
+
+/// Derive `(wrapper family, concrete target)` from ONE source spelling, across
+/// every carrier shape a reference is written in (fgdb-h1al).
+///
+/// A reference reaches its target through more than one spelling, and the law
+/// previously split `'<'` on the raw text, which recognised exactly one of them:
+///
+///   plain          `StrongRef<T>`                    -> family `StrongRef`
+///   bracket array  `[StrongRef<T>]`                  -> family `"[StrongRef"`   MISSED
+///   bracket map    `[k -> StrongRef<T>]`             -> family `"[k -> StrongRef"` MISSED
+///
+/// The two missed forms are how the census records a MANY-cardinality reference,
+/// so the law was blind to the plural case while enforcing the singular one. That
+/// is measured, not inferred: 384 of 11773 census field candidates are bracket
+/// spellings, 139 of those name a registered `reference_wrapper`, and 2 of those
+/// were violating the DAG in silence.
+///
+/// The map form takes the spelling after the LAST `->` because the retaining
+/// member of `[key -> Ref<T>]` is the VALUE; the key is an identity, not a
+/// reference. `->` is honoured only INSIDE a bracket: no flat spelling in the
+/// census names a registered wrapper across an arrow, so widening the flat path
+/// too would be unmeasured scope.
+///
+/// A bare wrapper with no `<...>` yields `None` for the target and therefore no
+/// edge, which is the pre-existing "names no target" narrowing, unchanged.
+fn census_reference_carrier(exact: &str) -> (&str, Option<&str>) {
+    let mut spelling = exact.trim();
+    if let Some(inner) = spelling
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
+        spelling = inner.trim();
+        if let Some(arrow) = spelling.rfind("->") {
+            spelling = spelling[arrow + 2..].trim();
+        }
+    }
+    let family = spelling.split('<').next().unwrap_or(spelling);
+    let target = spelling
+        .strip_prefix(family)
+        .and_then(|rest| rest.strip_prefix('<'))
+        .and_then(|rest| rest.strip_suffix('>'))
+        .map(str::trim);
+    (family, target)
 }
 
 /// The strength the construction DAG assigns a reference wrapper, composed exactly
@@ -15246,6 +15358,79 @@ name = "Probe"
         assert!(
             codes.contains(&"census_dag_future_result".to_owned()),
             "an uncovered future-result edge must be named, got {codes:?}"
+        );
+    }
+
+    /// fgdb-h1al: the SAME edge in the bracket-array spelling must be seen. Before
+    /// the carrier derivation existed, `[StrongRef<T>]` split to the family
+    /// `"[StrongRef"`, missed the wrapper lookup and `continue`d before any guard --
+    /// so the plural spelling of a reference was unenforced while the singular one
+    /// was enforced. 139 census references were dropped that way, 2 of them
+    /// violating.
+    #[test]
+    fn census_dag_sees_the_bracket_array_carrier() {
+        let codes = census_dag_codes(vec![typed_field_candidate(
+            "CommitCommand",
+            "CommitCommand.unwaived_bracket_probe_refs",
+            "unwaived_bracket_probe_refs",
+            "[StrongRef<CommitMarker>]",
+        )]);
+        assert!(
+            codes.contains(&"census_dag_future_result".to_owned()),
+            "a bracket-array future-result edge must be named, got {codes:?}"
+        );
+    }
+
+    /// fgdb-h1al: and in the bracket-MAP spelling, whose retaining member is the
+    /// VALUE after the last `->`. Four census candidates use this form and every
+    /// one of them retains a real target.
+    #[test]
+    fn census_dag_sees_the_bracket_map_carrier() {
+        let codes = census_dag_codes(vec![typed_field_candidate(
+            "CommitCommand",
+            "CommitCommand.unwaived_map_probe_entries",
+            "unwaived_map_probe_entries",
+            "[probe_id -> StrongRef<CommitMarker>]",
+        )]);
+        assert!(
+            codes.contains(&"census_dag_future_result".to_owned()),
+            "a bracket-map future-result edge must be named, got {codes:?}"
+        );
+    }
+
+    /// fgdb-h1al COMPLETENESS GUARD, failing direction: a spelling that mentions a
+    /// registered wrapper but that no carrier shape explains is a VIOLATION, never
+    /// a silent skip. This is the guard that would have caught the bracket hole on
+    /// the day it was written.
+    #[test]
+    fn census_dag_guard_fires_on_an_unrecognised_carrier() {
+        let codes = census_dag_codes(vec![typed_field_candidate(
+            "CommitCommand",
+            "CommitCommand.unrecognised_carrier_probe",
+            "unrecognised_carrier_probe",
+            "Vec<StrongRef<CommitMarker>>",
+        )]);
+        assert!(
+            codes.contains(&"census_reference_carrier_unrecognised".to_owned()),
+            "an unrecognised carrier mentioning a registered wrapper must fail CLOSED, got {codes:?}"
+        );
+    }
+
+    /// CONTROL for the guard, passing direction, so it is not merely always-on: an
+    /// inline AGGREGATE spelling carries its references in member/arm payloads,
+    /// which are their own census candidates at deeper paths. 81 candidates are in
+    /// this class and none of them owes a top-level edge.
+    #[test]
+    fn census_dag_guard_licenses_an_inline_aggregate_spelling() {
+        let codes = census_dag_codes(vec![typed_field_candidate(
+            "CommitCommand",
+            "CommitCommand.inline_aggregate_probe",
+            "inline_aggregate_probe",
+            "None|Some{marker_ref:StrongRef<CommitMarker>}",
+        )]);
+        assert!(
+            !codes.contains(&"census_reference_carrier_unrecognised".to_owned()),
+            "an inline aggregate must not fire the carrier guard, got {codes:?}"
         );
     }
 
