@@ -1895,8 +1895,10 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     // 1_231 -> 1_234: fgdb-ihtt bound the four heading-led appendix bodies, and
     // LogicalDeltaTemplate, RecoveryCheckpoint and BranchManifest became candidates
     // for the first time (CommitCommand already had a row, name-only, and was
-    // promoted to confirmed rather than added).
-    assert_eq!(baseline.top_level_candidates.len(), 1_234);
+    // promoted to confirmed rather than added). 1_234 -> 1_236: fgdb-801o
+    // separated the two second definition heads that an earlier union in the
+    // same sentence had swallowed.
+    assert_eq!(baseline.top_level_candidates.len(), 1_236);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT

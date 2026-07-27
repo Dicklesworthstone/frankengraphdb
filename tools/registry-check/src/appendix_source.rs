@@ -1163,10 +1163,11 @@ fn starts_with_word(value: &str, word: &str) -> bool {
 }
 
 fn has_definition_cue(value: &str) -> bool {
-    const CUES: [&str; 21] = [
+    const CUES: [&str; 22] = [
         "is",
         "are",
         "has",
+        "exactly",
         "contains",
         "maps",
         "uses",
@@ -1396,6 +1397,19 @@ fn simple_type_display(text: &str) -> Option<String> {
     (consumed == trimmed.len()).then_some(display)
 }
 
+/// The one reader for a backticked prose definition head.
+///
+/// Keep both discovery and continuation termination delegated here. A second
+/// spelling of this predicate inside either scan is how one owner can consume
+/// the next owner's structural body.
+fn prose_definition_head(fragment: &MarkdownFragment) -> Option<String> {
+    if fragment.kind != FragmentKind::Inline {
+        return None;
+    }
+    let display_name = simple_type_display(&fragment.text)?;
+    has_definition_cue(&fragment.after).then_some(display_name)
+}
+
 fn prose_schema_links(
     fragments: &[MarkdownFragment],
     source_map: &SourceMap<'_>,
@@ -1414,12 +1428,9 @@ fn prose_schema_links(
         indexes.sort_by_key(|index| fragments[*index].source_range.start);
         for (position, fragment_index) in indexes.iter().copied().enumerate() {
             let fragment = &fragments[fragment_index];
-            let Some(display_name) = simple_type_display(&fragment.text) else {
+            let Some(display_name) = prose_definition_head(fragment) else {
                 continue;
             };
-            if !has_definition_cue(&fragment.after) {
-                continue;
-            }
             let mut cue = normalize_whitespace(&fragment.after);
             let mut rhs_fragments = Vec::new();
             let mut scan = position;
@@ -1430,9 +1441,7 @@ fn prose_schema_links(
                     break;
                 };
                 let candidate = &fragments[candidate_index];
-                if simple_type_display(&candidate.text).is_some()
-                    && has_definition_cue(&candidate.after)
-                {
+                if prose_definition_head(candidate).is_some() {
                     break;
                 }
                 if prose_body_candidate(&display_name, &candidate.text) {
@@ -1466,6 +1475,9 @@ fn prose_schema_links(
                     }
                     separator_seen |= contains_continuation_separator(&previous.after);
                     let candidate = &fragments[candidate_index];
+                    if prose_definition_head(candidate).is_some() {
+                        break;
+                    }
                     if separator_seen && union_continuation_candidate(&candidate.text) {
                         rhs_fragments.push(candidate_index);
                         separator_seen = false;
@@ -5394,5 +5406,492 @@ mod tests {
         let error = census_appendix_source(b"first\nsecond", usize::MAX, &overflowing)
             .expect_err("unrepresentable source coordinates must not panic");
         assert_eq!(error.kind, CensusErrorKind::SourceCoordinateOverflow);
+    }
+
+    fn census_801o_fixture(source: &str) -> super::AppendixSourceCensus {
+        let slices = [SourceSliceSpec {
+            id: "801o",
+            start_line: 1,
+            end_line: 1,
+        }];
+        census_appendix_source(source.as_bytes(), 1, &slices)
+            .expect("the two-union fixture must census")
+    }
+
+    /// The metamorphic contract in both directions. Joining two definitions
+    /// into one sentence and splitting that sentence again must preserve the
+    /// union and arm transcripts.
+    #[test]
+    fn two_union_sentence_join_and_split_are_transcript_invariant() {
+        const ORDER_JOINED: &str = concat!(
+            "`LocalOrderSubject` is ",
+            "`Terminal{reservation_ref:StrongRef<LocalReservation>}|",
+            "Control{typed_payload_ref:StrongRef<SequenceNeutralSpec>}`; ",
+            "`MetaOrderSubject` is the corresponding ",
+            "`Terminal{reservation_ref:StrongRef<GlobalReservation>}|",
+            "Control{typed_payload_ref:StrongRef<GlobalSequenceNeutralSpec>}`.\n",
+        );
+        const ORDER_SPLIT: &str = concat!(
+            "`LocalOrderSubject` is ",
+            "`Terminal{reservation_ref:StrongRef<LocalReservation>}|",
+            "Control{typed_payload_ref:StrongRef<SequenceNeutralSpec>}`. ",
+            "`MetaOrderSubject` is the corresponding ",
+            "`Terminal{reservation_ref:StrongRef<GlobalReservation>}|",
+            "Control{typed_payload_ref:StrongRef<GlobalSequenceNeutralSpec>}`.\n",
+        );
+        const KEY_JOINED: &str = concat!(
+            "`KeyDestroyFloorRef` is ",
+            "`Checkpoint{checkpoint_ref:StrongRef<RecoveryCheckpoint>}|",
+            "Configuration{floor_ref:StrongRef<ConfigPayloadFloor>}` and ",
+            "`KeyDestroyExternalAckRef` is ",
+            "`Backup{ack_ref:StrongRef<BackupKeyReleaseAck>}|",
+            "LegalHold{ack_ref:StrongRef<LegalHoldReleaseAck>}|",
+            "RemoteConsumer{ack_ref:StrongRef<RemoteKeyConsumerReleaseAck>}`.\n",
+        );
+        const KEY_SPLIT: &str = concat!(
+            "`KeyDestroyFloorRef` is ",
+            "`Checkpoint{checkpoint_ref:StrongRef<RecoveryCheckpoint>}|",
+            "Configuration{floor_ref:StrongRef<ConfigPayloadFloor>}`. ",
+            "`KeyDestroyExternalAckRef` is ",
+            "`Backup{ack_ref:StrongRef<BackupKeyReleaseAck>}|",
+            "LegalHold{ack_ref:StrongRef<LegalHoldReleaseAck>}|",
+            "RemoteConsumer{ack_ref:StrongRef<RemoteKeyConsumerReleaseAck>}`.\n",
+        );
+        const READY_JOINED: &str = concat!(
+            "`ReadyChannelSurface` has exactly ",
+            "`0x0001 NativeFgp|0x0002 Http2|0x0003 Grpc|0x0004 WebSocket`, and ",
+            "`BoltBookmarkRequestKind` exactly `0x0001 Begin|0x0002 Run`; ",
+            "all other nested tags are reserved-invalid.\n",
+        );
+        const READY_SPLIT: &str = concat!(
+            "`ReadyChannelSurface` has exactly ",
+            "`0x0001 NativeFgp|0x0002 Http2|0x0003 Grpc|0x0004 WebSocket`. ",
+            "`BoltBookmarkRequestKind` exactly `0x0001 Begin|0x0002 Run`; ",
+            "all other nested tags are reserved-invalid.\n",
+        );
+        const RETRY_JOINED: &str = concat!(
+            "`SubscriptionClosePrecondition` has exactly the stable `u16` tags ",
+            "`0x0001 NoOutstanding{current_cursor_state_digest}|",
+            "0x0002 Outstanding{current_cursor_state_digest,lease_identity,",
+            "output_kind_and_id,public_digest}`, and ",
+            "`CapabilityMigrationRetrySelector` exactly ",
+            "`0x0001 Initial|0x0002 ExactLiveSuccessorRetry{entry_digest}`; ",
+            "every other nested tag is reserved-invalid.\n",
+        );
+        const RETRY_SPLIT: &str = concat!(
+            "`SubscriptionClosePrecondition` has exactly the stable `u16` tags ",
+            "`0x0001 NoOutstanding{current_cursor_state_digest}|",
+            "0x0002 Outstanding{current_cursor_state_digest,lease_identity,",
+            "output_kind_and_id,public_digest}`. ",
+            "`CapabilityMigrationRetrySelector` exactly ",
+            "`0x0001 Initial|0x0002 ExactLiveSuccessorRetry{entry_digest}`; ",
+            "every other nested tag is reserved-invalid.\n",
+        );
+
+        let cases = [
+            (
+                "local/meta order subjects",
+                ORDER_JOINED,
+                ORDER_SPLIT,
+                "; `MetaOrderSubject` is",
+                ". `MetaOrderSubject` is",
+                "`MetaOrderSubject` is",
+                "`MetaOrderSubject` resembles",
+                "LocalOrderSubject",
+                ["Control", "Terminal"].as_slice(),
+                4usize,
+            ),
+            (
+                "key-destroy reference selectors",
+                KEY_JOINED,
+                KEY_SPLIT,
+                " and `KeyDestroyExternalAckRef` is",
+                ". `KeyDestroyExternalAckRef` is",
+                "`KeyDestroyExternalAckRef` is",
+                "`KeyDestroyExternalAckRef` resembles",
+                "KeyDestroyFloorRef",
+                ["Checkpoint", "Configuration"].as_slice(),
+                5,
+            ),
+            (
+                "ready-channel selectors",
+                READY_JOINED,
+                READY_SPLIT,
+                ", and `BoltBookmarkRequestKind` exactly",
+                ". `BoltBookmarkRequestKind` exactly",
+                "`BoltBookmarkRequestKind` exactly",
+                "`BoltBookmarkRequestKind` nominally",
+                "ReadyChannelSurface",
+                [
+                    "0x0001 NativeFgp",
+                    "0x0002 Http2",
+                    "0x0003 Grpc",
+                    "0x0004 WebSocket",
+                ]
+                .as_slice(),
+                6usize,
+            ),
+            (
+                "close/retry selectors",
+                RETRY_JOINED,
+                RETRY_SPLIT,
+                ", and `CapabilityMigrationRetrySelector` exactly",
+                ". `CapabilityMigrationRetrySelector` exactly",
+                "`CapabilityMigrationRetrySelector` exactly",
+                "`CapabilityMigrationRetrySelector` nominally",
+                "SubscriptionClosePrecondition",
+                [
+                    "0x0001 Initial",
+                    "0x0001 NoOutstanding",
+                    "0x0002 ExactLiveSuccessorRetry",
+                    "0x0002 Outstanding",
+                ]
+                .as_slice(),
+                4,
+            ),
+        ];
+
+        let mut split_mutations = 0usize;
+        let mut join_mutations = 0usize;
+        let mut fault_controls_fired = 0usize;
+        let mut correct_unions = 0usize;
+        let mut correct_arms = 0usize;
+        for (
+            label,
+            joined,
+            split,
+            joined_separator,
+            split_boundary,
+            second_head,
+            faulted_head,
+            first_owner,
+            faulted_first_arms,
+            expected_arm_count,
+        ) in cases
+        {
+            let resplit = joined.replacen(joined_separator, split_boundary, 1);
+            assert_eq!(resplit, split, "{label}: the split mutation did not fire");
+            split_mutations += 1;
+
+            let rejoined = split.replacen(split_boundary, joined_separator, 1);
+            assert_eq!(
+                rejoined, joined,
+                "{label}: the inverse join mutation did not fire"
+            );
+            join_mutations += 1;
+
+            let joined_census = census_801o_fixture(joined);
+            let split_census = census_801o_fixture(&resplit);
+            let rejoined_census = census_801o_fixture(&rejoined);
+            assert_eq!(
+                joined_census.transcripts.unions, split_census.transcripts.unions,
+                "{label}: splitting changed the union transcript"
+            );
+            assert_eq!(
+                joined_census.transcripts.arms, split_census.transcripts.arms,
+                "{label}: splitting changed the arm transcript"
+            );
+            assert_eq!(
+                joined_census.transcripts.unions, rejoined_census.transcripts.unions,
+                "{label}: joining changed the union transcript"
+            );
+            assert_eq!(
+                joined_census.transcripts.arms, rejoined_census.transcripts.arms,
+                "{label}: joining changed the arm transcript"
+            );
+            assert_eq!(joined_census.counts.union_candidates, 2, "{label}");
+            assert_eq!(
+                joined_census.counts.arm_candidates, expected_arm_count,
+                "{label}"
+            );
+            correct_unions += joined_census.counts.union_candidates;
+            correct_arms += joined_census.counts.arm_candidates;
+
+            // INJECTED FAULT / VACUITY CONTROL: erase only the second
+            // definition cue. This reconstructs the defect's two real shapes:
+            // the second union vanishes in both; the first either stays intact
+            // or absorbs the foreign arms depending on whether its cue enables
+            // continuation.
+            let faulted = joined.replacen(second_head, faulted_head, 1);
+            assert_ne!(faulted, joined, "{label}: fault injection was inert");
+            let faulted_census = census_801o_fixture(&faulted);
+            if faulted_census.transcripts.unions != joined_census.transcripts.unions
+                && faulted_census.transcripts.arms != joined_census.transcripts.arms
+            {
+                fault_controls_fired += 1;
+            }
+            assert_eq!(
+                faulted_census.counts.union_candidates, 1,
+                "{label}: the erased second head must make one union vanish"
+            );
+            let first = faulted_census
+                .unions
+                .iter()
+                .find(|row| row.key.schema_owner == first_owner)
+                .expect("the first owner remains visible under the injected fault");
+            assert_eq!(
+                first.arm_names,
+                faulted_first_arms
+                    .iter()
+                    .map(|arm| (*arm).to_owned())
+                    .collect::<Vec<_>>(),
+                "{label}: the injected fault did not reproduce its named shape"
+            );
+        }
+
+        assert_eq!(split_mutations, 4, "all source sentences must be split");
+        assert_eq!(join_mutations, 4, "all split sentences must be rejoined");
+        assert_eq!(
+            fault_controls_fired, 4,
+            "the erased-head control must change both union and arm transcripts \
+             on all source shapes"
+        );
+        assert_eq!(correct_unions, 8);
+        assert_eq!(correct_arms, 19);
+        println!(
+            "801o metamorphic: split 4/4; join 4/4; correct union/arm population \
+             8/19; erased-head control fired 4/4"
+        );
+    }
+
+    /// The complete real-source partition. The Appendix A population is small
+    /// enough to name: four sentences, eight owners.
+    #[test]
+    fn appendix_a_two_union_sentence_population_is_exact_and_source_ordered() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            sha256_hex(source.as_bytes()),
+            "4fdc494ad32c25576b92134c92e7822e114f3d1c679afd2c8249791f4ceb1181",
+            "the two-union population was measured on a different Appendix A source"
+        );
+
+        let source_map = SourceMap::new(&source, 1388);
+        let (fragments, _) = super::extract_markdown_fragments(&source_map);
+        let links = super::prose_schema_links(&fragments, &source_map);
+        assert!(
+            links
+                .iter()
+                .all(|link| link.display_name != "DefinitelyFabricatedTwoUnionOwner"),
+            "fabricated-absent control matched a prose definition"
+        );
+
+        let mut by_line: std::collections::BTreeMap<usize, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (index, fragment) in fragments.iter().enumerate() {
+            if fragment.kind == super::FragmentKind::Inline {
+                by_line
+                    .entry(source_map.position(fragment.source_range.start).line)
+                    .or_default()
+                    .push(index);
+            }
+        }
+        let mut sentence_by_fragment = std::collections::BTreeMap::new();
+        for (line, indexes) in &mut by_line {
+            indexes.sort_by_key(|index| fragments[*index].source_range.start);
+            let mut sentence = 0usize;
+            for index in indexes {
+                sentence_by_fragment.insert(*index, (*line, sentence));
+                if super::sentence_ends(&fragments[*index].after) {
+                    sentence += 1;
+                }
+            }
+        }
+
+        let mut union_links_by_sentence: std::collections::BTreeMap<
+            (usize, usize),
+            Vec<(usize, String)>,
+        > = std::collections::BTreeMap::new();
+        for link in &links {
+            if !link
+                .rhs_fragments
+                .iter()
+                .any(|index| matches!(super::has_top_level_pipe(&fragments[*index].text), Ok(true)))
+            {
+                continue;
+            }
+            let sentence = sentence_by_fragment[&link.owner_fragment];
+            union_links_by_sentence.entry(sentence).or_default().push((
+                fragments[link.owner_fragment].source_range.start,
+                link.display_name.clone(),
+            ));
+        }
+        let mut population = Vec::new();
+        for ((line, _), mut owners) in union_links_by_sentence {
+            if owners.len() < 2 {
+                continue;
+            }
+            owners.sort_by_key(|(source_start, _)| *source_start);
+            population.push((
+                line,
+                owners
+                    .into_iter()
+                    .map(|(_, owner)| owner)
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        assert_eq!(
+            population,
+            [
+                (
+                    1758,
+                    vec![
+                        "LocalOrderSubject".to_owned(),
+                        "MetaOrderSubject".to_owned(),
+                    ],
+                ),
+                (
+                    2057,
+                    vec![
+                        "KeyDestroyFloorRef".to_owned(),
+                        "KeyDestroyExternalAckRef".to_owned(),
+                    ],
+                ),
+                (
+                    2645,
+                    vec![
+                        "ReadyChannelSurface".to_owned(),
+                        "BoltBookmarkRequestKind".to_owned(),
+                    ],
+                ),
+                (
+                    2651,
+                    vec![
+                        "SubscriptionClosePrecondition".to_owned(),
+                        "CapabilityMigrationRetrySelector".to_owned(),
+                    ],
+                ),
+            ],
+            "every real sentence that spells two unions must be named in source order"
+        );
+        for tagged_source_spelling in [
+            concat!(
+                "`ReadyChannelSurface` has exactly ",
+                "`0x0001 NativeFgp|0x0002 Http2|0x0003 Grpc|0x0004 WebSocket`",
+            ),
+            concat!(
+                "`BoltBookmarkRequestKind` exactly ",
+                "`0x0001 Begin|0x0002 Run`",
+            ),
+            concat!(
+                "`SubscriptionClosePrecondition` has exactly the stable `u16` tags ",
+                "`0x0001 NoOutstanding{current_cursor_state_digest}|",
+                "0x0002 Outstanding{current_cursor_state_digest,lease_identity,",
+                "output_kind_and_id,public_digest}`",
+            ),
+            concat!(
+                "`CapabilityMigrationRetrySelector` exactly ",
+                "`0x0001 Initial|0x0002 ExactLiveSuccessorRetry{entry_digest}`",
+            ),
+        ] {
+            assert!(
+                source.contains(tagged_source_spelling),
+                "tag assignment must be read from this exact source-order spelling: \
+                 {tagged_source_spelling}"
+            );
+        }
+
+        let slices = crate::appendix_a::SLICE_PINS
+            .iter()
+            .map(|slice| SourceSliceSpec {
+                id: slice.id,
+                start_line: usize::try_from(slice.start_line).expect("positive start line"),
+                end_line: usize::try_from(slice.end_line).expect("positive end line"),
+            })
+            .collect::<Vec<_>>();
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the committed Appendix A source must census");
+        for (owner, expected_arms) in [
+            ("LocalOrderSubject", ["Control", "Terminal"].as_slice()),
+            ("MetaOrderSubject", ["Control", "Terminal"].as_slice()),
+            (
+                "KeyDestroyFloorRef",
+                ["Checkpoint", "Configuration"].as_slice(),
+            ),
+            (
+                "KeyDestroyExternalAckRef",
+                ["Backup", "LegalHold", "RemoteConsumer"].as_slice(),
+            ),
+            (
+                "ReadyChannelSurface",
+                [
+                    "0x0001 NativeFgp",
+                    "0x0002 Http2",
+                    "0x0003 Grpc",
+                    "0x0004 WebSocket",
+                ]
+                .as_slice(),
+            ),
+            (
+                "BoltBookmarkRequestKind",
+                ["0x0001 Begin", "0x0002 Run"].as_slice(),
+            ),
+            (
+                "SubscriptionClosePrecondition",
+                ["0x0001 NoOutstanding", "0x0002 Outstanding"].as_slice(),
+            ),
+            (
+                "CapabilityMigrationRetrySelector",
+                ["0x0001 Initial", "0x0002 ExactLiveSuccessorRetry"].as_slice(),
+            ),
+        ] {
+            let rows = census
+                .unions
+                .iter()
+                .filter(|row| row.key.schema_owner == owner)
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), 1, "{owner} must own exactly one union");
+            assert_eq!(rows[0].key.union_path, owner);
+            assert_eq!(
+                rows[0].arm_names,
+                expected_arms
+                    .iter()
+                    .map(|arm| (*arm).to_owned())
+                    .collect::<Vec<_>>(),
+                "{owner}: the canonical census set must contain exactly the \
+                 source-spelled arm identities; this alphabetical set order is \
+                 not a tag-assignment order"
+            );
+            assert_eq!(rows[0].unparsed_arm_count, 0);
+            assert!(!rows[0].arm_set_conflict);
+        }
+        assert!(
+            census.fields.iter().any(|field| {
+                field.key.path
+                    == concat!(
+                        "CapabilityMigrationRetrySelector.0x0002 ",
+                        "ExactLiveSuccessorRetry.entry_digest"
+                    )
+            }),
+            "the retry selector payload field must belong to its source owner"
+        );
+        assert!(
+            census.fields.iter().all(|field| {
+                field.key.path
+                    != concat!(
+                        "SubscriptionClosePrecondition.0x0002 ",
+                        "ExactLiveSuccessorRetry.entry_digest"
+                    )
+            }),
+            "the retry selector payload field must not remain on the preceding union"
+        );
+        println!(
+            "801o source partition: 4 sentences, 8 unions, 19 arms; global \
+             schemas={} fields={} unions={} arms={} ambiguities={}",
+            census.counts.schema_candidates,
+            census.counts.field_candidates,
+            census.counts.union_candidates,
+            census.counts.arm_candidates,
+            census.counts.ambiguities
+        );
     }
 }

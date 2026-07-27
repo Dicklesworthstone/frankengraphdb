@@ -612,16 +612,16 @@ predecessor = "a20"
 successor = ""
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 118
-top_level_candidate_ids_sha256 = "f05b2e0f886cde3dd4002c58a8990d1b781fc52a4840714b5fceff1dd4eb0767"
+top_level_candidate_count = 120
+top_level_candidate_ids_sha256 = "320b32e94fc5619ad02dd4f9f1a1ed9bb20487a5f83648502fb1645d3ee79c72"
 field_candidate_count = 870
-field_candidate_ids_sha256 = "61826378335e619f210102344199f2ac696c5ba7ff597e08c81195b413f78c06"
-union_candidate_count = 65
-union_candidate_ids_sha256 = "c9cf8d6f56aeacafc9f429fc23657f9671496d0712f210c89ec9aa9c2b8869fb"
-arm_candidate_count = 198
-arm_candidate_ids_sha256 = "6e9ea348b2b4078450de6b560b3c966f9e59062603c9d10c2b82c2f0ed34210e"
-ambiguity_count = 627
-ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0d7722b61"
+field_candidate_ids_sha256 = "e270d6e975253784e12dc4e678cca39ae3b7e35e76d1d4ba7825c79b943dfdc6"
+union_candidate_count = 67
+union_candidate_ids_sha256 = "70acab74406a8d20d18fde88604786459c3dc0bbe021dae06f896d930f74c252"
+arm_candidate_count = 200
+arm_candidate_ids_sha256 = "4e4cba1b4034dd0654eae6a69f58b8ba2d80144de309a47eff0825d3be30853f"
+ambiguity_count = 626
+ambiguity_ids_sha256 = "33e8d9c5f6eb7447608290da8112ba21e20f826b19faaf36b098b2e35491cb63"
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
@@ -49616,6 +49616,16 @@ identity_class = "wire"
 source_locations = ["a07:1712"]
 
 [[top_level_candidate]]
+row_id = "a21:top-level-candidate:bolt-bookmark-request-kind-9e4f662a1c1d3b46"
+slice_id = "a21"
+symbol = "BoltBookmarkRequestKind"
+generic_signature = ""
+source_key = "top|BoltBookmarkRequestKind"
+source_kind = "confirmed"
+identity_class = "unclassified"
+source_locations = ["a21:2645"]
+
+[[top_level_candidate]]
 row_id = "a21:top-level-candidate:bolt-compat-profile-v1-7e4968c84ada5d66"
 slice_id = "a21"
 symbol = "BoltCompatProfileV1"
@@ -50094,6 +50104,16 @@ source_key = "top|CapabilityMigrationIndex"
 source_kind = "confirmed"
 identity_class = "logical"
 source_locations = ["a05:1644"]
+
+[[top_level_candidate]]
+row_id = "a21:top-level-candidate:capability-migration-retry-selector-9203d441ca1a0fa2"
+slice_id = "a21"
+symbol = "CapabilityMigrationRetrySelector"
+generic_signature = ""
+source_key = "top|CapabilityMigrationRetrySelector"
+source_kind = "confirmed"
+identity_class = "unclassified"
+source_locations = ["a21:2651"]
 
 [[top_level_candidate]]
 row_id = "a18:top-level-candidate:catalog-abandon-predecessor-81962eff2bfdc8d1"
