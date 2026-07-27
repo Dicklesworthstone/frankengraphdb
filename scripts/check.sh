@@ -520,15 +520,132 @@ run_ubs() {
 
   ubs --only=rust --ci "${rust_sources[@]}" 2>&1 | tee "$log"
   ubs_rc=${PIPESTATUS[0]}
-  if [ "$ubs_rc" -ne 0 ]; then
-    return "$ubs_rc"
-  fi
   if grep -Eiq \
     'nothing was checked|did not run any scanner|no supported languages detected' \
     "$log"; then
     echo "ERROR: UBS exited zero without running a Rust scanner" >&2
     return 1
   fi
+  if grep -Eiq 'Directory too large|exceeds limit of' "$log"; then
+    echo "ERROR: UBS refused to start on a size guard. The domain is the tracked" >&2
+    echo "  set, so this must not happen; do NOT raise UBS_MAX_DIR_SIZE_MB." >&2
+    return 1
+  fi
+  # The verdict is the RATCHET, not ubs's raw exit status. ubs exits 1 whenever
+  # any critical exists, so on a real backlog it is permanently red and says
+  # nothing about whether the code got better or worse. `ubs_rc` is therefore
+  # recorded, not returned.
+  echo "    ubs exit ${ubs_rc} (raw); verdict is the critical ratchet below"
+  ubs_critical_ratchet "$log"
+}
+
+# UBS_CRITICAL_BASELINE — the ratchet. "<check name>=<count>", one per class.
+#
+# WHY A RATCHET AND NOT A BURN-DOWN. Correcting this gate's domain (hdyv) made
+# it inspect Rust for the first time and it reported 1049 criticals — a backlog
+# no gate had ever looked at, not a regression any commit introduced. 1049 open
+# tickets is not a plan; an un-inspectable backlog that nobody can widen
+# silently is. Same shape as identity_code_set_is_ratcheted /
+# UNREGISTERED_BASELINE in tests/satisfiability.rs.
+#
+# THE PARTITION, measured at 0411aa0 over 119 tracked Rust sources. The
+# denominator is 1049 and these three classes are all of it:
+#
+#   794  75.7%  Secret/token comparisons without timing-safe equality
+#   135  12.9%  panic!/unreachable!/todo!/unimplemented!
+#   120  11.4%  JWT decode, validation bypass, or missing claim binding
+#
+# ALWAYS-FIX PER DOCTRINE — memory safety, UB, data races — IS ZERO OF 1049.
+# Stating that plainly because it is the load-bearing result: nothing here is in
+# the category AGENTS.md says to fix on sight. The workspace is
+# `unsafe_code = "forbid"`, so that is the expected reading, not a lucky one.
+#
+# 914 OF 1049 (87.1%) ARE TWO RULES WHOSE DOMAIN ASSUMPTIONS DO NOT HOLD HERE:
+#
+#   * The 794 "secret comparison" hits fire on `==` next to identifiers named
+#     `code`/`key`. Actual matched evidence:
+#         codes.iter().any(|code| code == expected)
+#         .filter(|schema| schema.key.source_key() == "top|RegisteredStrongRef")
+#     These compare VIOLATION CODES and SCHEMA KEYS. Neither is a secret.
+#   * The 120 "JWT" hits fire on the token `decode`. Actual matched evidence:
+#         CanonicalScalar::decode(&pinned_text_encoding).unwrap_err()
+#     MEASURED: `jsonwebtoken`, `DecodingKey` and `jwt` appear in ZERO tracked
+#     files. Doctrine #1 closes the dependency universe, so no JWT library can
+#     ever exist here. All 120 are false by construction.
+#
+# They are still PINNED rather than excluded. A waiver is forever and a red is
+# temporary: pinning keeps the count visible and makes any change fail, whereas
+# suppressing the rules would hide the day one of them matches something real.
+#
+# EQUALITY, NOT A CEILING. Drift in EITHER direction fails, exactly as
+# UNREGISTERED_BASELINE does. A ceiling lets the baseline go stale, and a count
+# that only ever rises silently absorbs improvements.
+#
+# KNOWN LIMIT, STATED RATHER THAN PAPERED OVER: this pins COUNTS, not the
+# finding set. An aggregate pin does not pin the split, so 794 becoming 793 real
+# plus 1 new one would pass. Per-finding identity is not obtainable from the
+# tool: its `--format=jsonl` emits summary rows only, its SARIF comes from the
+# `ast-grep` driver alone (122 results, panic-macro only — it does not see the
+# other two classes), and the text listing prints roughly 3 findings per class
+# with NO "and N more" marker, so it truncates silently. Tightening this to an
+# exact set needs a per-finding output UBS does not currently emit.
+UBS_CRITICAL_BASELINE=(
+  "Secret/token comparisons without timing-safe equality=794"
+  "panic!/unreachable!/todo!/unimplemented!=135"
+  "JWT decode, validation bypass, or missing claim binding=120"
+)
+
+# ubs_critical_ratchet <log> -> 0 when the critical partition equals the baseline
+#
+# Fails closed on an UNKNOWN class: a critical class this table has never seen is
+# by definition un-adjudicated, and defaulting it to "fine" is how a backlog
+# becomes invisible in the first place.
+ubs_critical_ratchet() {
+  local log="$1"
+  local -A observed=() expected=()
+  local entry name count check line drift=0 total=0
+  for entry in "${UBS_CRITICAL_BASELINE[@]}"; do
+    expected["${entry%=*}"]="${entry##*=}"
+  done
+  # Sections read "• <check name>" followed by "🔥 CRITICAL (<n> found)".
+  check=""
+  while IFS= read -r line; do
+    case "$line" in
+      "• "*) check="${line#• }" ;;
+      *"CRITICAL ("*)
+        count="${line#*CRITICAL (}"
+        count="${count%% found)*}"
+        [ -n "$check" ] && observed["$check"]=$((${observed["$check"]:-0} + count))
+        ;;
+    esac
+  done < "$log"
+
+  for name in "${!observed[@]}"; do
+    total=$((total + observed["$name"]))
+    if [ -z "${expected[$name]+set}" ]; then
+      echo "ERROR: unadjudicated UBS critical class \"$name\" (${observed[$name]} found)." >&2
+      echo "  A class this baseline has never seen must be adjudicated and pinned," >&2
+      echo "  not defaulted to acceptable." >&2
+      drift=1
+    elif [ "${observed[$name]}" -ne "${expected[$name]}" ]; then
+      echo "ERROR: UBS critical ratchet drift in \"$name\":" >&2
+      echo "  baseline ${expected[$name]}, observed ${observed[$name]}." >&2
+      echo "  If this is a real change, update UBS_CRITICAL_BASELINE in the SAME" >&2
+      echo "  commit and say in the message which findings moved and why." >&2
+      drift=1
+    fi
+  done
+  for name in "${!expected[@]}"; do
+    if [ -z "${observed[$name]+set}" ]; then
+      echo "ERROR: baselined UBS critical class \"$name\" no longer reported." >&2
+      echo "  Either it was fixed — remove its row — or the rule stopped running," >&2
+      echo "  which would make this gate quietly weaker." >&2
+      drift=1
+    fi
+  done
+  [ "$drift" -ne 0 ] && return 1
+  echo "    critical ratchet: $total across ${#observed[@]} class(es), all at baseline"
+  return 0
 }
 
 # Emit one row per unique live (kind, artifact) pair. Multiple symbols may
