@@ -39,9 +39,9 @@ occurrence_count = 2458
 occurrence_transcript_sha256 = "027571dc077dede9c326cb9fdecbb9b836c7dacd7912e46e8f7711b63b690b48"
 
 [target_manifest]
-target_count = 3269
-projection_fallback_count = 109
-target_source_assignment_sha256 = "e5955da8acb399845cb82a9f5e88fbec9c146d731da6ae4759086b93e484dc84"
+target_count = 3309
+projection_fallback_count = 111
+target_source_assignment_sha256 = "106b5b176c5dca18e96d41791dd31979ac1b005b6cf40fa57e4a772758d201a6"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "c87a4d5bba2765dd7de49b5ee0b5d6772b4d06b2673f5675c6239ad0
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 56
+registry_epoch = 57
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -645,7 +645,7 @@ registry_epoch = 38
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 66
+registry_epoch = 67
 
 [[logical_kind]]
 slice_id = "a03"
@@ -12913,6 +12913,326 @@ retention_and_cut_rule = "cross-checks the sibling object; NOT a reachability ed
 version_status = "active"
 max_size_bytes = 32
 digest_class = "weak_identity"
+
+[[target]]
+row_id = "a03:target:logical-kind-recovery-checkpoint"
+target_row_id = "a03:logical-kind:recovery-checkpoint"
+slice_id = "a03"
+source_key = "top|RecoveryCheckpoint"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-recovery-checkpoint-basis-payload-digest"
+target_row_id = "a12:field:recovery-checkpoint-basis-payload-digest"
+slice_id = "a12"
+source_key = "field|RecoveryCheckpoint|RecoveryCheckpoint.basis_payload_digest|basis_payload_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-recovery-checkpoint-basis-projection-digest"
+target_row_id = "a12:field:recovery-checkpoint-basis-projection-digest"
+slice_id = "a12"
+source_key = "field|RecoveryCheckpoint|RecoveryCheckpoint.basis_projection_digest|basis_projection_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-recovery-checkpoint-nonretaining-predecessor-checkpoint-digest"
+target_row_id = "a12:field:recovery-checkpoint-nonretaining-predecessor-checkpoint-digest"
+slice_id = "a12"
+source_key = "field|RecoveryCheckpoint|RecoveryCheckpoint.nonretaining_predecessor_checkpoint_digest|nonretaining_predecessor_checkpoint_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-recovery-checkpoint-command-basis-8bc04077cfc31b01"
+target_row_id = "a12:union:recovery-checkpoint-command-basis-8bc04077cfc31b01"
+slice_id = "a12"
+source_key = "union|RecoveryCheckpoint|RecoveryCheckpoint.command_basis"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-recovery-checkpoint-command-basis-genesis-308f6778b05c7820"
+target_row_id = "a12:union-arm:recovery-checkpoint-command-basis-genesis-308f6778b05c7820"
+slice_id = "a12"
+source_key = "arm|RecoveryCheckpoint|RecoveryCheckpoint.command_basis|Genesis"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-recovery-checkpoint-command-basis-ordered-06b9fe17f7433154"
+target_row_id = "a12:union-arm:recovery-checkpoint-command-basis-ordered-06b9fe17f7433154"
+slice_id = "a12"
+source_key = "arm|RecoveryCheckpoint|RecoveryCheckpoint.command_basis|Ordered"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-recovery-checkpoint-marker-basis-ef66f7fb7a6d657c"
+target_row_id = "a12:union:recovery-checkpoint-marker-basis-ef66f7fb7a6d657c"
+slice_id = "a12"
+source_key = "union|RecoveryCheckpoint|RecoveryCheckpoint.marker_basis"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-recovery-checkpoint-marker-basis-no-committed-transaction-at-basis-23070b94b6967060"
+target_row_id = "a12:union-arm:recovery-checkpoint-marker-basis-no-committed-transaction-at-basis-23070b94b6967060"
+slice_id = "a12"
+source_key = "arm|RecoveryCheckpoint|RecoveryCheckpoint.marker_basis|NoCommittedTransactionAtBasis"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:union-arm-recovery-checkpoint-marker-basis-committed-68fa45e962258c91"
+target_row_id = "a12:union-arm:recovery-checkpoint-marker-basis-committed-68fa45e962258c91"
+slice_id = "a12"
+source_key = "arm|RecoveryCheckpoint|RecoveryCheckpoint.marker_basis|Committed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-constraint-definition-set"
+target_row_id = "a12:logical-kind:constraint-definition-set"
+slice_id = "a12"
+source_key = "projection|logical_object_kinds|ConstraintDefinitionSet"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-resource-limit-policy"
+target_row_id = "a12:logical-kind:resource-limit-policy"
+slice_id = "a12"
+source_key = "projection|logical_object_kinds|ResourceLimitPolicy"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-checkpoint-install-spec"
+target_row_id = "a12:logical-kind:checkpoint-install-spec"
+slice_id = "a12"
+source_key = "top|CheckpointInstallSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-constraint-mutation-batch"
+target_row_id = "a12:logical-kind:constraint-mutation-batch"
+slice_id = "a12"
+source_key = "top|ConstraintMutationBatch"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-history-cut-activation-spec"
+target_row_id = "a12:logical-kind:history-cut-activation-spec"
+slice_id = "a12"
+source_key = "top|HistoryCutActivationSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-initial-config-floor-install-spec"
+target_row_id = "a12:logical-kind:initial-config-floor-install-spec"
+slice_id = "a12"
+source_key = "top|InitialConfigFloorInstallSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:logical-kind-resource-charge-effect"
+target_row_id = "a12:logical-kind:resource-charge-effect"
+slice_id = "a12"
+source_key = "top|ResourceChargeEffect"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-checkpoint-install-spec-basis"
+target_row_id = "a12:field:checkpoint-install-spec-basis"
+slice_id = "a12"
+source_key = "field|CheckpointInstallSpec|CheckpointInstallSpec.basis|basis"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-checkpoint-install-spec-basis-payload-digest"
+target_row_id = "a12:field:checkpoint-install-spec-basis-payload-digest"
+slice_id = "a12"
+source_key = "field|CheckpointInstallSpec|CheckpointInstallSpec.basis_payload_digest|basis_payload_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-checkpoint-install-spec-basis-projection-digest"
+target_row_id = "a12:field:checkpoint-install-spec-basis-projection-digest"
+slice_id = "a12"
+source_key = "field|CheckpointInstallSpec|CheckpointInstallSpec.basis_projection_digest|basis_projection_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-checkpoint-install-spec-checkpoint-ref"
+target_row_id = "a12:field:checkpoint-install-spec-checkpoint-ref"
+slice_id = "a12"
+source_key = "field|CheckpointInstallSpec|CheckpointInstallSpec.checkpoint_ref|checkpoint_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-checkpoint-install-spec-checkpoint-state-vector-digest"
+target_row_id = "a12:field:checkpoint-install-spec-checkpoint-state-vector-digest"
+slice_id = "a12"
+source_key = "field|CheckpointInstallSpec|CheckpointInstallSpec.checkpoint_state_vector_digest|checkpoint_state_vector_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-checkpoint-install-spec-paired-config-payload-floor-ref"
+target_row_id = "a12:field:checkpoint-install-spec-paired-config-payload-floor-ref"
+slice_id = "a12"
+source_key = "field|CheckpointInstallSpec|CheckpointInstallSpec.paired_config_payload_floor_ref|paired_config_payload_floor_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-checkpoint-install-spec-retention-cut-body-ref"
+target_row_id = "a12:field:checkpoint-install-spec-retention-cut-body-ref"
+slice_id = "a12"
+source_key = "field|CheckpointInstallSpec|CheckpointInstallSpec.retention_cut_body_ref|retention_cut_body_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-constraint-mutation-batch-apply-basis"
+target_row_id = "a12:field:constraint-mutation-batch-apply-basis"
+slice_id = "a12"
+source_key = "field|ConstraintMutationBatch|ConstraintMutationBatch.apply_basis|apply_basis"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-constraint-mutation-batch-before-root-ref"
+target_row_id = "a12:field:constraint-mutation-batch-before-root-ref"
+slice_id = "a12"
+source_key = "field|ConstraintMutationBatch|ConstraintMutationBatch.before_root_ref|before_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-constraint-mutation-batch-after-root-ref"
+target_row_id = "a12:field:constraint-mutation-batch-after-root-ref"
+slice_id = "a12"
+source_key = "field|ConstraintMutationBatch|ConstraintMutationBatch.after_root_ref|after_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-history-cut-activation-spec-provisional-cut-ref"
+target_row_id = "a12:field:history-cut-activation-spec-provisional-cut-ref"
+slice_id = "a12"
+source_key = "field|HistoryCutActivationSpec|HistoryCutActivationSpec.provisional_cut_ref|provisional_cut_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-history-cut-activation-spec-checkpoint-install-record-ref"
+target_row_id = "a12:field:history-cut-activation-spec-checkpoint-install-record-ref"
+slice_id = "a12"
+source_key = "field|HistoryCutActivationSpec|HistoryCutActivationSpec.checkpoint_install_record_ref|checkpoint_install_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-history-cut-activation-spec-expected-retention-map-basis"
+target_row_id = "a12:field:history-cut-activation-spec-expected-retention-map-basis"
+slice_id = "a12"
+source_key = "field|HistoryCutActivationSpec|HistoryCutActivationSpec.expected_retention_map_basis|expected_retention_map_basis"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-initial-config-floor-install-spec-checkpoint-installed-state"
+target_row_id = "a12:field:initial-config-floor-install-spec-checkpoint-installed-state"
+slice_id = "a12"
+source_key = "field|InitialConfigFloorInstallSpec|InitialConfigFloorInstallSpec.checkpoint_installed_state|checkpoint_installed_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-initial-config-floor-install-spec-checkpoint-ref"
+target_row_id = "a12:field:initial-config-floor-install-spec-checkpoint-ref"
+slice_id = "a12"
+source_key = "field|InitialConfigFloorInstallSpec|InitialConfigFloorInstallSpec.checkpoint_ref|checkpoint_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-initial-config-floor-install-spec-checkpoint-state-vector-digest"
+target_row_id = "a12:field:initial-config-floor-install-spec-checkpoint-state-vector-digest"
+slice_id = "a12"
+source_key = "field|InitialConfigFloorInstallSpec|InitialConfigFloorInstallSpec.checkpoint_state_vector_digest|checkpoint_state_vector_digest"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-initial-config-floor-install-spec-initial-config-payload-floor-ref"
+target_row_id = "a12:field:initial-config-floor-install-spec-initial-config-payload-floor-ref"
+slice_id = "a12"
+source_key = "field|InitialConfigFloorInstallSpec|InitialConfigFloorInstallSpec.initial_config_payload_floor_ref|initial_config_payload_floor_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-initial-config-floor-install-spec-initial-configuration-ref"
+target_row_id = "a12:field:initial-config-floor-install-spec-initial-configuration-ref"
+slice_id = "a12"
+source_key = "field|InitialConfigFloorInstallSpec|InitialConfigFloorInstallSpec.initial_configuration_ref|initial_configuration_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-resource-charge-effect-transition-ref"
+target_row_id = "a12:field:resource-charge-effect-transition-ref"
+slice_id = "a12"
+source_key = "field|ResourceChargeEffect|ResourceChargeEffect.transition_ref|transition_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-constraint-state-root-definition-set-ref"
+target_row_id = "a12:field:constraint-state-root-definition-set-ref"
+slice_id = "a12"
+source_key = "field|ConstraintStateRoot|ConstraintStateRoot.definition_set_ref|definition_set_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-resource-ledger-state-limit-policy-ref"
+target_row_id = "a12:field:resource-ledger-state-limit-policy-ref"
+slice_id = "a12"
+source_key = "field|ResourceLedgerState|ResourceLedgerState.limit_policy_ref|limit_policy_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-retention-cut-body-basis-state-identity"
+target_row_id = "a12:field:retention-cut-body-basis-state-identity"
+slice_id = "a12"
+source_key = "field|RetentionCutBody|RetentionCutBody.basis_state_identity|basis_state_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a12:target:field-resource-ledger-transition-role-authority-owning-role-idempotency-key-digest"
+target_row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-idempotency-key-digest"
+slice_id = "a12"
+source_key = "field|ResourceLedgerTransition<Role:AuthorityOwningRole>|ResourceLedgerTransition<Role:AuthorityOwningRole>.idempotency_key_digest|idempotency_key_digest"
+target_kind = "field"
+definition_status = "declared"
 
 [[field]]
 slice_id = "a03"
@@ -41960,7 +42280,7 @@ symbol = "ConstraintDefinitionSet"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x027b"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a08:reservation:constraint-release-record"
@@ -45236,7 +45556,7 @@ symbol = "RecoveryCheckpoint"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03aa"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:recovery-incarnation-projection-result"
@@ -45605,7 +45925,7 @@ symbol = "ResourceLimitPolicy"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03d1"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a18:reservation:restore-abandon-operation-record"
@@ -49962,7 +50282,7 @@ symbol = "CheckpointInstallSpec"
 generic_signature = ""
 source_key = "top|CheckpointInstallSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1966"]
 
 [[top_level_candidate]]
@@ -50332,7 +50652,7 @@ symbol = "ConstraintMutationBatch"
 generic_signature = ""
 source_key = "top|ConstraintMutationBatch"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1980"]
 
 [[top_level_candidate]]
@@ -52102,7 +52422,7 @@ symbol = "HistoryCutActivationSpec"
 generic_signature = ""
 source_key = "top|HistoryCutActivationSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1972"]
 
 [[top_level_candidate]]
@@ -52222,7 +52542,7 @@ symbol = "InitialConfigFloorInstallSpec"
 generic_signature = ""
 source_key = "top|InitialConfigFloorInstallSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1966"]
 
 [[top_level_candidate]]
@@ -55252,7 +55572,7 @@ symbol = "RecoveryCheckpoint"
 generic_signature = ""
 source_key = "top|RecoveryCheckpoint"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1964"]
 
 [[top_level_candidate]]
@@ -56192,7 +56512,7 @@ symbol = "ResourceChargeEffect"
 generic_signature = ""
 source_key = "top|ResourceChargeEffect"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a12:1996"]
 
 [[top_level_candidate]]
@@ -61628,6 +61948,619 @@ slice_id = "a01"
 source_key = "field|RootSlot|RootSlot.cluster_incarnation|cluster_incarnation"
 target_kind = "field"
 definition_status = "declared"
+
+[[logical_kind]]
+slice_id = "a03"
+row_id = "a03:logical-kind:recovery-checkpoint"
+object_kind = 0x03aa
+name = "RecoveryCheckpoint"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_checkpoint/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:constraint-definition-set"
+object_kind = 0x027b
+name = "ConstraintDefinitionSet"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_definition_set/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:resource-limit-policy"
+object_kind = 0x03d1
+name = "ResourceLimitPolicy"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_limit_policy/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:checkpoint-install-spec"
+object_kind = 0x0566
+name = "CheckpointInstallSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/checkpoint_install_spec/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:constraint-mutation-batch"
+object_kind = 0x0567
+name = "ConstraintMutationBatch"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_mutation_batch/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:history-cut-activation-spec"
+object_kind = 0x0568
+name = "HistoryCutActivationSpec"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/history_cut_activation_spec/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:initial-config-floor-install-spec"
+object_kind = 0x0569
+name = "InitialConfigFloorInstallSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/initial_config_floor_install_spec/"
+
+[[logical_kind]]
+slice_id = "a12"
+row_id = "a12:logical-kind:resource-charge-effect"
+object_kind = 0x056a
+name = "ResourceChargeEffect"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_charge_effect/"
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:checkpoint-install-spec-basis"
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0001
+stable_name = "basis"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline comparison-only basis identity for the state being checkpointed; retained and cut with the checkpoint-install spec and never traversed as a reachability edge (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:checkpoint-install-spec-basis-payload-digest"
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0004
+stable_name = "basis_payload_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "comparison-only digest of the exact basis payload; authenticates the cut without retaining any prior payload, command, or checkpoint object (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:checkpoint-install-spec-basis-projection-digest"
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0005
+stable_name = "basis_projection_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline transcript digest of the exact checkpoint-vector reconstruction; retained and cut with the install spec and names no future checkpoint, floor, cut, or result object (a12:1964,1966)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:checkpoint-projection:v1\" || canonical(vector reconstruction with exact literals))"
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:checkpoint-install-spec-checkpoint-ref"
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0006
+stable_name = "checkpoint_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryCheckpoint"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the already-built recovery checkpoint installed by this exact input; retained while the install spec is retained and cut only with that spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:checkpoint-install-spec-checkpoint-state-vector-digest"
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0007
+stable_name = "checkpoint_state_vector_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline target digest authenticating the exact checkpoint state vector; retained and cut with the install spec and creates no reachability edge (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:checkpoint-install-spec-paired-config-payload-floor-ref"
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0008
+stable_name = "paired_config_payload_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigPayloadFloor"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "optional strong reference to the paired configuration payload floor installed atomically for an operational basis; retained while present and cut only with the install spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:checkpoint-install-spec-retention-cut-body-ref"
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0009
+stable_name = "retention_cut_body_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RetentionCutBody"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "optional strong reference to the checkpoint-free retention-cut body consumed by an operational install; retained while present and cut only with the install spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:constraint-mutation-batch-apply-basis"
+containing_schema = "ConstraintMutationBatch"
+field_tag = 0x0002
+stable_name = "apply_basis"
+exact_wire_type = "WeakMarkerIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline comparison-only marker identity for the exact apply basis; retained and cut with the mutation batch and never followed by reachability walkers (a12:1980)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:constraint-mutation-batch-before-root-ref"
+containing_schema = "ConstraintMutationBatch"
+field_tag = 0x0003
+stable_name = "before_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConstraintStateRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact constraint-state root before this mutation batch; retained while the batch is retained and cut only with that batch (a12:1980)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:constraint-mutation-batch-after-root-ref"
+containing_schema = "ConstraintMutationBatch"
+field_tag = 0x0004
+stable_name = "after_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConstraintStateRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact constraint-state root constructed after this mutation batch; retained while the batch is retained and cut only with that batch (a12:1980)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:history-cut-activation-spec-provisional-cut-ref"
+containing_schema = "HistoryCutActivationSpec"
+field_tag = 0x0001
+stable_name = "provisional_cut_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ProvisionalRetentionCutSet"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact provisional cut being strengthened; retained while the activation spec is retained and cut only with that spec (a12:1972)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:history-cut-activation-spec-checkpoint-install-record-ref"
+containing_schema = "HistoryCutActivationSpec"
+field_tag = 0x0002
+stable_name = "checkpoint_install_record_ref"
+exact_wire_type = "StrongCommandRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LogicalCommandRecord"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong command reference to the previously constructed logical command record that installed the checkpoint; retained while the activation spec is retained and cut only with that spec (a12:1972)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:history-cut-activation-spec-expected-retention-map-basis"
+containing_schema = "HistoryCutActivationSpec"
+field_tag = 0x0003
+stable_name = "expected_retention_map_basis"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "inline comparison-only identity for the expected retention-map basis; retained and cut with the activation spec and creates no reachability edge (a12:1972)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:initial-config-floor-install-spec-checkpoint-installed-state"
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0001
+stable_name = "checkpoint_installed_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline comparison-only identity for the CheckpointInstalled state being advanced; retained and cut with the initial floor install spec and creates no reachability edge (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:initial-config-floor-install-spec-checkpoint-ref"
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0002
+stable_name = "checkpoint_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryCheckpoint"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact recovery checkpoint installed before the initial configuration floor; retained while the spec is retained and cut only with that spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:initial-config-floor-install-spec-checkpoint-state-vector-digest"
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0003
+stable_name = "checkpoint_state_vector_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline target digest authenticating the exact checkpoint state vector; retained and cut with the initial floor install spec and creates no reachability edge (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:initial-config-floor-install-spec-initial-config-payload-floor-ref"
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0004
+stable_name = "initial_config_payload_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigPayloadFloor"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact initial configuration payload floor installed by this transition; retained while the spec is retained and cut only with that spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:initial-config-floor-install-spec-initial-configuration-ref"
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0005
+stable_name = "initial_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact initial configuration state installed atomically with the floor; retained while the spec is retained and cut only with that spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:resource-charge-effect-transition-ref"
+containing_schema = "ResourceChargeEffect"
+field_tag = 0x0001
+stable_name = "transition_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ResourceLedgerTransition"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact resource-ledger transition represented by this effect; retained while the effect is retained and cut only with that effect (a12:1996)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:constraint-state-root-definition-set-ref"
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x0006
+stable_name = "definition_set_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConstraintDefinitionSet"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact constraint definition set governing this state root; retained while the root is retained and cut only with that root (a12:1978)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:resource-ledger-state-limit-policy-ref"
+containing_schema = "ResourceLedgerState"
+field_tag = 0x0006
+stable_name = "limit_policy_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ResourceLimitPolicy"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact resource-limit policy governing this ledger state; retained while the state is retained and cut only with that state (a12:1990)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:retention-cut-body-basis-state-identity"
+containing_schema = "RetentionCutBody"
+field_tag = 0x0002
+stable_name = "basis_state_identity"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline comparison-only identity for the state basis of the checkpoint-free cut body; retained and cut with the body and never followed as a reachability edge (a12:1968)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:resource-ledger-transition-role-authority-owning-role-idempotency-key-digest"
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "idempotency_key_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline weak-identity digest binding byte-identical retry to this transition's idempotency key; retained and cut with the transition and creates no reachability edge (a12:1992)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:recovery-checkpoint-basis-payload-digest"
+containing_schema = "RecoveryCheckpoint"
+field_tag = 0x0005
+stable_name = "basis_payload_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "comparison-only digest of the exact checkpoint basis payload; authenticates the cut without retaining any prior payload, command, or checkpoint object (a12:1964)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:recovery-checkpoint-basis-projection-digest"
+containing_schema = "RecoveryCheckpoint"
+field_tag = 0x0006
+stable_name = "basis_projection_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline transcript digest of the exact checkpoint-vector reconstruction; retained and cut with the checkpoint and names no future checkpoint, floor, cut, or result object (a12:1964)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:checkpoint-projection:v1\" || canonical(vector reconstruction with exact literals))"
+
+[[field]]
+slice_id = "a12"
+row_id = "a12:field:recovery-checkpoint-nonretaining-predecessor-checkpoint-digest"
+containing_schema = "RecoveryCheckpoint"
+field_tag = 0x0009
+stable_name = "nonretaining_predecessor_checkpoint_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline weak-identity digest that authenticates predecessor continuity without retaining or traversing the predecessor checkpoint; retained and cut with this checkpoint (a12:1964)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:recovery-checkpoint-command-basis-8bc04077cfc31b01"
+union_name = "RecoveryCheckpointCommandBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.command_basis"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RecoveryCheckpoint"]
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a12"
+row_id = "a12:union:recovery-checkpoint-marker-basis-ef66f7fb7a6d657c"
+union_name = "RecoveryCheckpointMarkerBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.marker_basis"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RecoveryCheckpoint"]
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:recovery-checkpoint-command-basis-genesis-308f6778b05c7820"
+union_name = "RecoveryCheckpointCommandBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.command_basis"
+arm_tag = 0x0001
+source_arm_name = "Genesis"
+stable_name = "genesis"
+payload_kind = "inline-record"
+payload_sha256 = "b8af076b1cc44234b812ad6e773743ec621912a23e5b1e3e0f14b7c8a9e8dd7e"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:recovery-checkpoint-command-basis-ordered-06b9fe17f7433154"
+union_name = "RecoveryCheckpointCommandBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.command_basis"
+arm_tag = 0x0002
+source_arm_name = "Ordered"
+stable_name = "ordered"
+payload_kind = "inline-record"
+payload_sha256 = "27634e2b4c963a76201929e0bca78dd8cef8676d98cb34e9218695bad370ba92"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:recovery-checkpoint-marker-basis-no-committed-transaction-at-basis-23070b94b6967060"
+union_name = "RecoveryCheckpointMarkerBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.marker_basis"
+arm_tag = 0x0001
+source_arm_name = "NoCommittedTransactionAtBasis"
+stable_name = "no_committed_transaction_at_basis"
+payload_kind = "inline-record"
+payload_sha256 = "10955adc8034d5f407148ae547939a275c61bfa20b699d22fb4b87a6431f0bf1"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a12"
+row_id = "a12:union-arm:recovery-checkpoint-marker-basis-committed-68fa45e962258c91"
+union_name = "RecoveryCheckpointMarkerBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.marker_basis"
+arm_tag = 0x0002
+source_arm_name = "Committed"
+stable_name = "committed"
+payload_kind = "inline-record"
+payload_sha256 = "6a8d314ff549e650f854b5265788584f20be6d9ace8d85c2fcfd5cd3325fa1a6"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[target]]
 row_id = "a01:target:field-root-slot-cluster-incarnation-continuity-digest"

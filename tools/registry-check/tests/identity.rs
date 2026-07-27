@@ -174,7 +174,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 66
+registry_epoch = 67
 
 [[union]]
 union_name = "FixtureTopLevelUnion"
@@ -216,7 +216,7 @@ max_size_bytes = 127
     let (epoch, fields, ordinary_unions, reference_unions) =
         identity::fields_from(&table).expect("ordinary-union fixture models");
 
-    assert_eq!(epoch, 66);
+    assert_eq!(epoch, 67);
     assert!(fields.is_empty());
     assert!(reference_unions.is_empty());
     assert_eq!(ordinary_unions.len(), 1);
@@ -6567,6 +6567,8 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "CheckpointFieldRecipe"
                 | "LocalPreparedRootEntry"
                 | "CheckpointStateVectorRole"
+                | "RecoveryCheckpointCommandBasis"
+                | "RecoveryCheckpointMarkerBasis"
                 | "GlobalBranchKeyDistributionPlanOperation"
                 | "GlobalRecoveryCheckpointBasis"
                 | "MetaPreparedCommandRecordStatus"
@@ -7045,9 +7047,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("ValidatedRemoteConfigurationAnchor", "input_spec_digest")
         )
     };
-    // A12 adds four fields whose source types, owners, and dependencies are all
-    // settled. Remove them as one cohort so the historical witness continues
-    // to reconstruct the namespace before post-erratum field increments.
+    // A12's settled field tranches have source-forced types, owners, tags, and
+    // dependencies. Remove them as one cohort so the historical witness
+    // continues to reconstruct the namespace before post-erratum increments.
     let post_erratum_a12_field = |schema: &str, name: &str| {
         matches!(
             (schema, name),
@@ -7071,6 +7073,47 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | (
                     "ResourceLedgerTransition<Role:AuthorityOwningRole>",
                     "authorization_decision_ref"
+                )
+                | ("RecoveryCheckpoint", "basis_payload_digest")
+                | ("RecoveryCheckpoint", "basis_projection_digest")
+                | (
+                    "RecoveryCheckpoint",
+                    "nonretaining_predecessor_checkpoint_digest"
+                )
+                | ("CheckpointInstallSpec", "basis")
+                | ("CheckpointInstallSpec", "basis_payload_digest")
+                | ("CheckpointInstallSpec", "basis_projection_digest")
+                | ("CheckpointInstallSpec", "checkpoint_ref")
+                | ("CheckpointInstallSpec", "checkpoint_state_vector_digest")
+                | ("CheckpointInstallSpec", "paired_config_payload_floor_ref")
+                | ("CheckpointInstallSpec", "retention_cut_body_ref")
+                | ("ConstraintMutationBatch", "apply_basis")
+                | ("ConstraintMutationBatch", "before_root_ref")
+                | ("ConstraintMutationBatch", "after_root_ref")
+                | ("HistoryCutActivationSpec", "provisional_cut_ref")
+                | ("HistoryCutActivationSpec", "checkpoint_install_record_ref")
+                | ("HistoryCutActivationSpec", "expected_retention_map_basis")
+                | (
+                    "InitialConfigFloorInstallSpec",
+                    "checkpoint_installed_state"
+                )
+                | ("InitialConfigFloorInstallSpec", "checkpoint_ref")
+                | (
+                    "InitialConfigFloorInstallSpec",
+                    "checkpoint_state_vector_digest"
+                )
+                | (
+                    "InitialConfigFloorInstallSpec",
+                    "initial_config_payload_floor_ref"
+                )
+                | ("InitialConfigFloorInstallSpec", "initial_configuration_ref")
+                | ("ResourceChargeEffect", "transition_ref")
+                | ("ConstraintStateRoot", "definition_set_ref")
+                | ("ResourceLedgerState", "limit_policy_ref")
+                | ("RetentionCutBody", "basis_state_identity")
+                | (
+                    "ResourceLedgerTransition<Role:AuthorityOwningRole>",
+                    "idempotency_key_digest"
                 )
         )
     };
@@ -7998,14 +8041,14 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a03_wire_consumer_fields(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 364,
+        pre_erratum.ordinary_unions.len() + 366,
         current_union_count,
         "the historical witness must remove every post-erratum union through the A20 promotion sweep"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 539,
+        pre_erratum.fields.len() + 565,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the A03 wire-consumer repair tranche"
+        "the historical witness must remove every post-erratum field cohort through the A12 residue tranche"
     );
     rename_logical_command_input_union(&mut pre_erratum, "CommandRef");
     undo_a01_exactness_repair(&mut pre_erratum);
@@ -8292,6 +8335,775 @@ fn idr_a12_retention_cut_fields_are_source_ordered_and_exact() {
         assert_eq!(targets[0].target_kind, "field");
         assert_eq!(targets[0].definition_status, "declared");
     }
+}
+
+#[test]
+fn idr_a12_residue_promotions_and_fields_are_source_exact() {
+    let identity = real_identity();
+    let mut catalog = real_appendix_catalog();
+
+    for (name, code, order, role, slice, source_key) in [
+        (
+            "RecoveryCheckpoint",
+            0x03aa,
+            30,
+            "role-local",
+            "a03",
+            "top|RecoveryCheckpoint",
+        ),
+        (
+            "ConstraintDefinitionSet",
+            0x027b,
+            30,
+            "true",
+            "a12",
+            "projection|logical_object_kinds|ConstraintDefinitionSet",
+        ),
+        (
+            "ResourceLimitPolicy",
+            0x03d1,
+            30,
+            "true",
+            "a12",
+            "projection|logical_object_kinds|ResourceLimitPolicy",
+        ),
+    ] {
+        let logical = identity
+            .logical
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("missing reservation-backed A12 target {name}"));
+        assert_eq!(logical.object_kind, code);
+        assert_eq!(logical.status, "reserved");
+        assert_eq!(logical.construction_order, order);
+        assert_eq!(logical.role_predicate, role);
+        assert_eq!(logical.max_size_bytes, 16_777_216);
+
+        let reservation = catalog
+            .reservations
+            .iter()
+            .find(|row| row.symbol == name)
+            .unwrap_or_else(|| panic!("missing reservation for {name}"));
+        assert_eq!(reservation.identity_class, "logical");
+        assert_eq!(reservation.code_reservation, format!("0x{code:04x}"));
+        assert_eq!(reservation.disposition, "existing");
+
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{name} must have one projection target");
+        assert_eq!(targets[0].slice_id, slice);
+        assert_eq!(targets[0].target_kind, "logical-kind");
+        assert_eq!(targets[0].definition_status, "declared");
+        if name == "RecoveryCheckpoint" {
+            let candidate = catalog
+                .top_level_candidates
+                .iter()
+                .find(|row| row.source_key == source_key)
+                .expect("RecoveryCheckpoint source candidate exists");
+            assert_eq!(candidate.identity_class, "logical");
+            assert_eq!(
+                targets[0].row_id,
+                "a03:target:logical-kind-recovery-checkpoint"
+            );
+            assert_eq!(
+                targets[0].target_row_id,
+                "a03:logical-kind:recovery-checkpoint"
+            );
+        }
+    }
+
+    for (name, code, order, role) in [
+        ("CheckpointInstallSpec", 0x0566, 30, "role-local"),
+        ("ConstraintMutationBatch", 0x0567, 30, "true"),
+        ("HistoryCutActivationSpec", 0x0568, 40, "role-local"),
+        ("InitialConfigFloorInstallSpec", 0x0569, 30, "role-local"),
+        ("ResourceChargeEffect", 0x056a, 15, "true"),
+    ] {
+        let logical = identity
+            .logical
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("missing A12 structural-body kind {name}"));
+        assert_eq!(logical.object_kind, code);
+        assert!(
+            logical.object_kind > i64::from(appendix_a::EXPECTED_RESERVATION_HIGH_WATER),
+            "{name} has no StrongRef reservation and must use fresh code space"
+        );
+        assert_eq!(logical.status, "reserved");
+        assert_eq!(logical.construction_order, order);
+        assert_eq!(logical.role_predicate, role);
+        assert_eq!(logical.max_size_bytes, 16_777_216);
+        assert!(
+            catalog
+                .reservations
+                .iter()
+                .all(|reservation| reservation.symbol != name),
+            "non-reservation family {name} must not acquire a reservation"
+        );
+
+        let source_key = format!("top|{name}");
+        let candidate = catalog
+            .top_level_candidates
+            .iter()
+            .find(|row| row.source_key == source_key)
+            .unwrap_or_else(|| panic!("missing source candidate for {name}"));
+        assert_eq!(candidate.identity_class, "logical");
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{name} must have one source target");
+        assert_eq!(targets[0].slice_id, "a12");
+        assert_eq!(targets[0].target_kind, "logical-kind");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+
+    struct ExpectedField {
+        schema: &'static str,
+        name: &'static str,
+        tag: i64,
+        wire_type: &'static str,
+        cardinality: &'static str,
+        identity_class: &'static str,
+        reference_semantics: &'static str,
+        target: Option<&'static str>,
+        digest_class: Option<&'static str>,
+    }
+    let expected = [
+        ExpectedField {
+            schema: "RecoveryCheckpoint",
+            name: "basis_payload_digest",
+            tag: 0x0005,
+            wire_type: "WeakDigest",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "weak_digest",
+            target: None,
+            digest_class: Some("target"),
+        },
+        ExpectedField {
+            schema: "RecoveryCheckpoint",
+            name: "basis_projection_digest",
+            tag: 0x0006,
+            wire_type: "digest256",
+            cardinality: "one",
+            identity_class: "inline",
+            reference_semantics: "none",
+            target: None,
+            digest_class: Some("transcript"),
+        },
+        ExpectedField {
+            schema: "RecoveryCheckpoint",
+            name: "nonretaining_predecessor_checkpoint_digest",
+            tag: 0x0009,
+            wire_type: "digest256",
+            cardinality: "one",
+            identity_class: "inline",
+            reference_semantics: "none",
+            target: None,
+            digest_class: Some("weak_identity"),
+        },
+        ExpectedField {
+            schema: "CheckpointInstallSpec",
+            name: "basis",
+            tag: 0x0001,
+            wire_type: "WeakStateIdentity",
+            cardinality: "one",
+            identity_class: "inline",
+            reference_semantics: "none",
+            target: None,
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "CheckpointInstallSpec",
+            name: "basis_payload_digest",
+            tag: 0x0004,
+            wire_type: "WeakDigest",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "weak_digest",
+            target: None,
+            digest_class: Some("target"),
+        },
+        ExpectedField {
+            schema: "CheckpointInstallSpec",
+            name: "basis_projection_digest",
+            tag: 0x0005,
+            wire_type: "digest256",
+            cardinality: "one",
+            identity_class: "inline",
+            reference_semantics: "none",
+            target: None,
+            digest_class: Some("transcript"),
+        },
+        ExpectedField {
+            schema: "CheckpointInstallSpec",
+            name: "checkpoint_ref",
+            tag: 0x0006,
+            wire_type: "StrongRef",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("RecoveryCheckpoint"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "CheckpointInstallSpec",
+            name: "checkpoint_state_vector_digest",
+            tag: 0x0007,
+            wire_type: "digest256",
+            cardinality: "one",
+            identity_class: "inline",
+            reference_semantics: "none",
+            target: None,
+            digest_class: Some("target"),
+        },
+        ExpectedField {
+            schema: "CheckpointInstallSpec",
+            name: "paired_config_payload_floor_ref",
+            tag: 0x0008,
+            wire_type: "StrongRef",
+            cardinality: "optional",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("ConfigPayloadFloor"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "CheckpointInstallSpec",
+            name: "retention_cut_body_ref",
+            tag: 0x0009,
+            wire_type: "StrongRef",
+            cardinality: "optional",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("RetentionCutBody"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "ConstraintMutationBatch",
+            name: "apply_basis",
+            tag: 0x0002,
+            wire_type: "WeakMarkerIdentity",
+            cardinality: "one",
+            identity_class: "inline",
+            reference_semantics: "none",
+            target: None,
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "ConstraintMutationBatch",
+            name: "before_root_ref",
+            tag: 0x0003,
+            wire_type: "StrongRef",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("ConstraintStateRoot"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "ConstraintMutationBatch",
+            name: "after_root_ref",
+            tag: 0x0004,
+            wire_type: "StrongRef",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("ConstraintStateRoot"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "HistoryCutActivationSpec",
+            name: "provisional_cut_ref",
+            tag: 0x0001,
+            wire_type: "StrongRef",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("ProvisionalRetentionCutSet"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "HistoryCutActivationSpec",
+            name: "checkpoint_install_record_ref",
+            tag: 0x0002,
+            wire_type: "StrongCommandRef",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("LogicalCommandRecord"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "HistoryCutActivationSpec",
+            name: "expected_retention_map_basis",
+            tag: 0x0003,
+            wire_type: "WeakStateIdentity",
+            cardinality: "one",
+            identity_class: "inline",
+            reference_semantics: "none",
+            target: None,
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "InitialConfigFloorInstallSpec",
+            name: "checkpoint_installed_state",
+            tag: 0x0001,
+            wire_type: "WeakStateIdentity",
+            cardinality: "one",
+            identity_class: "inline",
+            reference_semantics: "none",
+            target: None,
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "InitialConfigFloorInstallSpec",
+            name: "checkpoint_ref",
+            tag: 0x0002,
+            wire_type: "StrongRef",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("RecoveryCheckpoint"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "InitialConfigFloorInstallSpec",
+            name: "checkpoint_state_vector_digest",
+            tag: 0x0003,
+            wire_type: "digest256",
+            cardinality: "one",
+            identity_class: "inline",
+            reference_semantics: "none",
+            target: None,
+            digest_class: Some("target"),
+        },
+        ExpectedField {
+            schema: "InitialConfigFloorInstallSpec",
+            name: "initial_config_payload_floor_ref",
+            tag: 0x0004,
+            wire_type: "StrongRef",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("ConfigPayloadFloor"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "InitialConfigFloorInstallSpec",
+            name: "initial_configuration_ref",
+            tag: 0x0005,
+            wire_type: "StrongRef",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("ConfigurationState"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "ResourceChargeEffect",
+            name: "transition_ref",
+            tag: 0x0001,
+            wire_type: "StrongRef",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("ResourceLedgerTransition"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "ConstraintStateRoot",
+            name: "definition_set_ref",
+            tag: 0x0006,
+            wire_type: "StrongRef",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("ConstraintDefinitionSet"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "ResourceLedgerState",
+            name: "limit_policy_ref",
+            tag: 0x0006,
+            wire_type: "StrongRef",
+            cardinality: "one",
+            identity_class: "logical",
+            reference_semantics: "strong",
+            target: Some("ResourceLimitPolicy"),
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "RetentionCutBody",
+            name: "basis_state_identity",
+            tag: 0x0002,
+            wire_type: "WeakStateIdentity",
+            cardinality: "one",
+            identity_class: "inline",
+            reference_semantics: "none",
+            target: None,
+            digest_class: None,
+        },
+        ExpectedField {
+            schema: "ResourceLedgerTransition<Role:AuthorityOwningRole>",
+            name: "idempotency_key_digest",
+            tag: 0x0003,
+            wire_type: "digest256",
+            cardinality: "one",
+            identity_class: "inline",
+            reference_semantics: "none",
+            target: None,
+            digest_class: Some("weak_identity"),
+        },
+    ];
+
+    assert_eq!(expected.len(), 26);
+    for expected in expected {
+        let fields = identity
+            .fields
+            .iter()
+            .filter(|row| {
+                row.containing_schema == expected.schema && row.stable_name == expected.name
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields.len(),
+            1,
+            "{}.{} must exist exactly once",
+            expected.schema,
+            expected.name
+        );
+        let field = fields[0];
+        assert_eq!(field.field_tag, expected.tag);
+        assert_eq!(field.exact_wire_type, expected.wire_type);
+        assert_eq!(field.cardinality, expected.cardinality);
+        assert_eq!(field.identity_class, expected.identity_class);
+        assert_eq!(field.reference_semantics, expected.reference_semantics);
+        assert_eq!(field.target_schema_id.as_deref(), expected.target);
+        assert_eq!(field.digest_class.as_deref(), expected.digest_class);
+        let containing_kind = identity
+            .logical
+            .iter()
+            .find(|row| row.name == identity::generic_free_family(expected.schema))
+            .expect("A12 field has a non-wire logical host");
+        assert_eq!(
+            field.construction_order, containing_kind.construction_order,
+            "field order equals its containing kind"
+        );
+        assert_eq!(field.role_predicate, containing_kind.role_predicate);
+        assert_eq!(field.version_status, "reserved");
+        let expected_max_size = match expected.wire_type {
+            "StrongRef" | "StrongCommandRef" => 40,
+            "WeakDigest" | "digest256" => 32,
+            _ => 16_777_216,
+        };
+        assert_eq!(field.max_size_bytes, expected_max_size);
+        if field.reference_semantics == "none" {
+            assert_eq!(
+                field.identity_class, "inline",
+                "every non-reference A12 field is inline"
+            );
+        }
+
+        let source_key = format!(
+            "field|{}|{}.{}|{}",
+            expected.schema, expected.schema, expected.name, expected.name
+        );
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets.len(),
+            1,
+            "{}.{} must have one source target",
+            expected.schema,
+            expected.name
+        );
+        assert_eq!(targets[0].slice_id, "a12");
+        assert_eq!(targets[0].target_kind, "field");
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+
+    let projection_digest = identity
+        .fields
+        .iter()
+        .find(|field| {
+            field.containing_schema == "CheckpointInstallSpec"
+                && field.stable_name == "basis_projection_digest"
+        })
+        .expect("basis_projection_digest exists");
+    assert_eq!(
+        projection_digest.transcript_recipe.as_deref(),
+        Some(
+            "BLAKE3(\"fgdb:checkpoint-projection:v1\" || canonical(vector reconstruction with exact literals))"
+        )
+    );
+    let recovery_projection_digest = identity
+        .fields
+        .iter()
+        .find(|field| {
+            field.containing_schema == "RecoveryCheckpoint"
+                && field.stable_name == "basis_projection_digest"
+        })
+        .expect("RecoveryCheckpoint basis_projection_digest exists");
+    assert_eq!(
+        recovery_projection_digest.transcript_recipe.as_deref(),
+        Some(
+            "BLAKE3(\"fgdb:checkpoint-projection:v1\" || canonical(vector reconstruction with exact literals))"
+        )
+    );
+
+    for (union_name, union_path, expected_arms) in [
+        (
+            "RecoveryCheckpointCommandBasis",
+            "RecoveryCheckpoint.command_basis",
+            [
+                (
+                    0x0001,
+                    "Genesis",
+                    "genesis",
+                    "b8af076b1cc44234b812ad6e773743ec621912a23e5b1e3e0f14b7c8a9e8dd7e",
+                ),
+                (
+                    0x0002,
+                    "Ordered",
+                    "ordered",
+                    "27634e2b4c963a76201929e0bca78dd8cef8676d98cb34e9218695bad370ba92",
+                ),
+            ],
+        ),
+        (
+            "RecoveryCheckpointMarkerBasis",
+            "RecoveryCheckpoint.marker_basis",
+            [
+                (
+                    0x0001,
+                    "NoCommittedTransactionAtBasis",
+                    "no_committed_transaction_at_basis",
+                    "10955adc8034d5f407148ae547939a275c61bfa20b699d22fb4b87a6431f0bf1",
+                ),
+                (
+                    0x0002,
+                    "Committed",
+                    "committed",
+                    "6a8d314ff549e650f854b5265788584f20be6d9ace8d85c2fcfd5cd3325fa1a6",
+                ),
+            ],
+        ),
+    ] {
+        let union = identity
+            .ordinary_unions
+            .iter()
+            .find(|row| row.union_name == union_name)
+            .unwrap_or_else(|| panic!("missing A12 RecoveryCheckpoint union {union_name}"));
+        assert_eq!(union.containing_schema, "RecoveryCheckpoint");
+        assert_eq!(union.union_path, union_path);
+        assert_eq!(
+            union.field_tag, None,
+            "the source reader represents the union path itself, not a duplicate field anchor"
+        );
+        assert_eq!(union.tag_wire_type, "u8");
+        assert_eq!(union.encoding_context, "closed-tagged");
+        assert_eq!(
+            union.allowed_containing_schemas,
+            ["RecoveryCheckpoint".to_owned()]
+        );
+        assert_eq!(union.role_predicate, "role-local");
+        assert_eq!(union.version_status, "reserved");
+        assert_eq!(union.max_size_bytes, 16_777_216);
+        assert_eq!(
+            union
+                .arms
+                .iter()
+                .map(|arm| {
+                    (
+                        arm.arm_tag,
+                        arm.source_arm_name.as_str(),
+                        arm.stable_name.as_str(),
+                        arm.payload_sha256.as_deref().expect("payload digest"),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            expected_arms,
+            "RecoveryCheckpoint arm tags and names follow source order"
+        );
+        assert!(
+            union
+                .arms
+                .iter()
+                .all(|arm| arm.payload_kind == "inline-record"),
+            "each RecoveryCheckpoint union arm has a source-committed inline record body"
+        );
+
+        for source_key in [
+            format!("union|RecoveryCheckpoint|{union_path}"),
+            format!("arm|RecoveryCheckpoint|{union_path}|{}", expected_arms[0].1),
+            format!("arm|RecoveryCheckpoint|{union_path}|{}", expected_arms[1].1),
+        ] {
+            let targets = catalog
+                .targets
+                .iter()
+                .filter(|row| row.source_key == source_key)
+                .collect::<Vec<_>>();
+            assert_eq!(targets.len(), 1, "{source_key} must map exactly once");
+            assert_eq!(targets[0].slice_id, "a12");
+            assert!(matches!(
+                targets[0].target_kind.as_str(),
+                "union" | "union-arm"
+            ));
+            assert_eq!(targets[0].definition_status, "declared");
+        }
+    }
+
+    let bodyless = catalog
+        .top_level_candidates
+        .iter()
+        .find(|row| row.source_key == "top|ConstraintStateDirectoryRoot")
+        .expect("A12 bodyless definition is censused");
+    assert_eq!(bodyless.source_kind, "name-only");
+    assert_eq!(bodyless.identity_class, "logical");
+    assert!(
+        identity
+            .fields
+            .iter()
+            .all(|field| field.containing_schema != "ConstraintStateDirectoryRoot"),
+        "a definition without a structural body emits no interior field rows"
+    );
+
+    let arm_payload = catalog
+        .top_level_candidates
+        .iter()
+        .find(|row| row.source_key == "top|InstallProvisionalCut")
+        .expect("InstallProvisionalCut source token is censused");
+    assert_eq!(arm_payload.source_kind, "ambiguous");
+    assert_eq!(arm_payload.identity_class, "unclassified");
+    assert!(
+        identity
+            .logical
+            .iter()
+            .all(|row| row.name != "InstallProvisionalCut"),
+        "the source-spelled arm payload is not promoted as a standalone schema"
+    );
+
+    let mut wrong_order = identity.clone();
+    wrong_order
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "CheckpointInstallSpec" && field.stable_name == "basis"
+        })
+        .expect("control field exists")
+        .construction_order += 1;
+    assert!(
+        codes_without_assignment_drift(&wrong_order)
+            .contains(&"field_construction_order_mismatch".to_owned()),
+        "negative control: a field order different from its host must fire"
+    );
+
+    let mut wire_host = identity.clone();
+    wire_host
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "CheckpointInstallSpec" && field.stable_name == "basis"
+        })
+        .expect("control field exists")
+        .containing_schema = "WeakStateIdentity".to_owned();
+    assert!(
+        codes_without_assignment_drift(&wire_host).contains(&"field_unresolved_schema".to_owned()),
+        "negative control: a field on a wire-only host must fire"
+    );
+
+    let mut bad_field_class = identity.clone();
+    bad_field_class
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "CheckpointInstallSpec" && field.stable_name == "basis"
+        })
+        .expect("control field exists")
+        .identity_class = "wire".to_owned();
+    assert!(
+        codes_without_assignment_drift(&bad_field_class)
+            .contains(&"field_identity_class_not_a_field_class".to_owned()),
+        "negative control: wire is not one of the five field identity classes"
+    );
+
+    let mut invented_digest_wire = identity.clone();
+    invented_digest_wire
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "CheckpointInstallSpec"
+                && field.stable_name == "checkpoint_state_vector_digest"
+        })
+        .expect("control field exists")
+        .exact_wire_type = "CheckpointStateVectorDigest".to_owned();
+    assert!(
+        codes_without_assignment_drift(&invented_digest_wire)
+            .contains(&"field_unresolved_wire_type".to_owned()),
+        "negative control: a plan-named digest must not become a wire type"
+    );
+
+    let mut invented_target = identity.clone();
+    invented_target
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "CheckpointInstallSpec"
+                && field.stable_name == "checkpoint_ref"
+        })
+        .expect("control field exists")
+        .target_schema_id = Some("FutureRecoveryCheckpoint".to_owned());
+    assert!(
+        codes_without_assignment_drift(&invented_target)
+            .contains(&"ref_target_unresolved".to_owned()),
+        "negative control: a fabricated StrongRef target must fire"
+    );
+
+    let mut future_checkpoint_state = identity.clone();
+    let future_field = future_checkpoint_state
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "RecoveryCheckpoint"
+                && field.stable_name == "basis_payload_digest"
+        })
+        .expect("RecoveryCheckpoint control field exists");
+    future_field.stable_name = "checkpoint_state_vector_ref".to_owned();
+    future_field.field_tag = 0x0008;
+    future_field.exact_wire_type = "StrongRef".to_owned();
+    future_field.identity_class = "logical".to_owned();
+    future_field.reference_semantics = "strong".to_owned();
+    future_field.target_schema_id = Some("CheckpointStateVector".to_owned());
+    future_field.max_size_bytes = 40;
+    future_field.digest_class = None;
+    future_field.transcript_recipe = None;
+    assert!(
+        codes_without_assignment_drift(&future_checkpoint_state)
+            .contains(&"dag_future_result".to_owned()),
+        "negative control: RecoveryCheckpoint@30 cannot StrongRef CheckpointStateVector@35"
+    );
+
+    catalog
+        .reservations
+        .iter_mut()
+        .find(|row| row.symbol == "RecoveryCheckpoint")
+        .expect("RecoveryCheckpoint reservation exists")
+        .code_reservation = "0x03ab".to_owned();
+    assert!(
+        appendix_a::validate_catalog(&catalog)
+            .iter()
+            .any(|violation| violation.code == "catalog_reservation_existing_mismatch"),
+        "negative control: an existing reservation must mint at its exact code"
+    );
 }
 
 #[test]

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 56
+registry_epoch = 57
 
 [[kind]]
 object_kind = 0x0001
@@ -844,6 +844,15 @@ construction_order = 5
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/configuration_state/"
+
+[[kind]]
+object_kind = 0x027b
+name = "ConstraintDefinitionSet"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_definition_set/"
 
 [[kind]]
 object_kind = 0x027d
@@ -2250,6 +2259,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/read_result_release_decision_record/"
 
 [[kind]]
+object_kind = 0x03aa
+name = "RecoveryCheckpoint"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/recovery_checkpoint/"
+
+[[kind]]
 object_kind = 0x03ab
 name = "RecoveryIncarnationProjectionResult"
 status = "reserved"
@@ -2563,6 +2581,15 @@ construction_order = 15
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/resource_ledger_transition/"
+
+[[kind]]
+object_kind = 0x03d1
+name = "ResourceLimitPolicy"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_limit_policy/"
 
 [[kind]]
 object_kind = 0x03d2
@@ -4678,3 +4705,48 @@ construction_order = 44
 role_predicate = "role-shard"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/shard_restore_service_open_spec/"
+
+[[kind]]
+object_kind = 0x0566
+name = "CheckpointInstallSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/checkpoint_install_spec/"
+
+[[kind]]
+object_kind = 0x0567
+name = "ConstraintMutationBatch"
+status = "reserved"
+construction_order = 30
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/constraint_mutation_batch/"
+
+[[kind]]
+object_kind = 0x0568
+name = "HistoryCutActivationSpec"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/history_cut_activation_spec/"
+
+[[kind]]
+object_kind = 0x0569
+name = "InitialConfigFloorInstallSpec"
+status = "reserved"
+construction_order = 30
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/initial_config_floor_install_spec/"
+
+[[kind]]
+object_kind = 0x056a
+name = "ResourceChargeEffect"
+status = "reserved"
+construction_order = 15
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/resource_charge_effect/"

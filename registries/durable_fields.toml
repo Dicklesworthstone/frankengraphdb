@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 66
+registry_epoch = 67
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -922,6 +922,111 @@ version_status = "reserved"
 max_size_bytes = 159
 
 [[field]]
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0001
+stable_name = "basis"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline comparison-only basis identity for the state being checkpointed; retained and cut with the checkpoint-install spec and never traversed as a reachability edge (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0004
+stable_name = "basis_payload_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "comparison-only digest of the exact basis payload; authenticates the cut without retaining any prior payload, command, or checkpoint object (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0005
+stable_name = "basis_projection_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline transcript digest of the exact checkpoint-vector reconstruction; retained and cut with the install spec and names no future checkpoint, floor, cut, or result object (a12:1964,1966)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:checkpoint-projection:v1\" || canonical(vector reconstruction with exact literals))"
+
+[[field]]
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0006
+stable_name = "checkpoint_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryCheckpoint"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the already-built recovery checkpoint installed by this exact input; retained while the install spec is retained and cut only with that spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0007
+stable_name = "checkpoint_state_vector_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline target digest authenticating the exact checkpoint state vector; retained and cut with the install spec and creates no reachability edge (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0008
+stable_name = "paired_config_payload_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigPayloadFloor"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "optional strong reference to the paired configuration payload floor installed atomically for an operational basis; retained while present and cut only with the install spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "CheckpointInstallSpec"
+field_tag = 0x0009
+stable_name = "retention_cut_body_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RetentionCutBody"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "optional strong reference to the checkpoint-free retention-cut body consumed by an operational install; retained while present and cut only with the install spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "CheckpointStateVector"
 field_tag = 0x0001
 stable_name = "mandatory_inventory"
@@ -1214,6 +1319,50 @@ max_size_bytes = 32
 digest_class = "weak_identity"
 
 [[field]]
+containing_schema = "ConstraintMutationBatch"
+field_tag = 0x0002
+stable_name = "apply_basis"
+exact_wire_type = "WeakMarkerIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline comparison-only marker identity for the exact apply basis; retained and cut with the mutation batch and never followed by reachability walkers (a12:1980)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "ConstraintMutationBatch"
+field_tag = 0x0003
+stable_name = "before_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConstraintStateRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact constraint-state root before this mutation batch; retained while the batch is retained and cut only with that batch (a12:1980)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ConstraintMutationBatch"
+field_tag = 0x0004
+stable_name = "after_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConstraintStateRoot"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact constraint-state root constructed after this mutation batch; retained while the batch is retained and cut only with that batch (a12:1980)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "ConstraintReservationRecord"
 field_tag = 0x0007
 stable_name = "registration_ref"
@@ -1271,6 +1420,21 @@ role_predicate = "true"
 retention_and_cut_rule = "inline sequence-neutral ConstraintCoordinateKey embedded by value in the constraint state root; retained and cut with the containing root, names no selected head or future marker, and creates no reachability edge (a12:1974,1978)"
 version_status = "reserved"
 max_size_bytes = 256
+
+[[field]]
+containing_schema = "ConstraintStateRoot"
+field_tag = 0x0006
+stable_name = "definition_set_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConstraintDefinitionSet"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact constraint definition set governing this state root; retained while the root is retained and cut only with that root (a12:1978)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "ContinuityAuthorityObservationImport<Role>"
@@ -3213,6 +3377,50 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "HistoryCutActivationSpec"
+field_tag = 0x0001
+stable_name = "provisional_cut_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ProvisionalRetentionCutSet"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact provisional cut being strengthened; retained while the activation spec is retained and cut only with that spec (a12:1972)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "HistoryCutActivationSpec"
+field_tag = 0x0002
+stable_name = "checkpoint_install_record_ref"
+exact_wire_type = "StrongCommandRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LogicalCommandRecord"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong command reference to the previously constructed logical command record that installed the checkpoint; retained while the activation spec is retained and cut only with that spec (a12:1972)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "HistoryCutActivationSpec"
+field_tag = 0x0003
+stable_name = "expected_retention_map_basis"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "inline comparison-only identity for the expected retention-map basis; retained and cut with the activation spec and creates no reachability edge (a12:1972)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "IdRangeLease<Role:AuthorityOwningRole>"
 field_tag = 0x0001
 stable_name = "authority_bound_header"
@@ -3527,6 +3735,80 @@ role_predicate = "true"
 retention_and_cut_rule = "canonically-sorted threshold signature set over the continuity record; lives/dies with the record (a09:1892)"
 version_status = "reserved"
 max_size_bytes = 65536
+
+[[field]]
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0001
+stable_name = "checkpoint_installed_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline comparison-only identity for the CheckpointInstalled state being advanced; retained and cut with the initial floor install spec and creates no reachability edge (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0002
+stable_name = "checkpoint_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RecoveryCheckpoint"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact recovery checkpoint installed before the initial configuration floor; retained while the spec is retained and cut only with that spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0003
+stable_name = "checkpoint_state_vector_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline target digest authenticating the exact checkpoint state vector; retained and cut with the initial floor install spec and creates no reachability edge (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0004
+stable_name = "initial_config_payload_floor_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigPayloadFloor"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact initial configuration payload floor installed by this transition; retained while the spec is retained and cut only with that spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "InitialConfigFloorInstallSpec"
+field_tag = 0x0005
+stable_name = "initial_configuration_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ConfigurationState"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact initial configuration state installed atomically with the floor; retained while the spec is retained and cut only with that spec (a12:1966)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "KeyDestroyProposal"
@@ -5460,6 +5742,52 @@ reference_semantics = "weak_digest"
 construction_order = 20
 role_predicate = "restore-machinery"
 retention_and_cut_rule = "weak identity of the source manifest; never retains it"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
+
+[[field]]
+containing_schema = "RecoveryCheckpoint"
+field_tag = 0x0005
+stable_name = "basis_payload_digest"
+exact_wire_type = "WeakDigest"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "comparison-only digest of the exact checkpoint basis payload; authenticates the cut without retaining any prior payload, command, or checkpoint object (a12:1964)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "RecoveryCheckpoint"
+field_tag = 0x0006
+stable_name = "basis_projection_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline transcript digest of the exact checkpoint-vector reconstruction; retained and cut with the checkpoint and names no future checkpoint, floor, cut, or result object (a12:1964)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:checkpoint-projection:v1\" || canonical(vector reconstruction with exact literals))"
+
+[[field]]
+containing_schema = "RecoveryCheckpoint"
+field_tag = 0x0009
+stable_name = "nonretaining_predecessor_checkpoint_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "role-local"
+retention_and_cut_rule = "inline weak-identity digest that authenticates predecessor continuity without retaining or traversing the predecessor checkpoint; retained and cut with this checkpoint (a12:1964)"
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "weak_identity"
@@ -7582,6 +7910,36 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "ResourceChargeEffect"
+field_tag = 0x0001
+stable_name = "transition_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ResourceLedgerTransition"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact resource-ledger transition represented by this effect; retained while the effect is retained and cut only with that effect (a12:1996)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ResourceLedgerState"
+field_tag = 0x0006
+stable_name = "limit_policy_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "ResourceLimitPolicy"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the exact resource-limit policy governing this ledger state; retained while the state is retained and cut only with that state (a12:1990)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
 field_tag = 0x0001
 stable_name = "authority_bound_header"
@@ -7594,6 +7952,21 @@ role_predicate = "true"
 retention_and_cut_rule = "inline AuthorityBoundHeader<Role> embedded by value in the sequence-neutral pre-order ledger transition; retained with the containing object, byte-matched against the basis role and containing command, and creates no reachability edge (a12:1992)"
 version_status = "reserved"
 max_size_bytes = 256
+
+[[field]]
+containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "idempotency_key_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 15
+role_predicate = "true"
+retention_and_cut_rule = "inline weak-identity digest binding byte-identical retry to this transition's idempotency key; retained and cut with the transition and creates no reachability edge (a12:1992)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "weak_identity"
 
 [[field]]
 containing_schema = "ResourceLedgerTransition<Role:AuthorityOwningRole>"
@@ -8767,6 +9140,20 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the DeliveryLeaseExpiryEvidence this ResultReleaseEvidence names; retained while the referrer is retained, and the acyclic order 27 <= 30 keeps the reference backward-only (a07:1734)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "RetentionCutBody"
+field_tag = 0x0002
+stable_name = "basis_state_identity"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 20
+role_predicate = "true"
+retention_and_cut_rule = "inline comparison-only identity for the state basis of the checkpoint-free cut body; retained and cut with the body and never followed as a reachability edge (a12:1968)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "RootAuthorityTrustArtifact"
@@ -13657,6 +14044,28 @@ tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["RecoveryBridgeSourceLeaseBasis<Role>"]
 role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RecoveryCheckpointCommandBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.command_basis"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RecoveryCheckpoint"]
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RecoveryCheckpointMarkerBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.marker_basis"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RecoveryCheckpoint"]
+role_predicate = "role-local"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -23327,6 +23736,58 @@ stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "b6303707c6bab792a78e844e6f806c1148d70e08c1b95355a39695ee0c233beb"
 role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryCheckpointCommandBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.command_basis"
+arm_tag = 0x0001
+source_arm_name = "Genesis"
+stable_name = "genesis"
+payload_kind = "inline-record"
+payload_sha256 = "b8af076b1cc44234b812ad6e773743ec621912a23e5b1e3e0f14b7c8a9e8dd7e"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryCheckpointCommandBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.command_basis"
+arm_tag = 0x0002
+source_arm_name = "Ordered"
+stable_name = "ordered"
+payload_kind = "inline-record"
+payload_sha256 = "27634e2b4c963a76201929e0bca78dd8cef8676d98cb34e9218695bad370ba92"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryCheckpointMarkerBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.marker_basis"
+arm_tag = 0x0001
+source_arm_name = "NoCommittedTransactionAtBasis"
+stable_name = "no_committed_transaction_at_basis"
+payload_kind = "inline-record"
+payload_sha256 = "10955adc8034d5f407148ae547939a275c61bfa20b699d22fb4b87a6431f0bf1"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RecoveryCheckpointMarkerBasis"
+containing_schema = "RecoveryCheckpoint"
+union_path = "RecoveryCheckpoint.marker_basis"
+arm_tag = 0x0002
+source_arm_name = "Committed"
+stable_name = "committed"
+payload_kind = "inline-record"
+payload_sha256 = "6a8d314ff549e650f854b5265788584f20be6d9ace8d85c2fcfd5cd3325fa1a6"
+role_predicate = "role-local"
 version_status = "reserved"
 max_size_bytes = 16777216
 
