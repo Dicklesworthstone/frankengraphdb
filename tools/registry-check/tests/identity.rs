@@ -14708,6 +14708,162 @@ fn idr_a21_silent_resolution_unions_are_wire_envelopes() {
     }
 }
 
+/// A tag-refined wrapper's refinement claim must resolve to a registered arm
+/// (fgdb-gpms).
+///
+/// Appendix A a20:2593 mints two tag-refined strong references and states the
+/// rule they serve — "variant syntax is never used as a reference target" — so
+/// the refinement, not the target schema, is what makes the wrapper different
+/// from a plain `StrongRef`. `OperationalRestoreTerminalPinBasisRef` is the
+/// difference between "a pin basis" and "an *Operational* pin basis"; a decoder
+/// that admits the `Abandoned` arm through it accepts a state the source
+/// rejects.
+///
+/// MEASURED 2026-07-27 at dbaab71, before this law: 6 rows carry a refinement
+/// claim and NOTHING read it. `encoding_context` was checked for non-emptiness
+/// and nothing else, so a claim naming a nonexistent arm, or a real arm under
+/// the wrong `arm_tag`, read exactly like a correct one.
+///
+/// The completeness half is not decoration. 2 of those 6 were written in a
+/// prose dialect ("the Sharded/ExternalCas RestoreServicePromotionManifest
+/// arm" — no tag, no union clause) which parses to `None`; a law that only
+/// validated what it could parse would have skipped precisely the rows that
+/// motivated it. Case (d) below is that control, and it fails on the
+/// pre-change spelling of a landed row.
+#[test]
+fn idr_refinement_claims_resolve_to_a_registered_arm() {
+    let base = real_identity();
+    let base_codes = codes_without_assignment_drift(&base);
+    for code in [
+        "refinement_claim_unparseable",
+        "refinement_union_unresolved",
+        "refinement_arm_unresolved",
+        "refinement_arm_tag_mismatch",
+    ] {
+        assert!(
+            !base_codes.contains(&code.to_string()),
+            "the landed corpus must already satisfy the refinement law, but {code} fires: \
+             {base_codes:?}"
+        );
+    }
+
+    // NON-VACUITY. The law is an implication over rows that make a claim; if no
+    // row makes one, every assertion above is vacuously true. Pin the domain.
+    let claimants: BTreeSet<&str> = base
+        .wire
+        .iter()
+        .filter(|w| w.encoding_context.contains("admits only the "))
+        .map(|w| w.name.as_str())
+        .collect();
+    assert_eq!(
+        claimants.len(),
+        6,
+        "refinement-claim population moved; a new tag-refined wrapper must be added here \
+         deliberately, not discovered by a green run: {claimants:?}"
+    );
+
+    // The subject: a landed wrapper whose claim is already in the grammar.
+    let subject = |r: &IdentityRegistries| -> usize {
+        r.wire
+            .iter()
+            .position(|w| w.name == "OperationalRestoreTerminalPinBasisRef")
+            .expect("the landed a18 tag-refined wrapper")
+    };
+    let canonical = "generated tag-refined strong reference whose validator admits only the Operational arm \
+         (arm_tag 0x0001) of the RestoreTerminalPinBasis<Role> union";
+    assert!(
+        base.wire[subject(&base)]
+            .encoding_context
+            .starts_with(canonical),
+        "subject claim spelling moved: {:?}",
+        base.wire[subject(&base)].encoding_context
+    );
+
+    // (a) right arm, wrong tag -- the silent-drift case. Both `Operational` and
+    // `Abandoned` are real arms of this union, so the arm name alone cannot
+    // catch a tag swapped to its sibling.
+    let mut wrong_tag = real_identity();
+    let i = subject(&wrong_tag);
+    wrong_tag.wire[i].encoding_context = wrong_tag.wire[i]
+        .encoding_context
+        .replace("(arm_tag 0x0001)", "(arm_tag 0x0002)");
+    assert!(
+        codes(&wrong_tag).contains(&"refinement_arm_tag_mismatch".to_string()),
+        "a refinement may not name an arm under a tag the arm does not carry"
+    );
+
+    // (b) the union itself is not registered.
+    let mut no_union = real_identity();
+    let i = subject(&no_union);
+    no_union.wire[i].encoding_context = no_union.wire[i]
+        .encoding_context
+        .replace("RestoreTerminalPinBasis<Role> union", "NoSuchUnion union");
+    assert!(
+        codes(&no_union).contains(&"refinement_union_unresolved".to_string()),
+        "a wrapper may not refine an unregistered union"
+    );
+
+    // (c) the arm is not registered. This is the case that blocks the value-side
+    // extension of the instrument: fgdb-gpms measures 137 of 190 state-value
+    // field candidates whose referent arm has no [[union_arm]] row, and each
+    // would mint exactly this shape.
+    let mut no_arm = real_identity();
+    let i = subject(&no_arm);
+    no_arm.wire[i].encoding_context = no_arm.wire[i]
+        .encoding_context
+        .replace("the Operational arm", "the Operationall arm");
+    assert!(
+        codes(&no_arm).contains(&"refinement_arm_unresolved".to_string()),
+        "a wrapper may not refine an arm that is not registered"
+    );
+
+    // (d) COMPLETENESS. The pre-change spelling of a different landed row --
+    // a real claim, in prose, with no machine-readable referent.
+    let mut prose = real_identity();
+    let j = prose
+        .wire
+        .iter()
+        .position(|w| w.name == "ExternalCasRestoreServicePromotionReceiptRef")
+        .expect("the landed a20 wrapper canonicalized by fgdb-gpms");
+    prose.wire[j].encoding_context =
+        "generated tag-refined strong reference whose validator admits only the \
+         ExternalCasCataloged RestoreServicePromotionReceipt arm (a20:2593)"
+            .into();
+    assert!(
+        codes(&prose).contains(&"refinement_claim_unparseable".to_string()),
+        "a refinement stated only in prose is unenforceable and must not pass"
+    );
+
+    // CONFORMANT CONTROL. Re-point the same row at the union's OTHER real arm
+    // at that arm's real tag. This is a different refinement, and a wrong one
+    // for this wrapper, but it is well-formed -- so it must stay green. Without
+    // it, cases (a)-(d) are consistent with a law that rejects every edit.
+    let mut ok = real_identity();
+    let i = subject(&ok);
+    ok.wire[i].encoding_context = ok.wire[i].encoding_context.replace(
+        "the Operational arm (arm_tag 0x0001)",
+        "the Abandoned arm (arm_tag 0x0002)",
+    );
+    assert!(
+        ok.wire[i]
+            .encoding_context
+            .contains("the Abandoned arm (arm_tag 0x0002)"),
+        "conformant control did not apply"
+    );
+    let ok_codes = codes_without_assignment_drift(&ok);
+    for code in [
+        "refinement_claim_unparseable",
+        "refinement_union_unresolved",
+        "refinement_arm_unresolved",
+        "refinement_arm_tag_mismatch",
+    ] {
+        assert!(
+            !ok_codes.contains(&code.to_string()),
+            "conformant control must stay green, but {code} fires"
+        );
+    }
+}
+
 #[test]
 fn idr_wire_tag_declares_reference_semantics() {
     let base = real_identity();

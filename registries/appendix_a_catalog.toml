@@ -110209,7 +110209,7 @@ wire_type_id = 0x054f
 name = "ExternalCasRestoreServicePromotionReceiptRef"
 kind = "reference_wrapper"
 status = "reserved"
-encoding_context = "generated tag-refined strong reference whose validator admits only the ExternalCasCataloged RestoreServicePromotionReceipt arm (a20:2593)"
+encoding_context = "generated tag-refined strong reference whose validator admits only the ExternalCasCataloged arm (arm_tag 0x0001) of the RestoreServicePromotionReceipt union; variant syntax is never used as a reference target (a20:2593)"
 allowed_containing_schemas = ["GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "ShardRestoreServiceOpenSpec"]
 max_size_bytes = 40
 
@@ -111853,7 +111853,7 @@ wire_type_id = 0x0550
 name = "ExternalCasRestoreServicePromotionManifestRef"
 kind = "reference_wrapper"
 status = "reserved"
-encoding_context = "generated tag-refined strong reference whose validator admits only the Sharded/ExternalCas RestoreServicePromotionManifest arm; variant syntax is never used as a reference target (a20:2593)"
+encoding_context = "generated tag-refined strong reference whose validator admits only the Sharded arm (arm_tag 0x0002) of the RestoreServicePromotionManifestTargetPosture union, whose authority_profile is therefore always ExternalCasCataloged (a20:2575); variant syntax is never used as a reference target (a20:2593)"
 allowed_containing_schemas = ["GlobalRestoreServiceFinalizeSpec"]
 max_size_bytes = 40
 

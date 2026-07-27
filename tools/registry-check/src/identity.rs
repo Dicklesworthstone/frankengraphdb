@@ -47,6 +47,10 @@
 //!   bodydigest_self_included      the digest's own tag is not excluded
 //!   bodydigest_pin_mismatch       recipe drift against the FNV pin
 //!   unregistered_field      encodability check: field not in the table
+//!   refinement_claim_unparseable  arm-refinement prose outside the grammar
+//!   refinement_union_unresolved   refined union is not a registered union
+//!   refinement_arm_unresolved     refined arm name is not an arm of that union
+//!   refinement_arm_tag_mismatch   arm resolves but under a different arm_tag
 //!   bad_field               enum/shape violation
 
 use crate::hash::fnv1a64;
@@ -125,6 +129,55 @@ fn declared_field_reference_semantics(exact_wire_type: &str) -> Option<&'static 
             }
             _ => None,
         },
+    }
+}
+
+/// The marker that opens an arm-refinement claim in a wire tag's
+/// `encoding_context`. A tag-refined wrapper is a wire type that admits a
+/// STRICT SUBSET of its union's arms — Appendix A a20:2593 mints two of them
+/// and states the rule they exist to serve: "variant syntax is never used as a
+/// reference target."
+pub const REFINEMENT_CLAIM_MARKER: &str = "admits only the ";
+
+/// The canonical, machine-readable spelling of an arm-refinement claim:
+///
+/// ```text
+/// admits only the <SourceArmName> arm (arm_tag 0x<hex>) of the <Union> union
+/// ```
+///
+/// Returns `(source_arm_name, arm_tag, union_name)`. The union may carry a
+/// generic suffix in the prose (`RestoreTerminalPinBasis<Role>`); it is left
+/// intact here and stripped at lookup, because the registered `union_name`
+/// spelling is the caller's business, not the grammar's.
+///
+/// `None` means the claim is outside the grammar. The caller MUST report that
+/// as a violation rather than skipping it: a refinement written in prose is
+/// exactly the row this law exists to reach, so a silent `None` fails open on
+/// its own domain.
+fn parse_refinement_claim(encoding_context: &str) -> Option<(&str, i64, &str)> {
+    let rest = encoding_context.split_once(REFINEMENT_CLAIM_MARKER)?.1;
+    let (arm, rest) = rest.split_once(" arm (arm_tag 0x")?;
+    let (tag_hex, rest) = rest.split_once(") of the ")?;
+    let union = rest.split_once(" union")?.0;
+    if arm.is_empty() || union.is_empty() {
+        return None;
+    }
+    // The arm name is one identifier; a multi-word phrase ("Sharded/ExternalCas
+    // RestoreServicePromotionManifest") is the prose dialect, not this grammar.
+    if arm.contains(' ') || union.contains(' ') {
+        return None;
+    }
+    let tag = i64::from_str_radix(tag_hex, 16).ok()?;
+    Some((arm, tag, union))
+}
+
+/// The registered `union_name` for a prose union spelling: generics are dropped
+/// at the first `<`. `RestoreTerminalPinBasis<Role>` and the registered
+/// `RestoreTerminalPinBasis` are one union; so are the `<Role:Bound>` spellings.
+fn refinement_union_base(name: &str) -> &str {
+    match name.split_once('<') {
+        Some((base, _)) => base,
+        None => name,
     }
 }
 
@@ -1550,6 +1603,17 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
     let wire_names: BTreeSet<&str> = r.wire.iter().map(|w| w.name.as_str()).collect();
     let wire_by_name: BTreeMap<&str, &WireType> =
         r.wire.iter().map(|w| (w.name.as_str(), w)).collect();
+    // Ordinary unions keyed by their generic-stripped name, for refinement
+    // resolution below. Two rows may share a base name (one union declared per
+    // role); an arm found under ANY of them satisfies the claim, because the
+    // claim names the union, not the instantiation.
+    let mut ordinary_unions_by_base: BTreeMap<&str, Vec<&OrdinaryUnion>> = BTreeMap::new();
+    for u in &r.ordinary_unions {
+        ordinary_unions_by_base
+            .entry(refinement_union_base(u.union_name.as_str()))
+            .or_default()
+            .push(u);
+    }
     for w in &r.wire {
         if !matches!(
             w.kind.as_str(),
@@ -1587,6 +1651,91 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                 &w.name,
                 "encoding context, containing-schema closure, and positive resource bound are required",
             ));
+        }
+        // LAW: an arm-refinement claim must RESOLVE.
+        //
+        // A tag-refined wrapper is a wire tag that admits a strict subset of a
+        // union's arms — Appendix A a20:2593 mints two and states the rule they
+        // serve: "variant syntax is never used as a reference target." The
+        // refinement IS the durable constraint: `OperationalRestoreTerminalPin
+        // BasisRef` is the difference between "a pin basis" and "an Operational
+        // pin basis", and a decoder that admits the Abandoned arm through it
+        // accepts a state the source rejects.
+        //
+        // That constraint lived entirely in `encoding_context` prose. MEASURED
+        // 2026-07-27 at dbaab71: 6 claims across the corpus, checked by nothing
+        // — `encoding_context` was read only for non-emptiness (above). A claim
+        // naming an arm that does not exist, or the right arm under the wrong
+        // `arm_tag`, read exactly like a correct one.
+        //
+        // Both halves are load-bearing. Resolution alone would fail open on the
+        // 2 of 6 rows written in a prose dialect ("the Sharded/ExternalCas
+        // RestoreServicePromotionManifest arm" — no tag, no union clause), which
+        // parse to `None` and would simply be skipped. One construct in two
+        // dialects at n=6 is the same defect fgdb-gpms forecasts at n=190, so
+        // the unparseable case is a violation, not a pass.
+        if w.encoding_context.contains(REFINEMENT_CLAIM_MARKER) {
+            match parse_refinement_claim(&w.encoding_context) {
+                None => out.push(v(
+                    "refinement_claim_unparseable",
+                    "wire_types",
+                    &w.name,
+                    format!(
+                        "encoding_context claims an arm refinement but is outside the grammar \
+                         \"{REFINEMENT_CLAIM_MARKER}<SourceArmName> arm (arm_tag 0x<hex>) of the \
+                         <Union> union\"; a refinement stated only in prose is unresolvable and \
+                         therefore unenforced"
+                    ),
+                )),
+                Some((arm, tag, union)) => {
+                    let base = refinement_union_base(union);
+                    match ordinary_unions_by_base.get(base) {
+                        None => out.push(v(
+                            "refinement_union_unresolved",
+                            "wire_types",
+                            &w.name,
+                            format!(
+                                "refinement names union {union:?}, which has no [[union]] row \
+                                 under base name {base:?}; a wrapper may not refine a union that \
+                                 is not registered"
+                            ),
+                        )),
+                        Some(unions) => {
+                            let named: Vec<&OrdinaryUnionArm> = unions
+                                .iter()
+                                .flat_map(|u| u.arms.iter())
+                                .filter(|a| a.source_arm_name == arm)
+                                .collect();
+                            if named.is_empty() {
+                                out.push(v(
+                                    "refinement_arm_unresolved",
+                                    "wire_types",
+                                    &w.name,
+                                    format!(
+                                        "refinement names arm {arm:?} of union {base:?}, which \
+                                         has no [[union_arm]] row with that source_arm_name"
+                                    ),
+                                ));
+                            } else if !named.iter().any(|a| a.arm_tag == tag) {
+                                let actual: Vec<String> = named
+                                    .iter()
+                                    .map(|a| format!("{:#06x}", a.arm_tag))
+                                    .collect();
+                                out.push(v(
+                                    "refinement_arm_tag_mismatch",
+                                    "wire_types",
+                                    &w.name,
+                                    format!(
+                                        "refinement claims arm {arm:?} of union {base:?} at \
+                                         arm_tag {tag:#06x}; the registered arm carries {}",
+                                        actual.join(", ")
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
         }
         match (w.kind.as_str(), &w.containing_union, w.wire_tag) {
             ("union_variant", Some(union), Some(tag)) => {
