@@ -544,10 +544,25 @@ mod tests {
             census.target_ids_sha256,
             "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"
         );
-        assert_eq!(census.occurrence_count, 2_455);
+        // MOVED ONCE, BY 65a21da (fgdb-ymqm, "cut fourteen source self-edges"), which
+        // updated the catalog's [reference_manifest] and left this pin behind. Measured
+        // at that commit's parent e92ced6 this census is exactly 2_455 / bb3ca3c8.. and
+        // this test PASSES, so the delta is that single commit and not an accumulation.
+        //
+        // This is a CURRENT-STATE census of the committed plan, not a historical
+        // witness: precedent c5570ce and cc9fc26 both moved it when the plan legitimately
+        // changed. The values below are re-derived from the plan bytes and independently
+        // corroborated by the catalog's [reference_manifest], which the appendix checker
+        // validates against the same source and passes.
+        //
+        // THE PARTITION IS THE POINT: target_count and target_ids_sha256 above are
+        // UNCHANGED, so no reference TARGET was added or removed. Only 13 OCCURRENCES of
+        // those same 813 targets disappeared, which is what cutting self-edges does --
+        // it removes uses, not targets.
+        assert_eq!(census.occurrence_count, 2_442);
         assert_eq!(
             census.occurrence_transcript_sha256,
-            "bb3ca3c8c68134419373b249494cc918df94c20e28915052c706f877ed1ca044"
+            "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
         );
     }
 }

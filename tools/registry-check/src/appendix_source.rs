@@ -5669,9 +5669,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
+        // This guard did its job: 65a21da (fgdb-ymqm) edited Appendix A and the guard
+        // fired, refusing to let the population assertion below be read as current.
+        // Re-measured on the new source, the population is BYTE-FOR-BYTE UNCHANGED --
+        // same four sentences, same lines 1758/2057/2645/2651, same owners, same order.
+        // So only the "measured on" sha moves here; the law below is untouched, and this
+        // is a re-measurement rather than a re-pin.
         assert_eq!(
             sha256_hex(source.as_bytes()),
-            "b04701610581f864d42f59362411b8863512b2d75d00f59fabf1b2a7b195b302",
+            "d9a3dfad58deaf2a82796d6c4cc867f2ec33ec7273dcc0f533dbaa99e46a8a7d",
             "the two-union population was measured on a different Appendix A source"
         );
 
