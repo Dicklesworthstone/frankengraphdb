@@ -84,15 +84,21 @@ if "$BIN" all --root "$ROOT" >"$WORK/shipped.jsonl" 2>"$WORK/shipped.err"; then
 else
   die "shipped registries failed (see $WORK/shipped.jsonl)"
 fi
-grep -q '"event":"registry_validated"' "$WORK/shipped.jsonl" \
-  && ok "registry_validated events present" \
-  || die "missing registry_validated events"
-grep -q '"event":"hash_checked".*"outcome":"pass"' "$WORK/shipped.jsonl" \
-  && ok "twenty-ID hash pin verified" \
-  || die "twenty-ID hash pin not verified"
-grep -q '"event":"closure_computed".*"outcome":"pass"' "$WORK/shipped.jsonl" \
-  && ok "activation closure computed for the sample capability manifest" \
-  || die "activation closure missing or failed"
+if grep -q '"event":"registry_validated"' "$WORK/shipped.jsonl"; then
+  ok "registry_validated events present"
+else
+  die "missing registry_validated events"
+fi
+if grep -q '"event":"hash_checked".*"outcome":"pass"' "$WORK/shipped.jsonl"; then
+  ok "twenty-ID hash pin verified"
+else
+  die "twenty-ID hash pin not verified"
+fi
+if grep -q '"event":"closure_computed".*"outcome":"pass"' "$WORK/shipped.jsonl"; then
+  ok "activation closure computed for the sample capability manifest"
+else
+  die "activation closure missing or failed"
+fi
 
 # --- Phase 2: planted claim defects, BOTH directions (claims-lint) -----------
 # claims-lint answers two questions and a seeded corpus must plant one defect
@@ -151,15 +157,21 @@ if "$BIN" lint --root "$STAGE" >"$WORK/lint.jsonl" 2>/dev/null; then
 else
   ok "lint failed as required on the planted defects"
 fi
-grep -q '"event":"lint_hit","kind":"unregistered_marker","file":"README.md","line":3,"subject":"FG-INV-77"' "$WORK/lint.jsonl" \
-  && ok "direction 1: hit names exact file/line/marker (README.md:3 FG-INV-77)" \
-  || die "direction 1: hit missing exact file/line/marker (see $WORK/lint.jsonl)"
-grep -q '"event":"lint_hit","kind":"unmarked_gate_row","file":"README.md","line":10,"subject":"Planted budget"' "$WORK/lint.jsonl" \
-  && ok "direction 2: hit names the unmarked budget row (README.md:10 Planted budget)" \
-  || die "direction 2: unmarked budget row not caught (see $WORK/lint.jsonl)"
-grep -q '"event":"lint_completed","files_scanned":1,"markers_seen":3,"prose_files_seen":1,"gate_rows_read":2,"gate_rows_marked":1,"gate_rows_unmarked":1' "$WORK/lint.jsonl" \
-  && ok "census reports what was opened (1 file, 3 markers, 2 gate rows, 1 marked)" \
-  || die "census missing or wrong — a lint that examines nothing passes (see $WORK/lint.jsonl)"
+if grep -q '"event":"lint_hit","kind":"unregistered_marker","file":"README.md","line":3,"subject":"FG-INV-77"' "$WORK/lint.jsonl"; then
+  ok "direction 1: hit names exact file/line/marker (README.md:3 FG-INV-77)"
+else
+  die "direction 1: hit missing exact file/line/marker (see $WORK/lint.jsonl)"
+fi
+if grep -q '"event":"lint_hit","kind":"unmarked_gate_row","file":"README.md","line":10,"subject":"Planted budget"' "$WORK/lint.jsonl"; then
+  ok "direction 2: hit names the unmarked budget row (README.md:10 Planted budget)"
+else
+  die "direction 2: unmarked budget row not caught (see $WORK/lint.jsonl)"
+fi
+if grep -q '"event":"lint_completed","files_scanned":1,"markers_seen":3,"prose_files_seen":1,"gate_rows_read":2,"gate_rows_marked":1,"gate_rows_unmarked":1' "$WORK/lint.jsonl"; then
+  ok "census reports what was opened (1 file, 3 markers, 2 gate rows, 1 marked)"
+else
+  die "census missing or wrong — a lint that examines nothing passes (see $WORK/lint.jsonl)"
+fi
 
 # CONTROL. Both failures above must come from the plants and from nothing else
 # in the staging: remove the unresolvable marker, register the budget row in the
@@ -182,9 +194,11 @@ if "$BIN" lint --root "$STAGE" >"$WORK/lint-stale.jsonl" 2>/dev/null; then
 else
   ok "a ledger entry whose row is now marked fails as required"
 fi
-grep -q '"kind":"dead_gate_exemption","file":"README.md","line":9,"subject":"Planted budget"' "$WORK/lint-stale.jsonl" \
-  && ok "stale ledger entry named with file/line (README.md:9 Planted budget)" \
-  || die "stale ledger entry not named (see $WORK/lint-stale.jsonl)"
+if grep -q '"kind":"dead_gate_exemption","file":"README.md","line":9,"subject":"Planted budget"' "$WORK/lint-stale.jsonl"; then
+  ok "stale ledger entry named with file/line (README.md:9 Planted budget)"
+else
+  die "stale ledger entry not named (see $WORK/lint-stale.jsonl)"
+fi
 
 # --- Phase 3: planted cross-class escalation ---------------------------------
 log "phase 3: planted cross-class escalation (slo justifying an invariant)"
@@ -225,9 +239,11 @@ if "$BIN" validate --root "$ESC" >"$WORK/escalation.jsonl" 2>/dev/null; then
 else
   ok "validate failed as required on planted escalation"
 fi
-grep -q '"code":"class_escalation".*"row_id":"FG-INV-20.planted-escalation"' "$WORK/escalation.jsonl" \
-  && ok "escalation violation names the exact clause" \
-  || die "class_escalation violation missing (see $WORK/escalation.jsonl)"
+if grep -q '"code":"class_escalation".*"row_id":"FG-INV-20.planted-escalation"' "$WORK/escalation.jsonl"; then
+  ok "escalation violation names the exact clause"
+else
+  die "class_escalation violation missing (see $WORK/escalation.jsonl)"
+fi
 
 # --- Phase 4: twenty-first ID breaks the hash pin ----------------------------
 log "phase 4: planted twenty-first invariant ID"
@@ -245,9 +261,11 @@ if "$BIN" hash --root "$SPINE" >"$WORK/spine.jsonl" 2>/dev/null; then
 else
   ok "hash pin failed as required on twenty-first ID"
 fi
-grep -q '"extra":\["FG-INV-21"\]' "$WORK/spine.jsonl" \
-  && ok "hash mismatch logs the exact row-level diff (extra FG-INV-21)" \
-  || die "row-level diff missing from hash event (see $WORK/spine.jsonl)"
+if grep -q '"extra":\["FG-INV-21"\]' "$WORK/spine.jsonl"; then
+  ok "hash mismatch logs the exact row-level diff (extra FG-INV-21)"
+else
+  die "row-level diff missing from hash event (see $WORK/spine.jsonl)"
+fi
 
 # --- Verdict -----------------------------------------------------------------
 log "evidence: $WORK/{shipped,lint,escalation,spine}.jsonl"

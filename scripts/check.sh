@@ -105,6 +105,12 @@ coverage_of() {
     docs/THREAT_AND_TRUST_MODEL.md)      echo "threat-check (generated document)" ;;
     docs/WORKSPACE_TOPOLOGY.md)          echo "topology-check (generated document)" ;;
     docs/NEGATIVE_EVIDENCE.md)           echo "g0_negative_evidence_e2e (parses every entry; each doctrine id, bead and repair commit must resolve)" ;;
+    # EXACT, not `formal/lean/*.lean`. The gate runs the artifacts of CHECKED
+    # lanes only, so a glob would claim coverage for a future DECLARED lane's
+    # artifact that nothing runs — the same fail-open as the `registries/*.toml`
+    # row above. A new .lean file lands unclaimed and reds this step until
+    # somebody says which lane checks it.
+    formal/lean/VersionChain.lean)       echo "g0_proof_lanes_e2e (runs \`lean\` on it; lane lean-version-chain is status=checked)" ;;
     COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md)
                                          echo "registry-check (source_block pins + claims-lint)" ;;
     README.md)                           echo "registry-check lint (claim markers, + every §Performance gate row must cite one)" ;;
@@ -215,6 +221,28 @@ run_shell_lint() {
     return 1
   }
   echo "    shellcheck: clean at severity>=warning across ${#shell_files[@]} file(s)"
+  # SC2015 (`A && B || C`) is only a *note*, so the line above never enforced it,
+  # and 14 sites accumulated across the two largest gate scripts before anyone
+  # looked. `--include` reports one code regardless of its severity, which pins
+  # this class without dragging in the six unrelated notes the corpus still
+  # carries (3x SC1091, 2x SC2016, 1x SC2012) — those are a separate decision.
+  #
+  # MEASURED 2026-07-27 before removing them: none of the 14 failed OPEN. Every
+  # one was `check && ok "..." || die "..."`, and because `ok()` ends in a
+  # `printf` that returns 0, a passing check never reached `die`. The exposure
+  # was the other way: give `ok()` a non-zero return and all 14 report a FAIL
+  # line against an assertion that actually PASSED — a false RED whose message
+  # names the wrong thing. The if/then/else form turns that same breakage into
+  # an honest `set -e` abort caught by the trap. Both exit non-zero; only one
+  # tells the truth about which assertion failed.
+  shellcheck --include=SC2015 "${shell_files[@]}" || {
+    echo "ERROR: shellcheck reported SC2015 (A && B || C is not if-then-else)." >&2
+    echo "  In a gate script the third branch runs when the SECOND command fails," >&2
+    echo "  so the FAIL it reports is attributed to an assertion that passed." >&2
+    echo "  Write it as: if check; then ok \"...\"; else die \"...\"; fi" >&2
+    return 1
+  }
+  echo "    shellcheck: 0 SC2015 across ${#shell_files[@]} file(s)"
 }
 
 run_ubs() {

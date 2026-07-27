@@ -111,12 +111,16 @@ if [ "$CLAUSES" -ge 20 ]; then
 else
   die "expected >= 20 clause_checked events, found $CLAUSES"
 fi
-grep -q '"event":"hash_checked".*"outcome":"pass"' "$WORK/spine-baseline.jsonl" \
-  && ok "twenty-ID table hash verified" \
-  || die "twenty-ID table hash not verified"
-grep -q '"event":"closure_computed".*"absent":0.*"outcome":"pass"' "$WORK/spine-baseline.jsonl" \
-  && ok "pre-Genesis sample-manifest closure satisfied (no reachable stubs)" \
-  || die "baseline closure not satisfied"
+if grep -q '"event":"hash_checked".*"outcome":"pass"' "$WORK/spine-baseline.jsonl"; then
+  ok "twenty-ID table hash verified"
+else
+  die "twenty-ID table hash not verified"
+fi
+if grep -q '"event":"closure_computed".*"absent":0.*"outcome":"pass"' "$WORK/spine-baseline.jsonl"; then
+  ok "pre-Genesis sample-manifest closure satisfied (no reachable stubs)"
+else
+  die "baseline closure not satisfied"
+fi
 if grep -q '"code":"missing_checker"' "$WORK/spine-baseline.jsonl"; then
   die "unresolvable checker/negative-test symbol on the shipped spine"
 else
@@ -225,9 +229,11 @@ case "$P2_VERDICT" in
   failed_elsewhere)
     die "validate failed without emitting twenty_id_violation: the red is not the twenty-ID law (see $WORK/spine-neg-21.jsonl)" ;;
 esac
-grep -q '"code":"twenty_id_violation".*FG-INV-21' "$WORK/spine-neg-21.jsonl" \
-  && ok "violation names FG-INV-21 exactly" \
-  || die "twenty_id_violation missing FG-INV-21 (see $WORK/spine-neg-21.jsonl)"
+if grep -q '"code":"twenty_id_violation".*FG-INV-21' "$WORK/spine-neg-21.jsonl"; then
+  ok "violation names FG-INV-21 exactly"
+else
+  die "twenty_id_violation missing FG-INV-21 (see $WORK/spine-neg-21.jsonl)"
+fi
 
 # --- Phase 3: reachable-but-inactive clause forces the capability off --------
 log "phase 3: capability manifest enabling a stub-guarded feature"
@@ -314,12 +320,16 @@ case "$CLOSURE_VERDICT" in
   failed_elsewhere)
     die "closure failed with absent=0: the red is not the reachable-stub law (see $WORK/spine-closure-hot.jsonl)" ;;
 esac
-grep -q '"event":"closure_computed".*FG-INV-04.core' "$WORK/spine-closure-hot.jsonl" \
-  && ok "closure names the exact absent clause (FG-INV-04.core)" \
-  || die "absent clause not named (see $WORK/spine-closure-hot.jsonl)"
-grep -q '"event":"capability_absent","capability":"mvcc-visibility"' "$WORK/spine-closure-hot.jsonl" \
-  && ok "capability_absent names mvcc-visibility with its clauses" \
-  || die "capability_absent event missing"
+if grep -q '"event":"closure_computed".*FG-INV-04.core' "$WORK/spine-closure-hot.jsonl"; then
+  ok "closure names the exact absent clause (FG-INV-04.core)"
+else
+  die "absent clause not named (see $WORK/spine-closure-hot.jsonl)"
+fi
+if grep -q '"event":"capability_absent","capability":"mvcc-visibility"' "$WORK/spine-closure-hot.jsonl"; then
+  ok "capability_absent names mvcc-visibility with its clauses"
+else
+  die "capability_absent event missing"
+fi
 
 # --- Verdict -----------------------------------------------------------------
 log "evidence: $WORK/{spine-baseline,spine-neg-21,spine-closure-probe,spine-closure-control,spine-closure-hot}.jsonl"
