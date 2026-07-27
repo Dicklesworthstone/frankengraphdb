@@ -3810,6 +3810,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "GlobalRestoreServiceFinalizeSpec"
+field_tag = 0x0003
+stable_name = "manifest_ref"
+exact_wire_type = "ExternalCasRestoreServicePromotionManifestRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreServicePromotionManifest"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "tag-refined strong reference whose validator admits only the Sharded/ExternalCas manifest arm, since variant syntax is never used as a reference target; the finalize verifies the complete rooted ExternalCas four-stage lineage against it, and it is retained while the finalize spec is retained and cut only with that spec, and order 30 <= 35 keeps the edge backward-only (a20:2593, a20:2597)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalRestoreServiceFinalizeSpec"
 field_tag = 0x0004
 stable_name = "promotion_receipt_ref"
 exact_wire_type = "ExternalCasRestoreServicePromotionReceiptRef"
@@ -10691,6 +10706,21 @@ target_schema_id = "RestorePromotionRootSeal"
 construction_order = 50
 role_predicate = "role-shard"
 retention_and_cut_rule = "strong reference to the exact Shard promotion root seal acknowledged operational; retained while the acknowledgement is retained and cut only with it (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0009
+stable_name = "operational_terminal_pin_basis_ref"
+exact_wire_type = "OperationalRestoreTerminalPinBasisRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalPinBasis"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "tag-refined strong reference at Role=Shard whose validator admits only the Operational arm (arm_tag 0x0001) of the role-generic terminal pin basis union; the basis byte-matches the post-close root alongside the closure and projection commitments, and is retained while the acknowledgement is retained and cut only with it, and order 40 <= 50 keeps the edge backward-only (a18:2373, a20:2599)"
 version_status = "reserved"
 max_size_bytes = 40
 

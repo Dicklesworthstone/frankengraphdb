@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3644
+target_count = 3646
 projection_fallback_count = 133
-target_source_assignment_sha256 = "a9d37d3fbe7cbbe12acb1ca12a5775a620eaf1de999d70e1763ef40f72cf580d"
+target_source_assignment_sha256 = "55bd9b095bccb280408d7d4f3d86ef4571a4ca26bab8c729afd5b051512e7854"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -111927,4 +111927,54 @@ target_row_id = "a20:wire-type:external-cas-restore-service-promotion-manifest-r
 slice_id = "a20"
 source_key = "top|ExternalCasRestoreServicePromotionManifestRef"
 target_kind = "wire-type"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-finalize-spec-manifest-ref"
+containing_schema = "GlobalRestoreServiceFinalizeSpec"
+field_tag = 0x0003
+stable_name = "manifest_ref"
+exact_wire_type = "ExternalCasRestoreServicePromotionManifestRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreServicePromotionManifest"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "tag-refined strong reference whose validator admits only the Sharded/ExternalCas manifest arm, since variant syntax is never used as a reference target; the finalize verifies the complete rooted ExternalCas four-stage lineage against it, and it is retained while the finalize spec is retained and cut only with that spec, and order 30 <= 35 keeps the edge backward-only (a20:2593, a20:2597)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-operational-terminal-pin-basis-ref"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0009
+stable_name = "operational_terminal_pin_basis_ref"
+exact_wire_type = "OperationalRestoreTerminalPinBasisRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreTerminalPinBasis"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "tag-refined strong reference at Role=Shard whose validator admits only the Operational arm (arm_tag 0x0001) of the role-generic terminal pin basis union; the basis byte-matches the post-close root alongside the closure and projection commitments, and is retained while the acknowledgement is retained and cut only with it, and order 40 <= 50 keeps the edge backward-only (a18:2373, a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-finalize-spec-manifest-ref"
+target_row_id = "a20:field:global-restore-service-finalize-spec-manifest-ref"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceFinalizeSpec|GlobalRestoreServiceFinalizeSpec.manifest_ref|manifest_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-operational-terminal-pin-basis-ref"
+target_row_id = "a20:field:restore-shard-operational-ack-operational-terminal-pin-basis-ref"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.operational_terminal_pin_basis_ref|operational_terminal_pin_basis_ref"
+target_kind = "field"
 definition_status = "declared"
