@@ -675,3 +675,8 @@ reason = "vuq8: all four pins MEASURED to hold at 0ada651 — 67 evidence rows, 
 path = "scripts/w1_foundation_types_e2e.sh"
 role = "candidate"
 reason = "vuq8: all 16 pinned grep assertions MEASURED present at 0ada651, transcript byte-identical across seeds 1 and 2, and all six foundation crates declare zero deps so the cargo-tree universe check holds. Not promoted only because registration now makes check.sh execute it"
+
+[[script_disposition]]
+path = "scripts/disk_hygiene.sh"
+role = "advisory"
+reason = "fgdb-c4ou: an operator inventory of the swarm scratch root, not a gate. Its own header states 'Inventory only: this command never deletes or mutates artifacts' — it classifies /data/tmp/fgdb_swarm paths by owning pane and bead and reports reclaimable KB so a human can decide what to reclaim. It asserts nothing about this repository and would red on no defect, so registering it as a [[checker]] would make check.sh execute an inventory of a directory outside the repo and then have no verdict to consume. Declared advisory rather than candidate on purpose: candidate means measured-and-promotable, and there is nothing here to promote"
