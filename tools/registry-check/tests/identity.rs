@@ -4822,6 +4822,17 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
     proposal_fields.sort_by_key(|field| field.field_tag);
     let expected_fields = [
         (
+            0x0001,
+            "key_identity",
+            "id256",
+            "one",
+            "inline",
+            "none",
+            None,
+            32,
+            "fgdb:key-identity:v1",
+        ),
+        (
             0x0003,
             "basis_state",
             "WeakStateIdentity",
@@ -5058,6 +5069,10 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "a15:field:key-destroy-proposal-generated-scanned-root-inventory-ref",
         ),
         (
+            "field|KeyDestroyProposal|KeyDestroyProposal.key_identity|key_identity",
+            "a15:field:key-destroy-proposal-key-identity",
+        ),
+        (
             "field|KeyDestroyProposal|KeyDestroyProposal.sorted_destruction_operation_plans|sorted_destruction_operation_plans",
             "a15:field:key-destroy-proposal-sorted-destruction-operation-plans",
         ),
@@ -5254,13 +5269,13 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
         proposal_adjudications,
         vec![
             "field|KeyDestroyProposal|KeyDestroyProposal.expected_state_conditions|expected_state_conditions",
+            "field|KeyDestroyProposal|KeyDestroyProposal.key_identity|key_identity",
             "field|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|terminal_audit_gate",
         ],
-        "only the two source-forced shorthand fields may be adjudicated"
+        "only the three source-forced shorthand fields may be adjudicated"
     );
     for unresolved in [
         "expected_key_state",
-        "key_identity",
         "expected_prospective_configuration_set_digest",
         "exact_root_slot_generations",
         "complete_target_set_digest",
@@ -5280,6 +5295,45 @@ fn idr_key_destroy_proposal_reserved_logical_shell_is_exact() {
             "{unresolved} must remain unadjudicated"
         );
     }
+
+    let key_identity = identity
+        .fields
+        .iter()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal" && field.stable_name == "key_identity"
+        })
+        .expect("KeyDestroyProposal.key_identity exists");
+    assert!(
+        key_identity.retention_and_cut_rule.contains(
+            "canonical(0x0001 database_security_namespace_id:id256, 0x0002 material_class:u16, \
+             0x0003 key_id:id256, 0x0004 key_epoch:u64)"
+        ),
+        "KeyIdentity must retain its exact canonical input transcript"
+    );
+    assert!(
+        !identity.wire.iter().any(|row| row.name == "KeyIdentity")
+            && !identity.logical.iter().any(|row| row.name == "KeyIdentity")
+            && !catalog
+                .reservations
+                .iter()
+                .any(|row| row.symbol == "KeyIdentity"),
+        "the opaque builtin id256 ruling must not fabricate a KeyIdentity producer or reservation"
+    );
+
+    let mut invented_structured_producer = identity.clone();
+    invented_structured_producer
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field.containing_schema == "KeyDestroyProposal" && field.stable_name == "key_identity"
+        })
+        .expect("KeyDestroyProposal.key_identity exists")
+        .exact_wire_type = "KeyIdentity".to_owned();
+    assert!(
+        codes_without_assignment_drift(&invented_structured_producer)
+            .contains(&"field_unresolved_wire_type".to_owned()),
+        "negative control: an invented structured KeyIdentity producer must fire"
+    );
 }
 
 #[test]

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 68
+registry_epoch = 69
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -3824,6 +3824,20 @@ role_predicate = "role-local"
 retention_and_cut_rule = "strong reference to the exact initial configuration state installed atomically with the floor; retained while the spec is retained and cut only with that spec (a12:1966)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x0001
+stable_name = "key_identity"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "opaque nonretaining KeyIdentity bytes are BLAKE3(\"fgdb:key-identity:v1\" || canonical(0x0001 database_security_namespace_id:id256, 0x0002 material_class:u16, 0x0003 key_id:id256, 0x0004 key_epoch:u64)); the key-lifecycle registry recomputes this transcript, every proposal/quarantine/operation/finalization/record/certificate projection byte-matches it, and reachability, GC, checkpoint, and backup walkers never follow it (a15:2059-2069)"
+version_status = "reserved"
+max_size_bytes = 32
 
 [[field]]
 containing_schema = "KeyDestroyProposal"

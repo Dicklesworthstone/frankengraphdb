@@ -39,9 +39,9 @@ occurrence_count = 2455
 occurrence_transcript_sha256 = "ae40064992d27bd2772130802ec594b2f1238856fd561366d92fe46e6ae1ab93"
 
 [target_manifest]
-target_count = 3313
+target_count = 3314
 projection_fallback_count = 111
-target_source_assignment_sha256 = "2c72eb9d29f92b01ba254be197763f4172675156972cdc50f2787960491f4cd8"
+target_source_assignment_sha256 = "6a08317b93600524fb57aced546d94133cc7bec78593e13f5aba0f3e5e19946b"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 38
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 68
+registry_epoch = 69
 
 [[logical_kind]]
 slice_id = "a03"
@@ -17123,6 +17123,22 @@ role_predicate = "true"
 retention_and_cut_rule = "strong reference to the TimeAuthorityObservationImport this TimeValidationEvidence commits to; retained while the referrer is retained, and the acyclic order 23 <= 25 keeps the reference backward-only (a16:2167)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+slice_id = "a15"
+row_id = "a15:field:key-destroy-proposal-key-identity"
+containing_schema = "KeyDestroyProposal"
+field_tag = 0x0001
+stable_name = "key_identity"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 80
+role_predicate = "role-local"
+retention_and_cut_rule = "opaque nonretaining KeyIdentity bytes are BLAKE3(\"fgdb:key-identity:v1\" || canonical(0x0001 database_security_namespace_id:id256, 0x0002 material_class:u16, 0x0003 key_id:id256, 0x0004 key_epoch:u64)); the key-lifecycle registry recomputes this transcript, every proposal/quarantine/operation/finalization/record/certificate projection byte-matches it, and reachability, GC, checkpoint, and backup walkers never follow it (a15:2059-2069)"
+version_status = "reserved"
+max_size_bytes = 32
 
 [[field]]
 slice_id = "a15"
@@ -99826,6 +99842,14 @@ target_kind = "union-arm"
 definition_status = "declared"
 
 [[target]]
+row_id = "a15:target:field-key-destroy-proposal-key-identity"
+target_row_id = "a15:field:key-destroy-proposal-key-identity"
+slice_id = "a15"
+source_key = "field|KeyDestroyProposal|KeyDestroyProposal.key_identity|key_identity"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
 row_id = "a15:target:field-key-destroy-proposal-basis-state"
 target_row_id = "a15:field:key-destroy-proposal-basis-state"
 slice_id = "a15"
@@ -99848,6 +99872,15 @@ slice_id = "a15"
 source_key = "field|KeyDestroyProposal|KeyDestroyProposal.terminal_audit_gate|terminal_audit_gate"
 target_kind = "field"
 definition_status = "declared"
+
+[[ambiguity_adjudication]]
+row_id = "a15:ambiguity-adjudication:9fcf021dbaea4ffe1daf6fb1ceac10df49ebc45b5b43054c0c5cf93eb4471643"
+slice_id = "a15"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|KeyDestroyProposal|KeyDestroyProposal.key_identity|98f155babf41c5cf0afa9139f8a96469570cc31dbd6f19ee80e0e280f313bd76|1|fe7a66011064c18fafdfae45be42a091a85d7403c11a2500cf4bba5d6d402590|shorthand field has no exact type"
+source_locations = ["a15:2059"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|KeyDestroyProposal|KeyDestroyProposal.key_identity|key_identity"]
+rationale = "A15 repeatedly requires byte-equal key_identity projections but spells neither a KeyIdentity structural producer nor a StrongRef/typed by-value use that would license one. The owner ruling therefore selects the builtin opaque id256 form, not a fabricated record and not WeakStateIdentity/WeakDigest. Its canonical bytes are BLAKE3(\"fgdb:key-identity:v1\" || canonical(0x0001 database_security_namespace_id:id256, 0x0002 material_class:u16, 0x0003 key_id:id256, 0x0004 key_epoch:u64)); the namespace makes clone identities distinct while same-identity restore remains stable, and excluding physical targets keeps rewrap/replication/relocation from changing the logical key identity."
 
 [[ambiguity_adjudication]]
 row_id = "a15:ambiguity-adjudication:9d87b7faa3ae557cc0b0eb4aecf03219a98f5758e0e5607b1fa28c5d7eb3d55f"
