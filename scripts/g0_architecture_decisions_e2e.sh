@@ -9,6 +9,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# The shared verdict contract (fgdb-udco). This gate is fail-fast under `set -e`
+# and has no assertion-level emitter: every failure is an `echo "ERROR: ..." >&2`
+# followed by an exit. Those stay exactly as they are — stderr is the diagnostic
+# stream and is unconstrained — and gate_init's EXIT trap derives the contract's
+# `FAIL` line on stdout from the exit code. Converting the error sites by hand
+# instead would have left the contract false on every path no site covers, which
+# under `set -e` is most of them.
+# shellcheck source=lib/gate_verdict.sh
+. "$ROOT/scripts/lib/gate_verdict.sh"
+gate_init "g0_architecture_decisions_e2e"
+
 EVIDENCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-architecture-e2e.XXXXXX")"
 FIRST="$EVIDENCE_DIR/first.ndjson"
 SECOND="$EVIDENCE_DIR/second.ndjson"
@@ -331,4 +342,4 @@ PY
 echo "==> run the complete typed mutation and property suite"
 cargo test -p registry-check --test architecture_decisions
 
-echo "ADR E2E GREEN; retained deterministic evidence: $EVIDENCE_DIR"
+gate_pass "ADR E2E GREEN; retained deterministic evidence: $EVIDENCE_DIR"

@@ -70,6 +70,15 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECKER_INDEX="$ROOT/registries/checker_index.toml"
+GATE_VERDICT_LIB="$ROOT/scripts/lib/gate_verdict.sh"
+
+# The shared verdict contract (fgdb-udco). Sourced here for the emitters; the
+# EXIT trap is installed in the main run path below rather than here, because
+# `--self-test` runs its fixtures in subshells and a bash subshell inherits and
+# fires the parent's EXIT trap — which would add a FAIL line to the very output
+# verdict_stream_control counts.
+# shellcheck source=lib/gate_verdict.sh
+. "$GATE_VERDICT_LIB"
 
 CORE_EXPECTED=0
 CORE_EXECUTED=0
@@ -104,13 +113,14 @@ run_core_gate() {
   if "$@"; then
     CORE_PASSED=$((CORE_PASSED + 1))
     LAST_GATE_RC=0
-    echo "PASS core: $label"
+    gate_pass "core: $label"
   else
     LAST_GATE_RC=$?
     CORE_RED=$((CORE_RED + 1))
-    # Both tokens, both anchored, both on stdout. See THE REPORTING CONTRACT.
-    echo "RED core: $label (exit $LAST_GATE_RC)"
-    echo "FAIL core: $label (exit $LAST_GATE_RC)"
+    # RED is the refinement, FAIL is the contract token. Both anchored, both on
+    # stdout, emitted together. See THE REPORTING CONTRACT.
+    printf 'RED core: %s (exit %s)\n' "$label" "$LAST_GATE_RC"
+    gate_fail "core: $label (exit $LAST_GATE_RC)"
   fi
 }
 
@@ -294,6 +304,148 @@ run_shell_lint() {
   echo "    shellcheck: 0 SC2015 across ${#shell_files[@]} file(s)"
 }
 
+# =============================================================================
+# THE VERDICT-CONTRACT CLOSURE (bead fgdb-udco)
+# =============================================================================
+# WHY THIS IS A GATE AND NOT NINE PATCHES. Converting ten gates to one token
+# fixes ten gates. It does not stop the eleventh: a gate added next month writes
+# its own `echo "BROKEN: ..." >&2`, no gate opens it, and the swarm is back to a
+# failure nobody's query can see. This step is the difference — it derives the
+# gate set from registries/checker_index.toml AT RUN TIME, so a newly registered
+# gate is in scope the moment it is registered, and it FAILS CLOSED: an
+# unreadable registry, an empty gate list or an unreadable gate is a violation,
+# never a pass.
+#
+# THE CONTRACT IT ENFORCES is stated once in scripts/lib/gate_verdict.sh. Four
+# laws, each one directional and each one reachable:
+#
+#   L1  every gate sources the contract library and calls gate_init
+#   L2  no contract token is written to stderr (verdicts live on ONE stream)
+#   L3  no `WORD:` verdict marker at column 0 of stdout outside the vocabulary
+#   L4  vocabulary tokens are used as `TOKEN ` — `PASS:` is a fifth token
+#
+# L3's shape is deliberate and was chosen by measurement, not taste. The obvious
+# rule — "any ALL-CAPS word at column 0 of stdout must be in the vocabulary" —
+# was tried first and rejects legitimate prose: three gates end with lines like
+# `ADR E2E GREEN;` and `THREAT MODEL E2E GREEN`. `WORD:` is what a verdict
+# MARKER looks like and what prose does not, and it catches every historical
+# rogue (`ERROR:`, `FAIL:` prefixed, `PASS:`) plus anything a future gate
+# invents. Diagnostics on stderr stay unconstrained on purpose — the four
+# fail-fast gates keep their ~20 `echo "ERROR: ..." >&2` sites unchanged, and
+# their contract line comes from the library's exit-code-derived EXIT trap.
+#
+# WHAT IT CANNOT SEE, stated because an unstated limit reads as coverage: this
+# is a static reader of shell source. A verdict assembled across two lines, or
+# emitted through a variable, is invisible to it. That is why the fixture
+# controls below are behavioural and why the vocabulary is closed rather than
+# open — an unknown token is a violation, so the failure mode is a false RED
+# that someone fixes, not a false green nobody sees.
+VERDICT_VOCABULARY='PASS|FAIL|RED|UNRUN'
+
+# verdict_contract_gate_list <registry> — the enumerated gate set, one per line.
+#
+# Enumeration, not a glob over scripts/*.sh: a glob would claim coverage for a
+# file no runner opens, which is the fail-open this project has closed twice
+# already. The list is check.sh plus every live `kind = "script"` artifact.
+verdict_contract_gate_list() {
+  local registry="$1"
+  {
+    echo "scripts/check.sh"
+    awk '
+      /^\[\[checker\]\]/ { kind = ""; artifact = ""; status = "" }
+      /^[[:space:]]*kind[[:space:]]*=/      { kind = $0 }
+      /^[[:space:]]*artifact[[:space:]]*=/  { artifact = $0 }
+      /^[[:space:]]*status[[:space:]]*=/ {
+        status = $0
+        if (kind ~ /"script"/ && status ~ /"live"/) {
+          gsub(/^[^"]*"|"[^"]*$/, "", artifact)
+          print artifact
+        }
+      }
+    ' "$registry"
+  } | LC_ALL=C sort -u
+}
+
+# verdict_contract_violations <root> <gate> — prints one line per violation.
+verdict_contract_violations() {
+  local root="$1" gate="$2"
+  local path="$root/$gate"
+  local body
+
+  if [ ! -r "$path" ]; then
+    printf '%s: unreadable — refusing to report contract conformance as checked\n' "$gate"
+    return
+  fi
+  body="$(grep -vE '^[[:space:]]*#' "$path")"
+
+  # L1. check.sh installs the trap in its main path rather than at load, for the
+  # subshell reason stated where it does so; it must still source the library.
+  case "$body" in
+    *lib/gate_verdict.sh*) ;;
+    *) printf '%s: does not source scripts/lib/gate_verdict.sh (L1)\n' "$gate" ;;
+  esac
+  if [ "$gate" != "scripts/check.sh" ]; then
+    case "$body" in
+      *gate_init*) ;;
+      *) printf '%s: never calls gate_init, so no EXIT trap derives its verdict (L1)\n' "$gate" ;;
+    esac
+  fi
+
+  # L2. A verdict on stderr is the defect that made seven of ten gates invisible
+  # to a stdout capture.
+  printf '%s' "$body" \
+    | grep -nE "(echo|printf)[^|;&]*['\"][[:space:]]*($VERDICT_VOCABULARY)[: ][^|;&]*>&2" \
+    | sed "s|^|$gate: writes a contract token to stderr (L2) at body line |"
+
+  # L3/L4. A `WORD:` marker at column 0 of an emitted line, on stdout, outside
+  # the vocabulary. `printf '    ok ...'` and `echo "==> ..."` do not match:
+  # the marker must be an unindented ALL-CAPS word followed by a colon.
+  printf '%s' "$body" \
+    | grep -vE '>&2' \
+    | grep -nE "(echo|printf)[[:space:]]+['\"][A-Z][A-Z_]+:" \
+    | grep -vE "['\"]($VERDICT_VOCABULARY) " \
+    | sed "s|^|$gate: emits a non-vocabulary verdict marker on stdout (L3/L4) at body line |"
+}
+
+run_verdict_contract() {
+  local -a gates=()
+  local gate inventory violations total=0 conformant=0
+
+  if [ ! -r "$CHECKER_INDEX" ]; then
+    echo "ERROR: cannot read $CHECKER_INDEX — refusing to report the verdict contract as checked" >&2
+    return 1
+  fi
+  inventory="$(verdict_contract_gate_list "$CHECKER_INDEX")"
+  [ -n "$inventory" ] && mapfile -t gates <<<"$inventory"
+  # CONTROL. An empty list makes every verdict below quantified over nothing,
+  # and "no gates exist" is indistinguishable from "the reader is broken".
+  # scripts/check.sh is itself in the list, so 1 is the floor and 0 is never
+  # correct. The nine registered script gates make 10 the value at fgdb-udco.
+  if [ "${#gates[@]}" -lt 2 ]; then
+    echo "ERROR: enumerated ${#gates[@]} gate(s) from the checker index; a list this short" >&2
+    echo "  cannot be distinguished from a broken reader, so it is a violation not a pass" >&2
+    return 1
+  fi
+
+  for gate in "${gates[@]}"; do
+    total=$((total + 1))
+    violations="$(verdict_contract_violations "$ROOT" "$gate")"
+    if [ -z "$violations" ]; then
+      conformant=$((conformant + 1))
+    else
+      echo "ERROR: verdict-contract violation(s):" >&2
+      printf '%s\n' "$violations" | sed 's/^/  /' >&2
+    fi
+  done
+  if [ "$conformant" -ne "$total" ]; then
+    echo "ERROR: $((total - conformant)) of $total gates do not report under the shared" >&2
+    echo "  verdict contract (scripts/lib/gate_verdict.sh). A gate whose failure token" >&2
+    echo "  differs from what its readers grep for is green to every automated reader." >&2
+    return 1
+  fi
+  echo "    verdict contract: $conformant/$total gates conformant (vocabulary ${VERDICT_VOCABULARY//|/, }; stdout only)"
+}
+
 # gate_tracked_sources <pathspec>... -> NUL-separated tracked paths on stdout
 #
 # THE INPUT-SET LAW, and it is general, not a UBS workaround: a gate's domain
@@ -463,20 +615,20 @@ record_registered_result() {
       REGISTERED_EXECUTED=$((REGISTERED_EXECUTED + 1))
       REGISTERED_PASSED=$((REGISTERED_PASSED + 1))
       increment_registered_kind_executed "$kind"
-      echo "PASS registered $kind $artifact — $detail"
+      gate_pass "registered $kind $artifact — $detail"
       ;;
     red)
       REGISTERED_EXECUTED=$((REGISTERED_EXECUTED + 1))
       REGISTERED_RED=$((REGISTERED_RED + 1))
       increment_registered_kind_executed "$kind"
-      # Both tokens, both anchored, both on stdout. See THE REPORTING CONTRACT.
-      echo "RED registered $kind $artifact — $detail"
-      echo "FAIL registered $kind $artifact — $detail"
+      # RED/UNRUN are the refinements, FAIL is the contract token. Both anchored,
+      # both on stdout, emitted together. See THE REPORTING CONTRACT.
+      printf 'RED registered %s %s — %s\n' "$kind" "$artifact" "$detail"
+      gate_fail "registered $kind $artifact — $detail"
       ;;
     unrun)
       REGISTERED_UNRUN=$((REGISTERED_UNRUN + 1))
-      echo "UNRUN registered $kind $artifact — $detail"
-      echo "FAIL registered $kind $artifact — $detail"
+      gate_unrun "registered $kind $artifact — $detail"
       ;;
     *)
       echo "internal error: unknown registered outcome $outcome" >&2
@@ -801,6 +953,209 @@ verdict_stream_control() {
   return 0
 }
 
+# THE CONTROLS FOR THE VERDICT CONTRACT (bead fgdb-udco).
+#
+# Two halves, and both are needed. The LAW half plants one rogue gate per law
+# and asserts the guard names it — a guard that never fires is a decoration.
+# The CONFORMANT half plants a gate that obeys the contract and asserts the
+# guard stays silent — without it, a guard hard-wired to `return 1` would pass
+# every law test. The BEHAVIOURAL half then runs a conformant gate that actually
+# fails and asserts the contract query catches it on stdout alone, which is the
+# property every other assertion here is a proxy for.
+verdict_contract_control() {
+  local skip_rc unrun_rc
+  local work="$1"
+  local root="$work/contract-root"
+  local got
+
+  mkdir -p "$root/scripts/lib" || return 1
+  cp "$GATE_VERDICT_LIB" "$root/scripts/lib/gate_verdict.sh" || return 1
+
+  contract_case() { # name, body, expected-substring-or-empty, label
+    local name="$1" body="$2" want="$3" label="$4" out
+    printf '%s\n' "$body" >"$root/scripts/$name"
+    out="$(verdict_contract_violations "$root" "scripts/$name")"
+    if [ -z "$want" ]; then
+      if [ -n "$out" ]; then
+        echo "SELF-TEST RED: $label was flagged but conforms: $out" >&2
+        return 1
+      fi
+    else
+      case "$out" in
+        *"$want"*) ;;
+        *)
+          echo "SELF-TEST RED: $label was not flagged ($want); got: ${out:-<nothing>}" >&2
+          return 1
+          ;;
+      esac
+    fi
+    return 0
+  }
+
+  # The conformant control. If this is ever flagged, every law below is vacuous.
+  contract_case conformant.sh \
+'#!/usr/bin/env bash
+ROOT=.
+. "$ROOT/scripts/lib/gate_verdict.sh"
+gate_init "conformant"
+gate_pass "an assertion that held"
+gate_fail "an assertion that did not"
+echo "ERROR: why it did not" >&2
+gate_verdict' \
+    "" "a gate that obeys the contract" || return 1
+
+  # L1 — a gate that reports on its own, with no shared emitter behind it.
+  contract_case rogue_unsourced.sh \
+'#!/usr/bin/env bash
+echo "PASS something"
+echo "FAIL something else"' \
+    "does not source" "a gate that never sources the contract library" || return 1
+
+  # L1, second half. Sourcing the library is not conforming to it: without
+  # gate_init there is no EXIT trap, so a `set -e` abort produces no FAIL line
+  # at all. FOUND BY THE MUTATION MATRIX — silencing this check left the
+  # self-test green, because every other fixture here either does both or
+  # neither, so the assertion was quantified over nothing.
+  contract_case rogue_no_init.sh \
+'#!/usr/bin/env bash
+ROOT=.
+. "$ROOT/scripts/lib/gate_verdict.sh"
+gate_pass "sourced the library but installed no trap"' \
+    "never calls gate_init" "a gate that sources the library but skips gate_init" || return 1
+
+  # The next three fixtures ASSEMBLE their rogue line through a `%s` rather
+  # than writing it literally, and that is not cosmetic. check.sh is itself in
+  # the gate list, so a literal `echo "BROKEN: ..."` here is indistinguishable —
+  # to a static reader of shell source — from check.sh actually emitting one.
+  # MEASURED: written literally, all three tripped the guard against check.sh
+  # itself and the gate went red 1-of-10 on a conformant tree. A guard whose
+  # subject contains its own fixtures is reporting on the wrong thing; building
+  # the marker removes the ambiguity instead of special-casing the file. A real
+  # rogue is still a literal and is still caught.
+  rogue_line() { # <marker-and-rest> -> a fixture body ending in that echo
+    printf '#!/usr/bin/env bash\nROOT=.\n. "$ROOT/scripts/lib/gate_verdict.sh"\ngate_init "rogue"\necho "%s"%s\n' \
+      "$1" "${2:-}"
+  }
+
+  # L2 — the right token on the wrong stream. This is the seven-of-ten defect.
+  contract_case rogue_stderr.sh "$(rogue_line 'FAIL it broke' ' >&2')" \
+    "writes a contract token to stderr" "a gate emitting FAIL to stderr" || return 1
+
+  # L3 — the eleventh token. This is the case the whole guard exists for.
+  contract_case rogue_token.sh "$(rogue_line 'BROKEN: it broke')" \
+    "non-vocabulary verdict marker" "a gate inventing an eleventh token" || return 1
+
+  # L4 — the near-miss. `PASS:` is not `PASS `, and g0_topology_e2e.sh really
+  # ended this way before fgdb-udco.
+  contract_case rogue_colon.sh "$(rogue_line 'PASS: g0_something')" \
+    "non-vocabulary verdict marker" "a gate using PASS: instead of PASS " || return 1
+
+  # An unreadable gate must be a violation, never a pass — fail closed.
+  got="$(verdict_contract_violations "$root" "scripts/does_not_exist.sh")"
+  case "$got" in
+    *unreadable*) ;;
+    *)
+      echo "SELF-TEST RED: an unreadable gate did not fail closed; got: ${got:-<nothing>}" >&2
+      return 1
+      ;;
+  esac
+
+  # THE BEHAVIOURAL HALF. Run the conformant fixture for real, capture the two
+  # streams separately, and assert the contract query answers correctly from
+  # stdout alone — the property the static laws above are a proxy for.
+  ( cd "$root" && bash scripts/conformant.sh ) \
+    >"$work/contract-run.out" 2>"$work/contract-run.err"
+  if [ "$(grep -cE '^FAIL ' "$work/contract-run.out")" -ne 1 ]; then
+    echo "SELF-TEST RED: the contract query found no FAIL on a failing conformant gate" >&2
+    return 1
+  fi
+  if [ "$(grep -cE '^PASS ' "$work/contract-run.out")" -ne 1 ]; then
+    echo "SELF-TEST RED: a conformant gate's PASS line is missing from stdout" >&2
+    return 1
+  fi
+  if grep -qE '^(PASS|FAIL|RED|UNRUN) ' "$work/contract-run.err"; then
+    echo "SELF-TEST RED: a conformant gate wrote a verdict line to stderr" >&2
+    return 1
+  fi
+
+  # And the exit-code-derived line: a gate that dies before any assertion still
+  # reports FAIL. This is the path no per-site conversion could have covered.
+  printf '%s\n' \
+'#!/usr/bin/env bash
+set -euo pipefail
+ROOT=.
+. "$ROOT/scripts/lib/gate_verdict.sh"
+gate_init "aborts"
+false
+gate_pass "never reached"' >"$root/scripts/aborts.sh"
+  ( cd "$root" && bash scripts/aborts.sh ) >"$work/contract-abort.out" 2>/dev/null
+  if [ "$(grep -cE '^FAIL ' "$work/contract-abort.out")" -ne 1 ]; then
+    echo "SELF-TEST RED: a set -e abort produced no FAIL line on stdout" >&2
+    return 1
+  fi
+
+  # THE THIRD STATE. `ran and passed`, `ran and failed`, `did not run` — and
+  # only the first is green. This fixture is the identity.rs shape at gate
+  # scope: a guard clause skips the whole body and the script falls off the end
+  # with status 0, so silence reads as success. It must report UNRUN, must
+  # carry the FAIL token so the single query sees it, must NOT emit PASS, and
+  # must exit nonzero.
+  printf '%s\n' \
+'#!/usr/bin/env bash
+set -euo pipefail
+ROOT=.
+. "$ROOT/scripts/lib/gate_verdict.sh"
+gate_init "skips_everything"
+if [ ! -e "/nonexistent-corpus" ]; then
+  exit 0
+fi
+gate_pass "never reached"' >"$root/scripts/skips.sh"
+  ( cd "$root" && bash scripts/skips.sh ) \
+    >"$work/contract-skip.out" 2>/dev/null
+  skip_rc=$?
+  if [ "$skip_rc" -eq 0 ]; then
+    echo "SELF-TEST RED: a gate that executed no assertions exited 0" >&2
+    return 1
+  fi
+  if [ "$(grep -cE '^UNRUN ' "$work/contract-skip.out")" -ne 1 ]; then
+    echo "SELF-TEST RED: a gate that executed no assertions emitted no UNRUN line" >&2
+    return 1
+  fi
+  if [ "$(grep -cE '^FAIL ' "$work/contract-skip.out")" -ne 1 ]; then
+    echo "SELF-TEST RED: an UNRUN gate is invisible to the '^FAIL ' query" >&2
+    return 1
+  fi
+  if grep -qE '^PASS ' "$work/contract-skip.out"; then
+    echo "SELF-TEST RED: a gate that executed no assertions emitted the passing token" >&2
+    return 1
+  fi
+
+  # And gate_unrun itself: the refinement and the contract token together, and
+  # a verdict that is not green over it.
+  printf '%s\n' \
+'#!/usr/bin/env bash
+ROOT=.
+. "$ROOT/scripts/lib/gate_verdict.sh"
+gate_init "one_unrun"
+gate_pass "a check that ran"
+gate_unrun "a check that could not run: its corpus is absent"
+gate_verdict' >"$root/scripts/one_unrun.sh"
+  ( cd "$root" && bash scripts/one_unrun.sh ) \
+    >"$work/contract-unrun.out" 2>/dev/null
+  unrun_rc=$?
+  if [ "$unrun_rc" -eq 0 ]; then
+    echo "SELF-TEST RED: a gate with one UNRUN check reported a green verdict" >&2
+    return 1
+  fi
+  if [ "$(grep -cE '^UNRUN ' "$work/contract-unrun.out")" -ne 1 ] \
+    || [ "$(grep -cE '^FAIL ' "$work/contract-unrun.out")" -ne 1 ] \
+    || [ "$(grep -cE '^PASS ' "$work/contract-unrun.out")" -ne 1 ]; then
+    echo "SELF-TEST RED: gate_unrun did not emit exactly UNRUN + FAIL beside the PASS" >&2
+    return 1
+  fi
+  return 0
+}
+
 run_mutation_self_test() {
   local work
   local fixture_root
@@ -949,6 +1304,7 @@ EOF
   fi
 
   verdict_stream_control "$work" || return 1
+  verdict_contract_control "$work" || return 1
 
   echo "CHECK.SH MUTATION SELF-TEST PASS"
   echo "  failing registered gate: RED"
@@ -957,6 +1313,10 @@ EOF
   echo "  unrun cargo-test artifact: UNRUN and nonzero"
   echo "  reporting contract: every verdict on stdout, under both ^RED and ^FAIL,"
   echo "    and absent from a green run's stdout (streams captured separately)"
+  echo "  verdict contract: conformant gate silent; L1/L2/L3/L4 rogues each named;"
+  echo "    unreadable gate fails closed; a set -e abort still emits ^FAIL"
+  echo "  three states: a gate executing no assertions reports UNRUN + FAIL, never"
+  echo "    PASS, and exits nonzero; gate_unrun emits both tokens exactly once"
   echo "  evidence retained at $work"
 }
 
@@ -977,12 +1337,19 @@ cd "$ROOT" || exit 1
 GATE_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-check-gates.XXXXXX")"
 echo "gate logs: $GATE_LOG_DIR"
 
+# Installed here, not at load: --self-test runs fixtures in subshells, and a
+# bash subshell inherits and fires the parent's EXIT trap.
+gate_init "check.sh"
+
 run_core_gate \
   "file-coverage closure (every tracked file inspected or declared)" \
   run_file_coverage
 run_core_gate \
   "shell lint (bash -n + shellcheck) over tracked shell deliverables" \
   run_shell_lint
+run_core_gate \
+  "verdict-contract closure (every gate reports under one token on one stream)" \
+  run_verdict_contract
 run_core_gate "cargo fmt --check" cargo fmt --check
 run_core_gate "cargo check --all-targets" cargo check --all-targets
 run_core_gate "cargo clippy --all-targets -- -D warnings" \

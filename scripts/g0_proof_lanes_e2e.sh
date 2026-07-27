@@ -37,10 +37,14 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LANES="$ROOT/registries/proof_lanes.toml"
 
-PASS=0
-FAIL=0
 CHECKED_SEEN=0
 TALLY_PRINTED=0
+
+# The shared verdict contract (fgdb-udco). This gate's failure line was both
+# indented ("    FAIL  ...") and on stderr, so a stdout-only capture of a red run
+# carried every ok line and no trace of the failure.
+# shellcheck source=lib/gate_verdict.sh
+. "$ROOT/scripts/lib/gate_verdict.sh"
 
 # ONE READER of "what does an admitted Lean proof look like". The self-test below
 # and the detector in the lean branch must use the SAME string, or the self-test
@@ -48,16 +52,16 @@ TALLY_PRINTED=0
 # exactly what red-proof caught when this was three separate literals.
 ADMIT_PATTERN="declaration uses .sorry."
 
-pass() { PASS=$((PASS + 1)); printf '    ok    %s\n' "$1"; }
-fail() { FAIL=$((FAIL + 1)); printf '    FAIL  %s\n' "$1" >&2; }
+pass() { gate_pass "$1"; }
+fail() { gate_fail "$1"; }
 
 print_tally() {
   [ "$TALLY_PRINTED" -eq 1 ] && return 0
   TALLY_PRINTED=1
   echo
-  echo "  proof-lane gate: $PASS passed, $FAIL failed, $CHECKED_SEEN checked lane(s) run"
+  echo "  proof-lane gate: $GATE_PASS passed, $GATE_FAIL failed, $GATE_UNRUN unrun, $CHECKED_SEEN checked lane(s) run"
 }
-trap print_tally EXIT
+gate_init "g0_proof_lanes_e2e" print_tally
 
 echo "== g0 proof-lane gate =="
 
@@ -217,5 +221,8 @@ if [ "$CHECKED_SEEN" -eq 0 ]; then
 fi
 
 print_tally
-[ "$FAIL" -eq 0 ] || exit 1
+# Three states, not two: an UNRUN lane is not a passing lane (fgdb-udco).
+if [ "$GATE_FAIL" -ne 0 ] || [ "$GATE_UNRUN" -ne 0 ]; then
+  exit 1
+fi
 exit 0

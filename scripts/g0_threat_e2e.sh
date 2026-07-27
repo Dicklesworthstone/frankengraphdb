@@ -17,6 +17,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# The shared verdict contract (fgdb-udco). Fail-fast under `set -e` with no
+# assertion-level emitter: the EXIT trap derives the `FAIL` line on stdout from
+# the exit code, so a path that dies without printing anything still reports.
+# The existing `echo "ERROR: ..." >&2` sites are diagnostics and stay unchanged.
+# shellcheck source=lib/gate_verdict.sh
+. "$ROOT/scripts/lib/gate_verdict.sh"
+gate_init "g0_threat_e2e"
+
 EVIDENCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-threat-e2e.XXXXXX")"
 FIRST="$EVIDENCE_DIR/first.ndjson"
 SECOND="$EVIDENCE_DIR/second.ndjson"
@@ -310,4 +318,4 @@ rg -q 'claim-scan\[TMS-1\] docs/THREAT_AND_TRUST_MODEL\.md:[0-9]+:' "$OVERREACH_
 echo "==> run the attenuation property and typed mutation suite"
 cargo test -p registry-check --test threat_model
 
-echo "THREAT MODEL E2E GREEN; retained deterministic evidence: $EVIDENCE_DIR"
+gate_pass "THREAT MODEL E2E GREEN; retained deterministic evidence: $EVIDENCE_DIR"

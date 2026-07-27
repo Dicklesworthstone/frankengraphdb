@@ -44,16 +44,38 @@
 # 2. ONE TOKEN.   Every failure emits an anchored `FAIL ` line at column 0.
 #    `grep -c '^FAIL ' <stdout>` is THE query, and it is total over all ten
 #    gates. `PASS ` is its counterpart. A gate MAY additionally emit `RED ` and
-#    `UNRUN ` as refinements (scripts/check.sh distinguishes a gate that ran and
-#    failed from one that never ran), but only BESIDE a FAIL line, never instead
-#    of one — so the single query never has to know which gate it is reading.
-#    The vocabulary is closed: PASS, FAIL, RED, UNRUN. Nothing else may appear
-#    at column 0 of stdout.
+#    `UNRUN ` as refinements, but only BESIDE a FAIL line, never instead of one
+#    — so the single query never has to know which gate it is reading. The
+#    vocabulary is closed: PASS, FAIL, RED, UNRUN. Nothing else may appear at
+#    column 0 of stdout.
 #
-# 3. ONE EXIT DISCIPLINE.  Exit 0 if and only if zero FAIL lines were emitted
-#    and the gate reached its verdict. THE EXIT CODE REMAINS AUTHORITATIVE — the
-#    tokens exist so that a reader who greps anyway gets a true answer, not so
-#    that grepping becomes the right way to read a gate.
+# 3. THREE STATES, NOT TWO.  `ran and passed`, `ran and failed`, and `DID NOT
+#    RUN` are three distinct outcomes, and only the first is green. A check that
+#    did not execute its assertions MUST NOT emit the passing token. This is the
+#    same doctrine fgdb-1nqb states for guards, said once here for everything.
+#
+#    WHY IT IS IN THE CONTRACT AND NOT A FOOTNOTE. pane3 mutation-proved on
+#    2026-07-27 that tools/registry-check/tests/identity.rs returns early and
+#    reports `ok. 1 passed` when `.beads/issues.jsonl` is absent: 6 of its 7
+#    assertions and the ONLY witness for ten violation codes are skipped, and
+#    the suite still reports passing. Two quiet roots differing only by
+#    `--exclude='.beads/*'` — separate compiles, because `repo_root()` is
+#    compile-time — ran 5.23s WITH the corpus and 1.06s WITHOUT, and the marker
+#    printed only in the first. The trigger is routine and ours: rch remote
+#    workers do not sync `.beads`, so every offloaded run of that test was
+#    silently vacuous. UNTIL THAT IS FIXED, RUN ANY SUITE THAT READS `.beads`
+#    LOCALLY, NOT THROUGH rch.
+#
+#    A gate that fails invisibly and a test that skips invisibly are the same
+#    defect wearing different clothes: the first is a red nobody's query can
+#    see, the second is a green nobody earned. `gate_verdict` and the EXIT trap
+#    below both refuse to report green over zero executed assertions, so a gate
+#    that skips its whole body reports UNRUN rather than falling through silent.
+#
+# 4. ONE EXIT DISCIPLINE.  Exit 0 if and only if zero FAIL lines AND zero UNRUN
+#    lines were emitted and the gate reached its verdict. THE EXIT CODE REMAINS
+#    AUTHORITATIVE — the tokens exist so that a reader who greps anyway gets a
+#    true answer, not so that grepping becomes the right way to read a gate.
 #
 # -----------------------------------------------------------------------------
 # WHY THE TRAP IS THE LOAD-BEARING PART
@@ -72,6 +94,7 @@
 GATE_NAME=""
 GATE_PASS=0
 GATE_FAIL=0
+GATE_UNRUN=0
 GATE_TALLY_HOOK=""
 GATE_CONTRACT_LINE_EMITTED=0
 
@@ -88,6 +111,7 @@ gate_init() {
   GATE_TALLY_HOOK="${2:-}"
   GATE_PASS=0
   GATE_FAIL=0
+  GATE_UNRUN=0
   GATE_CONTRACT_LINE_EMITTED=0
   trap gate_on_exit EXIT
 }
@@ -109,6 +133,17 @@ gate_fail() {
   printf 'FAIL %s\n' "$*"
 }
 
+# gate_unrun <detail> — the third state: an assertion or artifact that DID NOT
+# EXECUTE. Emits the refinement AND the contract token, because "did not run" is
+# not green and the single `^FAIL ` query must see it. Reach for this whenever a
+# check is skipped — a missing corpus, an absent toolchain, a fixture that could
+# not be built — instead of returning early and letting silence read as success.
+gate_unrun() {
+  GATE_UNRUN=$((GATE_UNRUN + 1))
+  printf 'UNRUN %s\n' "$*"
+  printf 'FAIL %s\n' "$*"
+}
+
 # gate_diag <line...> — the WHY. stderr, unconstrained, never a verdict.
 gate_diag() {
   printf '%s\n' "$*" >&2
@@ -127,10 +162,20 @@ gate_die() {
   exit 1
 }
 
-# gate_verdict — the tally line; returns nonzero when anything failed.
+# gate_verdict — the three-state tally; nonzero when anything failed OR did not
+# run.
+#
+# THE ZERO IS LICENSED BY ACCOUNTING, not by finding nothing. A gate that
+# reaches its verdict having executed NO assertions has not passed; it has not
+# run, and reporting it green is the identity.rs defect at gate scope. So zero
+# recorded outcomes is itself an UNRUN.
 gate_verdict() {
-  printf '%s: %d passed, %d failed\n' "$GATE_NAME" "$GATE_PASS" "$GATE_FAIL"
-  [ "$GATE_FAIL" -eq 0 ]
+  if [ $((GATE_PASS + GATE_FAIL + GATE_UNRUN)) -eq 0 ]; then
+    gate_unrun "$GATE_NAME: reached its verdict having executed no assertions"
+  fi
+  printf '%s: %d passed, %d failed, %d unrun\n' \
+    "$GATE_NAME" "$GATE_PASS" "$GATE_FAIL" "$GATE_UNRUN"
+  [ "$GATE_FAIL" -eq 0 ] && [ "$GATE_UNRUN" -eq 0 ]
 }
 
 # gate_on_exit — the EXIT trap. `local rc=$?` MUST be the first statement.
@@ -144,8 +189,23 @@ gate_on_exit() {
   if [ -n "$GATE_TALLY_HOOK" ]; then
     "$GATE_TALLY_HOOK" "$rc" || true
   fi
+  # A GREEN EXIT OVER ZERO EXECUTED ASSERTIONS IS THE THIRD STATE, NOT THE
+  # FIRST. This is the path that catches a gate whose body was skipped whole —
+  # a guard clause that returned early, a corpus that was not there — which
+  # otherwise exits 0 in silence and reads as a pass. The trap overrides the
+  # status, so "did not run" cannot be reported green.
+  if [ "$GATE_CONTRACT_LINE_EMITTED" -eq 0 ] && [ "$rc" -eq 0 ] \
+    && [ $((GATE_PASS + GATE_FAIL + GATE_UNRUN)) -eq 0 ]; then
+    GATE_CONTRACT_LINE_EMITTED=1
+    gate_unrun "${GATE_NAME:-gate}: exited 0 having executed no assertions"
+    exit 1
+  fi
+  # An UNRUN already carries the FAIL token, so it counts as "reported". Testing
+  # GATE_FAIL alone here emitted a SECOND FAIL line for a gate whose only
+  # not-passing outcome was an UNRUN, which broke `grep -c '^FAIL '` as an exact
+  # count. Found by the gate_unrun control, not by reading.
   if [ "$GATE_CONTRACT_LINE_EMITTED" -eq 0 ] \
-    && [ "$rc" -ne 0 ] && [ "$GATE_FAIL" -eq 0 ]; then
+    && [ "$rc" -ne 0 ] && [ $((GATE_FAIL + GATE_UNRUN)) -eq 0 ]; then
     GATE_CONTRACT_LINE_EMITTED=1
     printf 'FAIL %s: exited %s without reporting a failure; every assertion after that point did not run\n' \
       "${GATE_NAME:-gate}" "$rc"

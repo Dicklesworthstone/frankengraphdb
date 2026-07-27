@@ -53,6 +53,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# The shared verdict contract (fgdb-udco). Fail-fast under `set -e` with no
+# assertion-level emitter: the EXIT trap derives the `FAIL` line on stdout from
+# the exit code. The existing `echo "ERROR: ..." >&2` sites are diagnostics and
+# stay unchanged.
+# shellcheck source=lib/gate_verdict.sh
+. "$ROOT/scripts/lib/gate_verdict.sh"
+gate_init "w1_cross_crate_determinism_e2e"
+
 # Resolved to a real command, not a shell function: source_pin() pipes it
 # through xargs, and xargs cannot invoke a function. Getting this wrong fails
 # in the worst possible way — measured, not theorised. `xargs some_function`
@@ -312,6 +320,6 @@ SET_HASH="$(LC_ALL=C "${SHA256_CMD[@]}" <"$EVIDENCE_DIR/n1.tests" | cut -d' ' -f
 
 echo "==> sorted-set hash over $TESTS (binary#block, test, outcome) triples"
 echo "    $SET_HASH"
-echo "cross-crate determinism E2E GREEN: $CRATES engine crates, $BLOCKS result blocks, $TESTS tests"
+gate_pass "cross-crate determinism E2E GREEN: $CRATES engine crates, $BLOCKS result blocks, $TESTS tests"
 echo "  HEAD=$HEAD_BEFORE source=$PIN_BEFORE"
 echo "  retained deterministic evidence: $EVIDENCE_DIR"

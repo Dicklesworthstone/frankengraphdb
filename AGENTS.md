@@ -195,13 +195,46 @@ stderr only** — so `gate.sh > log` and then reading `log` yields a plausible,
 complete-looking, all-green transcript of a red run. A pane read
 `scripts/check.sh` that way and landed a commit on it.
 
-`scripts/check.sh` has since been fixed (`fgdb-checksh-red-not-fail-vbhd`): its
-whole verdict transcript is on **stdout**, stderr carries diagnostics only, and
-every failed gate emits both an anchored `RED`/`UNRUN` line and an anchored
-`FAIL` alias line, so `grep -c '^RED'`, `'^UNRUN'`, `'^FAIL'` and `'^PASS'` each
-count exactly one thing. The other nine gates still have their own token and
-stream — until that is uniform, **the exit code is the only instrument that is
-right about all of them.**
+All ten now report under one shared contract (`fgdb-udco`), defined once in
+[`scripts/lib/gate_verdict.sh`](scripts/lib/gate_verdict.sh) and sourced by
+every gate:
+
+- **One stream.** The verdict transcript is **stdout**. stderr carries only the
+  diagnostics explaining *why*, and is unconstrained.
+- **One token.** Every failure emits an anchored `FAIL ` line at column 0.
+  `grep -c '^FAIL ' <stdout>` is the query, and it is total over all ten gates.
+  `PASS ` is its counterpart. `scripts/check.sh` additionally emits `RED ` and
+  `UNRUN ` as refinements — always *beside* a `FAIL` line, never instead of one.
+  The vocabulary is closed: `PASS`, `FAIL`, `RED`, `UNRUN`.
+- **Three states, not two.** *ran and passed*, *ran and failed*, and **did not
+  run** — and only the first is green. A check that did not execute its
+  assertions must not emit the passing token. `gate_unrun` emits `UNRUN ` plus
+  the `FAIL ` token, and both `gate_verdict` and the `EXIT` trap refuse to
+  report green over **zero executed assertions**, so a gate whose body was
+  skipped whole reports `UNRUN` instead of falling through silent.
+- **One exit discipline.** Exit `0` iff zero `FAIL` and zero `UNRUN` lines were
+  emitted and the gate reached its verdict. The library's `EXIT` trap derives
+  the `FAIL` line from the exit code, so a gate that dies on an unguarded
+  `set -e` abort still reports one.
+
+> **Running a suite that reads `.beads/`** — do it **locally, not through
+> `rch`.** Remote workers do not sync `.beads/`, and
+> `tools/registry-check/tests/identity.rs` returns early and reports
+> `ok. 1 passed` when `.beads/issues.jsonl` is absent: 6 of its 7 assertions and
+> the only witness for ten violation codes are skipped. Mutation-proven
+> 2026-07-27 — two quiet roots differing only by `--exclude='.beads/*'`, 5.23s
+> with the corpus and 1.06s without. A test that skips invisibly and a gate that
+> fails invisibly are the same defect; the third state above is the contract's
+> answer to it.
+
+The **verdict-contract closure** core gate in `scripts/check.sh` enforces this:
+it enumerates the gate set from `registries/checker_index.toml` at run time, so
+a newly registered gate is in scope the moment it is registered, and it fails
+closed. A new gate that invents an eleventh token, writes a verdict to stderr,
+or never sources the library turns that gate red.
+
+**None of this makes grepping the right way to read a gate.** The tokens exist
+so a reader who greps anyway gets a true answer. `$?` is still the verdict.
 
 ### The `cargo test` gate (green-bar requirement)
 

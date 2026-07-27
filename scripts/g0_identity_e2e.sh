@@ -107,11 +107,17 @@ catalog_closure_census() {
 }
 WORK="${G0_E2E_WORKDIR:-$(mktemp -d)}"
 BIN="$WORK/bin/registry-check"
-PASS=0
-FAIL=0
+
+# The shared verdict contract (fgdb-udco). Before it, this gate said
+# "[g0-identity-e2e] FAIL: ..." — the token was right but the prefix pushed it
+# off column 0, so `grep '^FAIL'` returned 0 on a red run. ok()/die() now
+# delegate; the counters live in the library so there is one place they can
+# drift from.
+# shellcheck source=lib/gate_verdict.sh
+. "$ROOT/scripts/lib/gate_verdict.sh"
 
 log() { printf '[g0-identity-e2e] %s\n' "$*"; }
-ok()  { PASS=$((PASS + 1)); log "PASS: $*"; }
+ok()  { gate_pass "$*"; }
 # An ASSERTION failure is recorded and the run continues; it does not end the
 # run. This matches g0_claims_e2e.sh:26 and g0_spine_e2e.sh:49, which have
 # always been written this way -- this file was the one outlier, and its die()
@@ -129,7 +135,7 @@ ok()  { PASS=$((PASS + 1)); log "PASS: $*"; }
 # `exit 2` (the subject failed to build, or the artifact is not this tree's).
 # Those invalidate every assertion after them, so continuing would manufacture
 # failures rather than report them.
-die() { FAIL=$((FAIL + 1)); log "FAIL: $*"; }
+die() { gate_fail "$*"; }
 
 # Fail-slow becomes fail-never if the run dies before the verdict prints. Under
 # `set -e` any unguarded command can do that -- a derivation helper refusing to
@@ -137,13 +143,15 @@ die() { FAIL=$((FAIL + 1)); log "FAIL: $*"; }
 # reached. This trap makes the count unconditional, and says plainly that the
 # rest did not run rather than letting a truncated log read like a whole one.
 VERDICT_REACHED=0
+# The exit code arrives as $1: this now runs as gate_on_exit's tally hook, so
+# `$?` here would be the library's last command, not the script's exit status.
 report_partial_tally() {
-  local rc=$?
+  local rc="$1"
   [ "$VERDICT_REACHED" -eq 1 ] && return 0
-  log "ABORTED before the verdict (exit $rc): $PASS passed, $FAIL failed so far; every assertion after this point did not run"
+  log "ABORTED before the verdict (exit $rc): $GATE_PASS passed, $GATE_FAIL failed so far; every assertion after this point did not run"
   return 0
 }
-trap report_partial_tally EXIT
+gate_init "g0_identity_e2e" report_partial_tally
 
 # Match required JSON fragments on one line without depending on field order.
 # This deliberately recognizes only exact fragments; it is not a permissive
@@ -1823,6 +1831,5 @@ else
 fi
 log "evidence: $WORK/{appendix-baseline,identity-baseline,neg-future,neg-placement,neg-experimental,neg-recipe,neg-schema-version,neg-unknown-top-level,neg-unknown-row,neg-registry-epoch,neg-released-reuse,neg-missing-union-arm,neg-extra-union-arm,neg-reference-union-name-collision,neg-union-role,neg-appendix-bead,neg-appendix-redaction,neg-appendix-source,neg-appendix-projection,neg-appendix-target,neg-appendix-semantic-owner,neg-appendix-row-id,neg-appendix-g0-owner,neg-appendix-complete,neg-appendix-reference-source,neg-appendix-target-assignment,neg-appendix-source-owner,neg-appendix-repository-bindings,neg-appendix-unrelated-bindings,neg-appendix-annotation-placeholder,neg-appendix-annotation-reference,neg-appendix-maintenance,neg-appendix-unknown-key,neg-appendix-completion-schema,neg-appendix-projection-schema,neg-appendix-generate-write,appendix-generate-first,appendix-generate-second,appendix-regenerate-first,appendix-regenerate-second,appendix-regenerate-third}.jsonl"
 VERDICT_REACHED=1
-log "result: $PASS passed, $FAIL failed"
-[ "$FAIL" -eq 0 ] || exit 1
+gate_verdict || exit 1
 log "G0 identity e2e: ALL GREEN"

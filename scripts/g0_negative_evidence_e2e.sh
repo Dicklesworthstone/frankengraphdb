@@ -45,24 +45,30 @@ BEADS="$ROOT/.beads/issues.jsonl"
 # writer a false positive; floors are the repair.)
 LEDGER_ENTRY_FLOOR=44
 
-PASS=0
-FAIL=0
 TALLY_PRINTED=0
 
-pass() { PASS=$((PASS + 1)); printf '    ok    %s\n' "$1"; }
-fail() { FAIL=$((FAIL + 1)); printf '    FAIL  %s\n' "$1" >&2; }
+# The shared verdict contract (fgdb-udco). This gate was the worst of the ten:
+# its failure line was BOTH indented ("    FAIL  ...", so off column 0) AND on
+# stderr, so `bash scripts/g0_negative_evidence_e2e.sh > log` produced a log with
+# every ok line and no trace of the failure. MEASURED 2026-07-27 on a genuinely
+# red run: `grep -c '^FAIL' ` returned 0 even with BOTH streams merged.
+# shellcheck source=lib/gate_verdict.sh
+. "$ROOT/scripts/lib/gate_verdict.sh"
+
+pass() { gate_pass "$1"; }
+fail() { gate_fail "$1"; }
 
 print_tally() {
   [ "$TALLY_PRINTED" -eq 1 ] && return 0
   TALLY_PRINTED=1
   echo
-  echo "  negative-evidence gate: $PASS passed, $FAIL failed"
-  if [ "$FAIL" -ne 0 ]; then
-    echo "  RED — docs/NEGATIVE_EVIDENCE.md is the memorial AGENTS.md designates;" >&2
-    echo "  a failure here means the doctrine's enforcement clause is unbacked again." >&2
+  echo "  negative-evidence gate: $GATE_PASS passed, $GATE_FAIL failed, $GATE_UNRUN unrun"
+  if [ "$GATE_FAIL" -ne 0 ] || [ "$GATE_UNRUN" -ne 0 ]; then
+    gate_diag "  docs/NEGATIVE_EVIDENCE.md is the memorial AGENTS.md designates;"
+    gate_diag "  a failure here means the doctrine's enforcement clause is unbacked again."
   fi
 }
-trap print_tally EXIT
+gate_init "g0_negative_evidence_e2e" print_tally
 
 echo "== g0 negative-evidence gate =="
 
@@ -326,5 +332,8 @@ ledgered="$(grep -oE '^- \*\*bead\*\*: *[A-Za-z0-9._-]+' "$LEDGER" | awk '{print
 echo "    $closed_total closed beads; $ledgered are ledgered here; residue is unclassified by construction"
 
 print_tally
-[ "$FAIL" -eq 0 ] || exit 1
+# Three states, not two: an UNRUN law is not a passing law (fgdb-udco).
+if [ "$GATE_FAIL" -ne 0 ] || [ "$GATE_UNRUN" -ne 0 ]; then
+  exit 1
+fi
 exit 0

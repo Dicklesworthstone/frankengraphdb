@@ -41,12 +41,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="${G0_E2E_WORKDIR:-$(mktemp -d)}"
 BIN="$WORK/bin/registry-check"
-PASS=0
-FAIL=0
+
+# The shared verdict contract (fgdb-udco). Before it, this gate said
+# "[g0-spine-e2e] FAIL: ..." — the token was right but the prefix pushed it off
+# column 0, so `grep '^FAIL'` returned 0 on a red run. ok()/die() now delegate;
+# the counters live in the library so there is one place they can drift from.
+# shellcheck source=lib/gate_verdict.sh
+. "$ROOT/scripts/lib/gate_verdict.sh"
 
 log() { printf '[g0-spine-e2e] %s\n' "$*"; }
-ok()  { PASS=$((PASS + 1)); log "PASS: $*"; }
-die() { FAIL=$((FAIL + 1)); log "FAIL: $*"; }
+ok()  { gate_pass "$*"; }
+die() { gate_fail "$*"; }
 
 # This gate already records an assertion failure and keeps going, so its verdict
 # can say "3 failed". What it could not say is that it never got there: under
@@ -55,13 +60,15 @@ die() { FAIL=$((FAIL + 1)); log "FAIL: $*"; }
 # reader sees is a PASS line and a raw shell error, with nothing stating that the
 # remaining assertions did not run. A truncated log read exactly like a whole one.
 VERDICT_REACHED=0
+# The exit code arrives as $1: this now runs as gate_on_exit's tally hook, so
+# `$?` here would be the library's last command, not the script's exit status.
 report_partial_tally() {
-  local rc=$?
+  local rc="$1"
   [ "$VERDICT_REACHED" -eq 1 ] && return 0
-  log "ABORTED before the verdict (exit $rc): $PASS passed, $FAIL failed so far; every assertion after this point did not run"
+  log "ABORTED before the verdict (exit $rc): $GATE_PASS passed, $GATE_FAIL failed so far; every assertion after this point did not run"
   return 0
 }
-trap report_partial_tally EXIT
+gate_init "g0_spine_e2e" report_partial_tally
 
 log "work directory: $WORK"
 mkdir -p "$WORK/bin"
@@ -347,6 +354,5 @@ fi
 # --- Verdict -----------------------------------------------------------------
 log "evidence: $WORK/{spine-baseline,spine-neg-21,spine-closure-probe,spine-closure-control,spine-closure-hot}.jsonl"
 VERDICT_REACHED=1
-log "result: $PASS passed, $FAIL failed"
-[ "$FAIL" -eq 0 ] || exit 1
+gate_verdict || exit 1
 log "G0 spine e2e: ALL GREEN"

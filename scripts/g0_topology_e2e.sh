@@ -22,6 +22,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# The shared verdict contract (fgdb-udco). Fail-fast under `set -e` with no
+# assertion-level emitter: the EXIT trap derives the `FAIL` line on stdout from
+# the exit code. This gate already ended with `echo "PASS: g0_topology_e2e"` —
+# anchored, but `PASS:` rather than `PASS `, which is exactly the near-miss the
+# contract's closed vocabulary exists to stop drifting into a fifth token.
+# shellcheck source=lib/gate_verdict.sh
+. "$ROOT/scripts/lib/gate_verdict.sh"
+gate_init "g0_topology_e2e"
+
 EVIDENCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-topology-e2e.XXXXXX")"
 FIRST="$EVIDENCE_DIR/first.ndjson"
 SECOND="$EVIDENCE_DIR/second.ndjson"
@@ -214,4 +223,4 @@ seed_fixture empty-live-edge-floor required_edge_floor_vacuous \
   'required_dependency_live_floor = ["calibrate-over-asupersync"]=>required_dependency_live_floor = []'
 
 echo "==> evidence retained at $EVIDENCE_DIR"
-echo "PASS: g0_topology_e2e"
+gate_pass "g0_topology_e2e"
