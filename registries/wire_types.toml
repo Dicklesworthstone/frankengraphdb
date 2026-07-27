@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 41
+registry_epoch = 42
 
 [[type]]
 wire_type_id = 0x0001
@@ -5705,3 +5705,12 @@ wire_tag = 0x0006
 encoding_context = "arm 0x0006 MetaCancelledBeforeWrite of closed union AuditReceiptValidationResolution (a21:2657); inline payload committed byte-exactly by its source payload digest; exact payload-member registration remains producer-gated"
 allowed_containing_schemas = ["AuditReceiptValidationResolution"]
 max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x054f
+name = "ExternalCasRestoreServicePromotionReceiptRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated tag-refined strong reference whose validator admits only the ExternalCasCataloged RestoreServicePromotionReceipt arm (a20:2593)"
+allowed_containing_schemas = ["GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "ShardRestoreServiceOpenSpec"]
+max_size_bytes = 40

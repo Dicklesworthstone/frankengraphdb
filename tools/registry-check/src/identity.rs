@@ -1208,12 +1208,12 @@ pub fn generic_free_family(name: &str) -> &str {
 /// row, reassigning its code/tag, or silently changing a union arm therefore
 /// fails even when the resulting current snapshot is internally consistent.
 pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
-    const LOGICAL: &str = "fnv1a64:403196d930716d3c";
+    const LOGICAL: &str = "fnv1a64:6452f3a8e435800d";
     const PHYSICAL: &str = "fnv1a64:6eb820a69bc263b2";
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
-    const WIRE: &str = "fnv1a64:707daacb093dad46";
-    const FIELDS: &str = "fnv1a64:724d104f0816cbfa";
+    const WIRE: &str = "fnv1a64:4b6f14e8ebf36d7f";
+    const FIELDS: &str = "fnv1a64:cbd4ab53ddbf3b8b";
 
     let logical = rows_pin(
         r.logical
@@ -1335,7 +1335,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     vec![
         AssignmentPin {
             registry: "logical_object_kinds",
-            expected_epoch: 60,
+            expected_epoch: 61,
             actual_epoch: r.logical_epoch,
             expected_pin: LOGICAL,
             actual_pin: logical,
@@ -1363,14 +1363,14 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
         },
         AssignmentPin {
             registry: "wire_types",
-            expected_epoch: 41,
+            expected_epoch: 42,
             actual_epoch: r.wire_epoch,
             expected_pin: WIRE,
             actual_pin: wire,
         },
         AssignmentPin {
             registry: "durable_fields",
-            expected_epoch: 76,
+            expected_epoch: 77,
             actual_epoch: r.fields_epoch,
             expected_pin: FIELDS,
             actual_pin: fields,
@@ -3163,13 +3163,20 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
     out
 }
 
-/// Iterative three-color DFS over string-keyed edges.
+/// The construction-DAG cycle law, shared by both artifacts that enforce it.
+///
+/// `appendix_a`'s census-level DAG calls this rather than carrying its own
+/// traversal: `dag_cycle` is a law SEPARATE from `dag_future_result` — a graph
+/// can be free of strict future edges and still cycle among equal-order kinds —
+/// so a second implementation would be free to disagree with this one about what
+/// a cycle even is.
 pub(crate) fn find_construction_cycle<'a>(
     edges: &BTreeMap<&'a str, BTreeSet<&'a str>>,
 ) -> Option<Vec<&'a str>> {
     find_cycle_str(edges)
 }
 
+/// Iterative three-color DFS over string-keyed edges.
 fn find_cycle_str<'a>(edges: &BTreeMap<&'a str, BTreeSet<&'a str>>) -> Option<Vec<&'a str>> {
     #[derive(Clone, Copy, PartialEq)]
     enum Color {

@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 60
+registry_epoch = 61
 
 [[kind]]
 object_kind = 0x0001
@@ -1647,6 +1647,15 @@ max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_restore_completion_evidence/"
 
 [[kind]]
+object_kind = 0x031d
+name = "LocalRestoreIndependentReopenProof"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_independent_reopen_proof/"
+
+[[kind]]
 object_kind = 0x031e
 name = "LocalRestoreReadyCertificate"
 status = "reserved"
@@ -2707,6 +2716,15 @@ construction_order = 20
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/restore_no_target_observation_proof/"
+
+[[kind]]
+object_kind = 0x03df
+name = "RestorePromotionRootSeal"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_promotion_root_seal/"
 
 [[kind]]
 object_kind = 0x03e0
@@ -4656,7 +4674,7 @@ golden_corpus = "corpus/logical/global_restore_service_completion_spec/"
 object_kind = 0x0560
 name = "GlobalRestoreServiceFinalizeSpec"
 status = "reserved"
-construction_order = 24
+construction_order = 35
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_restore_service_finalize_spec/"
@@ -4674,7 +4692,7 @@ golden_corpus = "corpus/logical/local_restore_activation_spec/"
 object_kind = 0x0562
 name = "LocalRestoreServiceCompletionSpec"
 status = "reserved"
-construction_order = 35
+construction_order = 40
 role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_restore_service_completion_spec/"
@@ -4867,3 +4885,21 @@ construction_order = 40
 role_predicate = "true"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/remote_grant_retirement_plan_sorted_entries_record/"
+
+[[kind]]
+object_kind = 0x0578
+name = "LocalRestoreServicePrepareSpec"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_service_prepare_spec/"
+
+[[kind]]
+object_kind = 0x0579
+name = "ServiceCatalogPromotionReservationReceipt"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/service_catalog_promotion_reservation_receipt/"

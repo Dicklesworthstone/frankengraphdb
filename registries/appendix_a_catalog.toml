@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3564
+target_count = 3583
 projection_fallback_count = 118
-target_source_assignment_sha256 = "5b98f90cff407e28662e859cc55855d3bbe5aedc93a77bc3c60d5db18686a844"
+target_source_assignment_sha256 = "5eef2dcbca97143d3879dd7123484a8af7ecad1a2f1d5e1b1878dde95b6a942d"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "33e8d9c5f6eb7447608290da8112ba21e20f826b19faaf36b098b2e3
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 60
+registry_epoch = 61
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 41
+registry_epoch = 42
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 76
+registry_epoch = 77
 
 [[logical_kind]]
 slice_id = "a03"
@@ -6238,7 +6238,7 @@ row_id = "a20:logical-kind:global-restore-service-finalize-spec"
 object_kind = 0x0560
 name = "GlobalRestoreServiceFinalizeSpec"
 status = "reserved"
-construction_order = 24
+construction_order = 35
 role_predicate = "role-meta"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/global_restore_service_finalize_spec/"
@@ -6260,7 +6260,7 @@ row_id = "a20:logical-kind:local-restore-service-completion-spec"
 object_kind = 0x0562
 name = "LocalRestoreServiceCompletionSpec"
 status = "reserved"
-construction_order = 35
+construction_order = 40
 role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/local_restore_service_completion_spec/"
@@ -18497,7 +18497,7 @@ cardinality = "one"
 identity_class = "logical"
 reference_semantics = "strong"
 target_schema_id = "GlobalRestoreServicePrepareCertificate"
-construction_order = 24
+construction_order = 35
 role_predicate = "role-meta"
 retention_and_cut_rule = "strong reference to the hidden-service prepare certificate consumed by this finalize command; retained while the finalize spec is retained and cut only with that spec (a20:2597)"
 version_status = "reserved"
@@ -18514,7 +18514,7 @@ cardinality = "many"
 identity_class = "logical"
 reference_semantics = "strong"
 target_schema_id = "RestoreShardServiceReadyAck"
-construction_order = 24
+construction_order = 35
 role_predicate = "role-meta"
 retention_and_cut_rule = "complete sorted certified-remote retention set for the shard ready acknowledgements consumed by this finalize command; retained while the spec is retained and cut only with that spec (a20:2597)"
 version_status = "reserved"
@@ -18530,7 +18530,7 @@ exact_wire_type = "WeakStateIdentity"
 cardinality = "one"
 identity_class = "inline"
 reference_semantics = "none"
-construction_order = 24
+construction_order = 35
 role_predicate = "role-meta"
 retention_and_cut_rule = "comparison-only Meta WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the finalize spec (a20:2597)"
 version_status = "reserved"
@@ -18596,7 +18596,7 @@ cardinality = "one"
 identity_class = "logical"
 reference_semantics = "strong"
 target_schema_id = "LogicalCommandRecord"
-construction_order = 35
+construction_order = 40
 role_predicate = "role-local"
 retention_and_cut_rule = "strong reference to the ordered Local promotion record completed by this command; retained while the completion spec is retained and cut only with that spec (a20:2605)"
 version_status = "reserved"
@@ -18613,7 +18613,7 @@ cardinality = "one"
 identity_class = "logical"
 reference_semantics = "strong"
 target_schema_id = "RestoreServicePromotionReceipt"
-construction_order = 35
+construction_order = 40
 role_predicate = "role-local"
 retention_and_cut_rule = "strong reference to the exact profile promotion receipt completed by this command; retained while the completion spec is retained and cut only with that spec (a20:2605)"
 version_status = "reserved"
@@ -44093,7 +44093,7 @@ symbol = "LocalRestoreIndependentReopenProof"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x031d"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a20:reservation:local-restore-ready-certificate"
@@ -46154,7 +46154,7 @@ symbol = "RestorePromotionRootSeal"
 row_kind = "logical-kind"
 identity_class = "logical"
 code_reservation = "0x03df"
-disposition = "reserved"
+disposition = "existing"
 
 [[reservation]]
 row_id = "a19:reservation:restore-ready-closure-inventory"
@@ -51465,7 +51465,7 @@ symbol = "ExternalCasRestoreServicePromotionReceiptRef"
 generic_signature = ""
 source_key = "top|ExternalCasRestoreServicePromotionReceiptRef"
 source_kind = "name-only"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a20:2593"]
 
 [[top_level_candidate]]
@@ -53685,7 +53685,7 @@ symbol = "LocalRestoreServicePrepareSpec"
 generic_signature = ""
 source_key = "top|LocalRestoreServicePrepareSpec"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a20:2603"]
 
 [[top_level_candidate]]
@@ -58595,7 +58595,7 @@ symbol = "ServiceCatalogPromotionReservationReceipt"
 generic_signature = ""
 source_key = "top|ServiceCatalogPromotionReservationReceipt"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a20:2581"]
 
 [[top_level_candidate]]
@@ -110001,4 +110001,438 @@ target_row_id = "a08:field:remote-grant-retirement-plan-sorted-entries"
 slice_id = "a08"
 source_key = "field|RemoteGrantRetirementPlan|RemoteGrantRetirementPlan.sorted_entries|sorted_entries"
 target_kind = "field"
+definition_status = "declared"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:local-restore-independent-reopen-proof"
+object_kind = 0x031d
+name = "LocalRestoreIndependentReopenProof"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_independent_reopen_proof/"
+
+[[logical_kind]]
+slice_id = "a18"
+row_id = "a18:logical-kind:restore-promotion-root-seal"
+object_kind = 0x03df
+name = "RestorePromotionRootSeal"
+status = "reserved"
+construction_order = 40
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/restore_promotion_root_seal/"
+
+[[logical_kind]]
+slice_id = "a20"
+row_id = "a20:logical-kind:local-restore-service-prepare-spec"
+object_kind = 0x0578
+name = "LocalRestoreServicePrepareSpec"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_restore_service_prepare_spec/"
+
+[[logical_kind]]
+slice_id = "a20"
+row_id = "a20:logical-kind:service-catalog-promotion-reservation-receipt"
+object_kind = 0x0579
+name = "ServiceCatalogPromotionReservationReceipt"
+status = "reserved"
+construction_order = 24
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/service_catalog_promotion_reservation_receipt/"
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:external-cas-restore-service-promotion-receipt-ref"
+wire_type_id = 0x054f
+name = "ExternalCasRestoreServicePromotionReceiptRef"
+kind = "reference_wrapper"
+status = "reserved"
+encoding_context = "generated tag-refined strong reference whose validator admits only the ExternalCasCataloged RestoreServicePromotionReceipt arm (a20:2593)"
+allowed_containing_schemas = ["GlobalRestoreServiceCompletionSpec", "GlobalRestoreServiceFinalizeSpec", "ShardRestoreServiceOpenSpec"]
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-completion-spec-meta-seal-ref"
+containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0003
+stable_name = "meta_seal_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestorePromotionRootSeal"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the exact Meta promotion root seal consumed by completion; retained while the completion spec is retained and cut only with that spec (a20:2601)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-completion-spec-promotion-receipt-ref"
+containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0006
+stable_name = "promotion_receipt_ref"
+exact_wire_type = "ExternalCasRestoreServicePromotionReceiptRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreServicePromotionReceipt"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "tag-refined strong reference to the ExternalCasCataloged promotion receipt whose lineage completion verifies; retained while the completion spec is retained and cut only with that spec (a20:2593,2601)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:global-restore-service-finalize-spec-promotion-receipt-ref"
+containing_schema = "GlobalRestoreServiceFinalizeSpec"
+field_tag = 0x0004
+stable_name = "promotion_receipt_ref"
+exact_wire_type = "ExternalCasRestoreServicePromotionReceiptRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreServicePromotionReceipt"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "tag-refined strong reference to the ExternalCasCataloged promotion receipt finalized by this command; retained while the finalize spec is retained and cut only with that spec (a20:2593,2597)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-completion-spec-seal-ref"
+containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0004
+stable_name = "seal_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestorePromotionRootSeal"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact Local promotion root seal opened by completion; retained while the completion spec is retained and cut only with that spec (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-completion-spec-independent-reopen-proof-ref"
+containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0005
+stable_name = "independent_reopen_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalRestoreIndependentReopenProof"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the fresh-process Local reopen proof consumed by completion; retained while the completion spec is retained and cut only with that spec (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-prepare-spec-expected-local-restore-state"
+containing_schema = "LocalRestoreServicePrepareSpec"
+field_tag = 0x0003
+stable_name = "expected_local_restore_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "role-local"
+retention_and_cut_rule = "comparison-only Local WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the prepare spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-prepare-spec-promotion-authority-profile-recipe"
+containing_schema = "LocalRestoreServicePrepareSpec"
+field_tag = 0x0005
+stable_name = "promotion_authority_profile_recipe"
+exact_wire_type = "LocalRestoreServicePreparePromotionAuthorityProfileRecipe"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "role-local"
+retention_and_cut_rule = "closed source-ordered promotion-authority recipe embedded by value; no arm creates reachability and the union is retained and cut with the prepare spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:restore-shard-operational-ack-seal-ref"
+containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0008
+stable_name = "seal_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestorePromotionRootSeal"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the exact Shard promotion root seal acknowledged operational; retained while the acknowledgement is retained and cut only with it (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:shard-restore-reopen-confirm-spec-seal-ref"
+containing_schema = "ShardRestoreReopenConfirmSpec"
+field_tag = 0x0003
+stable_name = "seal_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestorePromotionRootSeal"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the exact Shard promotion root seal opened by this confirmation; retained while the confirm spec is retained and cut only with that spec (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:shard-restore-service-open-spec-locally-verified-promotion-receipt-ref"
+containing_schema = "ShardRestoreServiceOpenSpec"
+field_tag = 0x0003
+stable_name = "locally_verified_promotion_receipt_ref"
+exact_wire_type = "ExternalCasRestoreServicePromotionReceiptRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreServicePromotionReceipt"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "tag-refined strong reference to the locally verified ExternalCasCataloged promotion receipt; retained while the open spec is retained and cut only with that spec (a20:2593,2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[union]]
+slice_id = "a20"
+row_id = "a20:union:local-restore-service-prepare-promotion-authority-profile-recipe-e99f7f83f019841d"
+union_name = "LocalRestoreServicePreparePromotionAuthorityProfileRecipe"
+containing_schema = "LocalRestoreServicePrepareSpec"
+union_path = "LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe"
+field_tag = 0x0005
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalRestoreServicePrepareSpec"]
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:local-restore-service-prepare-promotion-authority-profile-recipe-external-cas-cataloged-32830c0ecdf5c274"
+union_name = "LocalRestoreServicePreparePromotionAuthorityProfileRecipe"
+containing_schema = "LocalRestoreServicePrepareSpec"
+union_path = "LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "external_cas_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "99ddb2fa9f0507c868175cee28e524788f96784f80cd742b7871f99e8a1302b9"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:local-restore-service-prepare-promotion-authority-profile-recipe-directory-bound-cataloged-1131e24f7259bc5c"
+union_name = "LocalRestoreServicePreparePromotionAuthorityProfileRecipe"
+containing_schema = "LocalRestoreServicePrepareSpec"
+union_path = "LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "directory_bound_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "99ddb2fa9f0507c868175cee28e524788f96784f80cd742b7871f99e8a1302b9"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:local-restore-service-prepare-promotion-authority-profile-recipe-directory-bound-embedded-no-catalog-def1a2cf77468499"
+union_name = "LocalRestoreServicePreparePromotionAuthorityProfileRecipe"
+containing_schema = "LocalRestoreServicePrepareSpec"
+union_path = "LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "directory_bound_embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "783ded6f6696b956c09cfc4945b1dfd96de7d0c0a01341f18a1abd2fc3242d8a"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a18:target:logical-kind-local-restore-independent-reopen-proof"
+target_row_id = "a18:logical-kind:local-restore-independent-reopen-proof"
+slice_id = "a18"
+source_key = "reference|LocalRestoreIndependentReopenProof"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:logical-kind-restore-promotion-root-seal"
+target_row_id = "a18:logical-kind:restore-promotion-root-seal"
+slice_id = "a18"
+source_key = "reference|RestorePromotionRootSeal"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:logical-kind-local-restore-service-prepare-spec"
+target_row_id = "a20:logical-kind:local-restore-service-prepare-spec"
+slice_id = "a20"
+source_key = "top|LocalRestoreServicePrepareSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:logical-kind-service-catalog-promotion-reservation-receipt"
+target_row_id = "a20:logical-kind:service-catalog-promotion-reservation-receipt"
+slice_id = "a20"
+source_key = "top|ServiceCatalogPromotionReservationReceipt"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:wire-type-external-cas-restore-service-promotion-receipt-ref"
+target_row_id = "a20:wire-type:external-cas-restore-service-promotion-receipt-ref"
+slice_id = "a20"
+source_key = "top|ExternalCasRestoreServicePromotionReceiptRef"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-completion-spec-meta-seal-ref"
+target_row_id = "a20:field:global-restore-service-completion-spec-meta-seal-ref"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceCompletionSpec|GlobalRestoreServiceCompletionSpec.meta_seal_ref|meta_seal_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-completion-spec-promotion-receipt-ref"
+target_row_id = "a20:field:global-restore-service-completion-spec-promotion-receipt-ref"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceCompletionSpec|GlobalRestoreServiceCompletionSpec.promotion_receipt_ref|promotion_receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-global-restore-service-finalize-spec-promotion-receipt-ref"
+target_row_id = "a20:field:global-restore-service-finalize-spec-promotion-receipt-ref"
+slice_id = "a20"
+source_key = "field|GlobalRestoreServiceFinalizeSpec|GlobalRestoreServiceFinalizeSpec.promotion_receipt_ref|promotion_receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-completion-spec-seal-ref"
+target_row_id = "a20:field:local-restore-service-completion-spec-seal-ref"
+slice_id = "a20"
+source_key = "field|LocalRestoreServiceCompletionSpec|LocalRestoreServiceCompletionSpec.seal_ref|seal_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-completion-spec-independent-reopen-proof-ref"
+target_row_id = "a20:field:local-restore-service-completion-spec-independent-reopen-proof-ref"
+slice_id = "a20"
+source_key = "field|LocalRestoreServiceCompletionSpec|LocalRestoreServiceCompletionSpec.independent_reopen_proof_ref|independent_reopen_proof_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-prepare-spec-expected-local-restore-state"
+target_row_id = "a20:field:local-restore-service-prepare-spec-expected-local-restore-state"
+slice_id = "a20"
+source_key = "field|LocalRestoreServicePrepareSpec|LocalRestoreServicePrepareSpec.expected_local_restore_state|expected_local_restore_state"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-prepare-spec-promotion-authority-profile-recipe"
+target_row_id = "a20:field:local-restore-service-prepare-spec-promotion-authority-profile-recipe"
+slice_id = "a20"
+source_key = "field|LocalRestoreServicePrepareSpec|LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe|promotion_authority_profile_recipe"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-restore-shard-operational-ack-seal-ref"
+target_row_id = "a20:field:restore-shard-operational-ack-seal-ref"
+slice_id = "a20"
+source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.seal_ref|seal_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-shard-restore-reopen-confirm-spec-seal-ref"
+target_row_id = "a20:field:shard-restore-reopen-confirm-spec-seal-ref"
+slice_id = "a20"
+source_key = "field|ShardRestoreReopenConfirmSpec|ShardRestoreReopenConfirmSpec.seal_ref|seal_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:field-shard-restore-service-open-spec-locally-verified-promotion-receipt-ref"
+target_row_id = "a20:field:shard-restore-service-open-spec-locally-verified-promotion-receipt-ref"
+slice_id = "a20"
+source_key = "field|ShardRestoreServiceOpenSpec|ShardRestoreServiceOpenSpec.locally_verified_promotion_receipt_ref|locally_verified_promotion_receipt_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-local-restore-service-prepare-promotion-authority-profile-recipe-e99f7f83f019841d"
+target_row_id = "a20:union:local-restore-service-prepare-promotion-authority-profile-recipe-e99f7f83f019841d"
+slice_id = "a20"
+source_key = "union|LocalRestoreServicePrepareSpec|LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-local-restore-service-prepare-promotion-authority-profile-recipe-external-cas-cataloged-32830c0ecdf5c274"
+target_row_id = "a20:union-arm:local-restore-service-prepare-promotion-authority-profile-recipe-external-cas-cataloged-32830c0ecdf5c274"
+slice_id = "a20"
+source_key = "arm|LocalRestoreServicePrepareSpec|LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe|ExternalCasCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-local-restore-service-prepare-promotion-authority-profile-recipe-directory-bound-cataloged-1131e24f7259bc5c"
+target_row_id = "a20:union-arm:local-restore-service-prepare-promotion-authority-profile-recipe-directory-bound-cataloged-1131e24f7259bc5c"
+slice_id = "a20"
+source_key = "arm|LocalRestoreServicePrepareSpec|LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe|DirectoryBoundCataloged"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-local-restore-service-prepare-promotion-authority-profile-recipe-directory-bound-embedded-no-catalog-def1a2cf77468499"
+target_row_id = "a20:union-arm:local-restore-service-prepare-promotion-authority-profile-recipe-directory-bound-embedded-no-catalog-def1a2cf77468499"
+slice_id = "a20"
+source_key = "arm|LocalRestoreServicePrepareSpec|LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe|DirectoryBoundEmbeddedNoCatalog"
+target_kind = "union-arm"
 definition_status = "declared"

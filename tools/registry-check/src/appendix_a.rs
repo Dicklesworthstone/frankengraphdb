@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "d9a3dfad58deaf2a82796d6c4cc867f2ec33ec7273dcc0f533dbaa99e46a8a7d";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3564;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3583;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "a329efe8c9e586546c8aca9ca1f8a51dafaa9063caaabae4287ce319c8676918";
+    "c4993ffc6bdf1e0f5c5266367b3d78718ce810097bd5ef9d842b205bfad84894";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 118;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "5b98f90cff407e28662e859cc55855d3bbe5aedc93a77bc3c60d5db18686a844";
+    "5eef2dcbca97143d3879dd7123484a8af7ecad1a2f1d5e1b1878dde95b6a942d";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -64,11 +64,11 @@ pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 450;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
     "a9f36f111bdcce5fb02d7a056d6a95521fab22c5f419aed2ce12ec72b798d12c";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
-pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 437;
-pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 376;
+pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 439;
+pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 374;
 pub const EXPECTED_RESERVATION_HIGH_WATER: u16 = 0x051d;
 pub const EXPECTED_RESERVATION_ASSIGNMENT_SHA256: &str =
-    "70461e343be25b55641eac6370c77a67f2aee60c768880e46dd2ab88979fe452";
+    "91a8c38bb349d46c16a2abf943cc953360b89d02af3065d442733a21b7c4f5ba";
 pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
 pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_442;
@@ -13665,6 +13665,7 @@ fn validate_annotation_reference_shape(
 pub(crate) fn registered_reference_definition_semantics(family: &str) -> Option<&'static str> {
     match family {
         "CertifiedRemoteStrongRef"
+        | "ExternalCasRestoreServicePromotionReceiptRef"
         | "RegisteredStrongRef"
         | "RemoteConfigurationRef"
         | "StrongCiphertextRef"

@@ -4584,12 +4584,12 @@ fn idr_a20_structural_body_promotion_commands_and_activation_union_are_exact() {
             50,
             "role-meta",
         ),
-        ("GlobalRestoreServiceFinalizeSpec", 0x0560, 24, "role-meta"),
+        ("GlobalRestoreServiceFinalizeSpec", 0x0560, 35, "role-meta"),
         ("LocalRestoreActivationSpec", 0x0561, 40, "role-local"),
         (
             "LocalRestoreServiceCompletionSpec",
             0x0562,
-            35,
+            40,
             "role-local",
         ),
         ("LocalRestoreServicePromotionSpec", 0x0563, 35, "role-local"),
@@ -4915,6 +4915,333 @@ fn idr_a20_structural_body_promotion_commands_and_activation_union_are_exact() {
         assert_ne!(targets[0].target_kind, "field");
         assert_eq!(targets[0].definition_status, "declared");
     }
+}
+
+#[test]
+fn idr_a20_residue_hosts_fields_and_reference_orders_are_nonvacuous() {
+    let base = real_identity();
+    assert!(
+        identity::validate_identity(&base).is_empty(),
+        "the released identity registry is the baseline control"
+    );
+    let catalog = real_appendix_catalog();
+
+    for (name, code) in [
+        ("LocalRestoreServicePrepareSpec", 0x0578),
+        ("ServiceCatalogPromotionReservationReceipt", 0x0579),
+    ] {
+        let kind = base
+            .logical
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("missing A20 residue host {name}"));
+        assert_eq!(kind.object_kind, code);
+        assert_eq!(kind.construction_order, 24);
+        assert_eq!(kind.status, "reserved");
+        assert_eq!(kind.role_predicate, "role-local");
+        assert!(
+            catalog
+                .reservations
+                .iter()
+                .all(|reservation| reservation.symbol != name),
+            "non-StrongRef host {name} must not acquire a reservation"
+        );
+        assert_eq!(
+            base.fields
+                .iter()
+                .filter(|field| {
+                    field.containing_schema == name
+                        && field.reference_semantics != "none"
+                        && field.target_schema_id.is_some()
+                })
+                .count(),
+            0,
+            "{name} has zero resolved outbound reference edges"
+        );
+        assert_eq!(
+            base.fields
+                .iter()
+                .filter(|field| field.target_schema_id.as_deref() == Some(name))
+                .count(),
+            0,
+            "{name} has zero resolved inbound reference edges"
+        );
+    }
+
+    for (name, code) in [
+        ("LocalRestoreIndependentReopenProof", "0x031d"),
+        ("RestorePromotionRootSeal", "0x03df"),
+    ] {
+        let reservation = catalog
+            .reservations
+            .iter()
+            .find(|reservation| reservation.symbol == name)
+            .unwrap_or_else(|| panic!("missing permanent reservation for {name}"));
+        assert_eq!(reservation.code_reservation, code);
+        assert_eq!(reservation.identity_class, "logical");
+        assert_eq!(reservation.disposition, "existing");
+        let kind = base
+            .logical
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("missing reservation-backed logical kind {name}"));
+        assert_eq!(format!("{:#06x}", kind.object_kind), code);
+        assert_eq!(kind.construction_order, 40);
+    }
+
+    let receipt_ref = base
+        .wire
+        .iter()
+        .find(|row| row.name == "ExternalCasRestoreServicePromotionReceiptRef")
+        .expect("the source-named receipt reference wrapper is registered");
+    assert_eq!(receipt_ref.wire_type_id, 0x054f);
+    assert_eq!(receipt_ref.kind, "reference_wrapper");
+    assert_eq!(
+        receipt_ref.allowed_containing_schemas,
+        [
+            "GlobalRestoreServiceCompletionSpec",
+            "GlobalRestoreServiceFinalizeSpec",
+            "ShardRestoreServiceOpenSpec",
+        ]
+    );
+    assert!(
+        catalog.reservations.iter().all(|reservation| {
+            reservation.symbol != "ExternalCasRestoreServicePromotionReceiptRef"
+        }),
+        "the non-StrongRef wrapper must not acquire a reservation"
+    );
+
+    for (owner, name, tag, wire, target, order) in [
+        (
+            "GlobalRestoreServiceCompletionSpec",
+            "meta_seal_ref",
+            3,
+            "StrongRef",
+            Some("RestorePromotionRootSeal"),
+            50,
+        ),
+        (
+            "GlobalRestoreServiceCompletionSpec",
+            "promotion_receipt_ref",
+            6,
+            "ExternalCasRestoreServicePromotionReceiptRef",
+            Some("RestoreServicePromotionReceipt"),
+            50,
+        ),
+        (
+            "GlobalRestoreServiceFinalizeSpec",
+            "promotion_receipt_ref",
+            4,
+            "ExternalCasRestoreServicePromotionReceiptRef",
+            Some("RestoreServicePromotionReceipt"),
+            35,
+        ),
+        (
+            "LocalRestoreServiceCompletionSpec",
+            "seal_ref",
+            4,
+            "StrongRef",
+            Some("RestorePromotionRootSeal"),
+            40,
+        ),
+        (
+            "LocalRestoreServiceCompletionSpec",
+            "independent_reopen_proof_ref",
+            5,
+            "StrongRef",
+            Some("LocalRestoreIndependentReopenProof"),
+            40,
+        ),
+        (
+            "LocalRestoreServicePrepareSpec",
+            "expected_local_restore_state",
+            3,
+            "WeakStateIdentity",
+            None,
+            24,
+        ),
+        (
+            "LocalRestoreServicePrepareSpec",
+            "promotion_authority_profile_recipe",
+            5,
+            "LocalRestoreServicePreparePromotionAuthorityProfileRecipe",
+            None,
+            24,
+        ),
+        (
+            "RestoreShardOperationalAck",
+            "seal_ref",
+            8,
+            "StrongRef",
+            Some("RestorePromotionRootSeal"),
+            50,
+        ),
+        (
+            "ShardRestoreReopenConfirmSpec",
+            "seal_ref",
+            3,
+            "StrongRef",
+            Some("RestorePromotionRootSeal"),
+            44,
+        ),
+        (
+            "ShardRestoreServiceOpenSpec",
+            "locally_verified_promotion_receipt_ref",
+            3,
+            "ExternalCasRestoreServicePromotionReceiptRef",
+            Some("RestoreServicePromotionReceipt"),
+            44,
+        ),
+    ] {
+        let rows = base
+            .fields
+            .iter()
+            .filter(|row| row.containing_schema == owner && row.stable_name == name)
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1, "{owner}.{name} must exist exactly once");
+        let row = rows[0];
+        assert_eq!(row.field_tag, tag, "{owner}.{name} source tag moved");
+        assert_eq!(row.exact_wire_type, wire);
+        assert_eq!(row.target_schema_id.as_deref(), target);
+        assert_eq!(row.construction_order, order);
+        assert_eq!(
+            row.identity_class,
+            if target.is_some() {
+                "logical"
+            } else {
+                "inline"
+            }
+        );
+        assert_eq!(
+            row.reference_semantics,
+            if target.is_some() { "strong" } else { "none" }
+        );
+    }
+
+    let recipe = base
+        .ordinary_unions
+        .iter()
+        .find(|row| row.union_name == "LocalRestoreServicePreparePromotionAuthorityProfileRecipe")
+        .expect("the Local prepare recipe union is registered");
+    assert_eq!(recipe.field_tag, Some(5));
+    assert_eq!(
+        recipe
+            .arms
+            .iter()
+            .map(|arm| (arm.arm_tag, arm.source_arm_name.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (1, "ExternalCasCataloged"),
+            (2, "DirectoryBoundCataloged"),
+            (3, "DirectoryBoundEmbeddedNoCatalog"),
+        ],
+        "arm tags follow source spelling, not census order"
+    );
+
+    let mut missing_seal = base.clone();
+    missing_seal
+        .logical
+        .retain(|row| row.name != "RestorePromotionRootSeal");
+    let missing_seal_codes = codes_without_assignment_drift(&missing_seal);
+    assert_eq!(
+        missing_seal_codes
+            .iter()
+            .filter(|code| code.as_str() == "ref_target_unresolved")
+            .count(),
+        4,
+        "named target-direction mutation must expose all four seal references: {missing_seal_codes:?}"
+    );
+
+    let mut missing_reopen_proof = base.clone();
+    missing_reopen_proof
+        .logical
+        .retain(|row| row.name != "LocalRestoreIndependentReopenProof");
+    let missing_reopen_codes = codes_without_assignment_drift(&missing_reopen_proof);
+    assert_eq!(
+        missing_reopen_codes
+            .iter()
+            .filter(|code| code.as_str() == "ref_target_unresolved")
+            .count(),
+        1,
+        "named target-direction mutation must expose the one reopen-proof reference: {missing_reopen_codes:?}"
+    );
+
+    let mut too_early = base.clone();
+    too_early
+        .logical
+        .iter_mut()
+        .find(|row| row.name == "LocalRestoreServiceCompletionSpec")
+        .expect("Local completion host exists")
+        .construction_order = 39;
+    for row in &mut too_early.fields {
+        if row.containing_schema == "LocalRestoreServiceCompletionSpec" {
+            row.construction_order = 39;
+        }
+    }
+    let too_early_codes = codes_without_assignment_drift(&too_early);
+    assert_eq!(
+        too_early_codes
+            .iter()
+            .filter(|code| code.as_str() == "dag_future_result")
+            .count(),
+        2,
+        "outbound mutation FIRED: Local completion at 39 cannot retain two order-40 targets: {too_early_codes:?}"
+    );
+
+    let mut too_late = base.clone();
+    too_late
+        .logical
+        .iter_mut()
+        .find(|row| row.name == "RestorePromotionRootSeal")
+        .expect("promotion seal exists")
+        .construction_order = 41;
+    let too_late_codes = codes_without_assignment_drift(&too_late);
+    assert_eq!(
+        too_late_codes
+            .iter()
+            .filter(|code| code.as_str() == "dag_future_result")
+            .count(),
+        1,
+        "inbound mutation FIRED: Local completion at 40 cannot retain a seal at 41: {too_late_codes:?}"
+    );
+
+    let mut weak_receipt_refs = base.clone();
+    for row in &mut weak_receipt_refs.fields {
+        if row.exact_wire_type == "ExternalCasRestoreServicePromotionReceiptRef" {
+            row.reference_semantics = "weak".into();
+        }
+    }
+    let weak_codes = codes_without_assignment_drift(&weak_receipt_refs);
+    assert_eq!(
+        weak_codes
+            .iter()
+            .filter(|code| code.as_str() == "wire_type_reference_semantics_mismatch")
+            .count(),
+        3,
+        "the source wrapper's strong-reference law must fire for all three consumers: {weak_codes:?}"
+    );
+
+    let mut wire_host = base.clone();
+    let mut illegal = field(
+        "ExternalCasRestoreServicePromotionReceiptRef",
+        0x7ffe,
+        "dkjg_vacuity",
+        0,
+    );
+    illegal.exact_wire_type = "u64".into();
+    illegal.identity_class = "inline".into();
+    illegal.reference_semantics = "none".into();
+    illegal.target_schema_id = None;
+    wire_host.fields.push(illegal);
+    let wire_host_codes = codes_without_assignment_drift(&wire_host);
+    assert_eq!(
+        wire_host_codes
+            .iter()
+            .filter(|code| code.as_str() == "field_unresolved_schema")
+            .count(),
+        1,
+        "wire-only host vacuity control FIRED: {wire_host_codes:?}"
+    );
 }
 
 #[test]
@@ -7374,6 +7701,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "RestoreServicePromotionReceipt"
                 | "RestoreServicePromotionManifestTargetPosture"
                 | "LocalRestoreActivationSpecPromotionAuthorityBasis"
+                | "LocalRestoreServicePreparePromotionAuthorityProfileRecipe"
                 | "RestoreIdentityKeyDispositionEvidence"
                 | "TimeValidationClassification"
                 | "OfflineMacaroonIssuerEpochState"
@@ -8609,6 +8937,31 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "ShardRestoreServiceOpenSpec",
                     "expected_local_restore_state"
                 )
+                | ("GlobalRestoreServiceCompletionSpec", "meta_seal_ref")
+                | (
+                    "GlobalRestoreServiceCompletionSpec",
+                    "promotion_receipt_ref"
+                )
+                | ("GlobalRestoreServiceFinalizeSpec", "promotion_receipt_ref")
+                | ("LocalRestoreServiceCompletionSpec", "seal_ref")
+                | (
+                    "LocalRestoreServiceCompletionSpec",
+                    "independent_reopen_proof_ref"
+                )
+                | (
+                    "LocalRestoreServicePrepareSpec",
+                    "expected_local_restore_state"
+                )
+                | (
+                    "LocalRestoreServicePrepareSpec",
+                    "promotion_authority_profile_recipe"
+                )
+                | ("RestoreShardOperationalAck", "seal_ref")
+                | ("ShardRestoreReopenConfirmSpec", "seal_ref")
+                | (
+                    "ShardRestoreServiceOpenSpec",
+                    "locally_verified_promotion_receipt_ref"
+                )
         )
     };
     // The l6xd owner ruling makes these ten embedded AuthorityBoundHeader
@@ -9150,7 +9503,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             )
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 377,
+        pre_erratum.ordinary_unions.len() + 378,
         current_union_count,
         "the historical witness must remove every post-erratum union through the ymqm self-edge repair"
     );
@@ -9172,12 +9525,17 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "historical witness reference-union arm cohort drift (unrecognised arm)"
     );
     assert_eq!(
-        pre_erratum.ordinary_unions.iter().map(|u| u.arms.len()).sum::<usize>() + 41,
+        pre_erratum
+            .ordinary_unions
+            .iter()
+            .map(|u| u.arms.len())
+            .sum::<usize>()
+            + 44,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 718,
+        pre_erratum.fields.len() + 728,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
     );

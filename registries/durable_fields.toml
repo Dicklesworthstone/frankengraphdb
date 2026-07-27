@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 76
+registry_epoch = 77
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -3428,6 +3428,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0003
+stable_name = "meta_seal_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestorePromotionRootSeal"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "strong reference to the exact Meta promotion root seal consumed by completion; retained while the completion spec is retained and cut only with that spec (a20:2601)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalRestoreServiceCompletionSpec"
 field_tag = 0x0005
 stable_name = "exact_sorted_operational_ack_refs"
 exact_wire_type = "CertifiedRemoteStrongRef"
@@ -3438,6 +3453,21 @@ target_schema_id = "RestoreShardOperationalAck"
 construction_order = 50
 role_predicate = "role-meta"
 retention_and_cut_rule = "complete sorted certified-remote retention set for every required shard operational acknowledgement; retained while the completion spec is retained and cut only with that spec (a20:2601)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalRestoreServiceCompletionSpec"
+field_tag = 0x0006
+stable_name = "promotion_receipt_ref"
+exact_wire_type = "ExternalCasRestoreServicePromotionReceiptRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreServicePromotionReceipt"
+construction_order = 50
+role_predicate = "role-meta"
+retention_and_cut_rule = "tag-refined strong reference to the ExternalCasCataloged promotion receipt whose lineage completion verifies; retained while the completion spec is retained and cut only with that spec (a20:2593,2601)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -3510,9 +3540,24 @@ cardinality = "one"
 identity_class = "logical"
 reference_semantics = "strong"
 target_schema_id = "GlobalRestoreServicePrepareCertificate"
-construction_order = 24
+construction_order = 35
 role_predicate = "role-meta"
 retention_and_cut_rule = "strong reference to the hidden-service prepare certificate consumed by this finalize command; retained while the finalize spec is retained and cut only with that spec (a20:2597)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "GlobalRestoreServiceFinalizeSpec"
+field_tag = 0x0004
+stable_name = "promotion_receipt_ref"
+exact_wire_type = "ExternalCasRestoreServicePromotionReceiptRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreServicePromotionReceipt"
+construction_order = 35
+role_predicate = "role-meta"
+retention_and_cut_rule = "tag-refined strong reference to the ExternalCasCataloged promotion receipt finalized by this command; retained while the finalize spec is retained and cut only with that spec (a20:2593,2597)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -3525,7 +3570,7 @@ cardinality = "many"
 identity_class = "logical"
 reference_semantics = "strong"
 target_schema_id = "RestoreShardServiceReadyAck"
-construction_order = 24
+construction_order = 35
 role_predicate = "role-meta"
 retention_and_cut_rule = "complete sorted certified-remote retention set for the shard ready acknowledgements consumed by this finalize command; retained while the spec is retained and cut only with that spec (a20:2597)"
 version_status = "reserved"
@@ -3539,7 +3584,7 @@ exact_wire_type = "WeakStateIdentity"
 cardinality = "one"
 identity_class = "inline"
 reference_semantics = "none"
-construction_order = 24
+construction_order = 35
 role_predicate = "role-meta"
 retention_and_cut_rule = "comparison-only Meta WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the finalize spec (a20:2597)"
 version_status = "reserved"
@@ -5583,7 +5628,7 @@ cardinality = "one"
 identity_class = "logical"
 reference_semantics = "strong"
 target_schema_id = "LogicalCommandRecord"
-construction_order = 35
+construction_order = 40
 role_predicate = "role-local"
 retention_and_cut_rule = "strong reference to the ordered Local promotion record completed by this command; retained while the completion spec is retained and cut only with that spec (a20:2605)"
 version_status = "reserved"
@@ -5598,11 +5643,69 @@ cardinality = "one"
 identity_class = "logical"
 reference_semantics = "strong"
 target_schema_id = "RestoreServicePromotionReceipt"
-construction_order = 35
+construction_order = 40
 role_predicate = "role-local"
 retention_and_cut_rule = "strong reference to the exact profile promotion receipt completed by this command; retained while the completion spec is retained and cut only with that spec (a20:2605)"
 version_status = "reserved"
 max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0004
+stable_name = "seal_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestorePromotionRootSeal"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the exact Local promotion root seal opened by completion; retained while the completion spec is retained and cut only with that spec (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0005
+stable_name = "independent_reopen_proof_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "LocalRestoreIndependentReopenProof"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "strong reference to the fresh-process Local reopen proof consumed by completion; retained while the completion spec is retained and cut only with that spec (a20:2605)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "LocalRestoreServicePrepareSpec"
+field_tag = 0x0003
+stable_name = "expected_local_restore_state"
+exact_wire_type = "WeakStateIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "role-local"
+retention_and_cut_rule = "comparison-only Local WeakStateIdentity embedded by value; never traversed by reachability, GC, checkpoint, or backup walkers and retained and cut with the prepare spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "LocalRestoreServicePrepareSpec"
+field_tag = 0x0005
+stable_name = "promotion_authority_profile_recipe"
+exact_wire_type = "LocalRestoreServicePreparePromotionAuthorityProfileRecipe"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 24
+role_predicate = "role-local"
+retention_and_cut_rule = "closed source-ordered promotion-authority recipe embedded by value; no arm creates reachability and the union is retained and cut with the prepare spec (a20:2603)"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[field]]
 containing_schema = "LocalRestoreServicePromotionSpec"
@@ -10242,6 +10345,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "RestoreShardOperationalAck"
+field_tag = 0x0008
+stable_name = "seal_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestorePromotionRootSeal"
+construction_order = 50
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the exact Shard promotion root seal acknowledged operational; retained while the acknowledgement is retained and cut only with it (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "RestoreShardOperationalAck"
 field_tag = 0x000b
 stable_name = "source_access_closure_ref"
 exact_wire_type = "StrongRef"
@@ -12561,6 +12679,21 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "ShardRestoreReopenConfirmSpec"
+field_tag = 0x0003
+stable_name = "seal_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestorePromotionRootSeal"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "strong reference to the exact Shard promotion root seal opened by this confirmation; retained while the confirm spec is retained and cut only with that spec (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "ShardRestoreServiceOpenSpec"
 field_tag = 0x0001
 stable_name = "final_certificate_ref"
@@ -12587,6 +12720,21 @@ target_schema_id = "RestoreShardServiceReadyAck"
 construction_order = 44
 role_predicate = "role-shard"
 retention_and_cut_rule = "strong reference to this shard's exact ready acknowledgement consumed by the open command; retained while the open spec is retained and cut only with that spec (a20:2599)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "ShardRestoreServiceOpenSpec"
+field_tag = 0x0003
+stable_name = "locally_verified_promotion_receipt_ref"
+exact_wire_type = "ExternalCasRestoreServicePromotionReceiptRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "RestoreServicePromotionReceipt"
+construction_order = 44
+role_predicate = "role-shard"
+retention_and_cut_rule = "tag-refined strong reference to the locally verified ExternalCasCataloged promotion receipt; retained while the open spec is retained and cut only with that spec (a20:2593,2599)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -15639,6 +15787,18 @@ tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["LocalRestoreRegistryValue"]
 role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "LocalRestoreServicePreparePromotionAuthorityProfileRecipe"
+containing_schema = "LocalRestoreServicePrepareSpec"
+union_path = "LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe"
+field_tag = 0x0005
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["LocalRestoreServicePrepareSpec"]
+role_predicate = "role-local"
 version_status = "reserved"
 max_size_bytes = 16777216
 
@@ -24090,6 +24250,45 @@ stable_name = "released_terminal"
 payload_kind = "inline-record"
 payload_sha256 = "88f8e8819cd772001999fa5b459cd791cf95f24cfb8cf002426c192a9aa7caf7"
 role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "LocalRestoreServicePreparePromotionAuthorityProfileRecipe"
+containing_schema = "LocalRestoreServicePrepareSpec"
+union_path = "LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe"
+arm_tag = 0x0001
+source_arm_name = "ExternalCasCataloged"
+stable_name = "external_cas_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "99ddb2fa9f0507c868175cee28e524788f96784f80cd742b7871f99e8a1302b9"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "LocalRestoreServicePreparePromotionAuthorityProfileRecipe"
+containing_schema = "LocalRestoreServicePrepareSpec"
+union_path = "LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe"
+arm_tag = 0x0002
+source_arm_name = "DirectoryBoundCataloged"
+stable_name = "directory_bound_cataloged"
+payload_kind = "inline-record"
+payload_sha256 = "99ddb2fa9f0507c868175cee28e524788f96784f80cd742b7871f99e8a1302b9"
+role_predicate = "role-local"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "LocalRestoreServicePreparePromotionAuthorityProfileRecipe"
+containing_schema = "LocalRestoreServicePrepareSpec"
+union_path = "LocalRestoreServicePrepareSpec.promotion_authority_profile_recipe"
+arm_tag = 0x0003
+source_arm_name = "DirectoryBoundEmbeddedNoCatalog"
+stable_name = "directory_bound_embedded_no_catalog"
+payload_kind = "inline-record"
+payload_sha256 = "783ded6f6696b956c09cfc4945b1dfd96de7d0c0a01341f18a1abd2fc3242d8a"
+role_predicate = "role-local"
 version_status = "reserved"
 max_size_bytes = 16777216
 
