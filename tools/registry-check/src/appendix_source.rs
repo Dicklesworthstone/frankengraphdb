@@ -100,6 +100,7 @@ impl Cardinality {
 pub enum AmbiguityKind {
     AliasExpressionUnparsed,
     AmbiguousSchemaOwner,
+    CompressedMemberToken,
     ConflictingCandidateEvidence,
     DefinitionWithoutStructuralBody,
     FieldTypeAmbiguous,
@@ -119,6 +120,7 @@ impl AmbiguityKind {
         match self {
             Self::AliasExpressionUnparsed => "alias-expression-unparsed",
             Self::AmbiguousSchemaOwner => "ambiguous-schema-owner",
+            Self::CompressedMemberToken => "compressed-member-token",
             Self::ConflictingCandidateEvidence => "conflicting-candidate-evidence",
             Self::DefinitionWithoutStructuralBody => "definition-without-structural-body",
             Self::FieldTypeAmbiguous => "field-type-ambiguous",
@@ -2567,6 +2569,25 @@ fn parse_record_fields(
         let optional_marker = bytes.get(name_end) == Some(&b'?');
         let remainder_start = skip_ascii_whitespace(bytes, name_end + usize::from(optional_marker));
         let remainder = &field_mapped.text[remainder_start..];
+        // A member-position slash token (`a/b/c_suffix`) compresses several
+        // member names into one. Splitting at the first slash would name the
+        // member `a` and call the rest its type, which is what this parser used
+        // to do and is wrong in both halves; expanding it would invent names the
+        // source does not spell, and the compression rule is demonstrably not
+        // uniform (a10:1920 against its uncompressed sibling at a08:1804).
+        // Refuse the member and record the raw token for per-token adjudication.
+        if bytes.get(name_end + usize::from(optional_marker)) == Some(&b'/') {
+            rows.ambiguities.push(AmbiguityOccurrence {
+                kind: AmbiguityKind::CompressedMemberToken,
+                schema_family: Some(schema.key.family.clone()),
+                path: Some(path.to_owned()),
+                raw: normalize_whitespace(&field_mapped.text),
+                reason: "member position compresses several names with '/' and the source does not spell them".to_owned(),
+                affected_source_keys: affected_source_key(owner_key.clone()),
+                source_range: field_mapped.source_range(0..field_mapped.text.len()),
+            });
+            continue;
+        }
         let mut ambiguity = None;
         let exact_range = if matches!(bytes.get(remainder_start), Some(b':') | Some(b'=')) {
             let range = trim_range(
@@ -3162,16 +3183,16 @@ fn ambiguity_affinity_is_valid(row: &AmbiguityOccurrence) -> bool {
             )
         }),
         AmbiguityKind::ConflictingCandidateEvidence => exact_key(|_| true),
-        AmbiguityKind::NestingLimitExceeded | AmbiguityKind::UnparsedRecordItem => {
-            exact_key(|key| {
-                matches!(
-                    key,
-                    StructuralCandidateKey::Schema(_)
-                        | StructuralCandidateKey::Field(_)
-                        | StructuralCandidateKey::Arm(_)
-                )
-            })
-        }
+        AmbiguityKind::CompressedMemberToken
+        | AmbiguityKind::NestingLimitExceeded
+        | AmbiguityKind::UnparsedRecordItem => exact_key(|key| {
+            matches!(
+                key,
+                StructuralCandidateKey::Schema(_)
+                    | StructuralCandidateKey::Field(_)
+                    | StructuralCandidateKey::Arm(_)
+            )
+        }),
         AmbiguityKind::MismatchedDelimiter | AmbiguityKind::UnbalancedDefinition => {
             if row.schema_family.is_none() && row.path.is_none() {
                 row.affected_source_keys.is_empty()

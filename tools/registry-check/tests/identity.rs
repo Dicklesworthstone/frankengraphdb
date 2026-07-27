@@ -9685,7 +9685,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
     assert_eq!(
-        pre_erratum.fields.len() + 751,
+        // 751 -> 750 (fgdb-census-slash-token-truncation-avex): the a10:1920
+        // `required_prepared` row was withdrawn, and every ConfigurationTransitionSpec
+        // field row is post-erratum via post_erratum_a12_exact_order_field (measured:
+        // 11 rows in, 0 out), so the post-erratum cohort is one smaller. The
+        // reconstruction is unchanged at 225 rows; only the cohort denominator moves.
+        pre_erratum.fields.len() + 750,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
     );
@@ -9694,12 +9699,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     undo_cq4x_capsule_retarget(&mut pre_erratum);
     undo_mn8i_exact_order_repairs(&mut pre_erratum);
     undo_e55p_id256_retype(&mut pre_erratum);
-    pre_erratum
-        .ordinary_unions
-        .retain(|union| {
-            !post_erratum_e55p_union(&union.union_name)
-                && !post_erratum_i1rx_union(&union.union_name)
-        });
+    pre_erratum.ordinary_unions.retain(|union| {
+        !post_erratum_e55p_union(&union.union_name) && !post_erratum_i1rx_union(&union.union_name)
+    });
     // A one-element `for` is a clippy::single_element_loop error under -D warnings.
     // Destructured rather than looped: there is exactly one pre-ymqm arm to restore,
     // and if a second is ever needed this should become a real slice with more than

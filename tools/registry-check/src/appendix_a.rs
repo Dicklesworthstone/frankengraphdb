@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "d9a3dfad58deaf2a82796d6c4cc867f2ec33ec7273dcc0f533dbaa99e46a8a7d";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3628;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3627;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "7a17d51d6530fce951e7bf9f7906f5aafb6d20316821c728daa9337b777dab41";
+    "a7bf529bb2450ed22bef595bdb01d970628147f6b76b77e53d1209a9278fe156";
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 133;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "c66ad4ca23f5e3ae02a7283c6586550ec84b5323bf0853379099ac75f7b59c04";
+    "61b32f677e875b915368f79ef27dd1c6e04137508d5f3b02cd006f0423f0e167";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -62,7 +62,7 @@ pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 450;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "a9f36f111bdcce5fb02d7a056d6a95521fab22c5f419aed2ce12ec72b798d12c";
+    "03d312017d950cbf7a58a7a7011467b547887827d24269eb1f1688d35bbab899";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 444;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 369;
@@ -4225,26 +4225,22 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
         rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
     },
     AmbiguityAdjudicationContractPin {
-        row_id: "a02:ambiguity-adjudication:1ea7c0f52efa23b6ea05499d6477e99f9ba7b7b7643e237788fff9db535671f4",
+        row_id: "a02:ambiguity-adjudication:17d6d325b40c98e821df86f2214f8769f1605d56941c6ee69ea933198cb37433",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.forbidden_layers|c8ebde079ef030df5a539237f8ed8d67364a0b71d0d416da37539dd12d1f4ffc|1|408650ee2f95d250a0851d94fe5ac150093a6cb135344c198822edad80a7060a|noncanonical field separator",
+        ambiguity_source_key: "ambiguity|compressed-member-token|FilesystemDurabilityProfile|FilesystemDurabilityProfile|c8ebde079ef030df5a539237f8ed8d67364a0b71d0d416da37539dd12d1f4ffc|1|0531aa4480c9cb6dddffe3f1a12691f93785819a77443e3c817732b69d456a86|member position compresses several names with '/' and the source does not spell them",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
-        resolved_source_keys: &[
-            "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.forbidden_layers|forbidden_layers",
-        ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        resolved_source_keys: &["top|FilesystemDurabilityProfile"],
+        rationale: "a02:1445: the member position spells a slash-compressed token, so the source names several members in one and spells none of them individually. The parser now refuses the token instead of splitting it at the first slash, which named a prefix and gave it a type beginning with '/'; expanding it by pattern would invent names, and the compression rule is not uniform (a10:1920 against its uncompressed sibling at a08:1804, which spells required_certificate_floor_ref beside required_remote_obligation_floor_ref). No field row is claimed for the token. The flagged span is part of the owner's own normative definition, the registered top-level candidate, so it maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
-        row_id: "a02:ambiguity-adjudication:6b2c1e520545d3f0a9f07781ed9ede4bae5756db2e1f8212a9ec94436cac6cf3",
+        row_id: "a02:ambiguity-adjudication:c7416022d96db48fb8420248771537b28d29cffb1e9428859c9fb36ea4853cfe",
         slice_id: "a02",
-        ambiguity_source_key: "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.os|ad40f30433f81ebb9114a3028258d2823275a69722d1f89e68174998ee803e5b|1|2f3c5639e5a8462a4ebe2ee70b26816f53c9cb40ee5d1504566d1aad5951e95a|noncanonical field separator",
+        ambiguity_source_key: "ambiguity|compressed-member-token|FilesystemDurabilityProfile|FilesystemDurabilityProfile|ad40f30433f81ebb9114a3028258d2823275a69722d1f89e68174998ee803e5b|1|0531aa4480c9cb6dddffe3f1a12691f93785819a77443e3c817732b69d456a86|member position compresses several names with '/' and the source does not spell them",
         source_locations: &["a02:1445"],
         resolution: "maps-to-source",
-        resolved_source_keys: &[
-            "field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.os|os",
-        ],
-        rationale: "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span.",
+        resolved_source_keys: &["top|FilesystemDurabilityProfile"],
+        rationale: "a02:1445: the member position spells a slash-compressed token, so the source names several members in one and spells none of them individually. The parser now refuses the token instead of splitting it at the first slash, which named a prefix and gave it a type beginning with '/'; expanding it by pattern would invent names, and the compression rule is not uniform (a10:1920 against its uncompressed sibling at a08:1804, which spells required_certificate_floor_ref beside required_remote_obligation_floor_ref). No field row is claimed for the token. The flagged span is part of the owner's own normative definition, the registered top-level candidate, so it maps to that source form.",
     },
     AmbiguityAdjudicationContractPin {
         row_id: "a02:ambiguity-adjudication:eef13b4b7a2306d6fe972c7c2d821b7e62ba883e6ffb2a9e6fdd313323849073",

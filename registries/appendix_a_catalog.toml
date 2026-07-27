@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3628
+target_count = 3627
 projection_fallback_count = 133
-target_source_assignment_sha256 = "c66ad4ca23f5e3ae02a7283c6586550ec84b5323bf0853379099ac75f7b59c04"
+target_source_assignment_sha256 = "61b32f677e875b915368f79ef27dd1c6e04137508d5f3b02cd006f0423f0e167"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -139,14 +139,14 @@ expected_projection_classes = ["physical_record_kinds", "wire_types", "durable_f
 definition_status = "declared"
 top_level_candidate_count = 10
 top_level_candidate_ids_sha256 = "f75c7376a50ed4f622b3b5a87159c3cb627629f8275f77557ca549d07a9f26c4"
-field_candidate_count = 77
-field_candidate_ids_sha256 = "059b658e054269ff9ed8690bbdbf3a5926071c6a1d128c0658132d8e69cf319e"
+field_candidate_count = 75
+field_candidate_ids_sha256 = "5c43d1eba7b8f8fb6d5450e0ae45cfc25cb2750f21d5f29ed897bbfea1ec7fcd"
 union_candidate_count = 1
 union_candidate_ids_sha256 = "7a64e9731aaa375261953dffcfc7458a0fe3931aed62248deb556c93b8e840f5"
 arm_candidate_count = 2
 arm_candidate_ids_sha256 = "a2233db18d97b699fb1b112c52b219a0e3a51ebf4deae1adc5713d85cd690aa4"
 ambiguity_count = 63
-ambiguity_ids_sha256 = "68d594eb64305a9b3d1a1cf649ff62135038572a69bba13184a4a81519d75cd1"
+ambiguity_ids_sha256 = "6f5708ee08bfcec435422f80bc45b30f17a7b9f29e96b064d384bfe2549d76d9"
 
 [[slice]]
 ordinal = 3
@@ -189,14 +189,14 @@ expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fi
 definition_status = "declared"
 top_level_candidate_count = 27
 top_level_candidate_ids_sha256 = "3e49b908821efaf475c0dcbe57fb973f7b3aec0ff8ef5e883ad04a71b3fa7f93"
-field_candidate_count = 264
-field_candidate_ids_sha256 = "d0595426951d9e2a059deac28094346fa262933fa02072eb81168b856052d55f"
+field_candidate_count = 263
+field_candidate_ids_sha256 = "f71a864797be0a20f41d46b3fcf048c390f605e75a82b9e181c27de54df8ab99"
 union_candidate_count = 14
 union_candidate_ids_sha256 = "2a98b59e5fdde61d2551ce3ab35fbfbac5066f590aa5026011e7c7c6239226dd"
 arm_candidate_count = 48
 arm_candidate_ids_sha256 = "977c725fde3710ac8aa048c573b003275e0ca47c66586fbfedca7a10aecf812d"
 ambiguity_count = 205
-ambiguity_ids_sha256 = "fc4f7646d2bdaa84f0bdda2cf480b93a7473201ea2e41b7e94225ee4dc347039"
+ambiguity_ids_sha256 = "8f0cf2457ae7e83528b303b1efdb70e304773f8ccaf2a38738ca3ccc452e24f1"
 
 [[slice]]
 ordinal = 5
@@ -214,14 +214,14 @@ expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fi
 definition_status = "declared"
 top_level_candidate_count = 81
 top_level_candidate_ids_sha256 = "4cef4236798589aba740015ffc9b600f5db3003c5c4273617111d388f8d3339b"
-field_candidate_count = 720
-field_candidate_ids_sha256 = "d9e2965d3624b4358c4ef764be3864f499a9fd2ab3379c9a4114cbe67fc6c97e"
+field_candidate_count = 711
+field_candidate_ids_sha256 = "c72d26aa29a3952a717cc13110b8dda713de93c59a1c2352a14bed3bb2e736cb"
 union_candidate_count = 20
 union_candidate_ids_sha256 = "e5f78118ed170d6fe31876c746e6d60f6a32f22e2ecfc4a498412c1e63ecd537"
 arm_candidate_count = 60
 arm_candidate_ids_sha256 = "628c0d4bdf5ed53ef8e4f7908dbf182fdb8686d28695ab723816f9f9df2be627"
-ambiguity_count = 541
-ambiguity_ids_sha256 = "70aa44fa9bc8cbab184ced5ecfb57941833f5d59c903c83f05462ce6a6ceb9ce"
+ambiguity_count = 533
+ambiguity_ids_sha256 = "7276831f4ecba0532e265d1db8ed2ed1c961bef3a825f05777e2e7d179e61b91"
 
 [[slice]]
 ordinal = 6
@@ -239,14 +239,14 @@ expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fi
 definition_status = "declared"
 top_level_candidate_count = 42
 top_level_candidate_ids_sha256 = "6f6b0b6f4d2ed2fcf71cce3a005e185b1251893f50d6a0846484ae287b984d71"
-field_candidate_count = 439
-field_candidate_ids_sha256 = "ed01f2d9670d4723a9b20b08e957ba8bc2c17ec7f0ef942553dc754235df03f6"
+field_candidate_count = 438
+field_candidate_ids_sha256 = "61fedc9643997810c7d42d8c5c396e7e4272aa95292a74be16271f826309b17f"
 union_candidate_count = 15
 union_candidate_ids_sha256 = "29e8e8f834cf4ddc73eb5faa5fbf76a72bd8a33cb9368cd85192c28e0ae2b724"
 arm_candidate_count = 51
 arm_candidate_ids_sha256 = "26ed5557dfe99c18410d1992312ffc09e1e9369113fbe87f9119d76251760bc6"
 ambiguity_count = 261
-ambiguity_ids_sha256 = "90fb814e1d1749a703f4bae95fa62ef514d25614b92b9679ff3b182255a9408f"
+ambiguity_ids_sha256 = "7a42e92bdc8f70771f395610a7aaf585e66edd3a698aeeebaa8305b4ecd43cef"
 
 [[slice]]
 ordinal = 7
@@ -289,14 +289,14 @@ expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fi
 definition_status = "declared"
 top_level_candidate_count = 111
 top_level_candidate_ids_sha256 = "3f997c3bcd5078b287868ffe3fca5a8a2b9197b140d070f3c4a60c25a439150e"
-field_candidate_count = 1112
-field_candidate_ids_sha256 = "a9701acac9609012f14c58e0a1499153f7ab783ad01be49bf15eca33cf62c1f5"
+field_candidate_count = 1101
+field_candidate_ids_sha256 = "c3f79afe39a37d095525eadd362ed4c596d876895199ad22c1eea015c8757ea0"
 union_candidate_count = 42
 union_candidate_ids_sha256 = "867a6dc2f093d342e80d0dc5e1a4fd6597a97b94ec6353a08ac250ae04da2fd8"
 arm_candidate_count = 142
 arm_candidate_ids_sha256 = "dbaca4cd29c32a02c0aec03ab339767c83e9e485eeaaae7719e646971e9fb5c1"
 ambiguity_count = 709
-ambiguity_ids_sha256 = "7f0ea0883e60d9811f8c9bf39c65177c2fe0b46f87151476ae2965c739f83a3f"
+ambiguity_ids_sha256 = "7e15a56d6e0801197399fed72fce6ceb7c9bd1f29672d2ef69c860635dc649e1"
 
 [[slice]]
 ordinal = 9
@@ -339,14 +339,14 @@ expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fi
 definition_status = "declared"
 top_level_candidate_count = 18
 top_level_candidate_ids_sha256 = "f523c0186612a49600265c0973fcccb6ec387aa293993e2cb538877fa2599543"
-field_candidate_count = 180
-field_candidate_ids_sha256 = "4c0d4584f1f1a77a77cca3e7f3cab456d86758b931a5bf47adec75acacb186d3"
+field_candidate_count = 179
+field_candidate_ids_sha256 = "80ebce75b18df4f24376787b29849ab44fdfecd389cf778af5c6cfdd3627d517"
 union_candidate_count = 5
 union_candidate_ids_sha256 = "ad9a6e5137cb020d17d5deb1296356146580661a0500823df541203875e56170"
 arm_candidate_count = 17
 arm_candidate_ids_sha256 = "7fcfd50dfd4f06f8be8676acbdc70683db596e0dd9f56020e0950b9c25aab16e"
 ambiguity_count = 110
-ambiguity_ids_sha256 = "6c00401a9c06e771bee0ace5b4770dbfe90ebbb4487272ae9e347f232bcf4109"
+ambiguity_ids_sha256 = "0e0d54b8ad8683ebb76934cdccac5409c74f9c917bd71ecaedc368935ce4f68a"
 
 [[slice]]
 ordinal = 11
@@ -464,14 +464,14 @@ expected_projection_classes = ["logical_object_kinds", "prebootstrap_artifact_ki
 definition_status = "declared"
 top_level_candidate_count = 99
 top_level_candidate_ids_sha256 = "fa41629df7e0f3230f88a0ae3b1cbeec1d1c2f5f003f4c44b141fd6c7d1b5e92"
-field_candidate_count = 1037
-field_candidate_ids_sha256 = "531bf0e419b78ab1d4edb281da5e452f879a5a83ee60e2c50a03e91439e70867"
+field_candidate_count = 1035
+field_candidate_ids_sha256 = "f4ca09af8ae6f11ec7c980bb3bdb9c8f2bb74610b8db70e046a95ea55b6bae5e"
 union_candidate_count = 51
 union_candidate_ids_sha256 = "7ae8c34a227cf7241c420848692817ab58f1052869af7470c1f788a1c1805a98"
 arm_candidate_count = 162
 arm_candidate_ids_sha256 = "51becf54c432a95fac5e4cb79fc7245f373904d7f97f629645619b10729ad798"
 ambiguity_count = 805
-ambiguity_ids_sha256 = "2afe0666561aa053e8eebc67536b9f9204f469285ba0aec12a8f12b54ced4276"
+ambiguity_ids_sha256 = "40b3f858874fa71a48ed7695c592898226271eaa3c2d6279c75017e6cbb0ccf4"
 
 [[slice]]
 ordinal = 16
@@ -614,14 +614,14 @@ expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fi
 definition_status = "declared"
 top_level_candidate_count = 120
 top_level_candidate_ids_sha256 = "320b32e94fc5619ad02dd4f9f1a1ed9bb20487a5f83648502fb1645d3ee79c72"
-field_candidate_count = 870
-field_candidate_ids_sha256 = "a1787f07beb1296ab46fad6af0b4b35e25a2520bbef9d43c2e2ea04386371189"
+field_candidate_count = 864
+field_candidate_ids_sha256 = "177bcabf03ff52e2940ad06e2a14486b83cabb1a4f685038c9d97fe706ee0208"
 union_candidate_count = 67
 union_candidate_ids_sha256 = "70acab74406a8d20d18fde88604786459c3dc0bbe021dae06f896d930f74c252"
 arm_candidate_count = 200
 arm_candidate_ids_sha256 = "4e4cba1b4034dd0654eae6a69f58b8ba2d80144de309a47eff0825d3be30853f"
-ambiguity_count = 626
-ambiguity_ids_sha256 = "33e8d9c5f6eb7447608290da8112ba21e20f826b19faaf36b098b2e35491cb63"
+ambiguity_count = 622
+ambiguity_ids_sha256 = "cd27ed0d1ed148a583b2c54607823a08f6e6e072cdcab4fb247598b254450acf"
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
@@ -93311,22 +93311,22 @@ resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityP
 rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
 
 [[ambiguity_adjudication]]
-row_id = "a02:ambiguity-adjudication:1ea7c0f52efa23b6ea05499d6477e99f9ba7b7b7643e237788fff9db535671f4"
+row_id = "a02:ambiguity-adjudication:17d6d325b40c98e821df86f2214f8769f1605d56941c6ee69ea933198cb37433"
 slice_id = "a02"
-ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.forbidden_layers|c8ebde079ef030df5a539237f8ed8d67364a0b71d0d416da37539dd12d1f4ffc|1|408650ee2f95d250a0851d94fe5ac150093a6cb135344c198822edad80a7060a|noncanonical field separator"
+ambiguity_source_key = "ambiguity|compressed-member-token|FilesystemDurabilityProfile|FilesystemDurabilityProfile|c8ebde079ef030df5a539237f8ed8d67364a0b71d0d416da37539dd12d1f4ffc|1|0531aa4480c9cb6dddffe3f1a12691f93785819a77443e3c817732b69d456a86|member position compresses several names with '/' and the source does not spell them"
 source_locations = ["a02:1445"]
 resolution = "maps-to-source"
-resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.forbidden_layers|forbidden_layers"]
-rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+resolved_source_keys = ["top|FilesystemDurabilityProfile"]
+rationale = "a02:1445: the member position spells a slash-compressed token, so the source names several members in one and spells none of them individually. The parser now refuses the token instead of splitting it at the first slash, which named a prefix and gave it a type beginning with '/'; expanding it by pattern would invent names, and the compression rule is not uniform (a10:1920 against its uncompressed sibling at a08:1804, which spells required_certificate_floor_ref beside required_remote_obligation_floor_ref). No field row is claimed for the token. The flagged span is part of the owner's own normative definition, the registered top-level candidate, so it maps to that source form."
 
 [[ambiguity_adjudication]]
-row_id = "a02:ambiguity-adjudication:6b2c1e520545d3f0a9f07781ed9ede4bae5756db2e1f8212a9ec94436cac6cf3"
+row_id = "a02:ambiguity-adjudication:c7416022d96db48fb8420248771537b28d29cffb1e9428859c9fb36ea4853cfe"
 slice_id = "a02"
-ambiguity_source_key = "ambiguity|field-type-ambiguous|FilesystemDurabilityProfile|FilesystemDurabilityProfile.os|ad40f30433f81ebb9114a3028258d2823275a69722d1f89e68174998ee803e5b|1|2f3c5639e5a8462a4ebe2ee70b26816f53c9cb40ee5d1504566d1aad5951e95a|noncanonical field separator"
+ambiguity_source_key = "ambiguity|compressed-member-token|FilesystemDurabilityProfile|FilesystemDurabilityProfile|ad40f30433f81ebb9114a3028258d2823275a69722d1f89e68174998ee803e5b|1|0531aa4480c9cb6dddffe3f1a12691f93785819a77443e3c817732b69d456a86|member position compresses several names with '/' and the source does not spell them"
 source_locations = ["a02:1445"]
 resolution = "maps-to-source"
-resolved_source_keys = ["field|FilesystemDurabilityProfile|FilesystemDurabilityProfile.os|os"]
-rationale = "a02:1445: shorthand member carries no inline exact type, but its owner `FilesystemDurabilityProfile` is a REGISTERED WIRE TYPE, so the member is committed as a wire interior by that row's encoding_context. Wire-interior coverage projects the affected census field key, so it maps to that registered source form rather than being a non-durable span."
+resolved_source_keys = ["top|FilesystemDurabilityProfile"]
+rationale = "a02:1445: the member position spells a slash-compressed token, so the source names several members in one and spells none of them individually. The parser now refuses the token instead of splitting it at the first slash, which named a prefix and gave it a type beginning with '/'; expanding it by pattern would invent names, and the compression rule is not uniform (a10:1920 against its uncompressed sibling at a08:1804, which spells required_certificate_floor_ref beside required_remote_obligation_floor_ref). No field row is claimed for the token. The flagged span is part of the owner's own normative definition, the registered top-level candidate, so it maps to that source form."
 
 [[ambiguity_adjudication]]
 row_id = "a02:ambiguity-adjudication:eef13b4b7a2306d6fe972c7c2d821b7e62ba883e6ffb2a9e6fdd313323849073"
@@ -111219,22 +111219,6 @@ max_size_bytes = 40
 
 [[field]]
 slice_id = "a10"
-row_id = "a10:field:configuration-transition-spec-required-prepared"
-containing_schema = "ConfigurationTransitionSpec"
-field_tag = 0x000b
-stable_name = "required_prepared"
-exact_wire_type = "u64"
-cardinality = "one"
-identity_class = "inline"
-reference_semantics = "none"
-construction_order = 30
-role_predicate = "role-local"
-retention_and_cut_rule = "a10:1920 source-position tag 11; required prepared/certificate/remote/key/audit/backup obligation floor under the Appendix A u64 floor law, embedded by value and retained and cut with ConfigurationTransitionSpec"
-version_status = "reserved"
-max_size_bytes = 8
-
-[[field]]
-slice_id = "a10"
 row_id = "a10:field:configuration-transition-spec-terminal-audit-gate"
 containing_schema = "ConfigurationTransitionSpec"
 field_tag = 0x000c
@@ -111404,14 +111388,6 @@ row_id = "a10:target:field-configuration-transition-spec-paired-config-payload-f
 target_row_id = "a10:field:configuration-transition-spec-paired-config-payload-floor-ref"
 slice_id = "a10"
 source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.paired_config_payload_floor_ref|paired_config_payload_floor_ref"
-target_kind = "field"
-definition_status = "declared"
-
-[[target]]
-row_id = "a10:target:field-configuration-transition-spec-required-prepared"
-target_row_id = "a10:field:configuration-transition-spec-required-prepared"
-slice_id = "a10"
-source_key = "field|ConfigurationTransitionSpec|ConfigurationTransitionSpec.required_prepared|required_prepared"
 target_kind = "field"
 definition_status = "declared"
 

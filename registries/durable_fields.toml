@@ -1670,20 +1670,6 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "ConfigurationTransitionSpec"
-field_tag = 0x000b
-stable_name = "required_prepared"
-exact_wire_type = "u64"
-cardinality = "one"
-identity_class = "inline"
-reference_semantics = "none"
-construction_order = 30
-role_predicate = "role-local"
-retention_and_cut_rule = "a10:1920 source-position tag 11; required prepared/certificate/remote/key/audit/backup obligation floor under the Appendix A u64 floor law, embedded by value and retained and cut with ConfigurationTransitionSpec"
-version_status = "reserved"
-max_size_bytes = 8
-
-[[field]]
-containing_schema = "ConfigurationTransitionSpec"
 field_tag = 0x000c
 stable_name = "terminal_audit_gate"
 exact_wire_type = "TerminalAuditGate"
