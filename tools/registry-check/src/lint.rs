@@ -121,6 +121,9 @@ pub enum HitKind {
     UnclaimedProse,
     /// A `presence = "required"` exclusion names a path that does not exist.
     DeadExclude,
+    /// An exclusion names a path that exists but that the closure walk never
+    /// reaches, so it excuses a hit that could not have been raised.
+    UnreachableExclude,
     /// A `presence = "required"` closure prune names a directory that does not
     /// exist: the walk is narrowed by a rule that no longer narrows anything.
     DeadPrune,
@@ -138,6 +141,7 @@ impl HitKind {
             HitKind::DeadGateExemption => "dead_gate_exemption",
             HitKind::UnclaimedProse => "unclaimed_prose",
             HitKind::DeadExclude => "dead_exclude",
+            HitKind::UnreachableExclude => "unreachable_exclude",
             HitKind::DeadPrune => "dead_closure_prune",
             HitKind::UncoveredClosureRoot => "uncovered_closure_root",
         }
@@ -689,14 +693,14 @@ pub fn run(
         }
         found.extend(found_here);
     }
-    for rel in found {
+    for rel in &found {
         census.prose_files_seen += 1;
         if !claimed.contains(rel.as_str()) {
             hits.push(LintHit {
                 kind: HitKind::UnclaimedProse,
                 file: rel.clone(),
                 line: 0,
-                subject: rel,
+                subject: rel.clone(),
                 text: "prose artifact is neither in claims_lint.toml lint.scan nor excluded with a reason".into(),
             });
         }
@@ -711,6 +715,44 @@ pub fn run(
                 line: 0,
                 subject: ex.path.clone(),
                 text: "exclusion names a path that does not exist; delete it rather than carrying a rule that matches nothing".into(),
+            });
+        }
+    }
+
+    // ---- ...and it must exclude something THIS WALK WOULD OTHERWISE ACCUSE ----
+    //
+    // `DeadExclude` above asks only whether the path exists. Existing is not the
+    // same as being narrowed: an exclusion is only doing work if the closure
+    // walk actually reaches the file, because `unclaimed_prose` accuses nothing
+    // the walk did not find. A row naming a path inside a `[[closure_prune]]`
+    // subtree, under a hidden directory, or outside every `closure_dir` excuses
+    // a hit that was never going to be raised.
+    //
+    // MEASURED 2026-07-27 at HEAD 3aa3f6c, which is why this is a law and not a
+    // tidy-up: appending `path = "target/PHANTOM.md"` (a pruned subtree) to the
+    // real config, with the file created so the existence law could not be what
+    // fires, left `lint::run` at exactly its base verdict — 1 hit before, 1 hit
+    // after, zero new hits. The row was inert and nothing said so.
+    //
+    // This is deliberately keyed on reachability, NOT on "would scanning this
+    // file raise an unregistered-marker hit". Measured on the same HEAD, only
+    // 2 of the 6 real exclusions suppress a marker hit, but ALL 6 are
+    // load-bearing for the closure law — removing any one of them raises
+    // `unclaimed_prose` for that file. A "must suppress a marker" law would
+    // therefore condemn four correctly-classified historical documents and
+    // force them into `scan`, which is the opposite of what their recorded
+    // reasons say.
+    //
+    // The `found` set is the walk's own output, so this reuses the one reader
+    // rather than re-deriving reachability from the config.
+    for ex in &config.excludes {
+        if root.join(&ex.path).exists() && !found.contains(ex.path.as_str()) {
+            hits.push(LintHit {
+                kind: HitKind::UnreachableExclude,
+                file: "registries/claims_lint.toml".into(),
+                line: 0,
+                subject: ex.path.clone(),
+                text: "exclusion names a path the closure walk never reaches, so it excuses a hit that could not be raised; move the file under a closure_dir or delete the row".into(),
             });
         }
     }

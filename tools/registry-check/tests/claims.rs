@@ -1043,6 +1043,57 @@ fn claims_neg_dead_exclude() {
 }
 
 #[test]
+fn claims_neg_unreachable_exclude() {
+    // `dead_exclude` asks only whether the path EXISTS, and existing is not the
+    // same as narrowing anything: `unclaimed_prose` accuses only files the
+    // closure walk FOUND, so an exclusion the walk never reaches excuses a hit
+    // that could not have been raised. Hidden directories are skipped by the
+    // walk, so the same file is reachable or not purely by where it sits —
+    // which makes location the only difference between the two verdicts below.
+    //
+    // MEASURED 2026-07-27 on the real tree: appending a `target/PHANTOM.md`
+    // exclusion (a pruned subtree) to the shipped config left the verdict at
+    // exactly its base — 1 hit before, 1 hit after — with nothing accusing the
+    // inert row.
+    let f = LintFixture::build("unreachable-exclude");
+    std::fs::create_dir_all(f.root.join(".private")).expect("hidden dir");
+    std::fs::write(
+        f.root.join(".private/OLD.md"),
+        "A hidden historical note.\n",
+    )
+    .expect("hidden file");
+    f.write_config(
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n\n\
+         [[exclude]]\npath = \".private/OLD.md\"\nreason = \"a note the walk cannot see\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    let dead = f.hits_of(lint::HitKind::DeadExclude);
+    assert!(
+        dead.is_empty(),
+        "the file exists, so the existence law must not be what fires: {dead:?}"
+    );
+    let hits = f.hits_of(lint::HitKind::UnreachableExclude);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].subject, ".private/OLD.md");
+
+    // Paired control: the same file, the same exclusion, moved somewhere the
+    // walk reaches. If this still fired, the law would be accusing every row.
+    std::fs::write(f.root.join("OLD.md"), "A historical note.\n").expect("visible file");
+    f.write_config(
+        &["README.md", "docs/GUIDE.md"],
+        "[[exclude]]\npath = \"HISTORY.md\"\nreason = \"historical draft\"\n\n\
+         [[exclude]]\npath = \"OLD.md\"\nreason = \"a note the walk can see\"\n",
+        &["Cold bulk load", "Point reads"],
+    );
+    let (hits, _) = f.run().expect("lint runs");
+    assert!(
+        hits.is_empty(),
+        "location must be the only thing that changed: {hits:?}"
+    );
+}
+
+#[test]
 fn claims_neg_unregistered_marker_survives_the_second_direction() {
     // Direction 1 regression guard: adding direction 2 must not cost the
     // direction that already worked.
