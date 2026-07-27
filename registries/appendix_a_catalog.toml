@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3603
+target_count = 3605
 projection_fallback_count = 118
-target_source_assignment_sha256 = "7f2143d67113800c237fb1a481e9934043fb496bf6bdfef739ef1e0c21e12787"
+target_source_assignment_sha256 = "de8d4ed337b1040ec8e883bbb18f5ae6835cff28a912fb8b8db8188d89ab64eb"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -625,7 +625,7 @@ ambiguity_ids_sha256 = "33e8d9c5f6eb7447608290da8112ba21e20f826b19faaf36b098b2e3
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
-registry_epoch = 61
+registry_epoch = 62
 
 [[projection_epoch]]
 registry = "physical_record_kinds"
@@ -53475,7 +53475,7 @@ symbol = "LocalGcApplyQuarantineSpec"
 generic_signature = ""
 source_key = "top|LocalGcApplyQuarantineSpec"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a14:2047"]
 
 [[top_level_candidate]]
@@ -53485,7 +53485,7 @@ symbol = "LocalGcCancellationAuthorizeSpec"
 generic_signature = ""
 source_key = "top|LocalGcCancellationAuthorizeSpec"
 source_kind = "ambiguous"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a14:2055"]
 
 [[top_level_candidate]]
@@ -110047,6 +110047,28 @@ role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/service_catalog_promotion_reservation_receipt/"
 
+[[logical_kind]]
+slice_id = "a14"
+row_id = "a14:logical-kind:local-gc-apply-quarantine-spec"
+object_kind = 0x057a
+name = "LocalGcApplyQuarantineSpec"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_gc_apply_quarantine_spec/"
+
+[[logical_kind]]
+slice_id = "a14"
+row_id = "a14:logical-kind:local-gc-cancellation-authorize-spec"
+object_kind = 0x057b
+name = "LocalGcCancellationAuthorizeSpec"
+status = "reserved"
+construction_order = 15
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_gc_cancellation_authorize_spec/"
+
 [[wire_type]]
 slice_id = "a20"
 row_id = "a20:wire-type:external-cas-restore-service-promotion-receipt-ref"
@@ -110906,4 +110928,20 @@ target_row_id = "a08:field:shard-gc-preflight-spec-basis-shard-state"
 slice_id = "a08"
 source_key = "field|ShardGcPreflightSpec|ShardGcPreflightSpec.basis_shard_state|basis_shard_state"
 target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:logical-kind-local-gc-apply-quarantine-spec"
+target_row_id = "a14:logical-kind:local-gc-apply-quarantine-spec"
+slice_id = "a14"
+source_key = "top|LocalGcApplyQuarantineSpec"
+target_kind = "logical-kind"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:logical-kind-local-gc-cancellation-authorize-spec"
+target_row_id = "a14:logical-kind:local-gc-cancellation-authorize-spec"
+slice_id = "a14"
+source_key = "top|LocalGcCancellationAuthorizeSpec"
+target_kind = "logical-kind"
 definition_status = "declared"

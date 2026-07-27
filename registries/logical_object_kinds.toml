@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 61
+registry_epoch = 62
 
 [[kind]]
 object_kind = 0x0001
@@ -4903,3 +4903,21 @@ construction_order = 24
 role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/service_catalog_promotion_reservation_receipt/"
+
+[[kind]]
+object_kind = 0x057a
+name = "LocalGcApplyQuarantineSpec"
+status = "reserved"
+construction_order = 40
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_gc_apply_quarantine_spec/"
+
+[[kind]]
+object_kind = 0x057b
+name = "LocalGcCancellationAuthorizeSpec"
+status = "reserved"
+construction_order = 15
+role_predicate = "role-local"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/local_gc_cancellation_authorize_spec/"
