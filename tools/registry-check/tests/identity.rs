@@ -10078,12 +10078,9 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
     //   GlobalDeltaBatchIndex -> GlobalLogicalDeltaBatch
     //   GlobalLogicalDeltaBatch -> GlobalTxnRecord
     //   GlobalTxnRecord -> GlobalStatePayload
-    component.logical.push(kind(
-        0x7ffe,
-        "GlobalDeltaBatchIndex",
-        "reserved",
-        44,
-    ));
+    component
+        .logical
+        .push(kind(0x7ffe, "GlobalDeltaBatchIndex", "reserved", 44));
     let mut state_to_index = field(
         "GlobalStatePayload",
         0x7ffe,
@@ -10095,12 +10092,7 @@ fn idr_rtnf_global_delta_prior_object_relation_cuts_the_exact_component() {
     state_to_index.retention_and_cut_rule =
         "fixture strong owner of the exact retained GlobalDeltaBatchIndex".into();
     component.fields.push(state_to_index);
-    let mut index_to_batch = field(
-        "GlobalDeltaBatchIndex",
-        0x0001,
-        "entries",
-        44,
-    );
+    let mut index_to_batch = field("GlobalDeltaBatchIndex", 0x0001, "entries", 44);
     index_to_batch.target_schema_id = Some("GlobalLogicalDeltaBatch".into());
     index_to_batch.version_status = "reserved".into();
     index_to_batch.retention_and_cut_rule =
