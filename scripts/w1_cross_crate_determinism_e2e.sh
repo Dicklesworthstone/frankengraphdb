@@ -140,21 +140,50 @@ compare_runs() {
   return "$rc"
 }
 
-# The measured shared-target race has a narrow rustc signature: Cargo launched
-# rustc with an --extern path, and that dependency artifact no longer existed
-# when rustc opened it. This is not a failed test or a comparison drift; the
-# workspace assertions never completed. Keep the classifier deliberately
-# narrower than generic "No such file" text so a missing source file or an
-# ordinary failing test remains RED.
+# The measured shared-target race has two narrow compiler-driver signatures:
+# rustc says outright that an `--extern` artifact no longer exists, while
+# rustdoc reports E0463 and prints the `--extern` artifact only in its failed
+# command line. In the rustdoc form, require the E0463 crate name and the
+# command-line `--extern` name to agree; a bare E0463 remains a real failure.
+# Neither form is a failed test or comparison drift: the workspace assertions
+# never completed. Keep the classifier deliberately narrower than generic
+# "No such file" or "can't find crate" text so a missing source/dependency
+# declaration and an ordinary failing test remain RED.
 cargo_extern_artifact_disappeared() { # cargo-test-log
   local log="$1"
 
   [ -f "$log" ] || return 1
   awk '
+    BEGIN {
+      apostrophe = sprintf("%c", 39)
+      e0463_prefix = "error[E0463]: can" apostrophe "t find crate for `"
+      rustdoc_failure = "process didn" apostrophe "t exit successfully: "
+    }
+    index($0, e0463_prefix) == 1 && $0 ~ /`$/ {
+      crate = substr($0, length(e0463_prefix) + 1)
+      sub(/`$/, "", crate)
+      if (crate ~ /^[[:alnum:]_]+$/) {
+        rustdoc_missing[crate] = 1
+      }
+    }
     /^error: extern location for [[:alnum:]_]+ does not exist:$/ {
       if ((getline artifact) > 0 \
           && artifact ~ /^[[:space:]]+.*\/(debug|release)\/deps\/lib[^[:space:]]+\.(rlib|rmeta)$/) {
         found = 1
+      }
+    }
+    index($0, rustdoc_failure) > 0 && $0 ~ /\/rustdoc / {
+      for (crate in rustdoc_missing) {
+        marker = "--extern " crate "="
+        marker_at = index($0, marker)
+        if (marker_at == 0) {
+          continue
+        }
+        artifact = substr($0, marker_at + length(marker))
+        sub(/[[:space:]`].*$/, "", artifact)
+        if (artifact ~ /\/(debug|release)\/deps\/lib[^[:space:]`]+\.(rlib|rmeta)$/) {
+          found = 1
+        }
       }
     }
     END {
@@ -174,8 +203,12 @@ workspace_test_failed() { # stage log exit-code genuine-failure-diagnostic
   if cargo_extern_artifact_disappeared "$log"; then
     gate_diag "INDETERMINATE: a Cargo dependency artifact disappeared during $stage."
     gate_diag "  The workspace assertions did not complete; this is NOT a determinism finding."
-    grep -A1 '^error: extern location for .* does not exist:$' "$log" \
+    grep -E -A1 \
+      "^error: extern location for .* does not exist:$|^error\\[E0463\\]: can't find crate for " \
+      "$log" \
       | head -10 >&2 || true
+    grep "process didn't exit successfully: .*/rustdoc .*--extern " "$log" \
+      | head -2 >&2 || true
     gate_diag "retained evidence: $EVIDENCE_DIR"
     gate_abort_unrun "$stage: Cargo dependency artifact disappeared before the workspace suite completed"
   fi
@@ -235,13 +268,41 @@ FIXTURE
     fi
   done
 
-  # The environmental classifier must identify the measured missing-rlib
-  # signature and reject nearby real failures. These two negative controls keep
-  # a generic compiler error or a failed test from borrowing UNRUN.
+  # The environmental classifier must identify both measured missing-rlib
+  # signatures and reject nearby real failures. In particular, a bare E0463,
+  # an E0463 whose crate does not match the rustdoc --extern name, and a
+  # non-target dependency path must not borrow UNRUN.
   cat >"$d/artifact-missing.txt" <<'FIXTURE'
 error: extern location for fgdb_bigint does not exist:
   /data/tmp/cargo-target/debug/deps/libfgdb_bigint-20abfb7010900144.rlib
 error: aborting due to 1 previous error
+FIXTURE
+  cat >"$d/rustdoc-artifact-missing.txt" <<'FIXTURE'
+error[E0463]: can't find crate for `fgdb_types`
+  --> crates/fgdb-codec/src/identity.rs:20:5
+   |
+20 | use fgdb_types::{CommitSeq, EId, VId};
+   |     ^^^^^^^^^^ can't find crate
+error: aborting due to 1 previous error
+Caused by:
+  process didn't exit successfully: `/toolchains/nightly/bin/rustdoc --edition=2024 --crate-name fgdb_codec --test crates/fgdb-codec/src/lib.rs --extern fgdb_codec=/data/tmp/cargo-target/debug/deps/libfgdb_codec-9702cb88adbcc8c6.rlib --extern fgdb_types=/data/tmp/cargo-target/debug/deps/libfgdb_types-570c87d0bb9d3d62.rlib -L dependency=/data/tmp/cargo-target/debug/deps` (exit status: 1)
+FIXTURE
+  cat >"$d/rustdoc-e0463-only.txt" <<'FIXTURE'
+error[E0463]: can't find crate for `fgdb_types`
+  --> crates/fgdb-codec/src/identity.rs:20:5
+error: aborting due to 1 previous error
+FIXTURE
+  cat >"$d/rustdoc-wrong-extern.txt" <<'FIXTURE'
+error[E0463]: can't find crate for `fgdb_types`
+error: aborting due to 1 previous error
+Caused by:
+  process didn't exit successfully: `/toolchains/nightly/bin/rustdoc --edition=2024 --crate-name fgdb_codec --test crates/fgdb-codec/src/lib.rs --extern fgdb_evidence=/data/tmp/cargo-target/debug/deps/libfgdb_evidence-5cced8237e6720e5.rlib` (exit status: 1)
+FIXTURE
+  cat >"$d/rustdoc-nontarget-extern.txt" <<'FIXTURE'
+error[E0463]: can't find crate for `fgdb_types`
+error: aborting due to 1 previous error
+Caused by:
+  process didn't exit successfully: `/toolchains/nightly/bin/rustdoc --edition=2024 --crate-name fgdb_codec --test crates/fgdb-codec/src/lib.rs --extern fgdb_types=/workspace/vendor/libfgdb_types.rlib` (exit status: 1)
 FIXTURE
   cat >"$d/compiler-error.txt" <<'FIXTURE'
 error[E0308]: mismatched types
@@ -254,7 +315,13 @@ error: test failed, to rerun pass `-p fgdb-bigint --lib`
 FIXTURE
   local classifier_case expect_classifier got_classifier
   for classifier_case in \
-    artifact-missing:match compiler-error:reject test-failure:reject; do
+    artifact-missing:match \
+    rustdoc-artifact-missing:match \
+    rustdoc-e0463-only:reject \
+    rustdoc-wrong-extern:reject \
+    rustdoc-nontarget-extern:reject \
+    compiler-error:reject \
+    test-failure:reject; do
     expect_classifier="${classifier_case#*:}"
     classifier_case="${classifier_case%%:*}"
     if cargo_extern_artifact_disappeared "$d/$classifier_case.txt"; then
