@@ -98,6 +98,7 @@ GATE_UNRUN=0
 GATE_TALLY_HOOK=""
 GATE_CONTRACT_LINE_EMITTED=0
 GATE_TREE_FP_START=""
+GATE_TREE_LIST_START=""
 GATE_TREE_HEAD_START=""
 GATE_TREE_CHECKED=0
 
@@ -138,18 +139,145 @@ GATE_TREE_CHECKED=0
 # Outside a git repo (a quiet root, a scratch copy) both calls return the same
 # sentinel, so the comparison is a no-op — correct, because a tree nothing can
 # commit to cannot be raced.
+# gate_tree_listing — the per-file evidence the fingerprint is derived FROM.
+#
+# WHY IT IS A SEPARATE FUNCTION (bead fgdb-g996). This listing was always
+# computed and then thrown away: the whole tree collapsed to one hex string, so
+# `gate_check_tree_stable` could report THAT the tree moved and never WHAT moved.
+# MEASURED on the first live leased run (2026-07-27 18:29:23-18:40:02): three
+# gates reported a void verdict and a peer edit, a stray tool write and check.sh
+# mutating its own generated docs were INDISTINGUISHABLE in the output. Attributing
+# it afterwards took four instruments, two of which silently under-report — the
+# current JSONL (last-write-wins) and the beads `events` table (no row at all for
+# a `--notes` write). Retaining the listing turns "something moved" into
+# "docs/X.md changed", which is the difference between a report and a rumour.
+#
+# The listing is held in a SHELL VARIABLE, not a temp file: MEASURED 20330 bytes
+# over 199 tracked files, in-process between gate_init and the EXIT trap. No
+# disk, no cleanup, and no interaction with the per-run-tmp-dir hazard.
+#
+# COST, MEASURED on this repo rather than assumed: 105.89 ms for the discarding
+# form, 111.01 ms for the retaining one — +5 ms per sample, two samples per gate,
+# against a ~35-minute run. The listing was already being computed; only the
+# throwing-away is removed.
+gate_tree_listing() {
+  git rev-parse HEAD 2>&1
+  # stderr is folded in on purpose: if a tracked file vanishes mid-run,
+  # sha256sum's error is itself the evidence the tree moved, and a digest that
+  # silently ignored it would report a void run as a clean one. gate_tree_diff
+  # classifies those lines SEPARATELY from content changes, because "the file
+  # could not be read at this instant" and "the file's bytes are different" are
+  # different facts and folding them into one digest made them the same fact.
+  git ls-files -z 2>/dev/null | xargs -0 sha256sum 2>&1
+}
+
 gate_tree_fingerprint() {
   if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     printf 'not-a-git-worktree\n'
     return 0
   fi
+  gate_tree_listing | sha256sum | cut -d' ' -f1
+}
+
+# gate_tree_fp_of <listing> — the fingerprint of a listing already in hand, so a
+# caller that needs BOTH does not walk 24.7 MB of tracked content twice.
+#
+# `$(...)` strips trailing newlines and `printf '%s\n'` restores exactly one, so
+# the bytes hashed here are identical to those `gate_tree_fingerprint` pipes.
+# That equality is asserted by the harness rather than assumed: if it ever drifts,
+# a start fingerprint and an end fingerprint would disagree on an unchanged tree
+# and every gate would report UNRUN — the "guard disabled by its own trigger"
+# shape this repo keeps closing.
+gate_tree_fp_of() {
+  printf '%s\n' "$1" | sha256sum | cut -d' ' -f1
+}
+
+# gate_tree_diff <start_listing> <end_listing> — the SET DIFFERENCE, on stderr.
+#
+# Four classes, deliberately distinguished:
+#   ~ changed    tracked path present at both ends, different content digest
+#   + added      path git listed at the end but not at the start
+#   - removed    path git listed at the start but not at the end
+#   ! read error a folded stderr line present at one end only — the file could
+#                not be hashed at that instant. This is the class that makes an
+#                atomic write+rename legible AS a transient instead of leaving it
+#                indistinguishable from a real content change.
+#
+# Output is sorted, so two runs over the same movement produce byte-identical
+# diagnostics. Long lists are capped, and THE CAP STATES THE TRUE TOTAL: a silent
+# truncation reads as "that was everything" when it was not.
+gate_tree_diff() {
+  local cap="${FGDB_TREE_DIFF_CAP:-40}"
   {
-    git rev-parse HEAD 2>&1
-    # stderr is folded into the digest on purpose: if a tracked file vanishes
-    # mid-run, sha256sum's error is itself the evidence the tree moved, and a
-    # digest that silently ignored it would report a void run as a clean one.
-    git ls-files -z 2>/dev/null | xargs -0 sha256sum 2>&1
-  } | sha256sum | cut -d' ' -f1
+    printf '%s\n' "$1"
+    printf '%s\n' '<<<gate-tree-split>>>'
+    printf '%s\n' "$2"
+  } | awk -v cap="$cap" '
+    BEGIN { side = 1; first = 1 }
+    $0 == "<<<gate-tree-split>>>" { side = 2; first = 1; next }
+    # line 1 of each listing is `git rev-parse HEAD`; HEAD is reported by the
+    # caller in full, so it is not re-derived here.
+    first == 1 { first = 0; next }
+    {
+      line = $0
+      esc = 0
+      # sha256sum prefixes a line with `\` when the path contains a backslash or
+      # a newline, and escapes them in the path. Keep the marker; do not pretend
+      # the raw path was recovered.
+      if (substr(line, 1, 1) == "\\") { esc = 1; line = substr(line, 2) }
+      if (line ~ /^[0-9a-f][0-9a-f]*  /) {
+        sp = index(line, "  ")
+        d = substr(line, 1, sp - 1)
+        p = substr(line, sp + 2)
+        if (esc) p = p " (escaped by sha256sum)"
+        if (side == 1) A[p] = d; else B[p] = d
+      } else {
+        if (side == 1) EA[line] = 1; else EB[line] = 1
+      }
+    }
+    END {
+      n = 0
+      for (p in A) if ((p in B) && A[p] != B[p]) { out[n++] = sprintf("  ~ changed     %s", p) }
+      for (p in B) if (!(p in A))                { out[n++] = sprintf("  + added       %s", p) }
+      for (p in A) if (!(p in B))                { out[n++] = sprintf("  - removed     %s", p) }
+      for (e in EB) if (!(e in EA))              { out[n++] = sprintf("  ! read error  %s", e) }
+      for (e in EA) if (!(e in EB))              { out[n++] = sprintf("  ! read error cleared  %s", e) }
+      if (n == 0) {
+        print "  (no per-file difference: the listings are equal, so the move is"
+        print "   in HEAD alone — see the two shas above)"
+      } else {
+        # sort deterministically without relying on for-in order
+        for (i = 0; i < n; i++) for (j = i + 1; j < n; j++)
+          if (out[j] < out[i]) { t = out[i]; out[i] = out[j]; out[j] = t }
+        shown = (n < cap) ? n : cap
+        for (i = 0; i < shown; i++) print out[i]
+        if (n > shown) printf "  ... %d of %d differences shown; %d NOT LISTED (raise FGDB_TREE_DIFF_CAP)\n", shown, n, n - shown
+        printf "  %d tracked path(s) differ in total\n", n
+      }
+    }
+  ' >&2
+}
+
+# gate_tree_snapshot_into <listing_var> <fingerprint_var> — take BOTH halves of a
+# tree sample through one code path.
+#
+# Both call sites (gate_init and gate_check_tree_stable) go through here so the
+# start and end samples cannot be derived differently. If they ever were, an
+# unchanged tree would produce two different fingerprints and EVERY gate would
+# report UNRUN — a guard that always fires is a guard that gets disabled.
+gate_tree_snapshot_into() {
+  local __gts_list __gts_fp
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    __gts_list="$(gate_tree_listing)"
+    __gts_fp="$(gate_tree_fp_of "$__gts_list")"
+  else
+    # A tree nothing can commit to cannot be raced; both samples agree and the
+    # comparison is a no-op.
+    __gts_list=""
+    __gts_fp="not-a-git-worktree"
+  fi
+  printf -v "$1" '%s' "$__gts_list"
+  printf -v "$2" '%s' "$__gts_fp"
 }
 
 # gate_tree_head — the human-readable half, for the diagnostic.
@@ -174,8 +302,8 @@ gate_check_tree_stable() {
   [ "$GATE_TREE_CHECKED" -eq 1 ] && return 0
   GATE_TREE_CHECKED=1
   [ -z "$GATE_TREE_FP_START" ] && return 0
-  local fp_end head_end
-  fp_end="$(gate_tree_fingerprint)"
+  local fp_end head_end list_end
+  gate_tree_snapshot_into list_end fp_end
   [ "$fp_end" = "$GATE_TREE_FP_START" ] && return 0
   head_end="$(gate_tree_head)"
   gate_unrun "${GATE_NAME:-gate}: tree changed under the run; verdict is void"
@@ -187,6 +315,11 @@ gate_check_tree_stable() {
     gate_diag "  HEAD is unchanged, so this was a working-tree or index edit, not a"
     gate_diag "  landing. Tracked-file content differs between start and end."
   fi
+  # WHAT moved, not just THAT it moved (fgdb-g996). Without this the operator is
+  # told the run is void and handed nothing to act on, and a peer edit, a stray
+  # tool write and a gate mutating its own subject read identically.
+  gate_diag "  WHAT MOVED:"
+  gate_tree_diff "$GATE_TREE_LIST_START" "$list_end"
   gate_diag "  Re-run the gate on a settled tree. Do NOT attribute the FAIL lines"
   gate_diag "  above to the code they name until a clean run reproduces them."
   return 1
@@ -209,7 +342,7 @@ gate_init() {
   GATE_CONTRACT_LINE_EMITTED=0
   GATE_TREE_CHECKED=0
   GATE_TREE_HEAD_START="$(gate_tree_head)"
-  GATE_TREE_FP_START="$(gate_tree_fingerprint)"
+  gate_tree_snapshot_into GATE_TREE_LIST_START GATE_TREE_FP_START
   gate_landing_acquire
   trap gate_on_exit EXIT
 }
