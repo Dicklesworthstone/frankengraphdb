@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# g0_tree_stability_e2e.sh — the tripwire that makes a voided run legible, guarded
+# g0_tree_stability_e2e.sh — prevent and detect a tree moving under a gate
 # =============================================================================
 # Owner bead: fgdb-49ng (fix landed 38cca3f). Durable-regression bead: fgdb-mt2b.
 #
@@ -38,6 +38,14 @@
 # and something else coincidentally failed. The mutation is asserted to have
 # applied, so F cannot pass vacuously by silently matching nothing.
 #
+# WHY CASES G-M EXIST. Detection alone still discarded nearly every full gate:
+# routine `br` writes rewrote the tracked JSONL every few minutes. The project
+# now disables automatic export and routes explicit export through br_sync.sh.
+# G-L prove every lease direction plus a neutered deferral; M drives the
+# deployed `br` binary and proves the DB advances while JSONL stays byte-stable,
+# then the helper exports it. A wrapper-only test would miss a config regression,
+# while a config-only test would miss an unguarded explicit sync.
+#
 # WHY THIS IS NOT FAIL-FAST. `set -e` is deliberately not set, for the reason
 # recorded in g0_negative_evidence_e2e.sh: a gate that stops at its first red
 # reports its own evaluation order rather than the tree's state.
@@ -48,16 +56,18 @@
 # fgdb-49ng exists to remove.
 #
 # IT DELETES NOTHING. Per RULE 1 of AGENTS.md this script removes no file or
-# directory, so its scratch accumulates: roughly 200 KB per run under
-# $WORK_ROOT, inventoried by scripts/disk_hygiene.sh and reclaimed by a human.
-# That is ~0.3% of the 61 MB the clone-based version would have left, and the
-# reason this design was chosen over the clone.
+# directory, so its scratch accumulates under $WORK_ROOT, is inventoried by
+# scripts/disk_hygiene.sh, and is reclaimed by a human. The prevention control
+# adds one tiny isolated Beads database per run; no live repository state moves.
 # =============================================================================
 
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIB="$ROOT/scripts/lib/gate_verdict.sh"
+LANDING_LIB="$ROOT/scripts/lib/landing_lease.sh"
+BR_SYNC="$ROOT/scripts/br_sync.sh"
+BR_CONFIG="$ROOT/.beads/config.yaml"
 
 # shellcheck source=lib/gate_verdict.sh
 . "$LIB"
@@ -66,10 +76,22 @@ gate_init "g0_tree_stability_e2e"
 
 WORK_ROOT="${FGDB_GATE_TMP:-/data/tmp/fgdb_swarm/g0_tree_stability}"
 CASES_RUN=0
+EXPORT_CASES_RUN=0
 
 if [ ! -f "$LIB" ]; then
   gate_die "the library under test is missing: $LIB"
 fi
+if [ ! -f "$LANDING_LIB" ]; then
+  gate_die "the landing-lease library under test is missing: $LANDING_LIB"
+fi
+if [ ! -f "$BR_SYNC" ]; then
+  gate_die "the Beads export helper under test is missing: $BR_SYNC"
+fi
+if [ ! -f "$BR_CONFIG" ]; then
+  gate_die "the Beads project config under test is missing: $BR_CONFIG"
+fi
+# shellcheck source=lib/landing_lease.sh
+. "$LANDING_LIB"
 if ! mkdir -p "$WORK_ROOT" 2>/dev/null; then
   gate_die "cannot create scratch root $WORK_ROOT" \
     "  Set FGDB_GATE_TMP to a writable directory."
@@ -272,9 +294,213 @@ fi
 # attributing their result to, and none of them are evidence about the tripwire.
 run_case F_mutation_control before commit 0 PASS zero neuter
 
+# -----------------------------------------------------------------------------
+# The prevention layer: project-wide deferred auto-flush plus one guarded
+# explicit-export path.
+# -----------------------------------------------------------------------------
+write_br_stub() {
+  cat >"$1" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${BR_STUB_LOG:?}"
+exit "${BR_STUB_RC:-0}"
+STUB
+  chmod +x "$1"
+}
+
+write_token_stub() {
+  cat >"$1" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${TOKEN_STUB_LOG:?}"
+case "${1:-}" in
+  acquire)
+    lock="${FGDB_TOKEN_DIR:?}/${2:?}.lock"
+    mkdir "$lock" 2>/dev/null || exit 1
+    printf '%s\n%s\n%s\n' "${3:?}" "$(date +%s)" "${4:?}" >"$lock/holder"
+    ;;
+  release)
+    # No deletion: every test has a private token directory, so leaving the
+    # released fixture behind cannot block another case.
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+STUB
+  chmod +x "$1"
+}
+
+make_export_fixture() {
+  local d="$1" state="$2" epoch start
+  mkdir -p "$d/tokens" || return 1
+  write_br_stub "$d/br-stub" || return 1
+  write_token_stub "$d/token-stub" || return 1
+
+  case "$state" in
+    FREE)
+      ;;
+    BINDING)
+      mkdir -p "$d/tokens/landing.lock" || return 1
+      epoch="$(date +%s)"
+      start="$(_ll_starttime "$$" 2>/dev/null)" || return 1
+      printf 'test-gate\n%s\n45\n%s\n%s\n' "$epoch" "$$" "$start" \
+        >"$d/tokens/landing.lock/holder" || return 1
+      ;;
+    BREAKABLE)
+      mkdir -p "$d/tokens/landing.lock" || return 1
+      epoch="$(date +%s)"
+      printf 'dead-gate\n%s\n45\n999999999\n0\n' "$epoch" \
+        >"$d/tokens/landing.lock/holder" || return 1
+      ;;
+    UNREADABLE)
+      mkdir -p "$d/tokens/landing.lock" || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# run_export_case <label> <state> <want_calls> <want_rc> <diagnostic|NONE>
+#                 [helper] [landing_lib]
+run_export_case() {
+  local label="$1" state="$2" want_calls="$3" want_rc="$4" diagnostic="$5"
+  local helper="${6:-$BR_SYNC}" landing_lib="${7:-$LANDING_LIB}"
+  local d="$RUN_DIR/$label" log token_log out err rc calls ok=1
+
+  make_export_fixture "$d" "$state"
+  if [ "$?" -ne 0 ]; then
+    gate_fail "$label: could not build the lease/export fixture"
+    EXPORT_CASES_RUN=$((EXPORT_CASES_RUN + 1))
+    return
+  fi
+
+  log="$d/br-calls.log"; token_log="$d/token-calls.log"
+  out="$d/out.txt"; err="$d/err.txt"
+  : >"$log"
+  : >"$token_log"
+  BR_STUB_LOG="$log" FGDB_BR_BIN="$d/br-stub" \
+    TOKEN_STUB_LOG="$token_log" FGDB_TOKEN_SH="$d/token-stub" \
+    FGDB_TOKEN_DIR="$d/tokens" FGDB_LANDING_LIB="$landing_lib" \
+    bash "$helper" >"$out" 2>"$err"
+  rc=$?
+  calls="$(wc -l <"$log")"
+
+  [ "$calls" -eq "$want_calls" ] || ok=0
+  [ "$rc" -eq "$want_rc" ] || ok=0
+  if [ "$calls" -gt 0 ] && ! grep -qx 'sync --flush-only' "$log"; then
+    ok=0
+  fi
+  if [ "$diagnostic" = NONE ]; then
+    if grep -Eq '^(DEFERRED BEADS EXPORT|BEADS EXPORT LEASE WARNING)' "$err"; then
+      ok=0
+    fi
+  elif ! grep -Fq "$diagnostic" "$err"; then
+    ok=0
+  fi
+
+  if [ "$ok" -eq 1 ]; then
+    gate_pass "$label: state=$state calls=$calls rc=$rc"
+  else
+    gate_fail "$label: state=$state calls=$calls/$want_calls rc=$rc/$want_rc"
+    gate_diag "  --- helper stdout ---"
+    while IFS= read -r line; do gate_diag "  $line"; done <"$out"
+    gate_diag "  --- helper stderr ---"
+    while IFS= read -r line; do gate_diag "  $line"; done <"$err"
+    gate_diag "  --- br stub calls ---"
+    while IFS= read -r line; do gate_diag "  $line"; done <"$log"
+    gate_diag "  --- token stub calls ---"
+    while IFS= read -r line; do gate_diag "  $line"; done <"$token_log"
+  fi
+  EXPORT_CASES_RUN=$((EXPORT_CASES_RUN + 1))
+}
+
+# G: no lease -> the explicit export runs exactly once.
+run_export_case G_export_free FREE 1 0 NONE
+
+# H: a live holder -> no tracked export, temporary failure for an explicit retry.
+run_export_case H_export_binding BINDING 0 75 'DEFERRED BEADS EXPORT'
+
+# I/J/K: prevention uncertainty fails open loudly; detection remains behind it.
+run_export_case I_export_breakable BREAKABLE 1 0 'state   : BREAKABLE'
+run_export_case J_export_unreadable UNREADABLE 1 0 'state   : UNREADABLE'
+run_export_case K_export_missing_library FREE 1 0 'landing-lease library is missing' \
+  "$BR_SYNC" "$RUN_DIR/K_export_missing_library/no-such-landing-lease.sh"
+
+# L: MUTATION CONTROL — bypass the BINDING deferral and the forbidden export
+# must return. The mutation is asserted to apply, so the control cannot pass on
+# an obsolete sed target.
+MUTATED_BR_SYNC="$RUN_DIR/L_export_mutation_control/br_sync.sh"
+mkdir -p "$(dirname "$MUTATED_BR_SYNC")"
+cp "$BR_SYNC" "$MUTATED_BR_SYNC"
+sed -i 's/^    defer_export$/    flush_export/' "$MUTATED_BR_SYNC"
+if cmp -s "$BR_SYNC" "$MUTATED_BR_SYNC"; then
+  gate_unrun "L: the deferral-neutering mutation matched nothing"
+  gate_diag "  Re-derive the exact BINDING branch; do not remove this control."
+  EXPORT_CASES_RUN=$((EXPORT_CASES_RUN + 1))
+else
+  run_export_case L_export_mutation_control BINDING 1 0 NONE "$MUTATED_BR_SYNC"
+fi
+
+# M: deployed-tool composition. The DB advances to two records while the
+# configured JSONL remains at one byte-identical line; the helper then exports
+# the second line under a FREE lease.
+run_project_config_case() {
+  local d="$RUN_DIR/M_project_config_and_explicit_export"
+  local before after_mutation after_flush count lines br_bin rc=0
+  mkdir -p "$d/tokens" || rc=1
+  write_token_stub "$d/token-stub" || rc=1
+  : >"$d/token-calls.log"
+  br_bin="$(command -v br 2>/dev/null)"
+  [ -n "$br_bin" ] || rc=1
+
+  if [ "$rc" -eq 0 ]; then
+    (
+      cd "$d" || exit 1
+      "$br_bin" --quiet init --prefix probe >init.out 2>&1 || exit 1
+      "$br_bin" --quiet create --title='control record' --type=task --priority=2 \
+        >create-control.out 2>&1 || exit 1
+      cp "$BR_CONFIG" .beads/config.yaml || exit 1
+      before="$(sha256sum .beads/issues.jsonl | awk '{print $1}')"
+      "$br_bin" --quiet create --title='deferred record' --type=task --priority=2 \
+        >create-deferred.out 2>&1 || exit 1
+      after_mutation="$(sha256sum .beads/issues.jsonl | awk '{print $1}')"
+      "$br_bin" --json count >count.out 2>&1 || exit 1
+      count="$(grep -oE '"count":[[:space:]]*[0-9]+' count.out \
+        | tail -1 | grep -oE '[0-9]+')"
+      FGDB_BR_BIN="$br_bin" FGDB_TOKEN_DIR="$d/tokens" \
+        FGDB_TOKEN_SH="$d/token-stub" TOKEN_STUB_LOG="$d/token-calls.log" \
+        bash "$BR_SYNC" >flush.out 2>flush.err || exit 1
+      after_flush="$(sha256sum .beads/issues.jsonl | awk '{print $1}')"
+      lines="$(wc -l <.beads/issues.jsonl)"
+      [ "$before" = "$after_mutation" ] || exit 1
+      [ "$count" = 2 ] || exit 1
+      [ "$after_flush" != "$before" ] || exit 1
+      [ "$lines" -eq 2 ] || exit 1
+    )
+    rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    gate_pass "M: deployed br deferred DB record 2, then guarded export produced JSONL line 2"
+  else
+    gate_fail "M: project auto-flush configuration and explicit export did not compose"
+    for artifact in init.out create-control.out create-deferred.out count.out flush.out flush.err; do
+      if [ -f "$d/$artifact" ]; then
+        gate_diag "  --- $artifact ---"
+        while IFS= read -r line; do gate_diag "  $line"; done <"$d/$artifact"
+      fi
+    done
+  fi
+  EXPORT_CASES_RUN=$((EXPORT_CASES_RUN + 1))
+}
+run_project_config_case
+
 # --- the zero is licensed by accounting, not by finding nothing --------------
 if [ "$CASES_RUN" -ne 6 ]; then
   gate_unrun "expected 6 cases to execute, $CASES_RUN did"
+fi
+if [ "$EXPORT_CASES_RUN" -ne 7 ]; then
+  gate_unrun "expected 7 Beads-export cases to execute, $EXPORT_CASES_RUN did"
 fi
 
 gate_verdict

@@ -273,7 +273,7 @@ Before finishing a work session you MUST:
 1. File beads issues for remaining work (anything needing follow-up).
 2. Run quality gates (if code changed) — tests, clippy, fmt, `ubs`.
 3. Update issue status — close finished work, update in-progress.
-4. `br sync --flush-only` to export beads to JSONL, then `git add .beads/`.
+4. `bash scripts/br_sync.sh` to export beads to JSONL, then `git add .beads/`.
 5. Hand off — summarize what changed, gates run + results, remaining risks/gaps, concrete next steps.
 
 ---
@@ -292,7 +292,9 @@ A mail-like layer for agents to coordinate via MCP tools/resources: identities, 
 
 ## Beads (br) — Dependency-Aware Issue Tracking
 
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`). Issues live in `.beads/` and are tracked in git. **`br` is non-invasive — it NEVER runs git.** After `br sync --flush-only`, manually `git add .beads/ && git commit`.
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`). Issues live in `.beads/` and are tracked in git. **`br` is non-invasive — it NEVER runs git.** Project configuration disables automatic JSONL export, so routine `br` mutations update the shared database without moving the tracked `.beads/issues.jsonl` under a gate. At session completion, use `bash scripts/br_sync.sh` — never a raw `br sync --flush-only` — then manually `git add .beads/ && git commit`.
+
+`scripts/br_sync.sh` is the tracked-export enforcement point. It atomically takes the same landing token for its brief export, without process-name matching, so a gate start and a JSONL write cannot race between a state probe and the write. A live gate returns exit 75 and leaves the JSONL byte-identical; wait for that gate to finish and retry. A free lease exports immediately. An unreadable or provably dead lease fails open **loudly**, matching the landing-lease policy, and the tree-stability tripwire remains the detection backstop. Deferred records remain live in the shared database; the explicit session-completion export owns convergence to JSONL.
 
 ```bash
 br ready                 # issues ready to work (no blockers)
@@ -302,7 +304,7 @@ br create --title="..." --type=task|bug|feature|epic --priority=2   # 0=critical
 br update <id> --status=in_progress
 br close <id> [<id2> ...] [--reason "..."]
 br dep add <issue> <depends-on>
-br sync --flush-only     # export to JSONL (NO git ops)
+bash scripts/br_sync.sh  # lease-aware export to JSONL (NO git ops)
 ```
 
 Conventions: use the bead ID (e.g. `br-123`) as the Agent-Mail `thread_id` and prefix subjects with `[br-123]`; put the issue ID in the file-reservation `reason`; include `br-###` in commit messages. Map beads to workstreams (W1 Bedrock … W8 Fabric+Warden+Aegis) and gates (G1–G4) from §19.

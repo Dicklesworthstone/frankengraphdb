@@ -2,3 +2,10 @@
 # issue_prefix: fgdb
 # default_priority: 2
 # default_type: task
+#
+# Routine `br` mutations update the shared database without rewriting the
+# tracked export.  `scripts/br_sync.sh` owns the explicit, landing-lease-aware
+# export at session completion so a gate never reads a corpus that moves under
+# it (fgdb-09iz / fgdb-wv3v).
+sync:
+  auto_flush: false
