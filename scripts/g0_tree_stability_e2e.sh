@@ -38,17 +38,20 @@
 # and something else coincidentally failed. The mutation is asserted to have
 # applied, so F cannot pass vacuously by silently matching nothing.
 #
-# WHY CASES G-M EXIST. Detection alone still discarded nearly every full gate:
+# WHY CASES G-N EXIST. Detection alone still discarded nearly every full gate:
 # routine `br` writes rewrote the tracked JSONL every few minutes. The project
 # now disables automatic export and routes explicit export through br_sync.sh.
-# G-L prove every lease direction plus a neutered deferral; M drives the
-# deployed `br` binary and proves the DB advances while JSONL stays byte-stable,
-# then the helper exports it. A wrapper-only test would miss a config regression,
-# while a config-only test would miss an unguarded explicit sync.
+# G-L prove every lease direction plus a neutered deferral. M drives the
+# deployed `br` binary and proves that one declared id cannot sweep a second
+# pending record, then proves that declaring both ids exports exactly both. N
+# neuters both attribution guards and requires the silent sweep to return. A
+# wrapper-only test would miss a config regression, while a config-only test
+# would miss either an unguarded explicit sync or an unattributed whole-file
+# export.
 #
-# WHY CASE N EXISTS. Prevention makes routine Beads movement rare; it does not
+# WHY CASE O EXISTS. Prevention makes routine Beads movement rare; it does not
 # make every other tracked write impossible. check.sh therefore attributes a
-# whole-run movement by each child gate's declared input domain. N runs
+# whole-run movement by each child gate's declared input domain. O runs
 # check.sh's mutation panel, which separates Beads, Rust, shell and gate-driver
 # movement, then proves declaration, ledger, live-wiring and intersection
 # mutations all turn the panel red.
@@ -314,7 +317,21 @@ write_br_stub() {
   cat >"$1" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${BR_STUB_LOG:?}"
-exit "${BR_STUB_RC:-0}"
+case "$*" in
+  "sync --status --json")
+    printf '{"dirty_count":1}\n'
+    ;;
+  "sync --flush-only")
+    if [ -n "${BR_STUB_APPEND_ID:-}" ]; then
+      printf '{"id":"%s","status":"open"}\n' "$BR_STUB_APPEND_ID" \
+        >>.beads/issues.jsonl
+    fi
+    exit "${BR_STUB_RC:-0}"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
 STUB
   chmod +x "$1"
 }
@@ -343,9 +360,20 @@ STUB
 
 make_export_fixture() {
   local d="$1" state="$2" epoch start
-  mkdir -p "$d/tokens" || return 1
+  local project="$d/project"
+  mkdir -p "$d/tokens" "$project/.beads" || return 1
   write_br_stub "$d/br-stub" || return 1
   write_token_stub "$d/token-stub" || return 1
+  printf '{"id":"fgdb-export-fixture","status":"open"}\n' \
+    >"$project/.beads/issues.jsonl" || return 1
+  git -C "$project" init -q || return 1
+  git -C "$project" config user.email gate@example.invalid || return 1
+  git -C "$project" config user.name fgdb-gate || return 1
+  git -C "$project" config commit.gpgsign false || return 1
+  git -C "$project" add .beads/issues.jsonl || return 1
+  git -C "$project" commit -qm 'fixture: baseline Beads export' || return 1
+  printf '{"id":"fgdb-export-fixture","status":"closed"}\n' \
+    >"$project/.beads/issues.jsonl" || return 1
 
   case "$state" in
     FREE)
@@ -373,11 +401,12 @@ make_export_fixture() {
 }
 
 # run_export_case <label> <state> <want_calls> <want_rc> <diagnostic|NONE>
-#                 [helper] [landing_lib]
+#                 [helper] [landing_lib] [raced_record_id]
 run_export_case() {
   local label="$1" state="$2" want_calls="$3" want_rc="$4" diagnostic="$5"
   local helper="${6:-$BR_SYNC}" landing_lib="${7:-$LANDING_LIB}"
-  local d="$RUN_DIR/$label" log token_log out err rc calls ok=1
+  local raced_record_id="${8:-}"
+  local d="$RUN_DIR/$label" log token_log expected_calls out err rc calls ok=1
 
   make_export_fixture "$d" "$state"
   if [ "$?" -ne 0 ]; then
@@ -390,17 +419,26 @@ run_export_case() {
   out="$d/out.txt"; err="$d/err.txt"
   : >"$log"
   : >"$token_log"
-  BR_STUB_LOG="$log" FGDB_BR_BIN="$d/br-stub" \
-    TOKEN_STUB_LOG="$token_log" FGDB_TOKEN_SH="$d/token-stub" \
-    FGDB_TOKEN_DIR="$d/tokens" FGDB_LANDING_LIB="$landing_lib" \
-    bash "$helper" >"$out" 2>"$err"
+  (
+    cd "$d/project" || exit 1
+    BR_STUB_LOG="$log" FGDB_BR_BIN="$d/br-stub" \
+      TOKEN_STUB_LOG="$token_log" FGDB_TOKEN_SH="$d/token-stub" \
+      FGDB_TOKEN_DIR="$d/tokens" FGDB_LANDING_LIB="$landing_lib" \
+      BR_STUB_APPEND_ID="$raced_record_id" \
+      bash "$helper" fgdb-export-fixture
+  ) >"$out" 2>"$err"
   rc=$?
   calls="$(wc -l <"$log")"
 
   [ "$calls" -eq "$want_calls" ] || ok=0
   [ "$rc" -eq "$want_rc" ] || ok=0
-  if [ "$calls" -gt 0 ] && ! grep -qx 'sync --flush-only' "$log"; then
-    ok=0
+  if [ "$calls" -gt 0 ]; then
+    expected_calls="$d/expected-br-calls.log"
+    printf '%s\n' 'sync --status --json' 'sync --flush-only' >"$expected_calls"
+    cmp -s "$expected_calls" "$log" || ok=0
+    if [ "$want_rc" -eq 0 ]; then
+      grep -Fq 'fgdb-export-fixture' "$out" || ok=0
+    fi
   fi
   if [ "$diagnostic" = NONE ]; then
     if grep -Eq '^(DEFERRED BEADS EXPORT|BEADS EXPORT LEASE WARNING)' "$err"; then
@@ -426,16 +464,21 @@ run_export_case() {
   EXPORT_CASES_RUN=$((EXPORT_CASES_RUN + 1))
 }
 
-# G: no lease -> the explicit export runs exactly once.
-run_export_case G_export_free FREE 1 0 NONE
+# G: no lease -> the status audit and explicit export each run exactly once.
+run_export_case G_export_free FREE 2 0 NONE
+
+# G2: a record racing in after the pre-check makes the post-export exact-set
+# audit fail closed and names the undeclared id.
+run_export_case G2_export_race_attribution FREE 2 65 'fgdb-raced-foreign' \
+  "$BR_SYNC" "$LANDING_LIB" fgdb-raced-foreign
 
 # H: a live holder -> no tracked export, temporary failure for an explicit retry.
 run_export_case H_export_binding BINDING 0 75 'DEFERRED BEADS EXPORT'
 
 # I/J/K: prevention uncertainty fails open loudly; detection remains behind it.
-run_export_case I_export_breakable BREAKABLE 1 0 'state   : BREAKABLE'
-run_export_case J_export_unreadable UNREADABLE 1 0 'state   : UNREADABLE'
-run_export_case K_export_missing_library FREE 1 0 'landing-lease library is missing' \
+run_export_case I_export_breakable BREAKABLE 2 0 'state   : BREAKABLE'
+run_export_case J_export_unreadable UNREADABLE 2 0 'state   : UNREADABLE'
+run_export_case K_export_missing_library FREE 2 0 'landing-lease library is missing' \
   "$BR_SYNC" "$RUN_DIR/K_export_missing_library/no-such-landing-lease.sh"
 
 # L: MUTATION CONTROL — bypass the BINDING deferral and the forbidden export
@@ -450,53 +493,117 @@ if cmp -s "$BR_SYNC" "$MUTATED_BR_SYNC"; then
   gate_diag "  Re-derive the exact BINDING branch; do not remove this control."
   EXPORT_CASES_RUN=$((EXPORT_CASES_RUN + 1))
 else
-  run_export_case L_export_mutation_control BINDING 1 0 NONE "$MUTATED_BR_SYNC"
+  run_export_case L_export_mutation_control BINDING 2 0 NONE "$MUTATED_BR_SYNC"
 fi
 
-# M: deployed-tool composition. The DB advances to two records while the
-# configured JSONL remains at one byte-identical line; the helper then exports
-# the second line under a FREE lease.
+# Build one committed JSONL baseline plus two DB-only records with the deployed
+# `br`. The caller gets the two pending ids in id-one.txt and id-two.txt.
+make_real_attribution_fixture() {
+  local d="$1" br_bin="$2"
+  local project="$d/project"
+  local before after dirty
+
+  mkdir -p "$project" "$d/tokens-refuse" "$d/tokens-export" \
+    "$d/tokens-mutant" || return 1
+  write_token_stub "$d/token-stub" || return 1
+  : >"$d/token-calls.log"
+
+  (
+    cd "$project" || exit 1
+    RUST_LOG=error "$br_bin" --quiet init --prefix probe \
+      >"$d/init.out" 2>"$d/init.err" || exit 1
+    RUST_LOG=error "$br_bin" --quiet create --title='control record' \
+      --type=task --priority=2 \
+      >"$d/create-control.out" 2>"$d/create-control.err" || exit 1
+    cp "$BR_CONFIG" .beads/config.yaml || exit 1
+
+    git init -q || exit 1
+    git config user.email gate@example.invalid || exit 1
+    git config user.name fgdb-gate || exit 1
+    git config commit.gpgsign false || exit 1
+    git add -f .beads/issues.jsonl || exit 1
+    git commit -qm 'fixture: baseline Beads export' || exit 1
+
+    before="$(sha256sum .beads/issues.jsonl | awk '{print $1}')"
+    RUST_LOG=error "$br_bin" --json create --title='first deferred record' \
+      --type=task --priority=2 \
+      >"$d/create-one.out" 2>"$d/create-one.err" || exit 1
+    RUST_LOG=error "$br_bin" --json create --title='second deferred record' \
+      --type=task --priority=2 \
+      >"$d/create-two.out" 2>"$d/create-two.err" || exit 1
+    jq -er '.id' "$d/create-one.out" >"$d/id-one.txt" || exit 1
+    jq -er '.id' "$d/create-two.out" >"$d/id-two.txt" || exit 1
+    RUST_LOG=error "$br_bin" sync --status --json \
+      >"$d/status.out" 2>"$d/status.err" || exit 1
+    dirty="$(jq -er '.dirty_count' "$d/status.out")" || exit 1
+    after="$(sha256sum .beads/issues.jsonl | awk '{print $1}')"
+    printf '%s\n' "$before" >"$d/before.sha"
+    printf '%s\n' "$after" >"$d/after-create.sha"
+    [ "$before" = "$after" ] || exit 1
+    [ "$dirty" -eq 2 ] || exit 1
+  )
+}
+
+# M: deployed-tool composition and the positive attribution contract. The DB
+# advances by two records while configured JSONL stays byte-identical. Declaring
+# one id refuses before write; declaring both exports exactly both.
 run_project_config_case() {
   local d="$RUN_DIR/M_project_config_and_explicit_export"
-  local before after_mutation after_flush count lines br_bin rc=0
-  mkdir -p "$d/tokens" || rc=1
-  write_token_stub "$d/token-stub" || rc=1
-  : >"$d/token-calls.log"
+  local before after_refuse after_flush lines br_bin id_one id_two
+  local refuse_rc flush_rc rc=0
   br_bin="$(command -v br 2>/dev/null)"
   [ -n "$br_bin" ] || rc=1
 
   if [ "$rc" -eq 0 ]; then
+    make_real_attribution_fixture "$d" "$br_bin" || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    before="$(cat "$d/before.sha")"
+    id_one="$(cat "$d/id-one.txt")"
+    id_two="$(cat "$d/id-two.txt")"
     (
-      cd "$d" || exit 1
-      "$br_bin" --quiet init --prefix probe >init.out 2>&1 || exit 1
-      "$br_bin" --quiet create --title='control record' --type=task --priority=2 \
-        >create-control.out 2>&1 || exit 1
-      cp "$BR_CONFIG" .beads/config.yaml || exit 1
-      before="$(sha256sum .beads/issues.jsonl | awk '{print $1}')"
-      "$br_bin" --quiet create --title='deferred record' --type=task --priority=2 \
-        >create-deferred.out 2>&1 || exit 1
-      after_mutation="$(sha256sum .beads/issues.jsonl | awk '{print $1}')"
-      "$br_bin" --json count >count.out 2>&1 || exit 1
-      count="$(grep -oE '"count":[[:space:]]*[0-9]+' count.out \
-        | tail -1 | grep -oE '[0-9]+')"
-      FGDB_BR_BIN="$br_bin" FGDB_TOKEN_DIR="$d/tokens" \
+      cd "$d/project" || exit 1
+      FGDB_BR_BIN="$br_bin" FGDB_TOKEN_DIR="$d/tokens-refuse" \
         FGDB_TOKEN_SH="$d/token-stub" TOKEN_STUB_LOG="$d/token-calls.log" \
-        bash "$BR_SYNC" >flush.out 2>flush.err || exit 1
-      after_flush="$(sha256sum .beads/issues.jsonl | awk '{print $1}')"
-      lines="$(wc -l <.beads/issues.jsonl)"
-      [ "$before" = "$after_mutation" ] || exit 1
-      [ "$count" = 2 ] || exit 1
-      [ "$after_flush" != "$before" ] || exit 1
-      [ "$lines" -eq 2 ] || exit 1
-    )
-    rc=$?
+        RUST_LOG=error bash "$BR_SYNC" "$id_one"
+    ) >"$d/refuse.out" 2>"$d/refuse.err"
+    refuse_rc=$?
+    after_refuse="$(sha256sum "$d/project/.beads/issues.jsonl" | awk '{print $1}')"
+
+    (
+      cd "$d/project" || exit 1
+      FGDB_BR_BIN="$br_bin" FGDB_TOKEN_DIR="$d/tokens-export" \
+        FGDB_TOKEN_SH="$d/token-stub" TOKEN_STUB_LOG="$d/token-calls.log" \
+        RUST_LOG=error bash "$BR_SYNC" "$id_two" "$id_one"
+    ) >"$d/flush.out" 2>"$d/flush.err"
+    flush_rc=$?
+    after_flush="$(sha256sum "$d/project/.beads/issues.jsonl" | awk '{print $1}')"
+    lines="$(wc -l <"$d/project/.beads/issues.jsonl")"
+
+    [ "$refuse_rc" -eq 65 ] || rc=1
+    [ "$after_refuse" = "$before" ] || rc=1
+    grep -Fq '2 dirty DB records' "$d/refuse.err" || rc=1
+    grep -Fq "$id_one" "$d/refuse.err" || rc=1
+    [ "$flush_rc" -eq 0 ] || rc=1
+    [ "$after_flush" != "$before" ] || rc=1
+    [ "$lines" -eq 3 ] || rc=1
+    grep -Fqx "$id_one" <(
+      jq -r '.id' "$d/project/.beads/issues.jsonl"
+    ) || rc=1
+    grep -Fqx "$id_two" <(
+      jq -r '.id' "$d/project/.beads/issues.jsonl"
+    ) || rc=1
+    grep -Fq "$id_one" "$d/flush.out" || rc=1
+    grep -Fq "$id_two" "$d/flush.out" || rc=1
   fi
 
   if [ "$rc" -eq 0 ]; then
-    gate_pass "M: deployed br deferred DB record 2, then guarded export produced JSONL line 2"
+    gate_pass "M: one-id intent refused two dirty records byte-stably; exact two-id intent exported both"
   else
-    gate_fail "M: project auto-flush configuration and explicit export did not compose"
-    for artifact in init.out create-control.out create-deferred.out count.out flush.out flush.err; do
+    gate_fail "M: project auto-flush and exact record-id attribution did not compose"
+    for artifact in init.out init.err create-control.out create-control.err \
+      create-one.out create-one.err create-two.out create-two.err status.out \
+      status.err refuse.out refuse.err flush.out flush.err token-calls.log; do
       if [ -f "$d/$artifact" ]; then
         gate_diag "  --- $artifact ---"
         while IFS= read -r line; do gate_diag "  $line"; done <"$d/$artifact"
@@ -507,19 +614,79 @@ run_project_config_case() {
 }
 run_project_config_case
 
-# N: the aggregate scoping layer and both of its mutation controls.
+# N: MUTATION CONTROL — remove both dirty-count and post-export exact-set
+# enforcement. A one-id declaration must then silently export both dirty rows,
+# proving M is evidence about the attribution guards rather than incidental br
+# behavior.
+run_attribution_mutation_case() {
+  local d="$RUN_DIR/N_attribution_mutation_control"
+  local br_bin mutant before after id_one id_two lines mutation_count rc=0
+
+  br_bin="$(command -v br 2>/dev/null)"
+  [ -n "$br_bin" ] || rc=1
+  if [ "$rc" -eq 0 ]; then
+    make_real_attribution_fixture "$d" "$br_bin" || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    mutant="$d/br_sync.sh"
+    cp "$BR_SYNC" "$mutant" || rc=1
+    sed -i \
+      -e 's/^  refuse_impossible_dirty_count || return \$?$/  : # MUTANT admits undeclared dirty records/' \
+      -e 's/^  verify_exported_ids$/  : # MUTANT suppresses exact-set verification/' \
+      "$mutant" || rc=1
+    mutation_count="$(grep -c '^  : # MUTANT ' "$mutant")"
+    [ "$mutation_count" -eq 2 ] || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    before="$(cat "$d/before.sha")"
+    id_one="$(cat "$d/id-one.txt")"
+    id_two="$(cat "$d/id-two.txt")"
+    (
+      cd "$d/project" || exit 1
+      FGDB_BR_BIN="$br_bin" FGDB_TOKEN_DIR="$d/tokens-mutant" \
+        FGDB_TOKEN_SH="$d/token-stub" TOKEN_STUB_LOG="$d/token-calls.log" \
+        FGDB_LANDING_LIB="$LANDING_LIB" \
+        RUST_LOG=error bash "$mutant" "$id_one"
+    ) >"$d/mutant.out" 2>"$d/mutant.err"
+    rc=$?
+    after="$(sha256sum "$d/project/.beads/issues.jsonl" | awk '{print $1}')"
+    lines="$(wc -l <"$d/project/.beads/issues.jsonl")"
+    [ "$after" != "$before" ] || rc=1
+    [ "$lines" -eq 3 ] || rc=1
+    grep -Fqx "$id_two" <(
+      jq -r '.id' "$d/project/.beads/issues.jsonl"
+    ) || rc=1
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    gate_pass "N: neutering both attribution guards restored a silent undeclared-record sweep"
+  else
+    gate_fail "N: attribution mutation control did not restore the forbidden sweep"
+    for artifact in create-one.out create-two.out status.out mutant.out \
+      mutant.err token-calls.log; do
+      if [ -f "$d/$artifact" ]; then
+        gate_diag "  --- $artifact ---"
+        while IFS= read -r line; do gate_diag "  $line"; done <"$d/$artifact"
+      fi
+    done
+  fi
+  EXPORT_CASES_RUN=$((EXPORT_CASES_RUN + 1))
+}
+run_attribution_mutation_case
+
+# O: the aggregate scoping layer and both of its mutation controls.
 run_scope_case() {
-  local out="$RUN_DIR/N_scoped_aggregate.out"
-  local err="$RUN_DIR/N_scoped_aggregate.err"
+  local out="$RUN_DIR/O_scoped_aggregate.out"
+  local err="$RUN_DIR/O_scoped_aggregate.err"
   local rc
 
   bash "$CHECK_SH" --self-test >"$out" 2>"$err"
   rc=$?
   if [ "$rc" -eq 0 ] \
     && grep -Fq "tree-domain scoping: Beads, Rust, shell, and gate-driver movements separate" "$out"; then
-    gate_pass "N: aggregate domain attribution and its closure mutants passed"
+    gate_pass "O: aggregate domain attribution and its closure mutants passed"
   else
-    gate_fail "N: check.sh domain-attribution mutation panel failed (rc=$rc)"
+    gate_fail "O: check.sh domain-attribution mutation panel failed (rc=$rc)"
     gate_diag "  --- self-test stdout ---"
     while IFS= read -r line; do gate_diag "  $line"; done <"$out"
     gate_diag "  --- self-test stderr ---"
@@ -533,8 +700,8 @@ run_scope_case
 if [ "$CASES_RUN" -ne 6 ]; then
   gate_unrun "expected 6 cases to execute, $CASES_RUN did"
 fi
-if [ "$EXPORT_CASES_RUN" -ne 7 ]; then
-  gate_unrun "expected 7 Beads-export cases to execute, $EXPORT_CASES_RUN did"
+if [ "$EXPORT_CASES_RUN" -ne 9 ]; then
+  gate_unrun "expected 9 Beads-export cases to execute, $EXPORT_CASES_RUN did"
 fi
 if [ "$SCOPE_CASES_RUN" -ne 1 ]; then
   gate_unrun "expected 1 aggregate-scope case to execute, $SCOPE_CASES_RUN did"
