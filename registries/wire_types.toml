@@ -5795,3 +5795,12 @@ status = "reserved"
 encoding_context = "generated tag-refined strong reference admitting only the ClaimedAvailable use record (a19:2513)"
 allowed_containing_schemas = ["ReservationBurnSource"]
 max_size_bytes = 40
+
+[[type]]
+wire_type_id = 0x0559
+name = "PromotedAwaitingReopenLocalRestorePhase"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant whose validator admits only the PromotedAwaitingReopen arm (arm_tag 0x0003) of the LocalRestorePhase union (a18:2381); a precondition field carries the refined union's u8 tag and never the arm payload (a20:2605)"
+allowed_containing_schemas = ["LocalRestoreServiceCompletionSpec"]
+max_size_bytes = 1

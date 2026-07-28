@@ -5957,6 +5957,20 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0006
+stable_name = "expected_restore_registry_state"
+exact_wire_type = "PromotedAwaitingReopenLocalRestorePhase"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "inline precondition discriminant refined to the PromotedAwaitingReopen arm (arm_tag 0x0003) of LocalRestorePhase; the completion spec is rejected in any other registry state, so the row carries the refined union's u8 tag rather than the arm payload, and it is retained while the completion spec is retained and cut only with that spec (a18:2381, a20:2605)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
 containing_schema = "LocalRestoreServicePrepareSpec"
 field_tag = 0x0002
 stable_name = "activation_certificate_ref"

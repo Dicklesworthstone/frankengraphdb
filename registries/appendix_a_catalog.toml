@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3646
-projection_fallback_count = 133
-target_source_assignment_sha256 = "55bd9b095bccb280408d7d4f3d86ef4571a4ca26bab8c729afd5b051512e7854"
+target_count = 3648
+projection_fallback_count = 134
+target_source_assignment_sha256 = "3480caa065cbaaf9f6df3574c6ca21bdf2e59f3b71ec981490d0c55dbb97ebc9"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -111976,5 +111976,48 @@ row_id = "a20:target:field-restore-shard-operational-ack-operational-terminal-pi
 target_row_id = "a20:field:restore-shard-operational-ack-operational-terminal-pin-basis-ref"
 slice_id = "a20"
 source_key = "field|RestoreShardOperationalAck|RestoreShardOperationalAck.operational_terminal_pin_basis_ref|operational_terminal_pin_basis_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:promoted-awaiting-reopen-local-restore-phase"
+wire_type_id = 0x0559
+name = "PromotedAwaitingReopenLocalRestorePhase"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant whose validator admits only the PromotedAwaitingReopen arm (arm_tag 0x0003) of the LocalRestorePhase union (a18:2381); a precondition field carries the refined union's u8 tag and never the arm payload (a20:2605)"
+allowed_containing_schemas = ["LocalRestoreServiceCompletionSpec"]
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:wire-type-promoted-awaiting-reopen-local-restore-phase"
+target_row_id = "a20:wire-type:promoted-awaiting-reopen-local-restore-phase"
+slice_id = "a20"
+source_key = "projection|wire_types|PromotedAwaitingReopenLocalRestorePhase"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a20"
+row_id = "a20:field:local-restore-service-completion-spec-expected-restore-registry-state"
+containing_schema = "LocalRestoreServiceCompletionSpec"
+field_tag = 0x0006
+stable_name = "expected_restore_registry_state"
+exact_wire_type = "PromotedAwaitingReopenLocalRestorePhase"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 40
+role_predicate = "role-local"
+retention_and_cut_rule = "inline precondition discriminant refined to the PromotedAwaitingReopen arm (arm_tag 0x0003) of LocalRestorePhase; the completion spec is rejected in any other registry state, so the row carries the refined union's u8 tag rather than the arm payload, and it is retained while the completion spec is retained and cut only with that spec (a18:2381, a20:2605)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[target]]
+row_id = "a20:target:field-local-restore-service-completion-spec-expected-restore-registry-state"
+target_row_id = "a20:field:local-restore-service-completion-spec-expected-restore-registry-state"
+slice_id = "a20"
+source_key = "field|LocalRestoreServiceCompletionSpec|LocalRestoreServiceCompletionSpec.expected_restore_registry_state|expected_restore_registry_state"
 target_kind = "field"
 definition_status = "declared"

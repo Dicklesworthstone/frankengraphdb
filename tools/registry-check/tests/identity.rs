@@ -9222,6 +9222,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     // durable_fields.toml, so this closure cannot remove a third row, and both
     // hosts already appear in the tranche above — the cohort boundary is drawn
     // where the arc is, not where this repair is.
+    //   ("LocalRestoreServiceCompletionSpec", "expected_restore_registry_state") —
+    //     field_tag 0x0006, exact_wire_type PromotedAwaitingReopenLocalRestorePhase
+    //     (wire 0x0559), source anchor a18:2381, a20:2605. The first row landed
+    //     under the fgdb-gpms state-value ruling: an inline tag-refined
+    //     discriminant, not a reference. Younger than the witness for the same
+    //     reason as the two above.
     let post_erratum_a20_field = |schema: &str, name: &str| {
         matches!(
             (schema, name),
@@ -9229,6 +9235,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | (
                     "RestoreShardOperationalAck",
                     "operational_terminal_pin_basis_ref"
+                )
+                | (
+                    "LocalRestoreServiceCompletionSpec",
+                    "expected_restore_registry_state"
                 )
         )
     };
@@ -9876,7 +9886,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // constant, so its width is not a value that follows the tree; pinning it
         // as a difference let the tree drag it. 225 must never move without the same
         // OWNER ruling the hash needs.
-        pre_erratum.fields.len() + 758,
+        // 758 -> 759 (fgdb-a20-restore-promotion-ivsp): the one a20 residue row the
+        // fgdb-gpms state-value ruling made authorable,
+        // LocalRestoreServiceCompletionSpec.expected_restore_registry_state, admitted
+        // to post_erratum_a20_field and enumerated there. current_field_count carries
+        // it (983 -> 984) and the reconstruction stays at the frozen 225.
+        pre_erratum.fields.len() + 759,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
     );
@@ -14755,9 +14770,14 @@ fn idr_refinement_claims_resolve_to_a_registered_arm() {
         .filter(|w| w.encoding_context.contains("admits only the "))
         .map(|w| w.name.as_str())
         .collect();
+    // 6 -> 7 (fgdb-a20-restore-promotion-ivsp): PromotedAwaitingReopenLocalRestorePhase,
+    // wire 0x0559. It is the FIRST claimant that is not a reference_wrapper — the
+    // fgdb-gpms ruling extends the tag-refined instrument from the reference position
+    // to the value position, so a `kind = "discriminant"` row now carries a refinement
+    // claim and this law's domain covers it on exactly the same terms.
     assert_eq!(
         claimants.len(),
-        6,
+        7,
         "refinement-claim population moved; a new tag-refined wrapper must be added here \
          deliberately, not discovered by a green run: {claimants:?}"
     );
