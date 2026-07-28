@@ -14,7 +14,7 @@
 use registry_check::closure;
 use registry_check::hash::id_table_hash;
 use registry_check::lint;
-use registry_check::model::{self, Manifest, Registries, SloRow};
+use registry_check::model::{self, Manifest, Registries, ScriptDisposition, SloRow};
 use registry_check::toml;
 use registry_check::validate::{
     self, CANONICAL_CLASSES, check_justification, class_rank, expected_invariant_ids,
@@ -130,6 +130,43 @@ fn claims_real_registries_validate() {
         report.ok(),
         "sample-manifest closure must be satisfied: {report:?}"
     );
+}
+
+#[test]
+fn claims_script_closure_reaches_nested_deliverables() {
+    // Concurrent runs may share this fixture safely: they write the same bytes,
+    // validation is read-only, and no run deletes the retained evidence.
+    let root = std::env::temp_dir().join("fgdb-fknh-nested-script");
+    let nested = root.join("scripts/lib/unclaimed.sh");
+    std::fs::create_dir_all(nested.parent().expect("nested script parent"))
+        .expect("nested script directory");
+    std::fs::write(&nested, "#!/usr/bin/env bash\n").expect("nested script fixture");
+
+    let mut registries = real_registries();
+    let exact_violation = |registries: &Registries| {
+        validate::validate_all(registries, &root)
+            .into_iter()
+            .any(|v| v.code == "script_undeclared" && v.row_id == "scripts/lib/unclaimed.sh")
+    };
+
+    assert!(
+        exact_violation(&registries),
+        "an undeclared nested script must be inside the file-to-row closure"
+    );
+
+    registries.script_dispositions.push(ScriptDisposition {
+        path: "scripts/lib/unclaimed.sh".into(),
+        role: "library".into(),
+        reason: "fixture source library; its caller owns the assertions".into(),
+    });
+    assert!(
+        !exact_violation(&registries),
+        "a declared nested source library is the conformant control"
+    );
+    let bad_role = validate::validate_all(&registries, &root)
+        .into_iter()
+        .any(|v| v.code == "bad_field" && v.row_id == "scripts/lib/unclaimed.sh");
+    assert!(!bad_role, "library must be a closed-vocabulary role");
 }
 
 // ---------------------------------------------------------------------------

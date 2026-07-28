@@ -187,7 +187,7 @@ pub struct Checker {
     pub unit: Option<String>,
 }
 
-/// A `scripts/*.sh` deliverable that is deliberately NOT a registered gate.
+/// A `scripts/**/*.sh` deliverable that is deliberately NOT a registered gate.
 ///
 /// `checker_index.toml` closes row -> file (a `live` row's artifact must exist).
 /// It never closed file -> row, so a script could sit in `scripts/` carrying
@@ -209,7 +209,12 @@ pub struct ScriptDisposition {
 /// script's own assertions have been measured to hold but promoting it to a
 /// registered gate would make `scripts/check.sh` execute it, which is a claim
 /// about the whole swarm's gate chain and needs its own evidence.
-pub const SCRIPT_ROLES: [&str; 3] = ["runner", "advisory", "candidate"];
+///
+/// `library` is source-only code whose assertions belong to the registered
+/// scripts that source it. `hook` is invoked by an external lifecycle event
+/// rather than by the quality-gate runner. Executing either one as a checker
+/// would manufacture an UNRUN or exercise the wrong entry condition.
+pub const SCRIPT_ROLES: [&str; 5] = ["runner", "advisory", "candidate", "library", "hook"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {

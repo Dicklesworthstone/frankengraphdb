@@ -41,7 +41,7 @@
 //!   artifact_missing         — a "live"/"checked" row's artifact is absent
 //!   checker_*                — a "live" checker row is not registered, invoked
 //!                              or capable of failing
-//!   script_undeclared        — a scripts/*.sh is neither registered nor declared
+//!   script_undeclared        — a scripts/**/*.sh is neither registered nor declared
 //!   script_disposition_*     — a non-gate declaration is dangling or conflicting
 //!   script_scan_empty        — the scripts/ scan found nothing (control)
 
@@ -1027,14 +1027,61 @@ fn validate_checker_index(
     }
 }
 
+/// Recursively collect every shell deliverable below `scripts/`.
+///
+/// This walk is deliberately filesystem-derived rather than Git-derived: an
+/// untracked script is already absent from the Git-based shell lint and must
+/// not disappear from this closure too. Every directory-entry error fails the
+/// whole scan closed; silently dropping one child would make an unreadable
+/// subtree indistinguishable from a fully declared one.
+fn collect_shell_scripts(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    let relative_dir = dir.strip_prefix(root).unwrap_or(dir);
+    let entries =
+        fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", relative_dir.display()))?;
+    let mut entries = entries.collect::<Result<Vec<_>, _>>().map_err(|e| {
+        format!(
+            "cannot read a directory entry below {}: {e}",
+            relative_dir.display()
+        )
+    })?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| {
+            format!(
+                "cannot classify shell-deliverable candidate {}: {e}",
+                path.strip_prefix(root).unwrap_or(&path).display()
+            )
+        })?;
+        if file_type.is_dir() {
+            collect_shell_scripts(root, &path, out)?;
+            continue;
+        }
+        if !entry.file_name().to_string_lossy().ends_with(".sh") {
+            continue;
+        }
+        let relative = path.strip_prefix(root).map_err(|e| {
+            format!(
+                "scanned path {} escaped repository root {}: {e}",
+                path.display(),
+                root.display()
+            )
+        })?;
+        out.push(relative.to_string_lossy().replace('\\', "/"));
+    }
+    Ok(())
+}
+
 /// Close `checker_index.toml` in the FILE -> ROW direction.
 ///
 /// [`validate_checker_index`] closes row -> file: a `live` row's artifact must
-/// exist. Nothing closed the other way, so a `scripts/*.sh` could carry every
+/// exist. Nothing closed the other way, so a `scripts/**/*.sh` could carry every
 /// signal of a gate — `set -euo pipefail`, pinned counts, PASS/FAIL counters —
-/// while no runner and no registry knew it existed. Five did
+/// while no runner and no registry knew it existed. Five top-level scripts did
 /// (`fgdb-orphan-w1-e2e-gates-unregistered-unrun-vuq8`), holding six hard-pinned
-/// magic numbers between them.
+/// magic numbers between them. Before `fgdb-fknh`, the same blind spot remained
+/// below `scripts/lib/` and `scripts/git_hooks/`.
 ///
 /// Since `scripts/check.sh` became registry-derived, registration is also what
 /// makes a script RUN, so this is the law that decides whether a deliverable is
@@ -1046,23 +1093,16 @@ fn validate_script_closure(r: &Registries, root: &Path, out: &mut Vec<Violation>
     let reg = "checker_index";
     let dir = root.join("scripts");
 
-    let mut on_disk: Vec<String> = match fs::read_dir(&dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".sh"))
-            .map(|n| format!("scripts/{n}"))
-            .collect(),
-        Err(e) => {
-            out.push(Violation::new(
-                "script_scan_failed",
-                reg,
-                "scripts/",
-                format!("cannot read scripts/: {e} — refusing to report script closure as checked"),
-            ));
-            return;
-        }
-    };
+    let mut on_disk = Vec::new();
+    if let Err(e) = collect_shell_scripts(root, &dir, &mut on_disk) {
+        out.push(Violation::new(
+            "script_scan_failed",
+            reg,
+            "scripts/",
+            format!("{e} — refusing to report recursive script closure as checked"),
+        ));
+        return;
+    }
     on_disk.sort();
 
     // CONTROL. Every verdict below is a statement about a set this function

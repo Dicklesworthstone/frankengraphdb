@@ -667,11 +667,11 @@ unit = "artifact"
 # scripts/ carrying every signal of a gate — set -euo pipefail, pinned counts,
 # PASS/FAIL counters — while no runner and no registry knew it existed. Six did.
 #
-# Every scripts/*.sh must now be either a [[checker]] artifact above or a row
+# Every scripts/**/*.sh must now be either a [[checker]] artifact above or a row
 # here saying why it is not a gate. `role` is one of runner | advisory |
-# candidate. Enforced by validate_script_closure, which scans the filesystem
-# (not `git ls-files`, since an untracked script is already exempt from the
-# shell lint and must not be exempt twice).
+# candidate | library | hook. Enforced by validate_script_closure, which walks
+# the filesystem recursively (not `git ls-files`, since an untracked script is
+# already exempt from the shell lint and must not be exempt twice).
 # =============================================================================
 
 [[script_disposition]]
@@ -713,3 +713,28 @@ reason = "vuq8: all 16 pinned grep assertions MEASURED present at 0ada651, trans
 path = "scripts/disk_hygiene.sh"
 role = "advisory"
 reason = "fgdb-c4ou: an operator inventory of the swarm scratch root, not a gate. Its own header states 'Inventory only: this command never deletes or mutates artifacts' — it classifies /data/tmp/fgdb_swarm paths by owning pane and bead and reports reclaimable KB so a human can decide what to reclaim. It asserts nothing about this repository and would red on no defect, so registering it as a [[checker]] would make check.sh execute an inventory of a directory outside the repo and then have no verdict to consume. Declared advisory rather than candidate on purpose: candidate means measured-and-promotable, and there is nothing here to promote"
+
+[[script_disposition]]
+path = "scripts/git_hooks/install.sh"
+role = "advisory"
+reason = "fgdb-eesn: an explicit operator installer/status command for the landing-lease pre-commit hook. Its --install mode mutates the repository's shared Git hook directory, so executing it inside check.sh would be an unauthorized state change rather than an assertion"
+
+[[script_disposition]]
+path = "scripts/git_hooks/pre-commit.sh"
+role = "hook"
+reason = "fgdb-eesn: invoked by Git only for a commit lifecycle event and enforced only for a landing on main. Running it as a checker would exercise a synthetic shell invocation instead of the Git hook contract; its lease states are red-proved by the registered tree-stability gate"
+
+[[script_disposition]]
+path = "scripts/lib/gate_verdict.sh"
+role = "library"
+reason = "fgdb-udco: shared source-only verdict and tree-stability contract for check.sh and every registered script gate. It registers no gate and asserts nothing standalone; verdict-contract closure proves that every live gate sources it"
+
+[[script_disposition]]
+path = "scripts/lib/landing_lease.sh"
+role = "library"
+reason = "fgdb-eesn: source-only landing-lease policy and state machine used by check.sh, br_sync.sh, and the Git hook. It has no standalone entrypoint; the registered tree-stability gate red-proves its FREE, BINDING, BREAKABLE, and degraded-state behavior"
+
+[[script_disposition]]
+path = "scripts/lib/private_subject.sh"
+role = "library"
+reason = "fgdb-g0-spine-e2e-red-measures-harness-not-spine-iy7e: source-only content-keyed subject builder used by the registered claims, identity, and spine gates. Each caller owns and executes its freshness and residue controls; the library itself reports no verdict"
