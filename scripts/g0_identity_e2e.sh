@@ -105,7 +105,13 @@ catalog_closure_census() {
     }
   ' "$ROOT/registries/appendix_a_catalog.toml"
 }
-WORK="${G0_E2E_WORKDIR:-$(mktemp -d)}"
+# The Appendix support fixtures below use hard links on purpose: their manifest
+# proves that no negative fixture wrote through a shared input. A global TMPDIR
+# can legitimately live on another filesystem (for example /dev/shm during
+# root-disk pressure), where `cp -l` must fail with EXDEV. Give this one gate a
+# specific override so the runner can keep its hard-link evidence on ROOT's
+# filesystem without forcing every other gate's temporary data there.
+WORK="${G0_IDENTITY_E2E_WORKDIR:-${G0_E2E_WORKDIR:-$(mktemp -d)}}"
 BIN="$WORK/bin/registry-check"
 
 # The shared verdict contract (fgdb-udco). Before it, this gate said
