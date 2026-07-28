@@ -6944,7 +6944,7 @@ pub fn verify_source(catalog: &Catalog, source: &[u8]) -> Vec<Violation> {
         verify_source_bytes(bytes, slice.byte_count, &slice.sha256, &slice.id, &mut out);
         concatenated.extend_from_slice(bytes);
     }
-    if concatenated.as_slice() != appendix {
+    if !concatenated.as_slice().eq(appendix) {
         out.push(Violation::new(
             "source_concatenation_mismatch",
             "source_manifest",
@@ -7862,7 +7862,11 @@ fn verify_complete_field_census_coverage_with(
         (_, None) => {}
     }
     for certified in certified_slices {
-        if !catalog.slices.iter().any(|slice| slice.id == *certified) {
+        if !catalog
+            .slices
+            .iter()
+            .any(|slice| slice.id.as_str().eq(*certified))
+        {
             out.push(Violation::new(
                 "source_complete_census_certification_stale",
                 *certified,
@@ -8648,9 +8652,9 @@ fn verify_reference_source_census(
     let target_count = i64::try_from(census.target_count).unwrap_or(i64::MAX);
     let occurrence_count = i64::try_from(census.occurrence_count).unwrap_or(i64::MAX);
     let manifest = &catalog.reference_manifest;
-    if manifest.target_count != target_count
+    if !manifest.target_count.eq(&target_count)
         || manifest.target_ids_sha256 != census.target_ids_sha256
-        || manifest.occurrence_count != occurrence_count
+        || !manifest.occurrence_count.eq(&occurrence_count)
         || manifest.occurrence_transcript_sha256 != census.occurrence_transcript_sha256
     {
         out.push(Violation::new(
@@ -10191,13 +10195,17 @@ fn validate_reference_manifest(catalog: &Catalog, out: &mut Vec<Violation>) {
     }
     let target_count = i64::try_from(symbols.len()).unwrap_or(i64::MAX);
     let target_ids_sha256 = sha256_hex(transcript.as_bytes());
-    if manifest.target_count != target_count
-        || manifest.target_ids_sha256 != target_ids_sha256
+    if !manifest.target_count.eq(&target_count)
+        || !manifest.target_ids_sha256.eq(&target_ids_sha256)
         || target_count != i64::try_from(EXPECTED_TYPE_RESERVATION_COUNT).unwrap_or(i64::MAX)
-        || manifest.target_ids_sha256 != EXPECTED_REFERENCE_TARGET_IDS_SHA256
+        || !manifest
+            .target_ids_sha256
+            .eq(EXPECTED_REFERENCE_TARGET_IDS_SHA256)
         || manifest.occurrence_count
             != i64::try_from(EXPECTED_REFERENCE_OCCURRENCE_COUNT).unwrap_or(i64::MAX)
-        || manifest.occurrence_transcript_sha256 != EXPECTED_REFERENCE_OCCURRENCE_SHA256
+        || !manifest
+            .occurrence_transcript_sha256
+            .eq(EXPECTED_REFERENCE_OCCURRENCE_SHA256)
         || !valid_sha256_hex(&manifest.target_ids_sha256)
         || !valid_sha256_hex(&manifest.occurrence_transcript_sha256)
     {
@@ -10223,13 +10231,19 @@ fn validate_target_manifest(catalog: &Catalog, out: &mut Vec<Violation>) {
     )
     .unwrap_or(i64::MAX);
     let assignment_sha256 = target_source_assignment_sha256(&catalog.targets);
-    if manifest.target_count != target_count
+    if !manifest.target_count.eq(&target_count)
         || target_count != i64::try_from(EXPECTED_PROJECTION_ROW_COUNT).unwrap_or(i64::MAX)
-        || manifest.projection_fallback_count != projection_fallback_count
+        || !manifest
+            .projection_fallback_count
+            .eq(&projection_fallback_count)
         || projection_fallback_count
             != i64::try_from(EXPECTED_PROJECTION_FALLBACK_COUNT).unwrap_or(i64::MAX)
-        || manifest.target_source_assignment_sha256 != assignment_sha256
-        || manifest.target_source_assignment_sha256 != EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256
+        || !manifest
+            .target_source_assignment_sha256
+            .eq(&assignment_sha256)
+        || !manifest
+            .target_source_assignment_sha256
+            .eq(EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256)
         || !valid_sha256_hex(&manifest.target_source_assignment_sha256)
     {
         out.push(Violation::new(
@@ -11162,7 +11176,7 @@ fn validate_source_manifest_pin(manifest: &SourceManifest, out: &mut Vec<Violati
         .end_line
         .checked_sub(manifest.start_line)
         .and_then(|delta| delta.checked_add(1));
-    if computed_lines != Some(manifest.line_count) {
+    if !computed_lines.eq(&Some(manifest.line_count)) {
         out.push(Violation::new(
             "source_manifest_range_mismatch",
             "source_manifest",
@@ -15359,13 +15373,8 @@ name = "Probe"
         let source = fs::read(root.join(PLAN_PATH)).expect("plan reads");
         let line_spans = source_line_spans(&source);
         let manifest = &catalog.source_manifest;
-        let appendix = extract_lines(
-            &source,
-            &line_spans,
-            manifest.start_line,
-            manifest.end_line,
-        )
-        .expect("appendix range");
+        let appendix = extract_lines(&source, &line_spans, manifest.start_line, manifest.end_line)
+            .expect("appendix range");
         let mut out = Vec::new();
         let census =
             verify_structural_source_census(&catalog, appendix, &mut out).expect("census builds");
