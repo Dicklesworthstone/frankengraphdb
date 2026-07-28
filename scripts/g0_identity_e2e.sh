@@ -529,21 +529,61 @@ else
 fi
 
 # --- Phase 2: negative fixtures ----------------------------------------------
-stage() { # stage <name> -> stages registries into $WORK/<name>/registries
-  local name="$1"
-  mkdir -p "$WORK/$name/registries"
-  cp "$ROOT"/registries/*.toml "$WORK/$name/registries/"
+registry_is_private() { # registry_is_private <basename> [private-basename...]
+  local basename="$1"
+  shift
+  local private
+  for private in "$@"; do
+    [ "$basename" = "$private" ] && return 0
+  done
+  return 1
 }
 
-stage_except() { # stage_except <name> <basename> -> leave one output uncreated
+validate_private_registries() { # validate_private_registries [basename...]
+  local private
+  for private in "$@"; do
+    [ -f "$ROOT/registries/$private" ] \
+      || die "fixture names unknown private registry $private"
+  done
+}
+
+stage() { # stage <name> [private-basename...] -> stages registries
   local name="$1"
-  local excluded="$2"
+  shift
   local source basename
+  validate_private_registries "$@"
   mkdir -p "$WORK/$name/registries"
   for source in "$ROOT"/registries/*.toml; do
     basename="${source##*/}"
-    [ "$basename" = "$excluded" ] || cp "$source" "$WORK/$name/registries/"
+    if registry_is_private "$basename" "$@"; then
+      cp "$source" "$WORK/$name/registries/"
+    else
+      link_shared_support "$source" "$WORK/$name/registries/"
+    fi
   done
+  assert_linked_manifest_complete "$WORK/$name"
+}
+
+stage_except() { # stage_except <name> <excluded> [private-basename...]
+  local name="$1"
+  local excluded="$2"
+  shift 2
+  local source basename
+  [ -f "$ROOT/registries/$excluded" ] \
+    || die "fixture excludes unknown registry $excluded"
+  validate_private_registries "$@"
+  mkdir -p "$WORK/$name/registries"
+  for source in "$ROOT"/registries/*.toml; do
+    basename="${source##*/}"
+    if [ "$basename" = "$excluded" ]; then
+      continue
+    elif registry_is_private "$basename" "$@"; then
+      cp "$source" "$WORK/$name/registries/"
+    else
+      link_shared_support "$source" "$WORK/$name/registries/"
+    fi
+  done
+  assert_linked_manifest_complete "$WORK/$name"
 }
 
 # LINKED_MANIFEST — "<sha256>  <staged-path>", one row per hard-linked input.
@@ -572,6 +612,7 @@ stage_except() { # stage_except <name> <basename> -> leave one output uncreated
 # measures the actual law — "no fixture wrote a linked inode after staging" —
 # instead of a proxy for it.
 LINKED_MANIFEST="$WORK/.linked-manifest"
+SHARED_INPUT_ROOT="$WORK/.shared-inputs"
 
 link_support() { # link_support <source-file> <destination-dir-or-file>
   local source="$1" destination="$2"
@@ -580,17 +621,43 @@ link_support() { # link_support <source-file> <destination-dir-or-file>
   sha256sum "$destination" >> "$LINKED_MANIFEST"
 }
 
-stage_appendix_support() { # stage_appendix_support <name> -> non-registry proof inputs
+link_shared_support() { # link_shared_support <root-source> <destination>
+  local source="$1" destination="$2"
+  local relative anchor
+  relative="${source#"$ROOT"/}"
+  [ "$relative" != "$source" ] \
+    || die "shared fixture input is outside the repository root: $source"
+  anchor="$SHARED_INPUT_ROOT/$relative"
+  if [ ! -f "$anchor" ]; then
+    mkdir -p "${anchor%/*}"
+    cp "$source" "$anchor"
+  fi
+  link_support "$anchor" "$destination"
+}
+
+stage_appendix_support() { # stage_appendix_support <name> <linked|private>
   local name="$1"
+  local plan_disposition="$2"
   local manifest relative source
   mkdir -p "$WORK/$name/.beads"
-  # These support inputs are read-only after staging. Hard-linking them avoids
-  # duplicating ~10 MB per fixture; registries and the plan remain real copies
-  # because fixtures mutate those paths. Every `cp -l` here goes through
-  # link_support so the linked set is DERIVED rather than declared — see
-  # assert_linked_manifest_complete for why a declared list is not enough.
+  # Every hard link goes through link_support so the linked set is DERIVED
+  # rather than declared — see assert_linked_manifest_complete for why a
+  # declared list is not enough.
   link_support "$ROOT/.beads/issues.jsonl" "$WORK/$name/.beads/"
-  cp "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" "$WORK/$name/"
+  case "$plan_disposition" in
+    linked)
+      link_shared_support \
+        "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" \
+        "$WORK/$name/"
+      ;;
+    private)
+      cp "$ROOT/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md" \
+        "$WORK/$name/"
+      ;;
+    *)
+      die "fixture $name has unknown plan disposition $plan_disposition"
+      ;;
+  esac
   link_support "$ROOT/Cargo.toml" "$WORK/$name/"
   for manifest in "$ROOT"/crates/*/Cargo.toml "$ROOT"/tools/*/Cargo.toml; do
     [ -f "$manifest" ] || continue
@@ -653,17 +720,21 @@ write-through guard verified nothing"
   fi
 }
 
-stage_appendix() { # stage_appendix <name> -> complete isolated Appendix root
+stage_appendix() { # stage_appendix <name> <plan-disposition> [private-registry...]
   local name="$1"
-  stage "$name"
-  stage_appendix_support "$name"
+  local plan_disposition="$2"
+  shift 2
+  stage "$name" "$@"
+  stage_appendix_support "$name" "$plan_disposition"
 }
 
-stage_appendix_except() { # stage_appendix_except <name> <projection-basename>
+stage_appendix_except() { # stage_appendix_except <name> <excluded> <plan-disposition> [private-registry...]
   local name="$1"
   local excluded="$2"
-  stage_except "$name" "$excluded"
-  stage_appendix_support "$name"
+  local plan_disposition="$3"
+  shift 3
+  stage_except "$name" "$excluded" "$@"
+  stage_appendix_support "$name" "$plan_disposition"
 }
 
 snapshot_nonprojection_tree() { # snapshot_nonprojection_tree <staged-root>
@@ -788,7 +859,7 @@ assert_only_violation_code() { # assert_only_violation_code <fixture> <code>
 }
 
 log "phase 2a: planted future-result edge (command input naming its applied record)"
-stage neg-future
+stage neg-future durable_fields.toml
 cat >> "$WORK/neg-future/registries/durable_fields.toml" <<'EOF'
 
 [[field]]
@@ -819,7 +890,7 @@ else
 fi
 
 log "phase 2b: planted StrongRef-to-placement (physical record as strong target)"
-stage neg-placement
+stage neg-placement durable_fields.toml
 cat >> "$WORK/neg-placement/registries/durable_fields.toml" <<'EOF'
 
 [[field]]
@@ -849,7 +920,7 @@ else
 fi
 
 log "phase 2c: planted experimental row in the production registry"
-stage neg-experimental
+stage neg-experimental logical_object_kinds.toml
 cat >> "$WORK/neg-experimental/registries/logical_object_kinds.toml" <<'EOF'
 
 [[kind]]
@@ -1147,7 +1218,7 @@ expect_identity_violation \
 
 # --- Phase 3: Appendix source/catalog/projection mutation corpus ------------
 log "phase 3a: wrong Appendix slice Bead binding"
-stage_appendix neg-appendix-bead
+stage_appendix neg-appendix-bead linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "bead_id = \"fgdb-a01-reference-roots-2k0q\"" {
     print "bead_id = \"fgdb-a01-wrong-owner\""
@@ -1166,7 +1237,7 @@ awk '
 expect_appendix_violation neg-appendix-bead catalog_pin_mismatch a01
 
 log "phase 3a-redaction: attacker-controlled catalog values never reach diagnostics"
-stage_appendix neg-appendix-redaction
+stage_appendix neg-appendix-redaction linked appendix_a_catalog.toml
 APPENDIX_SECRET_SENTINEL='APPENDIX_SECRET_SENTINEL_7f7c9d5b'
 awk -v sentinel="$APPENDIX_SECRET_SENTINEL" '
   !title_changed && $0 == "title = \"Appendix A exact catalog: Reference semantics, RootSlot, and RootBootstrap\"" {
@@ -1194,7 +1265,7 @@ else
 fi
 
 log "phase 3b: exact Appendix source-byte drift"
-stage_appendix neg-appendix-source
+stage_appendix neg-appendix-source private
 awk '
   !changed && $0 == "## Appendix A — On-Disk Object Formats (normative contract)" {
     print "## Appendix X — On-Disk Object Formats (normative contract)"
@@ -1214,7 +1285,7 @@ expect_appendix_violation \
   neg-appendix-source source_sha256_mismatch source_manifest
 
 log "phase 3c: semantically invisible checked-in projection-byte drift"
-stage_appendix neg-appendix-projection
+stage_appendix neg-appendix-projection linked logical_object_kinds.toml
 printf '\n# planted byte-only projection drift\n' \
   >> "$WORK/neg-appendix-projection/registries/logical_object_kinds.toml"
 expect_appendix_violation \
@@ -1232,7 +1303,7 @@ else
 fi
 
 log "phase 3d: projection generation is a read-only, deterministic verifier"
-stage_appendix neg-appendix-generate-write
+stage_appendix neg-appendix-generate-write linked logical_object_kinds.toml
 printf '\n# planted generation-write sentinel\n' \
   >> "$WORK/neg-appendix-generate-write/registries/logical_object_kinds.toml"
 sha256sum \
@@ -1271,7 +1342,7 @@ else
   die "Appendix generation changed a checked-in projection"
 fi
 
-stage_appendix appendix-generate
+stage_appendix appendix-generate linked
 sha256sum \
   "$WORK/appendix-generate/registries/logical_object_kinds.toml" \
   "$WORK/appendix-generate/registries/physical_record_kinds.toml" \
@@ -1308,7 +1379,10 @@ else
 fi
 
 log "phase 3d-regenerate: sanctioned projection writer is scoped and idempotent"
-stage_appendix appendix-regenerate
+stage_appendix appendix-regenerate linked \
+  logical_object_kinds.toml physical_record_kinds.toml \
+  bootstrap_frames.toml prebootstrap_artifact_kinds.toml \
+  wire_types.toml durable_fields.toml
 APPENDIX_REGENERATE_SENTINEL='APPENDIX_REGENERATE_SECRET_8b5ad169'
 printf '\n# %s\n' "$APPENDIX_REGENERATE_SENTINEL" \
   >> "$WORK/appendix-regenerate/registries/logical_object_kinds.toml"
@@ -1416,7 +1490,11 @@ else
   die "Appendix regeneration changed a file outside the six projections"
 fi
 
-stage_appendix neg-appendix-regenerate-load
+stage_appendix neg-appendix-regenerate-load linked \
+  appendix_a_catalog.toml \
+  logical_object_kinds.toml physical_record_kinds.toml \
+  bootstrap_frames.toml prebootstrap_artifact_kinds.toml \
+  wire_types.toml durable_fields.toml
 printf '\nbroken = {}\n' \
   >> "$WORK/neg-appendix-regenerate-load/registries/appendix_a_catalog.toml"
 status=0
@@ -1433,7 +1511,9 @@ fi
 
 log "phase 3d-regenerate-safety: unsafe projection destinations fail closed"
 stage_appendix_except \
-  neg-appendix-regenerate-symlink logical_object_kinds.toml
+  neg-appendix-regenerate-symlink logical_object_kinds.toml linked \
+  physical_record_kinds.toml bootstrap_frames.toml \
+  prebootstrap_artifact_kinds.toml wire_types.toml durable_fields.toml
 APPENDIX_SYMLINK_SENTINEL='APPENDIX_SYMLINK_TARGET_76e13f0b'
 printf '%s\n' "$APPENDIX_SYMLINK_SENTINEL" \
   > "$WORK/appendix-regenerate-symlink-external.toml"
@@ -1461,7 +1541,9 @@ else
 fi
 
 stage_appendix_except \
-  neg-appendix-regenerate-hardlink logical_object_kinds.toml
+  neg-appendix-regenerate-hardlink logical_object_kinds.toml linked \
+  physical_record_kinds.toml bootstrap_frames.toml \
+  prebootstrap_artifact_kinds.toml wire_types.toml durable_fields.toml
 APPENDIX_HARDLINK_SENTINEL='APPENDIX_HARDLINK_TARGET_c4c5b322'
 printf '%s\n' "$APPENDIX_HARDLINK_SENTINEL" \
   > "$WORK/appendix-regenerate-hardlink-external.toml"
@@ -1489,7 +1571,9 @@ else
 fi
 
 stage_appendix_except \
-  neg-appendix-regenerate-directory logical_object_kinds.toml
+  neg-appendix-regenerate-directory logical_object_kinds.toml linked \
+  physical_record_kinds.toml bootstrap_frames.toml \
+  prebootstrap_artifact_kinds.toml wire_types.toml durable_fields.toml
 mkdir -p \
   "$WORK/neg-appendix-regenerate-directory/registries/logical_object_kinds.toml"
 status=0
@@ -1514,7 +1598,7 @@ else
 fi
 
 log "phase 3e: every checked-in projection requires one target"
-stage_appendix neg-appendix-target
+stage_appendix neg-appendix-target linked appendix_a_catalog.toml
 awk '
   !removed && $0 == "[[target]]" { removed = 1; skipping = 1; next }
   skipping && /^\[\[/ { skipping = 0 }
@@ -1527,7 +1611,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3f: catalog-maintenance owners cannot masquerade as semantic owners"
-stage_appendix neg-appendix-semantic-owner
+stage_appendix neg-appendix-semantic-owner linked appendix_a_catalog.toml
 cat >> "$WORK/neg-appendix-semantic-owner/registries/appendix_a_catalog.toml" <<'EOF'
 
 [[semantic_binding]]
@@ -1543,7 +1627,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3g: row IDs are derived from typed projection identity"
-stage_appendix neg-appendix-row-id
+stage_appendix neg-appendix-row-id linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "row_id = \"a03:logical-kind:logical-state-payload\"" {
     print "row_id = \"a03:logical-kind:logical-state-payload-wrong\""
@@ -1564,7 +1648,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3h: G0 projection ownership cannot be broadened"
-stage_appendix neg-appendix-g0-owner
+stage_appendix neg-appendix-g0-owner linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "slice_id = \"a03\"" {
     print "slice_id = \"g0\""
@@ -1585,7 +1669,7 @@ expect_appendix_violation \
   neg-appendix-g0-owner g0_projection_allowlist_drift g0
 
 log "phase 3i: a declared slice cannot become vacuously complete"
-stage_appendix neg-appendix-complete
+stage_appendix neg-appendix-complete linked appendix_a_catalog.toml
 awk '
   $0 == "id = \"a02\"" { in_slice = 1 }
   in_slice && !changed && $0 == "definition_status = \"declared\"" {
@@ -1607,7 +1691,7 @@ expect_appendix_violation \
   neg-appendix-complete slice_census_pin_mismatch a02
 
 log "phase 3j: full-plan reference occurrence drift fails closed"
-stage_appendix neg-appendix-reference-source
+stage_appendix neg-appendix-reference-source private
 awk '
   NR < 1388 && !changed && index($0, "StrongRef<") {
     sub(/StrongRef</, "StrongRefX<")
@@ -1627,7 +1711,7 @@ expect_appendix_violation \
   reference_manifest
 
 log "phase 3j-target: exact target/source assignments cannot be downgraded"
-stage_appendix neg-appendix-target-assignment
+stage_appendix neg-appendix-target-assignment linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "source_key = \"field|RootSlot|RootSlot.cluster_incarnation|cluster_incarnation\"" {
     print "source_key = \"projection|durable_fields|RootSlot.cluster_incarnation\""
@@ -1648,7 +1732,7 @@ expect_appendix_violation \
   target_manifest
 
 log "phase 3j-owner: reservation ownership is derived from source"
-stage_appendix neg-appendix-source-owner
+stage_appendix neg-appendix-source-owner linked appendix_a_catalog.toml
 awk '
   $0 == "row_id = \"plan:reservation:valid-time-contract\"" {
     print "row_id = \"a21:reservation:valid-time-contract\""
@@ -1683,7 +1767,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3j-bindings: fabricated repository metadata cannot self-assert"
-stage_appendix neg-appendix-repository-bindings
+stage_appendix neg-appendix-repository-bindings linked appendix_a_catalog.toml
 cat >> "$WORK/neg-appendix-repository-bindings/registries/appendix_a_catalog.toml" <<'EOF'
 
 [[semantic_binding]]
@@ -1726,7 +1810,7 @@ for code in \
 done
 
 log "phase 3j-binding-pins: real but unrelated repository metadata cannot self-authorize"
-stage_appendix neg-appendix-unrelated-bindings
+stage_appendix neg-appendix-unrelated-bindings linked appendix_a_catalog.toml
 cat >> "$WORK/neg-appendix-unrelated-bindings/registries/appendix_a_catalog.toml" <<'EOF'
 
 [[semantic_binding]]
@@ -1764,7 +1848,7 @@ else
 fi
 
 log "phase 3j-annotation: placeholder annotations cannot self-assert"
-stage_appendix neg-appendix-annotation-placeholder
+stage_appendix neg-appendix-annotation-placeholder linked appendix_a_catalog.toml
 cat >> "$WORK/neg-appendix-annotation-placeholder/registries/appendix_a_catalog.toml" <<'EOF'
 
 [[annotation]]
@@ -1801,7 +1885,7 @@ else
 fi
 
 log "phase 3j-annotation-reference: malformed and unregistered reference shapes fail closed"
-stage_appendix neg-appendix-annotation-reference
+stage_appendix neg-appendix-annotation-reference linked appendix_a_catalog.toml
 cat >> "$WORK/neg-appendix-annotation-reference/registries/appendix_a_catalog.toml" <<'EOF'
 
 [[annotation]]
@@ -1830,7 +1914,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3k: maintenance proof ownership and evidence are release-pinned"
-stage_appendix neg-appendix-maintenance
+stage_appendix neg-appendix-maintenance linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "owner_crate = \"registry-check\"" {
     print "owner_crate = \"fgdb-warden\""
@@ -1851,7 +1935,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3l: unknown catalog keys are structural load failures"
-stage_appendix neg-appendix-unknown-key
+stage_appendix neg-appendix-unknown-key linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "schema_version = 5" {
     print
@@ -1872,7 +1956,7 @@ expect_appendix_structural_error \
   neg-appendix-unknown-key catalog_unknown_key catalog
 
 log "phase 3m: completion-layer schema contract drift is rejected"
-stage_appendix neg-appendix-completion-schema
+stage_appendix neg-appendix-completion-schema linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "pin_policy = \"compiled-count-sha256-readable-row-contract\"" {
     print "pin_policy = \"catalog-self-authorized\""
@@ -1893,7 +1977,7 @@ expect_appendix_violation \
   catalog_row
 
 log "phase 3n: malformed projection schemas are structural load failures"
-stage_appendix neg-appendix-projection-schema
+stage_appendix neg-appendix-projection-schema linked appendix_a_catalog.toml
 awk '
   !changed && $0 == "[[logical_kind]]" {
     print
