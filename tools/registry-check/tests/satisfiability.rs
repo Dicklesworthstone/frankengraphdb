@@ -234,6 +234,13 @@ const REGISTRY: &[(&str, Coverage)] = &[
             trigger_tests: &["idr_refinement_claims_resolve_to_a_registered_arm"],
         },
     ),
+    // ---- manifest cross-field family (fgdb-xkg9) -------------------------------------
+    (
+        "restore_service_promotion_manifest_coherence",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_restore_service_promotion_manifest_coherence_is_enforced"],
+        },
+    ),
     // ---- completion family: cannot be witnessed until instance [III] resolves ----------
     (
         "complete_slice_annotation_missing",

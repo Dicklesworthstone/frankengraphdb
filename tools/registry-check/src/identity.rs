@@ -51,6 +51,9 @@
 //!   refinement_union_unresolved   refined union is not a registered union
 //!   refinement_arm_unresolved     refined arm name is not an arm of that union
 //!   refinement_arm_tag_mismatch   arm resolves but under a different arm_tag
+//!   restore_service_promotion_manifest_coherence  manifest posture, BODY, and
+//!                           authority-profile tag domains are not bound to
+//!                           their one legal cross-field truth table
 //!   bad_field               enum/shape violation
 
 use crate::hash::fnv1a64;
@@ -1054,6 +1057,219 @@ fn v(code: &str, registry: &str, row_id: &str, msg: impl Into<String>) -> Violat
         registry: registry.into(),
         row_id: row_id.into(),
         msg: msg.into(),
+    }
+}
+
+const RESTORE_MANIFEST_LOCAL_TAG: u8 = 0x01;
+const RESTORE_MANIFEST_SHARDED_TAG: u8 = 0x02;
+const RESTORE_AUTHORITY_EXTERNAL_CAS_CATALOGED_TAG: u8 = 0x01;
+const RESTORE_AUTHORITY_DIRECTORY_BOUND_CATALOGED_TAG: u8 = 0x02;
+const RESTORE_AUTHORITY_DIRECTORY_BOUND_EMBEDDED_NO_CATALOG_TAG: u8 = 0x03;
+
+/// Admission law for the three tags that jointly describe one
+/// `RestoreServicePromotionManifest` (Appendix A a20:2575).
+///
+/// The common `target_posture` and exactly-one BODY discriminants must agree.
+/// A Local body admits all three authority profiles; a Sharded body admits
+/// only `ExternalCasCataloged`. Unknown tags fail closed. This is deliberately
+/// expressed over the durable bytes so a format decoder can call the same
+/// predicate before publishing a decoded manifest.
+pub fn restore_service_promotion_manifest_tags_are_coherent(
+    target_posture_tag: u8,
+    body_tag: u8,
+    authority_profile_tag: u8,
+) -> bool {
+    matches!(
+        (target_posture_tag, body_tag, authority_profile_tag),
+        (
+            RESTORE_MANIFEST_LOCAL_TAG,
+            RESTORE_MANIFEST_LOCAL_TAG,
+            RESTORE_AUTHORITY_EXTERNAL_CAS_CATALOGED_TAG
+                | RESTORE_AUTHORITY_DIRECTORY_BOUND_CATALOGED_TAG
+                | RESTORE_AUTHORITY_DIRECTORY_BOUND_EMBEDDED_NO_CATALOG_TAG,
+        ) | (
+            RESTORE_MANIFEST_SHARDED_TAG,
+            RESTORE_MANIFEST_SHARDED_TAG,
+            RESTORE_AUTHORITY_EXTERNAL_CAS_CATALOGED_TAG,
+        )
+    )
+}
+
+fn unique_ordinary_union<'a>(
+    r: &'a IdentityRegistries,
+    union_name: &str,
+) -> Option<&'a OrdinaryUnion> {
+    let mut matches = r
+        .ordinary_unions
+        .iter()
+        .filter(|union| union.union_name == union_name);
+    let only = matches.next()?;
+    matches.next().is_none().then_some(only)
+}
+
+fn ordinary_union_has_exact_arms(
+    union: &OrdinaryUnion,
+    expected: &[(&str, u8, &str, &str)],
+) -> bool {
+    union.arms.len() == expected.len()
+        && expected
+            .iter()
+            .all(|(source_arm_name, arm_tag, payload_kind, role_predicate)| {
+                union.arms.iter().any(|arm| {
+                    arm.source_arm_name == *source_arm_name
+                        && arm.stable_name == *source_arm_name
+                        && arm.arm_tag == i64::from(*arm_tag)
+                        && arm.payload_kind == *payload_kind
+                        && arm.role_predicate == *role_predicate
+                })
+            })
+}
+
+/// Bind the runtime truth table above to the released durable tag meanings.
+///
+/// Independent union validation proves that each closed union is internally
+/// well formed, but cannot prove that three tags in one manifest agree. This
+/// check activates when any part of the manifest family is present and then
+/// fails closed unless the fields, all three union domains, and the
+/// ExternalCas-refined wrapper agree on the tags consumed by the admission
+/// predicate.
+fn check_restore_service_promotion_manifest_coherence(
+    r: &IdentityRegistries,
+    out: &mut Vec<Violation>,
+) {
+    const MANIFEST: &str = "RestoreServicePromotionManifest";
+    const POSTURE: &str = "RestoreServicePromotionManifestTargetPosture";
+    const AUTHORITY: &str = "RestorePromotionAuthorityProfile";
+    const EXTERNAL_REF: &str = "ExternalCasRestoreServicePromotionManifestRef";
+
+    let domain_present = r.logical.iter().any(|row| row.name == MANIFEST)
+        || r.fields.iter().any(|row| row.containing_schema == MANIFEST)
+        || r.ordinary_unions
+            .iter()
+            .any(|row| matches!(row.union_name.as_str(), MANIFEST | POSTURE | AUTHORITY))
+        || r.wire.iter().any(|row| row.name == EXTERNAL_REF);
+    if !domain_present {
+        return;
+    }
+
+    let field_has_exact_contract = |stable_name: &str, field_tag: i64, wire_type: &str| {
+        let mut rows = r
+            .fields
+            .iter()
+            .filter(|row| row.containing_schema == MANIFEST && row.stable_name == stable_name);
+        matches!(
+            (rows.next(), rows.next()),
+            (Some(row), None)
+                if row.field_tag == field_tag
+                    && row.exact_wire_type == wire_type
+                    && row.cardinality == "one"
+                    && row.identity_class == "inline"
+                    && row.reference_semantics == "none"
+                    && row.target_schema_id.is_none()
+                    && row.role_predicate == "true"
+        )
+    };
+
+    let body = unique_ordinary_union(r, MANIFEST);
+    let body_is_bound = body.is_some_and(|union| {
+        union.containing_schema == MANIFEST
+            && union.union_path == MANIFEST
+            && union.field_tag.is_none()
+            && union.tag_wire_type == "u8"
+            && union.allowed_containing_schemas == [MANIFEST]
+            && union.role_predicate == "true"
+            && ordinary_union_has_exact_arms(
+                union,
+                &[
+                    ("Local", RESTORE_MANIFEST_LOCAL_TAG, "inline-record", "true"),
+                    (
+                        "Sharded",
+                        RESTORE_MANIFEST_SHARDED_TAG,
+                        "inline-record",
+                        "true",
+                    ),
+                ],
+            )
+    });
+
+    let posture = unique_ordinary_union(r, POSTURE);
+    let posture_is_bound = posture.is_some_and(|union| {
+        union.containing_schema == MANIFEST
+            && union.union_path == "RestoreServicePromotionManifest.target_posture"
+            && union.field_tag == Some(0x0005)
+            && union.tag_wire_type == "u8"
+            && union.allowed_containing_schemas == [MANIFEST]
+            && union.role_predicate == "true"
+            && ordinary_union_has_exact_arms(
+                union,
+                &[
+                    ("Local", RESTORE_MANIFEST_LOCAL_TAG, "unit", "true"),
+                    ("Sharded", RESTORE_MANIFEST_SHARDED_TAG, "unit", "true"),
+                ],
+            )
+    });
+
+    let authority = unique_ordinary_union(r, AUTHORITY);
+    let authority_is_bound = authority.is_some_and(|union| {
+        union.containing_schema == AUTHORITY
+            && union.union_path == AUTHORITY
+            && union.field_tag.is_none()
+            && union.tag_wire_type == "u8"
+            && union.allowed_containing_schemas == [MANIFEST]
+            && union.role_predicate == "true"
+            && ordinary_union_has_exact_arms(
+                union,
+                &[
+                    (
+                        "ExternalCasCataloged",
+                        RESTORE_AUTHORITY_EXTERNAL_CAS_CATALOGED_TAG,
+                        "inline-record",
+                        "true",
+                    ),
+                    (
+                        "DirectoryBoundCataloged",
+                        RESTORE_AUTHORITY_DIRECTORY_BOUND_CATALOGED_TAG,
+                        "inline-record",
+                        "role-local",
+                    ),
+                    (
+                        "DirectoryBoundEmbeddedNoCatalog",
+                        RESTORE_AUTHORITY_DIRECTORY_BOUND_EMBEDDED_NO_CATALOG_TAG,
+                        "inline-record",
+                        "role-local",
+                    ),
+                ],
+            )
+    });
+
+    let mut external_refs = r.wire.iter().filter(|row| row.name == EXTERNAL_REF);
+    let external_ref_is_bound = matches!(
+        (external_refs.next(), external_refs.next()),
+        (Some(row), None)
+            if row.kind == "reference_wrapper"
+                && matches!(
+                    parse_refinement_claim(&row.encoding_context),
+                    Some(("Sharded", tag, POSTURE))
+                        if tag == i64::from(RESTORE_MANIFEST_SHARDED_TAG)
+                )
+    );
+
+    if !field_has_exact_contract("target_posture", 0x0005, POSTURE)
+        || !field_has_exact_contract("authority_profile", 0x0007, AUTHORITY)
+        || !body_is_bound
+        || !posture_is_bound
+        || !authority_is_bound
+        || !external_ref_is_bound
+    {
+        out.push(v(
+            "restore_service_promotion_manifest_coherence",
+            "durable_fields",
+            MANIFEST,
+            "Appendix A a20:2575 requires target_posture to equal the BODY arm, Local to admit \
+             ExternalCasCataloged or either DirectoryBound profile, and Sharded to admit only \
+             ExternalCasCataloged; the two fields, BODY/posture/profile tag domains, and \
+             ExternalCas-refined wrapper must stay exactly bound to the runtime admission table",
+        ));
     }
 }
 
@@ -3332,6 +3548,8 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             format!("construction-DAG cycle: {cycle:?}"),
         ));
     }
+
+    check_restore_service_promotion_manifest_coherence(r, &mut out);
 
     out
 }

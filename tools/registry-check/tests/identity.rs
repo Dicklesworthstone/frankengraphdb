@@ -5157,6 +5157,127 @@ fn idr_a20_restore_service_promotion_manifest_body_is_exact() {
     );
 }
 
+/// The three independently valid tag domains of
+/// `RestoreServicePromotionManifest` have one joint admission table
+/// (Appendix A a20:2575; fgdb-xkg9).
+///
+/// This is both the positive runtime witness and the registry mutation
+/// witness. The expected matrix is hand-authored rather than derived from the
+/// predicate or registry rows: two equal implementations would not be an
+/// independent oracle.
+#[test]
+fn idr_restore_service_promotion_manifest_coherence_is_enforced() {
+    let base = real_identity();
+    assert!(
+        !codes_without_assignment_drift(&base)
+            .contains(&"restore_service_promotion_manifest_coherence".to_owned()),
+        "the released registry must bind the runtime admission table"
+    );
+
+    let mut admitted = Vec::new();
+    for target_posture_tag in [0x01, 0x02] {
+        for body_tag in [0x01, 0x02] {
+            for authority_profile_tag in [0x01, 0x02, 0x03] {
+                let expected = matches!(
+                    (target_posture_tag, body_tag, authority_profile_tag),
+                    (0x01, 0x01, 0x01 | 0x02 | 0x03) | (0x02, 0x02, 0x01)
+                );
+                let actual = identity::restore_service_promotion_manifest_tags_are_coherent(
+                    target_posture_tag,
+                    body_tag,
+                    authority_profile_tag,
+                );
+                assert_eq!(
+                    actual, expected,
+                    "coherence verdict drifted for posture={target_posture_tag:#04x}, \
+                     BODY={body_tag:#04x}, authority={authority_profile_tag:#04x}"
+                );
+                if actual {
+                    admitted.push((target_posture_tag, body_tag, authority_profile_tag));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        admitted,
+        [
+            (0x01, 0x01, 0x01),
+            (0x01, 0x01, 0x02),
+            (0x01, 0x01, 0x03),
+            (0x02, 0x02, 0x01),
+        ],
+        "exactly four of the twelve in-domain tag combinations are legal"
+    );
+    for tags in [
+        (0x00, 0x01, 0x01),
+        (0x01, 0x00, 0x01),
+        (0x01, 0x01, 0x00),
+        (0xff, 0x01, 0x01),
+        (0x01, 0xff, 0x01),
+        (0x01, 0x01, 0xff),
+    ] {
+        assert!(
+            !identity::restore_service_promotion_manifest_tags_are_coherent(tags.0, tags.1, tags.2,),
+            "unknown durable tags must fail closed: {tags:?}"
+        );
+    }
+
+    let assert_coherence_violation = |mutated: &IdentityRegistries, mutation: &str| {
+        let mutation_codes = codes_without_assignment_drift(mutated);
+        assert!(
+            mutation_codes.contains(&"restore_service_promotion_manifest_coherence".to_owned()),
+            "{mutation} must fire the exact coherence law: {mutation_codes:?}"
+        );
+    };
+
+    let mut body_tag_drift = real_identity();
+    body_tag_drift
+        .ordinary_unions
+        .iter_mut()
+        .find(|union| union.union_name == "RestoreServicePromotionManifest")
+        .expect("manifest BODY union")
+        .arms
+        .iter_mut()
+        .find(|arm| arm.source_arm_name == "Sharded")
+        .expect("Sharded BODY arm")
+        .arm_tag = 0x0004;
+    assert_coherence_violation(
+        &body_tag_drift,
+        "a Sharded BODY tag that no longer matches target_posture",
+    );
+
+    let mut directory_profile_broadened = real_identity();
+    directory_profile_broadened
+        .ordinary_unions
+        .iter_mut()
+        .find(|union| union.union_name == "RestorePromotionAuthorityProfile")
+        .expect("authority-profile union")
+        .arms
+        .iter_mut()
+        .find(|arm| arm.source_arm_name == "DirectoryBoundCataloged")
+        .expect("DirectoryBoundCataloged authority arm")
+        .role_predicate = "true".to_owned();
+    assert_coherence_violation(
+        &directory_profile_broadened,
+        "a DirectoryBound authority profile broadened beyond Local",
+    );
+
+    let mut wrapper_admits_local = real_identity();
+    let wrapper = wrapper_admits_local
+        .wire
+        .iter_mut()
+        .find(|row| row.name == "ExternalCasRestoreServicePromotionManifestRef")
+        .expect("ExternalCas-refined manifest wrapper");
+    wrapper.encoding_context = wrapper.encoding_context.replace(
+        "the Sharded arm (arm_tag 0x0002)",
+        "the Local arm (arm_tag 0x0001)",
+    );
+    assert_coherence_violation(
+        &wrapper_admits_local,
+        "an ExternalCas wrapper refined only to Local posture",
+    );
+}
+
 #[test]
 fn idr_a20_residue_hosts_fields_and_reference_orders_are_nonvacuous() {
     let base = real_identity();
