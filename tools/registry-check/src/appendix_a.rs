@@ -7727,6 +7727,61 @@ fn covered_interior_keys(catalog: &Catalog, census: &AppendixSourceCensus) -> Co
     covered
 }
 
+/// One licence for the empty domain of the complete-slice census law, together
+/// with the repair that retires it (fgdb-complete-census-law-vacuous-twice-54jf).
+///
+/// The two metadata fields are read ONLY by the `#[cfg(test)]` contract test
+/// that enforces licence quality: a row without measured evidence and a named
+/// repair is an inherited excuse rather than a licensed vacuity. `expect` rather
+/// than `allow`, so that if live code ever starts reading one the suppression is
+/// reported as unfulfilled instead of lingering.
+#[derive(Debug, Clone, Copy)]
+struct CompleteCensusDomainWaiver {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the cfg(test) licence-contract test")
+    )]
+    evidence: &'static str,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the cfg(test) licence-contract test")
+    )]
+    repair: &'static str,
+    owning_bead: &'static str,
+}
+
+/// The complete licence set for an EMPTY complete-slice domain.
+///
+/// Exactly one row while no slice has ever been completed. Emptying this table
+/// turns the vacuity into `source_complete_census_domain_vacuous`; completing
+/// any slice turns the row into `source_complete_census_domain_waiver_stale`.
+/// One of the three states is licensed at a time, so a law with no subjects can
+/// no longer report the same clean zero as a law with all of them.
+const COMPLETE_CENSUS_DOMAIN_WAIVERS: &[CompleteCensusDomainWaiver] =
+    &[CompleteCensusDomainWaiver {
+        evidence: "measured at HEAD: 0 of 21 slices carry definition_status = \"complete\"; all 21 \
+                   are \"declared\", so the coverage loop body never executes. The predicate is \
+                   live, not dead: forcing one slice complete yields 82 (a20), 328 (a03) or 720 \
+                   (a18) violations and forcing all 21 yields 8616",
+        repair: "mark the first slice complete once its interior residue reaches zero AND its \
+                 census universe is certified; this row must be deleted in the same change",
+        owning_bead: "fgdb-complete-census-law-vacuous-twice-54jf",
+    }];
+
+/// Slices whose census universe has been shown to hold the source it quantifies
+/// over, and which may therefore CLAIM `definition_status = "complete"`.
+///
+/// EMPTY, and the emptiness is the enforcement rather than a second vacuity: a
+/// slice marked complete while absent from this list is a violation naming the
+/// universe, so the coverage certificate cannot be issued over a census known to
+/// drop source. `fgdb-qh3r` is the blocker — the census drops the body of every
+/// braced arm whose head is `Local`, `Meta` or `Shard` (110 of 114 sites), and
+/// at 5 of those sites no member of the body appears anywhere in the census, so
+/// 11 source-spelled members are outside the universe at ANY setting of
+/// `definition_status`. Add a slice here only with the measurement that shows
+/// its census emits every member its source spells.
+const CENSUS_UNIVERSE_CERTIFIED_SLICES: &[&str] = &[];
+
 /// The complete-slice field census law (fgdb-z35a): every census field key of
 /// a complete slice must be covered by exactly one verified contract — a
 /// field target, an approved not-a-durable-schema adjudication, or a covering
@@ -7736,17 +7791,101 @@ fn covered_interior_keys(catalog: &Catalog, census: &AppendixSourceCensus) -> Co
 /// `verify_structural_target_source_keys`, and adjudicated key sets are
 /// byte-matched to the census, so one-directional coverage completeness here
 /// closes full set equality.
+///
+/// # It was vacuous twice over, and both narrowings are now checked
+///
+/// `fgdb-complete-census-law-vacuous-twice-54jf`.
+///
+/// NARROWING 1 — AN EMPTY DOMAIN. The loop is gated on `definition_status ==
+/// "complete"` and every one of the 21 slices is `declared`, so the body never
+/// executed and the law reported zero because it evaluated nothing. That is the
+/// purest vacuity: every instrument reading the output saw the clean zero a
+/// fully covered appendix would produce. `COMPLETE_CENSUS_DOMAIN_WAIVERS` now
+/// licenses that state explicitly and fails in BOTH directions around it.
+///
+/// NARROWING 2 — THE UNIVERSE IS THE CENSUS, WHICH DROPS SOURCE. The keys are
+/// `source_slice.fields/.unions/.arms`: census OUTPUT, not source. A member the
+/// census never emitted is not in the universe and cannot be flagged, so the
+/// certificate is completeness relative to whatever the census happened to see.
+/// The reverse direction is already closed — `source_target_key_missing` rejects
+/// a targeted key the census lacks — and what remains is a member absent from
+/// BOTH, which no reader in this crate can see. So the CLAIM is gated instead:
+/// see `CENSUS_UNIVERSE_CERTIFIED_SLICES`.
 fn verify_complete_field_census_coverage(
     catalog: &Catalog,
     census: &AppendixSourceCensus,
     out: &mut Vec<Violation>,
 ) {
+    verify_complete_field_census_coverage_with(
+        catalog,
+        census,
+        COMPLETE_CENSUS_DOMAIN_WAIVERS,
+        CENSUS_UNIVERSE_CERTIFIED_SLICES,
+        out,
+    );
+}
+
+/// The body, with the two ledgers injected so a test can mutate the input each
+/// vacuity hides and observe the law go red.
+fn verify_complete_field_census_coverage_with(
+    catalog: &Catalog,
+    census: &AppendixSourceCensus,
+    domain_waivers: &[CompleteCensusDomainWaiver],
+    certified_slices: &[&str],
+    out: &mut Vec<Violation>,
+) {
+    let complete_slice_count = catalog
+        .slices
+        .iter()
+        .filter(|slice| slice.definition_status == "complete")
+        .count();
+    match (complete_slice_count, domain_waivers.first()) {
+        (0, None) => out.push(Violation::new(
+            "source_complete_census_domain_vacuous",
+            "source_manifest",
+            format!(
+                "the complete-slice census law evaluated 0 of {} slices, so its zero certifies \
+                 nothing; license the empty domain or complete a slice",
+                catalog.slices.len()
+            ),
+        )),
+        (0, Some(_)) => {}
+        (_, Some(waiver)) => out.push(Violation::new(
+            "source_complete_census_domain_waiver_stale",
+            "source_manifest",
+            format!(
+                "{complete_slice_count} slices are complete, so the empty-domain licence owned by \
+                 {} no longer licenses anything and must be deleted",
+                waiver.owning_bead
+            ),
+        )),
+        (_, None) => {}
+    }
+    for certified in certified_slices {
+        if !catalog.slices.iter().any(|slice| slice.id == *certified) {
+            out.push(Violation::new(
+                "source_complete_census_certification_stale",
+                *certified,
+                "a certified census universe names a slice the catalog does not carry",
+            ));
+        }
+    }
+
     let covered = covered_interior_keys(catalog, census);
     for slice in catalog
         .slices
         .iter()
         .filter(|slice| slice.definition_status == "complete")
     {
+        if !certified_slices.contains(&slice.id.as_str()) {
+            out.push(Violation::new(
+                "source_complete_census_universe_uncertified",
+                &slice.id,
+                "this slice claims completeness while its census universe is uncertified: the law \
+                 below quantifies over census output, so a member the census dropped cannot be \
+                 flagged and the certificate would be complete only relative to what was seen",
+            ));
+        }
         let Some(source_slice) = census
             .slices
             .iter()
@@ -15200,6 +15339,219 @@ name = "Probe"
             .iter()
             .filter(|violation| violation.code == "source_complete_census_uncovered")
             .collect()
+    }
+
+    // --- fgdb-complete-census-law-vacuous-twice-54jf ------------------------
+    //
+    // The law below was vacuous in two independent ways at once, and a vacuous
+    // law is indistinguishable at every instrument from one that ran and
+    // passed. Each red-proof here mutates THE INPUT THE VACUITY HID and asserts
+    // the law goes red, and each is paired with a conformant control on the
+    // same subject so that a test which cannot fail is not mistaken for one
+    // that did.
+
+    /// The REAL catalog and its REAL structural census, built exactly the way
+    /// `verify_source` builds them, so a red-proof runs against the production
+    /// subject rather than a fixture that agrees with itself.
+    fn real_catalog_and_census() -> (Catalog, AppendixSourceCensus) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let catalog = load_catalog_file(&root.join(CATALOG_PATH)).expect("catalog loads");
+        let source = fs::read(root.join(PLAN_PATH)).expect("plan reads");
+        let line_spans = source_line_spans(&source);
+        let manifest = &catalog.source_manifest;
+        let appendix = extract_lines(
+            &source,
+            &line_spans,
+            manifest.start_line,
+            manifest.end_line,
+        )
+        .expect("appendix range");
+        let mut out = Vec::new();
+        let census =
+            verify_structural_source_census(&catalog, appendix, &mut out).expect("census builds");
+        assert!(
+            out.is_empty(),
+            "the real structural census must be clean before a red-proof runs on it, got {out:?}"
+        );
+        (catalog, census)
+    }
+
+    fn codes(violations: &[Violation]) -> Vec<&str> {
+        violations
+            .iter()
+            .map(|violation| violation.code.as_str())
+            .collect()
+    }
+
+    fn run_coverage(
+        catalog: &Catalog,
+        census: &AppendixSourceCensus,
+        waivers: &[CompleteCensusDomainWaiver],
+        certified: &[&str],
+    ) -> Vec<Violation> {
+        let mut violations = Vec::new();
+        verify_complete_field_census_coverage_with(
+            catalog,
+            census,
+            waivers,
+            certified,
+            &mut violations,
+        );
+        violations
+    }
+
+    fn with_complete_slice(catalog: &Catalog, slice_id: &str) -> Catalog {
+        let mut forced = catalog.clone();
+        let mut found = false;
+        for slice in &mut forced.slices {
+            if slice.id == slice_id {
+                slice.definition_status = "complete".to_owned();
+                found = true;
+            }
+        }
+        assert!(found, "the red-proof subject slice {slice_id} must exist");
+        forced
+    }
+
+    /// A licence for a vacuity is only a licence if it carries what makes it
+    /// one: the measurement that says the domain is empty today and the exact
+    /// change that retires the row. Without both it is an inherited excuse.
+    #[test]
+    fn empty_domain_licence_carries_its_evidence_and_its_repair() {
+        assert_eq!(
+            COMPLETE_CENSUS_DOMAIN_WAIVERS.len(),
+            1,
+            "exactly one licence while no slice has ever been completed"
+        );
+        for waiver in COMPLETE_CENSUS_DOMAIN_WAIVERS {
+            assert!(
+                waiver.evidence.contains("0 of 21"),
+                "the licence must state the measured domain, got {:?}",
+                waiver.evidence
+            );
+            assert!(
+                !waiver.repair.is_empty(),
+                "a licensed vacuity must name the change that retires it"
+            );
+            assert!(
+                waiver.owning_bead.starts_with("fgdb-"),
+                "the licence must name an owning bead, got {:?}",
+                waiver.owning_bead
+            );
+        }
+    }
+
+    /// NARROWING 1, RED-PROOF. The input this vacuity hid is the empty domain
+    /// itself: at HEAD the law evaluates 0 of 21 slices and reports the same
+    /// zero a fully covered appendix would. Withdraw the licence and the real
+    /// tree goes red.
+    #[test]
+    fn an_unlicensed_empty_domain_is_red_on_the_real_catalog() {
+        let (catalog, census) = real_catalog_and_census();
+        assert_eq!(
+            catalog
+                .slices
+                .iter()
+                .filter(|slice| slice.definition_status == "complete")
+                .count(),
+            0,
+            "the premise of this red-proof is that the domain is empty at HEAD"
+        );
+
+        let unlicensed = run_coverage(&catalog, &census, &[], &[]);
+        assert!(
+            codes(&unlicensed).contains(&"source_complete_census_domain_vacuous"),
+            "an unlicensed empty domain must be a violation, got {:?}",
+            codes(&unlicensed)
+        );
+
+        // CONFORMANT CONTROL, same subject: the landed licence makes it green,
+        // so the red above is the licence's absence and not a broken law.
+        let licensed = run_coverage(&catalog, &census, COMPLETE_CENSUS_DOMAIN_WAIVERS, &[]);
+        assert!(
+            licensed.is_empty(),
+            "the landed licence must leave the real tree clean, got {:?}",
+            codes(&licensed)
+        );
+    }
+
+    /// NARROWING 1, THE OTHER DIRECTION. A licence that outlives the state it
+    /// licenses is how a zero goes back to meaning nothing, so completing any
+    /// slice must retire it in the same change.
+    #[test]
+    fn completing_a_slice_retires_the_empty_domain_licence() {
+        let (catalog, census) = real_catalog_and_census();
+        let forced = with_complete_slice(&catalog, "a20");
+        let violations = run_coverage(&forced, &census, COMPLETE_CENSUS_DOMAIN_WAIVERS, &["a20"]);
+        assert!(
+            codes(&violations).contains(&"source_complete_census_domain_waiver_stale"),
+            "a non-empty domain must retire the licence, got {:?}",
+            codes(&violations)
+        );
+    }
+
+    /// NARROWING 2, RED-PROOF. The input this vacuity hid is a slice CLAIMING
+    /// completeness over a universe that is census output rather than source.
+    /// Marking a real slice complete must be red on the universe, and the
+    /// coverage body must still run — a gate that swaps one law for another
+    /// buys nothing.
+    #[test]
+    fn an_uncertified_census_universe_blocks_the_completeness_claim() {
+        let (catalog, census) = real_catalog_and_census();
+        let forced = with_complete_slice(&catalog, "a20");
+
+        let uncertified = run_coverage(&forced, &census, &[], &[]);
+        assert!(
+            codes(&uncertified).contains(&"source_complete_census_universe_uncertified"),
+            "an uncertified universe must block the claim, got {:?}",
+            codes(&uncertified)
+        );
+        assert_eq!(
+            uncovered_field_violations(&uncertified).len(),
+            82,
+            "the coverage law must still evaluate a20's 82 uncovered keys"
+        );
+
+        // CONFORMANT CONTROL: certify the universe and only the universe code
+        // disappears. The 82 stay, so the certification gates the CLAIM and
+        // does not weaken the coverage law it guards.
+        let certified = run_coverage(&forced, &census, &[], &["a20"]);
+        assert!(
+            !codes(&certified).contains(&"source_complete_census_universe_uncertified"),
+            "certifying the universe must clear exactly that code, got {:?}",
+            codes(&certified)
+        );
+        assert_eq!(
+            uncovered_field_violations(&certified).len(),
+            82,
+            "certification must not change what the coverage law finds"
+        );
+    }
+
+    /// The certification list is itself checked, so it cannot rot into a list
+    /// of names that certify nothing.
+    #[test]
+    fn a_certification_naming_no_slice_is_stale() {
+        let (catalog, census) = real_catalog_and_census();
+        let violations = run_coverage(&catalog, &census, COMPLETE_CENSUS_DOMAIN_WAIVERS, &["a99"]);
+        assert!(
+            codes(&violations).contains(&"source_complete_census_certification_stale"),
+            "a certification for an absent slice must be a violation, got {:?}",
+            codes(&violations)
+        );
+    }
+
+    /// The certified list is EMPTY at HEAD and that emptiness is load-bearing:
+    /// it is what makes every completeness claim red while `fgdb-qh3r` is open.
+    /// If a slice is ever certified, this test is the one that forces the
+    /// certifier to state the measurement.
+    #[test]
+    fn the_certified_universe_list_is_empty_until_qh3r_lands() {
+        assert!(
+            CENSUS_UNIVERSE_CERTIFIED_SLICES.is_empty(),
+            "certifying a census universe requires the measurement that its census emits every \
+             member its source spells; fgdb-qh3r is open, got {CENSUS_UNIVERSE_CERTIFIED_SLICES:?}"
+        );
     }
 
     #[test]
