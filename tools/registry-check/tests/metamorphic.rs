@@ -160,7 +160,7 @@
 //! and the pre-existing proof-lane suite still passes with the fix reverted,
 //! which is precisely why nothing caught this for as long as it stood.
 
-use registry_check::unsafe_ledger::{self, LEDGER_PATH};
+use registry_check::unsafe_ledger::{self, LEDGER_PATH, VERIFICATION_LANES_PATH};
 use std::collections::BTreeSet;
 use std::fs;
 
@@ -221,6 +221,38 @@ const FIXTURE_LEDGER: &str = "schema_version = 1\n\n\
      charter = \"Bump/region arena internals behind safe APIs.\"\n\
      status = \"planned\"\n";
 
+/// Complete zero-site lane posture for the manifest-reader fixtures. These
+/// relations intentionally exercise workspace topology, so the mandatory
+/// verification-lane reader must be satisfied rather than short-circuiting the
+/// checker before topology is observed.
+const FIXTURE_VERIFICATION_LANES: &str = r#"schema_version = 1
+cell = []
+
+[[lane]]
+tool = "miri"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["miri", "rust-src"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "Synthetic zero-site fixture; no checked Miri claim."
+
+[[lane]]
+tool = "asan"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["rust-src", "llvm-tools-preview"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "Synthetic zero-site fixture; no checked ASAN claim."
+
+[[lane]]
+tool = "tsan"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["rust-src", "llvm-tools-preview"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "Synthetic zero-site fixture; no checked TSAN claim."
+"#;
+
 /// Materialize a workspace whose root manifest is exactly `manifest`, run the
 /// checker over it, and return what it concluded.
 ///
@@ -245,8 +277,29 @@ fn verdict(scope: &str, tag: &str, manifest: &str, members: &[Member]) -> Verdic
         fs::remove_dir_all(&root).expect("clear fixture root");
     }
     fs::create_dir_all(root.join("registries")).expect("registries dir");
+    fs::create_dir_all(root.join("scripts")).expect("scripts dir");
     fs::write(root.join("Cargo.toml"), manifest).expect("workspace manifest");
     fs::write(root.join(LEDGER_PATH), FIXTURE_LEDGER).expect("ledger");
+    fs::write(
+        root.join(VERIFICATION_LANES_PATH),
+        FIXTURE_VERIFICATION_LANES,
+    )
+    .expect("verification lanes");
+    fs::write(
+        root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"nightly-2026-07-05\"\ncomponents = [\"miri\", \"rust-src\", \"llvm-tools-preview\"]\n",
+    )
+    .expect("toolchain");
+    fs::write(
+        root.join("registries/checker_index.toml"),
+        "[registry]\nname = \"checker_index\"\n\n[[checker]]\nsymbol = \"w1_unsafe_tool_lanes\"\nkind = \"script\"\nstatus = \"live\"\nartifact = \"scripts/w1_unsafe_tool_lanes.sh\"\nunit = \"artifact\"\n",
+    )
+    .expect("checker index");
+    fs::write(
+        root.join("scripts/w1_unsafe_tool_lanes.sh"),
+        "#!/usr/bin/env bash\nexit 1\n",
+    )
+    .expect("lane runner");
 
     for member in members {
         let dir = root.join(&member.dir);
@@ -649,12 +702,18 @@ fn an_unledgered_site_is_found_under_every_roster_spelling() {
 
 /// Materialize a one-crate workspace whose `src/lib.rs` is `source`, and report
 /// what `topology::scan_workspace` concluded about that crate.
-fn topology_flags(tag: &str, root_attr: &str, source: &str) -> (bool, bool, bool) {
-    // Process-scoped for the reason given on the fixture root above.
-    let root = std::env::temp_dir().join(format!(
-        "fgdb-metamorphic-topo-{}-{tag}",
+fn topology_fixture_root(scope: &str, tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "fgdb-metamorphic-topo-{}-{scope}-{tag}",
         std::process::id()
-    ));
+    ))
+}
+
+fn topology_flags(scope: &str, tag: &str, root_attr: &str, source: &str) -> (bool, bool, bool) {
+    // Process scope separates concurrent suite binaries. Relation scope also
+    // separates tests inside this binary: several relations intentionally use
+    // the same semantic variant tag (notably `nothing`) and run in parallel.
+    let root = topology_fixture_root(scope, tag);
     if root.is_dir() {
         fs::remove_dir_all(&root).expect("clear fixture root");
     }
@@ -680,6 +739,15 @@ fn topology_flags(tag: &str, root_attr: &str, source: &str) -> (bool, bool, bool
         crate_scan.root_forbids_unsafe,
         crate_scan.root_denies_unsafe,
     )
+}
+
+#[test]
+fn topology_fixture_identity_includes_the_calling_relation() {
+    assert_ne!(
+        topology_fixture_root("attribute_forms", "nothing"),
+        topology_fixture_root("root_policy_negatives", "nothing"),
+        "parallel relations using the same semantic variant must never share a live fixture"
+    );
 }
 
 /// Every form in this table either relaxes `unsafe_code` or merely mentions it.
@@ -743,7 +811,7 @@ fn topology_and_ledger_agree_on_every_attribute_form() {
     ];
     for (tag, source, relaxes) in cases {
         let ledger_says = !registry_check::unsafe_ledger::scan_sites("<probe>", &source).is_empty();
-        let (topology_says, _, _) = topology_flags(tag, "", &source);
+        let (topology_says, _, _) = topology_flags("attribute_forms", tag, "", &source);
         assert_eq!(
             ledger_says, relaxes,
             "`{tag}`: the ledger scanner is the reference reader and must be right first"
@@ -786,7 +854,8 @@ fn a_root_forbid_is_recognised_however_it_is_spelled() {
             format!("{hash}![forbid(\n    unsafe_code\n)]\n"),
         ),
     ] {
-        let (_, forbids, _) = topology_flags(tag, &attr, "pub fn f() {}\n");
+        let (_, forbids, _) =
+            topology_flags("root_forbid_spellings", tag, &attr, "pub fn f() {}\n");
         assert!(
             forbids,
             "`{tag}` forbids unsafe_code at the crate root and must be read as doing so"
@@ -809,7 +878,8 @@ fn text_that_only_mentions_a_root_forbid_is_not_one() {
         ("deny_not_forbid", format!("{hash}![deny(unsafe_code)]\n")),
         ("nothing", String::new()),
     ] {
-        let (_, forbids, _) = topology_flags(tag, &attr, "pub fn f() {}\n");
+        let (_, forbids, _) =
+            topology_flags("root_policy_negatives", tag, &attr, "pub fn f() {}\n");
         assert!(
             !forbids,
             "`{tag}` does not forbid unsafe_code at the crate root and must not be read as \
@@ -824,6 +894,7 @@ fn text_that_only_mentions_a_root_forbid_is_not_one() {
 fn a_root_deny_is_distinguished_from_a_root_forbid() {
     let hash = '#';
     let (_, forbids, denies) = topology_flags(
+        "root_deny",
         "deny_grouped",
         &format!("{hash}![deny(unsafe_code, unused)] // island root\n"),
         "pub fn f() {}\n",
@@ -1046,6 +1117,7 @@ fn a_site_sharing_a_line_names_the_item_it_covers() {
 fn a_root_policy_the_compiler_cannot_see_is_not_a_policy() {
     let hash = '#';
     let (_, live, _) = topology_flags(
+        "hidden_root_policy",
         "root_live_control",
         &format!("{hash}![forbid(unsafe_code)]\n"),
         "pub fn f() {}\n",
@@ -1069,7 +1141,7 @@ fn a_root_policy_the_compiler_cannot_see_is_not_a_policy() {
             format!("const S: &str = \"\n{hash}![forbid(unsafe_code)]\n\";\n"),
         ),
     ] {
-        let (_, forbids, _) = topology_flags(tag, &attr, "pub fn f() {}\n");
+        let (_, forbids, _) = topology_flags("hidden_root_policy", tag, &attr, "pub fn f() {}\n");
         assert!(
             !forbids,
             "`{tag}`: this crate root declares nothing to the compiler, and reporting \
@@ -1353,6 +1425,7 @@ fn changing_what_the_kind_registry_means_changes_the_arm_verdict() {
 fn a_root_forbid_is_recognised_at_any_column() {
     let hash = '#';
     let (_, forbids, _) = topology_flags(
+        "root_forbid_column",
         "root_second_inner_on_one_line",
         &format!("{hash}![no_std] {hash}![forbid(unsafe_code)]\n"),
         "pub fn f() {}\n",

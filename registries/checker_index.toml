@@ -571,6 +571,13 @@ artifact = "tools/registry-check/src/bin/unsafe-ledger-check.rs"
 status = "live"
 unit = "artifact"
 
+[[checker]]
+symbol = "w1_unsafe_tool_lanes"
+kind = "script"
+artifact = "scripts/w1_unsafe_tool_lanes.sh"
+status = "live"
+unit = "artifact"
+
 # --- G0 workspace crate/layer topology and the build-versus-consume inventory. ---
 # Owner: fgdb-g0-workspace-topology-1q9m.
 

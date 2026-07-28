@@ -98,10 +98,25 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::toml::{self, get_str, get_table_array};
+use crate::toml::{self, get_str, get_str_array, get_table, get_table_array};
 
 /// Repo-relative location of the ledger.
 pub const LEDGER_PATH: &str = "registries/unsafe_boundary_ledger.toml";
+
+/// Per-tool, per-site dynamic-verification posture.
+pub const VERIFICATION_LANES_PATH: &str = "registries/unsafe_verification_lanes.toml";
+
+/// Closed verification-tool universe for the unsafe boundary.
+pub const VERIFICATION_TOOLS: [&str; 3] = ["miri", "asan", "tsan"];
+
+/// Every current lane executes on the native x86-64 Linux posture that owns
+/// the SIMD and inline-assembly sites. A free-form target field would be
+/// decorative: the runner executes this target, so the manifest must say this
+/// target or fail.
+const LANE_TARGET: &str = "x86_64-unknown-linux-gnu";
+
+/// The one registered gate that consumes checked cells.
+const LANE_RUNNER: &str = "scripts/w1_unsafe_tool_lanes.sh";
 
 /// A source fixture with a known number of `#[allow(...)]` sites, ASSEMBLED AT
 /// RUNTIME rather than written as literal source text.
@@ -228,6 +243,9 @@ pub struct LedgerSite {
     pub evidence: String,
     pub fallback: String,
     pub no_claim_boundary: String,
+    /// Exactly one structured no-claim boundary for every tool in
+    /// [`VERIFICATION_TOOLS`], encoded as `tool|disposition|rationale`.
+    pub tool_no_claim_boundaries: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +253,36 @@ pub struct UnsafeLedger {
     pub schema_version: i64,
     pub islands: Vec<Island>,
     pub sites: Vec<LedgerSite>,
+}
+
+/// One dynamic-verification lane. `checked` means at least one cell has a live
+/// workload; `declared` means every cell remains either a candidate or an
+/// explicit technical exclusion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationLane {
+    pub tool: String,
+    pub status: String,
+    pub target: String,
+    pub required_components: Vec<String>,
+    pub runner: String,
+    pub no_claim_boundary: String,
+}
+
+/// One site x tool cell in the complete verification matrix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationCell {
+    pub site_row_id: String,
+    pub tool: String,
+    pub disposition: String,
+    pub rationale: String,
+    pub workload: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsafeVerificationLanes {
+    pub schema_version: i64,
+    pub lanes: Vec<VerificationLane>,
+    pub cells: Vec<VerificationCell>,
 }
 
 /// A site as found in the tree, independent of what the ledger claims.
@@ -288,12 +336,68 @@ pub fn load_ledger(path: &Path) -> Result<UnsafeLedger, LoadError> {
             evidence: get_str(row, "evidence", &ctx).map_err(read)?,
             fallback: get_str(row, "fallback", &ctx).map_err(read)?,
             no_claim_boundary: get_str(row, "no_claim_boundary", &ctx).map_err(read)?,
+            tool_no_claim_boundaries: get_str_array(row, "tool_no_claim_boundaries", &ctx)
+                .map_err(read)?,
         });
     }
     Ok(UnsafeLedger {
         schema_version,
         islands,
         sites,
+    })
+}
+
+pub fn load_verification_lanes(path: &Path) -> Result<UnsafeVerificationLanes, LoadError> {
+    let text = fs::read_to_string(path).map_err(|error| LoadError {
+        path: path.display().to_string(),
+        msg: error.to_string(),
+    })?;
+    let table = toml::parse(&text).map_err(|error| LoadError {
+        path: path.display().to_string(),
+        msg: error.to_string(),
+    })?;
+    let read = |e: crate::toml::ReadError| LoadError {
+        path: path.display().to_string(),
+        msg: e.to_string(),
+    };
+    let version =
+        crate::toml::get_int(&table, "schema_version", "verification_lanes").map_err(read)?;
+    let mut lanes = Vec::new();
+    for (index, row) in get_table_array(&table, "lane", "verification_lanes")
+        .map_err(read)?
+        .into_iter()
+        .enumerate()
+    {
+        let context = format!("lane[{index}]");
+        lanes.push(VerificationLane {
+            tool: get_str(row, "tool", &context).map_err(read)?,
+            status: get_str(row, "status", &context).map_err(read)?,
+            target: get_str(row, "target", &context).map_err(read)?,
+            required_components: get_str_array(row, "required_components", &context)
+                .map_err(read)?,
+            runner: get_str(row, "runner", &context).map_err(read)?,
+            no_claim_boundary: get_str(row, "no_claim_boundary", &context).map_err(read)?,
+        });
+    }
+    let mut cells = Vec::new();
+    for (index, row) in get_table_array(&table, "cell", "verification_lanes")
+        .map_err(read)?
+        .into_iter()
+        .enumerate()
+    {
+        let context = format!("cell[{index}]");
+        cells.push(VerificationCell {
+            site_row_id: get_str(row, "site_row_id", &context).map_err(read)?,
+            tool: get_str(row, "tool", &context).map_err(read)?,
+            disposition: get_str(row, "disposition", &context).map_err(read)?,
+            rationale: get_str(row, "rationale", &context).map_err(read)?,
+            workload: get_str(row, "workload", &context).map_err(read)?,
+        });
+    }
+    Ok(UnsafeVerificationLanes {
+        schema_version: version,
+        lanes,
+        cells,
     })
 }
 
@@ -848,6 +952,573 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
+fn parse_tool_boundary(value: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = value.splitn(3, '|');
+    let tool = parts.next()?.trim();
+    let disposition = parts.next()?.trim();
+    let rationale = parts.next()?.trim();
+    if tool.is_empty() || disposition.is_empty() || rationale.is_empty() {
+        None
+    } else {
+        Some((tool, disposition, rationale))
+    }
+}
+
+fn safe_repo_relative(path: &str) -> bool {
+    !path.trim().is_empty()
+        && !Path::new(path).is_absolute()
+        && !Path::new(path).components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+}
+
+fn required_lane_components(tool: &str) -> BTreeSet<&'static str> {
+    match tool {
+        "miri" => ["miri", "rust-src"].into_iter().collect(),
+        "asan" | "tsan" => ["rust-src", "llvm-tools-preview"].into_iter().collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
+fn pinned_toolchain_components(root: &Path, out: &mut Vec<Violation>) -> BTreeSet<String> {
+    let path = root.join("rust-toolchain.toml");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            out.push(Violation::new(
+                "unsafe_lane_toolchain_unreadable",
+                "rust-toolchain.toml",
+                path.display().to_string(),
+                format!(
+                    "cannot read the pinned toolchain, so lane component availability is \
+                     unknown: {error}"
+                ),
+            ));
+            return BTreeSet::new();
+        }
+    };
+    let table = match toml::parse(&text) {
+        Ok(table) => table,
+        Err(error) => {
+            out.push(Violation::new(
+                "unsafe_lane_toolchain_unreadable",
+                "rust-toolchain.toml",
+                path.display().to_string(),
+                format!(
+                    "cannot parse the pinned toolchain, so lane component availability is \
+                     unknown: {error}"
+                ),
+            ));
+            return BTreeSet::new();
+        }
+    };
+    let toolchain = match get_table(&table, "toolchain", "rust-toolchain.toml") {
+        Ok(toolchain) => toolchain,
+        Err(error) => {
+            out.push(Violation::new(
+                "unsafe_lane_toolchain_unreadable",
+                "rust-toolchain.toml",
+                "toolchain",
+                error.to_string(),
+            ));
+            return BTreeSet::new();
+        }
+    };
+    match get_str_array(toolchain, "components", "rust-toolchain.toml.toolchain") {
+        Ok(components) => components.into_iter().collect(),
+        Err(error) => {
+            out.push(Violation::new(
+                "unsafe_lane_toolchain_unreadable",
+                "rust-toolchain.toml",
+                "toolchain.components",
+                error.to_string(),
+            ));
+            BTreeSet::new()
+        }
+    }
+}
+
+fn live_script_artifacts(
+    root: &Path,
+    requested: &BTreeSet<&str>,
+    out: &mut Vec<Violation>,
+) -> BTreeSet<String> {
+    let path = root.join("registries/checker_index.toml");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            out.push(Violation::new(
+                "unsafe_lane_checker_index_unreadable",
+                "checker_index.toml",
+                path.display().to_string(),
+                format!("cannot read the checker index that must own each lane runner: {error}"),
+            ));
+            return BTreeSet::new();
+        }
+    };
+    let table = match toml::parse(&text) {
+        Ok(table) => table,
+        Err(error) => {
+            out.push(Violation::new(
+                "unsafe_lane_checker_index_unreadable",
+                "checker_index.toml",
+                path.display().to_string(),
+                format!("cannot parse the checker index that must own each lane runner: {error}"),
+            ));
+            return BTreeSet::new();
+        }
+    };
+    let checkers = match crate::model::checker_index_from(&table) {
+        Ok(checkers) => checkers,
+        Err(error) => {
+            out.push(Violation::new(
+                "unsafe_lane_checker_index_unreadable",
+                "checker_index.toml",
+                path.display().to_string(),
+                error.to_string(),
+            ));
+            return BTreeSet::new();
+        }
+    };
+
+    let self_test = crate::liveness::self_test();
+    if !self_test.licensed() {
+        out.push(Violation::new(
+            "unsafe_lane_liveness_self_test_failed",
+            "checker_index.toml",
+            "<self-test>",
+            format!(
+                "the checker-liveness reader got {} of {} known answers wrong ({}); no \
+                 lane runner may be reported live",
+                self_test.failures.len(),
+                self_test.cases,
+                self_test.failures.join(", ")
+            ),
+        ));
+        return BTreeSet::new();
+    }
+
+    let prover = crate::liveness::Prover::new(root);
+    let mut live = BTreeSet::new();
+    let mut rejected: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for checker in checkers {
+        if !matches!(
+            (checker.kind.as_str(), checker.status.as_str()),
+            ("script", "live")
+        ) || !requested.contains(checker.artifact.as_str())
+        {
+            continue;
+        }
+        let defects = prover.assess(&checker);
+        if defects.is_empty() {
+            live.insert(checker.artifact);
+        } else {
+            rejected.entry(checker.artifact).or_default().extend(
+                defects
+                    .into_iter()
+                    .map(|defect| format!("{}: {}", defect.kind.code(), defect.detail)),
+            );
+        }
+    }
+    for (artifact, reasons) in rejected {
+        if !live.contains(&artifact) {
+            out.push(Violation::new(
+                "unsafe_lane_runner_not_live",
+                &artifact,
+                "checker_index.toml",
+                format!(
+                    "the registered lane runner failed the authoritative liveness proof: {}",
+                    reasons.join("; ")
+                ),
+            ));
+        }
+    }
+    live
+}
+
+fn verify_verification_lanes(
+    root: &Path,
+    ledger: &UnsafeLedger,
+    lanes: &UnsafeVerificationLanes,
+    report: &mut Report,
+    out: &mut Vec<Violation>,
+) {
+    report.verification_lanes = lanes.lanes.len();
+    report.verification_cells = lanes.cells.len();
+    report.checked_cells = lanes
+        .cells
+        .iter()
+        .filter(|cell| matches!(cell.disposition.as_str(), "checked"))
+        .count();
+    report.candidate_cells = lanes
+        .cells
+        .iter()
+        .filter(|cell| matches!(cell.disposition.as_str(), "candidate"))
+        .count();
+    report.excluded_cells = lanes
+        .cells
+        .iter()
+        .filter(|cell| matches!(cell.disposition.as_str(), "excluded"))
+        .count();
+
+    match lanes.schema_version {
+        1 => {}
+        other => out.push(Violation::new(
+            "unsafe_lane_schema_version_unknown",
+            VERIFICATION_LANES_PATH,
+            other.to_string(),
+            "unknown unsafe verification-lane schema_version",
+        )),
+    }
+
+    let required_tools: BTreeSet<&str> = VERIFICATION_TOOLS.into_iter().collect();
+    let pinned_components = pinned_toolchain_components(root, out);
+    let requested_runners: BTreeSet<&str> = lanes
+        .lanes
+        .iter()
+        .map(|lane| lane.runner.as_str())
+        .collect();
+    let live_scripts = live_script_artifacts(root, &requested_runners, out);
+    let mut lane_by_tool = BTreeMap::new();
+    for lane in &lanes.lanes {
+        if !required_tools.contains(lane.tool.as_str()) {
+            out.push(Violation::new(
+                "unsafe_lane_tool_unknown",
+                &lane.tool,
+                VERIFICATION_LANES_PATH,
+                "tool must be exactly miri|asan|tsan",
+            ));
+        }
+        if lane_by_tool.insert(lane.tool.as_str(), lane).is_some() {
+            out.push(Violation::new(
+                "unsafe_lane_tool_duplicate",
+                &lane.tool,
+                VERIFICATION_LANES_PATH,
+                "each verification tool must own exactly one lane",
+            ));
+        }
+        if !matches!(lane.status.as_str(), "checked" | "declared") {
+            out.push(Violation::new(
+                "unsafe_lane_status_unknown",
+                &lane.tool,
+                &lane.status,
+                "lane status must be checked|declared",
+            ));
+        }
+        match lane.target.as_str() {
+            LANE_TARGET => {}
+            other => out.push(Violation::new(
+                "unsafe_lane_target_mismatch",
+                &lane.tool,
+                other,
+                format!(
+                    "the unsafe runner executes {LANE_TARGET}; the lane target may not \
+                     drift from the workload it describes"
+                ),
+            )),
+        }
+        match lane.runner.as_str() {
+            LANE_RUNNER => {}
+            other => out.push(Violation::new(
+                "unsafe_lane_runner_mismatch",
+                &lane.tool,
+                other,
+                format!("every unsafe lane must name the consuming gate {LANE_RUNNER}"),
+            )),
+        }
+        for (field, value) in [
+            ("target", lane.target.as_str()),
+            ("runner", lane.runner.as_str()),
+            ("no_claim_boundary", lane.no_claim_boundary.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                out.push(Violation::new(
+                    "unsafe_lane_field_vacuous",
+                    &lane.tool,
+                    field,
+                    format!("{field} may not be empty"),
+                ));
+            }
+        }
+        if lane.required_components.is_empty() {
+            out.push(Violation::new(
+                "unsafe_lane_field_vacuous",
+                &lane.tool,
+                "required_components",
+                "a lane must declare the complete pinned component set it requires",
+            ));
+        }
+        let declared_components: BTreeSet<&str> = lane
+            .required_components
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let required_components = required_lane_components(&lane.tool);
+        if !required_components.is_empty()
+            && (!declared_components.iter().eq(required_components.iter())
+                || !declared_components
+                    .len()
+                    .eq(&lane.required_components.len()))
+        {
+            out.push(Violation::new(
+                "unsafe_lane_component_contract_mismatch",
+                &lane.tool,
+                "required_components",
+                format!(
+                    "declared components {:?} must exactly equal {:?}, without duplicates",
+                    lane.required_components, required_components
+                ),
+            ));
+        }
+        for component in &lane.required_components {
+            if !pinned_components.contains(component) {
+                out.push(Violation::new(
+                    "unsafe_lane_component_unpinned",
+                    &lane.tool,
+                    component,
+                    "a lane component must be declared in rust-toolchain.toml",
+                ));
+            }
+        }
+        if !safe_repo_relative(&lane.runner) {
+            out.push(Violation::new(
+                "unsafe_lane_runner_path_unsafe",
+                &lane.tool,
+                &lane.runner,
+                "lane runner must be a safe repository-relative path",
+            ));
+        } else {
+            if !root.join(&lane.runner).is_file() {
+                out.push(Violation::new(
+                    "unsafe_lane_runner_missing",
+                    &lane.tool,
+                    &lane.runner,
+                    "lane runner does not exist",
+                ));
+            }
+            if !live_scripts.contains(&lane.runner) {
+                out.push(Violation::new(
+                    "unsafe_lane_runner_unregistered",
+                    &lane.tool,
+                    &lane.runner,
+                    "lane runner must resolve as a live script in checker_index.toml",
+                ));
+            }
+        }
+    }
+    for tool in required_tools.iter().copied() {
+        if !lane_by_tool.contains_key(tool) {
+            out.push(Violation::new(
+                "unsafe_lane_tool_missing",
+                tool,
+                VERIFICATION_LANES_PATH,
+                "the closed tool universe requires exactly one lane per tool",
+            ));
+        }
+    }
+
+    let site_ids: BTreeSet<&str> = ledger
+        .sites
+        .iter()
+        .map(|site| site.row_id.as_str())
+        .collect();
+    let mut cell_by_key: BTreeMap<(&str, &str), &VerificationCell> = BTreeMap::new();
+    let mut dispositions_by_tool: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
+    for cell in &lanes.cells {
+        let key = (cell.site_row_id.as_str(), cell.tool.as_str());
+        if cell_by_key.insert(key, cell).is_some() {
+            out.push(Violation::new(
+                "unsafe_lane_cell_duplicate",
+                &cell.site_row_id,
+                &cell.tool,
+                "each site x tool pair must have exactly one manifest cell",
+            ));
+        }
+        if !site_ids.contains(cell.site_row_id.as_str()) {
+            out.push(Violation::new(
+                "unsafe_lane_cell_orphaned",
+                &cell.site_row_id,
+                &cell.tool,
+                "manifest cell names no ledger site",
+            ));
+        }
+        if !lane_by_tool.contains_key(cell.tool.as_str()) {
+            out.push(Violation::new(
+                "unsafe_lane_cell_tool_unresolved",
+                &cell.site_row_id,
+                &cell.tool,
+                "manifest cell names no verification lane",
+            ));
+        }
+        if !matches!(
+            cell.disposition.as_str(),
+            "checked" | "candidate" | "excluded"
+        ) {
+            out.push(Violation::new(
+                "unsafe_lane_cell_disposition_unknown",
+                &cell.site_row_id,
+                &cell.disposition,
+                "cell disposition must be checked|candidate|excluded",
+            ));
+        }
+        if cell.rationale.trim().is_empty() {
+            out.push(Violation::new(
+                "unsafe_lane_cell_rationale_vacuous",
+                &cell.site_row_id,
+                &cell.tool,
+                "every cell must state why its disposition is honest",
+            ));
+        }
+        if matches!(cell.disposition.as_str(), "checked") && cell.workload.trim().is_empty() {
+            out.push(Violation::new(
+                "unsafe_lane_checked_cell_without_workload",
+                &cell.site_row_id,
+                &cell.tool,
+                "a checked cell must name the exact workload the runner executes",
+            ));
+        }
+        if !matches!(cell.disposition.as_str(), "checked") && !cell.workload.trim().is_empty() {
+            out.push(Violation::new(
+                "unsafe_lane_unchecked_cell_with_workload",
+                &cell.site_row_id,
+                &cell.tool,
+                "candidate and excluded cells may not imply an unexecuted workload",
+            ));
+        }
+        let counts = dispositions_by_tool
+            .entry(cell.tool.as_str())
+            .or_insert((0, 0, 0));
+        match cell.disposition.as_str() {
+            "checked" => counts.0 += 1,
+            "candidate" => counts.1 += 1,
+            "excluded" => counts.2 += 1,
+            _ => {}
+        }
+    }
+
+    for lane in &lanes.lanes {
+        let (checked, candidate, _) = dispositions_by_tool
+            .get(lane.tool.as_str())
+            .copied()
+            .unwrap_or_default();
+        if !ledger.sites.is_empty()
+            && matches!(lane.status.as_str(), "checked")
+            && matches!(checked, 0)
+        {
+            out.push(Violation::new(
+                "unsafe_lane_checked_without_cell",
+                &lane.tool,
+                "status",
+                "a checked lane must own at least one checked cell",
+            ));
+        }
+        if matches!(lane.status.as_str(), "declared") && !matches!(checked, 0) {
+            out.push(Violation::new(
+                "unsafe_lane_declared_with_checked_cell",
+                &lane.tool,
+                "status",
+                "a lane with checked cells must itself be checked",
+            ));
+        }
+        if !ledger.sites.is_empty()
+            && matches!(lane.status.as_str(), "declared")
+            && matches!(candidate, 0)
+        {
+            out.push(Violation::new(
+                "unsafe_lane_declared_without_candidate",
+                &lane.tool,
+                "status",
+                "a declared lane must identify at least one executable candidate",
+            ));
+        }
+    }
+
+    for site in &ledger.sites {
+        let prose = site.no_claim_boundary.to_ascii_lowercase();
+        let mut boundary_by_tool = BTreeMap::new();
+        for encoded in &site.tool_no_claim_boundaries {
+            let Some((tool, disposition, rationale)) = parse_tool_boundary(encoded) else {
+                out.push(Violation::new(
+                    "unsafe_ledger_tool_boundary_malformed",
+                    &site.row_id,
+                    encoded,
+                    "tool boundary must be tool|disposition|non-empty rationale",
+                ));
+                continue;
+            };
+            if !required_tools.contains(tool) {
+                out.push(Violation::new(
+                    "unsafe_ledger_tool_boundary_unknown",
+                    &site.row_id,
+                    tool,
+                    "tool boundary must name exactly miri|asan|tsan",
+                ));
+            }
+            if !matches!(disposition, "checked" | "candidate" | "excluded") {
+                out.push(Violation::new(
+                    "unsafe_ledger_tool_boundary_disposition_unknown",
+                    &site.row_id,
+                    disposition,
+                    "tool boundary disposition must be checked|candidate|excluded",
+                ));
+            }
+            if boundary_by_tool
+                .insert(tool, (disposition, rationale))
+                .is_some()
+            {
+                out.push(Violation::new(
+                    "unsafe_ledger_tool_boundary_duplicate",
+                    &site.row_id,
+                    tool,
+                    "each ledger site must state exactly one boundary per tool",
+                ));
+            }
+        }
+        for tool in required_tools.iter().copied() {
+            if !prose.contains(tool) {
+                out.push(Violation::new(
+                    "unsafe_ledger_tool_boundary_not_named_in_prose",
+                    &site.row_id,
+                    tool,
+                    "the human no_claim_boundary must name every structured tool boundary",
+                ));
+            }
+            let Some((disposition, rationale)) = boundary_by_tool.get(tool).copied() else {
+                out.push(Violation::new(
+                    "unsafe_ledger_tool_boundary_missing",
+                    &site.row_id,
+                    tool,
+                    "each ledger site must state one structured boundary for every tool",
+                ));
+                continue;
+            };
+            let Some(cell) = cell_by_key.get(&(site.row_id.as_str(), tool)).copied() else {
+                out.push(Violation::new(
+                    "unsafe_lane_cell_missing",
+                    &site.row_id,
+                    tool,
+                    "ledger boundary has no matching manifest cell",
+                ));
+                continue;
+            };
+            if !cell.disposition.as_str().eq(disposition) || !cell.rationale.as_str().eq(rationale)
+            {
+                out.push(Violation::new(
+                    "unsafe_lane_cell_mismatch",
+                    &site.row_id,
+                    tool,
+                    "manifest disposition and rationale must byte-match the ledger boundary",
+                ));
+            }
+        }
+    }
+}
+
 /// The machine-readable report the bead's acceptance criteria require.
 #[derive(Debug, Default)]
 pub struct Report {
@@ -865,6 +1536,13 @@ pub struct Report {
     pub island_public_items: usize,
     /// Findings the API reader reproduced in its own fixture.
     pub safe_facing_self_test_findings: usize,
+    /// Dynamic unsafe-verification lane rows read from the live manifest.
+    pub verification_lanes: usize,
+    /// Complete site x tool matrix cells read from the live manifest.
+    pub verification_cells: usize,
+    pub checked_cells: usize,
+    pub candidate_cells: usize,
+    pub excluded_cells: usize,
 }
 
 /// Verify the whole unsafe boundary. Returns the report alongside violations so
@@ -1019,6 +1697,24 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
         ));
     }
 
+    let verification_lanes_path = root.join(VERIFICATION_LANES_PATH);
+    let verification_lanes = match load_verification_lanes(&verification_lanes_path) {
+        Ok(lanes) => lanes,
+        Err(error) => {
+            v.push(Violation::new(
+                "unsafe_verification_lanes_absent_or_unreadable",
+                VERIFICATION_LANES_PATH,
+                error.path.clone(),
+                format!(
+                    "the per-tool unsafe verification manifest could not be loaded ({}); \
+                     the run fails rather than inferring omitted site x tool cells",
+                    error.msg
+                ),
+            ));
+            return (report, v);
+        }
+    };
+
     let island_names: BTreeSet<&str> = ledger.islands.iter().map(|i| i.name.as_str()).collect();
 
     // --- the roster is a claim, and both directions of it are checked
@@ -1095,6 +1791,8 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
             }
         }
     }
+
+    verify_verification_lanes(root, &ledger, &verification_lanes, &mut report, &mut v);
 
     // --- scan every workspace member
     //
@@ -2618,12 +3316,67 @@ mod tests {
         );
     }
 
+    /// Install the lane plumbing needed by synthetic workspaces whose ledger
+    /// intentionally contains no admitted sites. Keeping this fixture complete
+    /// prevents a missing manifest from short-circuiting the older topology
+    /// mutations before they reach the assertion they are meant to exercise.
+    fn write_empty_verification_fixture(root: &Path) {
+        fs::create_dir_all(root.join("scripts")).expect("scripts dir");
+        fs::write(
+            root.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"nightly-2026-07-05\"\ncomponents = [\"miri\", \"rust-src\", \"llvm-tools-preview\"]\n",
+        )
+        .expect("toolchain");
+        fs::write(
+            root.join("registries/checker_index.toml"),
+            "[registry]\nname = \"checker_index\"\n\n[[checker]]\nsymbol = \"w1_unsafe_tool_lanes\"\nkind = \"script\"\nstatus = \"live\"\nartifact = \"scripts/w1_unsafe_tool_lanes.sh\"\nunit = \"artifact\"\n",
+        )
+        .expect("checker index");
+        fs::write(
+            root.join("scripts/w1_unsafe_tool_lanes.sh"),
+            "#!/usr/bin/env bash\nexit 1\n",
+        )
+        .expect("lane runner");
+        fs::write(
+            root.join(VERIFICATION_LANES_PATH),
+            r#"schema_version = 1
+cell = []
+
+[[lane]]
+tool = "miri"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["miri", "rust-src"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "Synthetic zero-site fixture; no checked Miri claim."
+
+[[lane]]
+tool = "asan"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["rust-src", "llvm-tools-preview"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "Synthetic zero-site fixture; no checked ASAN claim."
+
+[[lane]]
+tool = "tsan"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["rust-src", "llvm-tools-preview"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "Synthetic zero-site fixture; no checked TSAN claim."
+"#,
+        )
+        .expect("verification lanes");
+    }
+
     /// Build a throwaway workspace and return `check_workspace`'s violation codes.
     fn synthetic_verdict(tag: &str, members_block: &str, member_manifest: &str) -> Vec<String> {
         let root = std::env::temp_dir().join(format!("fgdb-unsafe-ledger-{tag}"));
         let crate_dir = root.join("crates/fgdb-probe");
         fs::create_dir_all(crate_dir.join("src")).expect("crate dir");
         fs::create_dir_all(root.join("registries")).expect("registries dir");
+        write_empty_verification_fixture(&root);
         fs::write(
             root.join("Cargo.toml"),
             format!(
@@ -2713,6 +3466,7 @@ mod tests {
             "schema_version = 1\n\n[[island]]\nname = \"fgdb-unsafe-arena\"\ncharter = \"arena internals\"\nstatus = \"planned\"\n",
         )
         .expect("ledger");
+        write_empty_verification_fixture(&root);
         let (report, violations) = check_workspace(&root);
         assert_eq!(report.crates_scanned, 0);
         let codes: Vec<String> = violations.into_iter().map(|v| v.code).collect();

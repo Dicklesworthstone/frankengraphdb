@@ -18,6 +18,7 @@ pub const REPLAY_COMMAND: &str =
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let mut root = PathBuf::from(".");
+    let mut checked_plan = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--root" => match args.next() {
@@ -34,6 +35,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
+            "--checked-plan" => checked_plan = true,
             other => {
                 println!(
                     "{}",
@@ -50,6 +52,40 @@ fn main() -> ExitCode {
 
     let (report, violations) = unsafe_ledger::check_workspace(&root);
 
+    if checked_plan {
+        if !violations.is_empty() {
+            for violation in &violations {
+                eprintln!(
+                    "{} {}: {}",
+                    violation.code, violation.subject, violation.message
+                );
+            }
+            return ExitCode::FAILURE;
+        }
+        let lanes_path = root.join(unsafe_ledger::VERIFICATION_LANES_PATH);
+        let lanes = match unsafe_ledger::load_verification_lanes(&lanes_path) {
+            Ok(lanes) => lanes,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let mut emitted = 0_usize;
+        for cell in lanes
+            .cells
+            .iter()
+            .filter(|cell| cell.disposition == "checked")
+        {
+            println!("{}\t{}\t{}", cell.tool, cell.site_row_id, cell.workload);
+            emitted += 1;
+        }
+        if emitted == 0 {
+            eprintln!("the checked unsafe-verification plan is empty");
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
+
     // The scanner's own control is reported FIRST and explicitly: every
     // zero-site conclusion below is licensed by it, so a reader can tell
     // whether an empty unsafe surface was proven or merely assumed.
@@ -65,6 +101,18 @@ fn main() -> ExitCode {
             ),
             ("licensed", b(licensed)),
             ("outcome", s(if licensed { "pass" } else { "fail" })),
+        ])
+    );
+
+    println!(
+        "{}",
+        event(&[
+            ("event", s("unsafe_verification_matrix")),
+            ("lanes", n(report.verification_lanes as i64)),
+            ("cells", n(report.verification_cells as i64)),
+            ("checked", n(report.checked_cells as i64)),
+            ("candidate", n(report.candidate_cells as i64)),
+            ("excluded", n(report.excluded_cells as i64)),
         ])
     );
 
@@ -162,6 +210,8 @@ fn main() -> ExitCode {
             ("orphan_rows", n(report.orphan_rows.len() as i64)),
             ("islands_api_scanned", n(report.islands_api_scanned as i64)),
             ("island_public_items", n(report.island_public_items as i64)),
+            ("verification_lanes", n(report.verification_lanes as i64)),
+            ("verification_cells", n(report.verification_cells as i64)),
             ("violations", n(violations.len() as i64)),
             ("outcome", s(if failed { "fail" } else { "pass" })),
         ])

@@ -11,7 +11,9 @@
 # topology-check and unsafe-ledger-check are load-bearing for the file-coverage
 # closure: the coverage table claims
 # topology-check as the inspector for rust-toolchain.toml,
-# registries/workspace_topology.toml, registries/unsafe_boundary_ledger.toml and
+# registries/workspace_topology.toml and registries/unsafe_boundary_ledger.toml;
+# unsafe-ledger-check plus w1_unsafe_tool_lanes inspect
+# registries/unsafe_verification_lanes.toml; topology-check also inspects
 # docs/WORKSPACE_TOPOLOGY.md. A coverage claim naming a gate this script does not
 # run would be false. The registry-derived runner makes such a removal UNRUN and
 # red; if a checker is retired, move its files to an exemption in the same
@@ -153,6 +155,7 @@ coverage_of() {
     registries/threat_model.toml)        echo "threat-check" ;;
     registries/workspace_topology.toml)  echo "topology-check" ;;
     registries/unsafe_boundary_ledger.toml) echo "topology-check" ;;
+    registries/unsafe_verification_lanes.toml) echo "unsafe-ledger-check + w1_unsafe_tool_lanes" ;;
     # EXACT, not the `registries/*.toml` glob below. laws.toml is validated by
     # a cargo test, not by `registry-check all`, so the glob would claim a gate
     # that never opens the file -- the fail-open this row's own comment names.

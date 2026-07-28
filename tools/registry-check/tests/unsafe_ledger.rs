@@ -45,9 +45,101 @@ charter = "SIMD kernels with bit-identical scalar fallbacks."
 status = "planned"
 "#;
 
+const EMPTY_VERIFICATION_LANES: &str = r#"schema_version = 1
+
+[[lane]]
+tool = "miri"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["miri", "rust-src"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "fixture Miri lane"
+
+[[lane]]
+tool = "asan"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["rust-src", "llvm-tools-preview"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "fixture ASAN lane"
+
+[[lane]]
+tool = "tsan"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["rust-src", "llvm-tools-preview"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "fixture TSAN lane"
+"#;
+
+const ONE_SITE_VERIFICATION_LANES: &str = r#"schema_version = 1
+
+[[lane]]
+tool = "miri"
+status = "checked"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["miri", "rust-src"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "fixture Miri lane"
+
+[[lane]]
+tool = "asan"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["rust-src", "llvm-tools-preview"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "fixture ASAN lane"
+
+[[lane]]
+tool = "tsan"
+status = "declared"
+target = "x86_64-unknown-linux-gnu"
+required_components = ["rust-src", "llvm-tools-preview"]
+runner = "scripts/w1_unsafe_tool_lanes.sh"
+no_claim_boundary = "fixture TSAN lane"
+
+[[cell]]
+site_row_id = "simd-kernel-1"
+tool = "miri"
+disposition = "checked"
+rationale = "fixture Miri rationale"
+workload = "cargo miri test fixture"
+
+[[cell]]
+site_row_id = "simd-kernel-1"
+tool = "asan"
+disposition = "candidate"
+rationale = "fixture ASAN rationale"
+workload = ""
+
+[[cell]]
+site_row_id = "simd-kernel-1"
+tool = "tsan"
+disposition = "candidate"
+rationale = "fixture TSAN rationale"
+workload = ""
+"#;
+
+const FIXTURE_CHECKER_INDEX: &str = r#"schema_version = 1
+
+[registry]
+name = "checker_index"
+
+[[checker]]
+symbol = "w1_unsafe_tool_lanes"
+kind = "script"
+artifact = "scripts/w1_unsafe_tool_lanes.sh"
+status = "live"
+unit = "artifact"
+"#;
+
 /// A minimal but structurally faithful workspace: root manifest with the
 /// forbid default, one ordinary member that inherits it, and the ledger.
 fn clean_workspace(tag: &str) -> PathBuf {
+    workspace_fixture(tag, true)
+}
+
+fn workspace_fixture(tag: &str, include_verification_manifest: bool) -> PathBuf {
     let root = scratch(tag);
     fs::write(
         root.join("Cargo.toml"),
@@ -66,6 +158,29 @@ fn clean_workspace(tag: &str) -> PathBuf {
     fs::write(
         root.join("registries/unsafe_boundary_ledger.toml"),
         LEDGER_HEAD,
+    )
+    .unwrap();
+    if include_verification_manifest {
+        fs::write(
+            root.join("registries/unsafe_verification_lanes.toml"),
+            EMPTY_VERIFICATION_LANES,
+        )
+        .unwrap();
+    }
+    fs::write(
+        root.join("registries/checker_index.toml"),
+        FIXTURE_CHECKER_INDEX,
+    )
+    .unwrap();
+    fs::write(
+        root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"nightly-2026-07-05\"\ncomponents = [\"rustfmt\", \"clippy\", \"miri\", \"rust-src\", \"llvm-tools-preview\"]\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("scripts")).unwrap();
+    fs::write(
+        root.join("scripts/w1_unsafe_tool_lanes.sh"),
+        "#!/usr/bin/env bash\nexit 1\n",
     )
     .unwrap();
     root
@@ -112,6 +227,11 @@ fn workspace_with_landed_island(tag: &str, ledger_sites: &str) -> PathBuf {
         ),
     )
     .unwrap();
+    fs::write(
+        root.join("registries/unsafe_verification_lanes.toml"),
+        ONE_SITE_VERIFICATION_LANES,
+    )
+    .unwrap();
     root
 }
 
@@ -124,7 +244,12 @@ symbol = "unsafe fn kernel() {}"
 stated_invariant = "the caller has proven the slice is 16-lane aligned"
 evidence = "kernel_dispatch_differential, miri lane"
 fallback = "SCALAR_KERNEL, bit-identical on every dispatch path"
-no_claim_boundary = "says nothing about targets outside the dispatch matrix"
+no_claim_boundary = "Miri is checked; ASAN and TSAN remain candidates."
+tool_no_claim_boundaries = [
+    "miri|checked|fixture Miri rationale",
+    "asan|candidate|fixture ASAN rationale",
+    "tsan|candidate|fixture TSAN rationale",
+]
 "#;
 
 fn codes(root: &Path) -> Vec<String> {
@@ -150,6 +275,8 @@ fn clean_workspace_passes() {
     assert_eq!(report.crates_scanned, 1);
     assert_eq!(report.scanned_sites.len(), 0);
     assert_eq!(report.scanner_self_test_sites, SCANNER_FIXTURE_SITES);
+    assert_eq!(report.verification_lanes, 3);
+    assert_eq!(report.verification_cells, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +290,114 @@ fn absent_ledger_fails_rather_than_reporting_an_empty_unsafe_surface() {
     assert!(
         codes(&root).contains(&"ledger_absent_or_unreadable".to_owned()),
         "a missing ledger must fail; passing here would launder an unaudited tree"
+    );
+}
+
+#[test]
+fn absent_verification_manifest_fails_rather_than_inferring_tool_boundaries() {
+    let root = workspace_fixture("no-verification-manifest", false);
+    assert!(
+        codes(&root).contains(&"unsafe_verification_lanes_absent_or_unreadable".to_owned()),
+        "a missing site x tool manifest must fail rather than imply every cell is excluded"
+    );
+}
+
+#[test]
+fn a_lane_runner_that_cannot_fail_is_not_live() {
+    let root = clean_workspace("lane-runner-cannot-fail");
+    fs::write(
+        root.join("scripts/w1_unsafe_tool_lanes.sh"),
+        "#!/usr/bin/env bash\nexit 0\n",
+    )
+    .unwrap();
+    let found = codes(&root);
+    assert!(
+        found.contains(&"unsafe_lane_runner_not_live".to_owned()),
+        "status = live plus an existing script cannot replace the liveness proof: {found:?}"
+    );
+}
+
+#[test]
+fn a_lane_target_that_does_not_match_its_runner_fails() {
+    let root = clean_workspace("lane-target-drift");
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        text.replacen(
+            "target = \"x86_64-unknown-linux-gnu\"",
+            "target = \"aarch64-unknown-linux-gnu\"",
+            1,
+        ),
+    )
+    .unwrap();
+    let found = codes(&root);
+    assert!(
+        found.contains(&"unsafe_lane_target_mismatch".to_owned()),
+        "the target field must describe the target the runner actually executes: {found:?}"
+    );
+}
+
+#[test]
+fn removing_a_manifest_cell_fails_in_the_ledger_to_manifest_direction() {
+    let root = workspace_with_landed_island("manifest-cell-removed", ISLAND_SITE_ROW);
+    assert!(
+        codes(&root).is_empty(),
+        "the one-site control must pass before its manifest is mutated: {:?}",
+        codes(&root)
+    );
+    let path = root.join("registries/unsafe_verification_lanes.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let block = r#"[[cell]]
+site_row_id = "simd-kernel-1"
+tool = "asan"
+disposition = "candidate"
+rationale = "fixture ASAN rationale"
+workload = ""
+
+"#;
+    assert_eq!(
+        text.matches(block).count(),
+        1,
+        "the mutation must remove exactly one controlled cell"
+    );
+    fs::write(&path, text.replacen(block, "", 1)).unwrap();
+    let found = codes(&root);
+    assert!(
+        found.contains(&"unsafe_lane_cell_missing".to_owned()),
+        "a ledger boundary with no manifest cell must fail, got {found:?}"
+    );
+    assert!(
+        !found.contains(&"unsafe_ledger_tool_boundary_missing".to_owned()),
+        "this mutation removed only the manifest side, got {found:?}"
+    );
+}
+
+#[test]
+fn removing_a_ledger_boundary_fails_in_the_manifest_to_ledger_direction() {
+    let root = workspace_with_landed_island("ledger-boundary-removed", ISLAND_SITE_ROW);
+    assert!(
+        codes(&root).is_empty(),
+        "the one-site control must pass before its ledger is mutated: {:?}",
+        codes(&root)
+    );
+    let path = root.join("registries/unsafe_boundary_ledger.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let line = "    \"asan|candidate|fixture ASAN rationale\",\n";
+    assert_eq!(
+        text.matches(line).count(),
+        1,
+        "the mutation must remove exactly one controlled boundary"
+    );
+    fs::write(&path, text.replacen(line, "", 1)).unwrap();
+    let found = codes(&root);
+    assert!(
+        found.contains(&"unsafe_ledger_tool_boundary_missing".to_owned()),
+        "a manifest cell with no ledger boundary must fail, got {found:?}"
+    );
+    assert!(
+        !found.contains(&"unsafe_lane_cell_missing".to_owned()),
+        "this mutation removed only the ledger side, got {found:?}"
     );
 }
 
@@ -226,7 +461,8 @@ fn orphan_ledger_row_fails_so_the_ledger_cannot_rot() {
         format!(
             "{LEDGER_HEAD}\n[[site]]\nrow_id = \"orphan-1\"\nisland = \"fgdb-unsafe-simd\"\n\
              path = \"crates/fgdb-unsafe-simd/src/gone.rs\"\nsymbol = \"unsafe fn gone() {{}}\"\n\
-             stated_invariant = \"i\"\nevidence = \"e\"\nfallback = \"f\"\nno_claim_boundary = \"n\"\n"
+             stated_invariant = \"i\"\nevidence = \"e\"\nfallback = \"f\"\nno_claim_boundary = \"Miri ASAN TSAN\"\n\
+             tool_no_claim_boundaries = [\"miri|excluded|m\", \"asan|candidate|a\", \"tsan|candidate|t\"]\n"
         ),
     )
     .unwrap();
@@ -478,7 +714,8 @@ fn ledger_row_with_blank_evidence_fails() {
         format!(
             "{LEDGER_HEAD}\n[[site]]\nrow_id = \"blank-1\"\nisland = \"fgdb-unsafe-simd\"\n\
              path = \"p.rs\"\nsymbol = \"unsafe fn x() {{}}\"\n\
-             stated_invariant = \"i\"\nevidence = \"   \"\nfallback = \"f\"\nno_claim_boundary = \"n\"\n"
+             stated_invariant = \"i\"\nevidence = \"   \"\nfallback = \"f\"\nno_claim_boundary = \"Miri ASAN TSAN\"\n\
+             tool_no_claim_boundaries = [\"miri|excluded|m\", \"asan|candidate|a\", \"tsan|candidate|t\"]\n"
         ),
     )
     .unwrap();
@@ -497,7 +734,8 @@ fn site_naming_an_undeclared_island_fails() {
         format!(
             "{LEDGER_HEAD}\n[[site]]\nrow_id = \"x-1\"\nisland = \"fgdb-unsafe-nowhere\"\n\
              path = \"p.rs\"\nsymbol = \"unsafe fn x() {{}}\"\n\
-             stated_invariant = \"i\"\nevidence = \"e\"\nfallback = \"f\"\nno_claim_boundary = \"n\"\n"
+             stated_invariant = \"i\"\nevidence = \"e\"\nfallback = \"f\"\nno_claim_boundary = \"Miri ASAN TSAN\"\n\
+             tool_no_claim_boundaries = [\"miri|excluded|m\", \"asan|candidate|a\", \"tsan|candidate|t\"]\n"
         ),
     )
     .unwrap();
@@ -569,6 +807,14 @@ fn the_real_workspace_passes_its_own_boundary_check() {
         report.safe_facing_self_test_findings,
         unsafe_ledger::SAFE_FACING_FIXTURE_FINDINGS
     );
+    assert_eq!(report.verification_lanes, 3);
+    assert_eq!(
+        report.verification_cells, 18,
+        "six ledger sites x three tools must be a complete matrix"
+    );
+    assert_eq!(report.checked_cells, 1);
+    assert_eq!(report.candidate_cells, 12);
+    assert_eq!(report.excluded_cells, 5);
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,7 +1331,8 @@ fn a_duplicated_ledger_row_id_fails() {
         let site = "[[site]]\nrow_id = \"dup-1\"\nisland = \"fgdb-unsafe-simd\"\n\
                     path = \"p.rs\"\nsymbol = \"unsafe fn x() {}\"\n\
                     stated_invariant = \"i\"\nevidence = \"e\"\nfallback = \"f\"\n\
-                    no_claim_boundary = \"n\"\n";
+                    no_claim_boundary = \"Miri ASAN TSAN\"\n\
+                    tool_no_claim_boundaries = [\"miri|excluded|m\", \"asan|candidate|a\", \"tsan|candidate|t\"]\n";
         fs::write(
             root.join("registries/unsafe_boundary_ledger.toml"),
             format!("{LEDGER_HEAD}\n{site}\n{site}"),
