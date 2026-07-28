@@ -192,6 +192,119 @@ gate_tree_fp_of() {
   printf '%s\n' "$1" | sha256sum | cut -d' ' -f1
 }
 
+# gate_tree_domain_known <domain> — the closed input-domain vocabulary used by
+# check.sh when it attributes a run-level tree movement to individual verdicts.
+#
+# `all-tracked` is the fail-closed boundary. Every registered artifact currently
+# uses it because its runtime readers are intentionally broad. The narrower
+# domains belong only to core gates whose tracked inputs are derived
+# mechanically:
+#
+#   tracked-rust   exactly the `git ls-files -- '*.rs'` set UBS scans
+#   tracked-shell  exactly the tracked *.sh / *.bash set shell lint scans
+#   rust-format    Rust sources plus Cargo/rustfmt discovery inputs
+#   verdict-shell  the checker index plus every tracked shell gate source
+#   domain-closure the three files that define and enumerate these declarations
+#
+# Unknown is NOT another spelling of empty. Callers must treat it as
+# `all-tracked` and report the missing declaration, because rescuing a verdict
+# through an unknown domain is the false-PASS failure this vocabulary prevents.
+gate_tree_domain_known() {
+  case "$1" in
+    all-tracked | tracked-rust | tracked-shell | rust-format | verdict-shell | domain-closure)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# gate_tree_domain_listing <whole-tree-listing> <domain>
+#
+# Filter a listing already produced by gate_tree_listing. Filtering the retained
+# start listing is load-bearing: re-running `git ls-files` at attribution time
+# would reconstruct both sides from the END tree and make a tracked addition or
+# removal invisible.
+#
+# Read errors and sha256sum-escaped paths are included in EVERY domain. Their
+# path cannot be classified safely from the folded diagnostic, so narrowing one
+# would turn uncertainty into permission to retain a verdict. The conservative
+# answer is to void it.
+gate_tree_domain_listing() {
+  local listing="$1" domain="$2"
+  gate_tree_domain_known "$domain" || return 2
+  printf '%s\n' "$listing" | awk -v domain="$domain" '
+    NR == 1 { next } # HEAD is handled separately by the aggregate caller.
+    function gate_source(path) {
+      return path == "scripts/check.sh" \
+        || path == "scripts/lib/gate_verdict.sh"
+    }
+    function included(path) {
+      if (domain == "all-tracked") return 1
+      # The running gate implementation is an input to every narrowed verdict.
+      if (gate_source(path)) return 1
+      if (domain == "tracked-rust")
+        return path ~ /\.rs$/
+      if (domain == "tracked-shell")
+        return path ~ /\.(sh|bash)$/
+      if (domain == "rust-format")
+        return path ~ /\.rs$/ \
+          || path == "Cargo.toml" \
+          || path ~ /\/Cargo\.toml$/ \
+          || path == "Cargo.lock" \
+          || path == "rust-toolchain.toml" \
+          || path == "rustfmt.toml" \
+          || path ~ /\/rustfmt\.toml$/ \
+          || path == ".rustfmt.toml" \
+          || path ~ /\/\.rustfmt\.toml$/ \
+          || path ~ /^\.cargo\//
+      if (domain == "verdict-shell")
+        return path == "registries/checker_index.toml" \
+          || path ~ /\.(sh|bash)$/
+      if (domain == "domain-closure")
+        return path == "registries/checker_index.toml" \
+          || path == "scripts/check.sh" \
+          || path == "scripts/lib/gate_verdict.sh"
+      return 0
+    }
+    {
+      line = $0
+      # sha256sum prefixes escaped path records with a backslash. Do not guess
+      # their suffix; make the uncertainty affect every domain.
+      if (substr(line, 1, 1) == "\\") {
+        print line
+        next
+      }
+      if (line ~ /^[0-9a-f][0-9a-f]*  /) {
+        split_at = index(line, "  ")
+        path = substr(line, split_at + 2)
+        if (included(path)) print line
+      } else {
+        # A folded read error has no safely recoverable tracked path.
+        print line
+      }
+    }
+  '
+}
+
+# gate_tree_domain_changed <start-listing> <end-listing> <domain>
+#
+# Exit 0 means the declared domain changed, 1 means it stayed byte-identical,
+# and 2 means the declaration could not be evaluated. This intentionally uses
+# predicate-style zero for "changed" so callers can write
+# `if gate_tree_domain_changed ...`; status 2 is distinct and must fail closed.
+gate_tree_domain_changed() {
+  local start_listing="$1" end_listing="$2" domain="$3"
+  local start_domain end_domain start_fp end_fp
+  gate_tree_domain_known "$domain" || return 2
+  start_domain="$(gate_tree_domain_listing "$start_listing" "$domain")" || return 2
+  end_domain="$(gate_tree_domain_listing "$end_listing" "$domain")" || return 2
+  start_fp="$(gate_tree_fp_of "$start_domain")"
+  end_fp="$(gate_tree_fp_of "$end_domain")"
+  [ "$start_fp" != "$end_fp" ]
+}
+
 # gate_tree_diff <start_listing> <end_listing> — the SET DIFFERENCE, on stderr.
 #
 # Four classes, deliberately distinguished:

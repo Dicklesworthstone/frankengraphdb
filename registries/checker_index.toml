@@ -653,6 +653,12 @@ unit = "artifact"
 # --- differing shas, an UNCOMMITTED tracked edit -> UNRUN with HEAD equal at both
 # --- ends (the case that kills a HEAD-only fingerprint), the EXIT-trap window, and
 # --- a mutation control asserting the UNRUNs come from the tripwire itself.
+# --- The same artifact also guards fgdb-41p3's aggregate attribution: a
+# --- Beads, Rust, shell and gate-driver moves exercise the domain boundaries;
+# --- declaration, result-ledger, live-wiring and intersection mutants all red
+# --- the panel. Registered artifacts remain explicitly all-tracked until a
+# --- narrower reader has its own completeness proof, so an undeclared domain
+# --- cannot become a false-PASS escape hatch.
 # --- Its subject is a synthetic few-KB git repo, not a clone of this one: it costs
 # --- no build slot, cannot race, and never commits in the live worktree — doing
 # --- that to prove this would void whatever check.sh is in flight, which is the

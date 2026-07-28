@@ -86,6 +86,7 @@ CORE_EXPECTED=0
 CORE_EXECUTED=0
 CORE_PASSED=0
 CORE_RED=0
+CORE_UNRUN=0
 REGISTERED_EXPECTED=0
 REGISTERED_EXECUTED=0
 REGISTERED_PASSED=0
@@ -106,16 +107,115 @@ COV_TRACKED=0
 COV_INSPECTED=0
 COV_EXEMPT=0
 
+CORE_GATE_FILE_COVERAGE="file-coverage closure (every tracked file inspected or declared)"
+CORE_GATE_SHELL_LINT="shell lint (bash -n + shellcheck) over tracked shell deliverables"
+CORE_GATE_VERDICT_CONTRACT="verdict-contract closure (every gate reports under one token on one stream)"
+CORE_GATE_DOMAIN_CLOSURE="gate-domain closure (every verdict declares its tracked input domain)"
+CORE_GATE_FMT="cargo fmt --check"
+CORE_GATE_CHECK="cargo check --all-targets"
+CORE_GATE_CLIPPY="cargo clippy --all-targets -- -D warnings"
+CORE_GATE_TEST="cargo test --workspace --no-fail-fast"
+CORE_GATE_UBS="UBS over every tracked Rust source"
+CORE_GATE_ROSTER=(
+  "$CORE_GATE_FILE_COVERAGE"
+  "$CORE_GATE_SHELL_LINT"
+  "$CORE_GATE_VERDICT_CONTRACT"
+  "$CORE_GATE_DOMAIN_CLOSURE"
+  "$CORE_GATE_FMT"
+  "$CORE_GATE_CHECK"
+  "$CORE_GATE_CLIPPY"
+  "$CORE_GATE_TEST"
+  "$CORE_GATE_UBS"
+)
+
+# Per-result input-domain attribution (fgdb-41p3). The outer check.sh tripwire
+# still watches every tracked file for its whole run. These records let its final
+# sample answer the narrower question: which already-emitted verdicts actually
+# read a path that moved? Unknown declarations are treated as all-tracked and
+# make their gate UNRUN; they can never rescue a verdict.
+GATE_SCOPE_TRACKING=0
+GATE_SCOPE_COUNT=0
+GATE_SCOPE_FATAL=0
+declare -a GATE_SCOPE_CLASS=()
+declare -a GATE_SCOPE_KIND=()
+declare -a GATE_SCOPE_LABEL=()
+declare -a GATE_SCOPE_OUTCOME=()
+declare -a GATE_SCOPE_DOMAIN=()
+
+core_gate_domain() {
+  case "$1" in
+    "$CORE_GATE_FILE_COVERAGE")  printf 'all-tracked\n' ;;
+    "$CORE_GATE_SHELL_LINT")     printf 'tracked-shell\n' ;;
+    "$CORE_GATE_VERDICT_CONTRACT") printf 'verdict-shell\n' ;;
+    "$CORE_GATE_DOMAIN_CLOSURE") printf 'domain-closure\n' ;;
+    "$CORE_GATE_FMT")            printf 'rust-format\n' ;;
+    # Compilation and runtime readers are deliberately broad. In particular,
+    # registry-check tests read registries, generated documents and .beads at
+    # run time; pretending their domain is Rust would silently retain a verdict
+    # over the absent-corpus defect AGENTS.md documents.
+    "$CORE_GATE_CHECK" | "$CORE_GATE_CLIPPY" | "$CORE_GATE_TEST")
+      printf 'all-tracked\n'
+      ;;
+    "$CORE_GATE_UBS")            printf 'tracked-rust\n' ;;
+    *)                           return 1 ;;
+  esac
+}
+
+registered_gate_domain() {
+  # Registered artifacts can read repository state through runtime paths that
+  # checker_index.toml does not enumerate. Until a narrower domain has its own
+  # completeness proof, every executable kind is explicitly all-tracked.
+  case "$1" in
+    cargo-test | script | binary) printf 'all-tracked\n' ;;
+    *)                            return 1 ;;
+  esac
+}
+
+gate_scope_record() {
+  local class="$1" kind="$2" label="$3" outcome="$4" domain="$5"
+  local i="$GATE_SCOPE_COUNT"
+  GATE_SCOPE_CLASS[i]="$class"
+  GATE_SCOPE_KIND[i]="$kind"
+  GATE_SCOPE_LABEL[i]="$label"
+  GATE_SCOPE_OUTCOME[i]="$outcome"
+  GATE_SCOPE_DOMAIN[i]="$domain"
+  GATE_SCOPE_COUNT=$((GATE_SCOPE_COUNT + 1))
+}
+
+gate_scope_reset() {
+  GATE_SCOPE_COUNT=0
+  GATE_SCOPE_FATAL=0
+  GATE_SCOPE_CLASS=()
+  GATE_SCOPE_KIND=()
+  GATE_SCOPE_LABEL=()
+  GATE_SCOPE_OUTCOME=()
+  GATE_SCOPE_DOMAIN=()
+}
+
 run_core_gate() {
   local label="$1"
+  local domain="all-tracked"
+  local outcome
   shift
   CORE_EXPECTED=$((CORE_EXPECTED + 1))
+
+  if [ "$GATE_SCOPE_TRACKING" -eq 1 ]; then
+    if ! domain="$(core_gate_domain "$label")"; then
+      CORE_UNRUN=$((CORE_UNRUN + 1))
+      LAST_GATE_RC=125
+      gate_unrun "core: $label — tracked input domain is undeclared; treated as all-tracked"
+      gate_scope_record core "" "$label" unrun all-tracked
+      return 0
+    fi
+  fi
+
   CORE_EXECUTED=$((CORE_EXECUTED + 1))
   echo "==> $label"
   if "$@"; then
     CORE_PASSED=$((CORE_PASSED + 1))
     LAST_GATE_RC=0
     gate_pass "core: $label"
+    outcome=pass
   else
     LAST_GATE_RC=$?
     CORE_RED=$((CORE_RED + 1))
@@ -123,6 +223,10 @@ run_core_gate() {
     # stdout, emitted together. See THE REPORTING CONTRACT.
     printf 'RED core: %s (exit %s)\n' "$label" "$LAST_GATE_RC"
     gate_fail "core: $label (exit $LAST_GATE_RC)"
+    outcome=red
+  fi
+  if [ "$GATE_SCOPE_TRACKING" -eq 1 ]; then
+    gate_scope_record core "" "$label" "$outcome" "$domain"
   fi
 }
 
@@ -730,6 +834,127 @@ live_gate_inventory() {
   ' "$registry" | LC_ALL=C sort -u
 }
 
+gate_domain_wiring_complete() {
+  local source="$1"
+  local tracking_calls finalize_calls closure_calls ledger_calls failures=0
+
+  if [ ! -r "$source" ]; then
+    echo "ERROR: gate-domain wiring source is unreadable: $source" >&2
+    return 1
+  fi
+  tracking_calls="$(grep -c '^GATE_SCOPE_TRACKING=1$' "$source")"
+  finalize_calls="$(grep -c '^gate_scope_finalize_tree_stability$' "$source")"
+  closure_calls="$(grep -c \
+    '^run_core_gate "\$CORE_GATE_DOMAIN_CLOSURE" run_gate_domain_closure$' \
+    "$source")"
+  ledger_calls="$(grep -c '^  if ! gate_scope_records_complete; then$' "$source")"
+  if [ "$tracking_calls" -ne 1 ]; then
+    echo "ERROR: check.sh enables scoped result recording $tracking_calls time(s), expected 1" >&2
+    failures=$((failures + 1))
+  fi
+  if [ "$finalize_calls" -ne 1 ]; then
+    echo "ERROR: check.sh invokes scoped final attribution $finalize_calls time(s), expected 1" >&2
+    failures=$((failures + 1))
+  fi
+  if [ "$closure_calls" -ne 1 ]; then
+    echo "ERROR: check.sh invokes gate-domain closure $closure_calls time(s), expected 1" >&2
+    failures=$((failures + 1))
+  fi
+  if [ "$ledger_calls" -ne 1 ]; then
+    echo "ERROR: check.sh checks scoped result-ledger closure $ledger_calls time(s), expected 1" >&2
+    failures=$((failures + 1))
+  fi
+  [ "$failures" -eq 0 ]
+}
+
+# Validate the declaration layer before trusting it to retain any verdict.
+#
+# This is an inverse closure over both populations: every core label in the
+# fixed roster resolves to a known, nonempty domain, and every live registered
+# artifact kind resolves too. A new core gate cannot inherit a narrow neighbour
+# accidentally, and an unknown registered kind is all-tracked + UNRUN at
+# execution time. The latter is deliberately stricter than defaulting to an
+# empty set, which would make any unrelated movement "prove" the gate stable.
+run_gate_domain_closure() {
+  local label domain projection inventory row kind artifact
+  local core_count=0 registered_count=0 failures=0
+  local -A seen_core=()
+
+  if [ -z "$GATE_TREE_LIST_START" ]; then
+    echo "ERROR: the run-start tracked listing is absent; no domain can be proved nonempty" >&2
+    return 1
+  fi
+  if ! gate_domain_wiring_complete "$ROOT/scripts/check.sh"; then
+    failures=$((failures + 1))
+  fi
+
+  for label in "${CORE_GATE_ROSTER[@]}"; do
+    if [ -n "${seen_core[$label]+set}" ]; then
+      echo "ERROR: duplicate core gate-domain declaration: $label" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    seen_core["$label"]=1
+    if ! domain="$(core_gate_domain "$label")"; then
+      echo "ERROR: core gate has no tracked input-domain declaration: $label" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    if ! gate_tree_domain_known "$domain"; then
+      echo "ERROR: core gate $label declares unknown domain $domain" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    if ! projection="$(gate_tree_domain_listing "$GATE_TREE_LIST_START" "$domain")" \
+      || [ -z "$projection" ]; then
+      echo "ERROR: core gate $label declares an empty or unreadable domain $domain" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    core_count=$((core_count + 1))
+  done
+
+  if [ ! -r "$CHECKER_INDEX" ]; then
+    echo "ERROR: cannot read $CHECKER_INDEX for registered gate-domain closure" >&2
+    return 1
+  fi
+  if ! inventory="$(live_gate_inventory "$CHECKER_INDEX")" || [ -z "$inventory" ]; then
+    echo "ERROR: no live registered artifacts were derived for gate-domain closure" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r kind artifact; do
+    if [ -z "$kind" ] || [ -z "$artifact" ]; then
+      echo "ERROR: malformed live checker row has no kind/artifact domain key" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    if ! domain="$(registered_gate_domain "$kind")"; then
+      echo "ERROR: registered $kind $artifact has no tracked input-domain declaration" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    if ! gate_tree_domain_known "$domain"; then
+      echo "ERROR: registered $kind $artifact declares unknown domain $domain" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    if ! projection="$(gate_tree_domain_listing "$GATE_TREE_LIST_START" "$domain")" \
+      || [ -z "$projection" ]; then
+      echo "ERROR: registered $kind $artifact declares empty domain $domain" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    registered_count=$((registered_count + 1))
+  done <<<"$inventory"
+
+  if [ "$failures" -ne 0 ]; then
+    echo "ERROR: $failures gate-domain declaration failure(s); undeclared means all-tracked + UNRUN" >&2
+    return 1
+  fi
+  echo "    gate domains: $core_count core + $registered_count registered artifacts declared; unknown defaults to all-tracked + UNRUN"
+  return 0
+}
+
 safe_artifact() {
   local artifact="$1"
 
@@ -758,14 +983,29 @@ increment_registered_kind_executed() {
   esac
 }
 
+decrement_registered_kind_executed() {
+  case "$1" in
+    cargo-test) REGISTERED_CARGO_EXECUTED=$((REGISTERED_CARGO_EXECUTED - 1)) ;;
+    script) REGISTERED_SCRIPT_EXECUTED=$((REGISTERED_SCRIPT_EXECUTED - 1)) ;;
+    binary) REGISTERED_BINARY_EXECUTED=$((REGISTERED_BINARY_EXECUTED - 1)) ;;
+  esac
+}
+
 record_registered_result() {
   local kind="$1"
   local artifact="$2"
   local outcome="$3"
   local detail="$4"
+  local domain="all-tracked"
 
   REGISTERED_EXPECTED=$((REGISTERED_EXPECTED + 1))
   increment_registered_kind_expected "$kind"
+  if [ "$GATE_SCOPE_TRACKING" -eq 1 ] \
+    && ! domain="$(registered_gate_domain "$kind")"; then
+    domain="all-tracked"
+    outcome=unrun
+    detail="tracked input domain is undeclared; treated as all-tracked"
+  fi
   case "$outcome" in
     pass)
       REGISTERED_EXECUTED=$((REGISTERED_EXECUTED + 1))
@@ -791,6 +1031,9 @@ record_registered_result() {
       return 2
       ;;
   esac
+  if [ "$GATE_SCOPE_TRACKING" -eq 1 ]; then
+    gate_scope_record registered "$kind" "$artifact" "$outcome" "$domain"
+  fi
 }
 
 run_registered_command() {
@@ -1026,6 +1269,219 @@ reset_registered_counters() {
   REGISTERED_BINARY_EXECUTED=0
   REGISTERED_OTHER_EXPECTED=0
   REGISTERED_SEQ=0
+}
+
+gate_scope_subject_name() {
+  local i="$1"
+  if [ "${GATE_SCOPE_CLASS[i]}" = core ]; then
+    printf 'core: %s' "${GATE_SCOPE_LABEL[i]}"
+  else
+    printf 'registered %s %s' \
+      "${GATE_SCOPE_KIND[i]}" "${GATE_SCOPE_LABEL[i]}"
+  fi
+}
+
+# Prove that every emitted child verdict is represented exactly once before
+# using the ledger to decide which claims survive a tree move. Merely enabling
+# recording is insufficient: a missed call would otherwise leave that verdict
+# outside attribution, and another affected record would keep the aggregate
+# from noticing the omission.
+gate_scope_records_complete() {
+  local i class outcome domain
+  local core_records=0 core_pass=0 core_red=0 core_unrun=0
+  local registered_records=0 registered_pass=0 registered_red=0
+  local registered_unrun=0 failures=0
+
+  for ((i = 0; i < GATE_SCOPE_COUNT; i++)); do
+    class="${GATE_SCOPE_CLASS[i]-}"
+    outcome="${GATE_SCOPE_OUTCOME[i]-}"
+    domain="${GATE_SCOPE_DOMAIN[i]-}"
+    if ! gate_tree_domain_known "$domain"; then
+      echo "ERROR: scoped result $i has an unknown or empty domain '$domain'" >&2
+      failures=$((failures + 1))
+    fi
+    case "$class:$outcome" in
+      core:pass)
+        core_records=$((core_records + 1))
+        core_pass=$((core_pass + 1))
+        ;;
+      core:red)
+        core_records=$((core_records + 1))
+        core_red=$((core_red + 1))
+        ;;
+      core:unrun)
+        core_records=$((core_records + 1))
+        core_unrun=$((core_unrun + 1))
+        ;;
+      registered:pass)
+        registered_records=$((registered_records + 1))
+        registered_pass=$((registered_pass + 1))
+        ;;
+      registered:red)
+        registered_records=$((registered_records + 1))
+        registered_red=$((registered_red + 1))
+        ;;
+      registered:unrun)
+        registered_records=$((registered_records + 1))
+        registered_unrun=$((registered_unrun + 1))
+        ;;
+      *)
+        echo "ERROR: scoped result $i has invalid class/outcome '$class:$outcome'" >&2
+        failures=$((failures + 1))
+        ;;
+    esac
+  done
+
+  if [ "$core_records" -ne "$CORE_EXPECTED" ] \
+    || [ "$core_pass" -ne "$CORE_PASSED" ] \
+    || [ "$core_red" -ne "$CORE_RED" ] \
+    || [ "$core_unrun" -ne "$CORE_UNRUN" ] \
+    || [ $((core_pass + core_red)) -ne "$CORE_EXECUTED" ]; then
+    echo "ERROR: scoped core ledger does not match verdict counters: records=$core_records/$CORE_EXPECTED pass=$core_pass/$CORE_PASSED red=$core_red/$CORE_RED unrun=$core_unrun/$CORE_UNRUN executed=$((core_pass + core_red))/$CORE_EXECUTED" >&2
+    failures=$((failures + 1))
+  fi
+  if [ "$registered_records" -ne "$REGISTERED_EXPECTED" ] \
+    || [ "$registered_pass" -ne "$REGISTERED_PASSED" ] \
+    || [ "$registered_red" -ne "$REGISTERED_RED" ] \
+    || [ "$registered_unrun" -ne "$REGISTERED_UNRUN" ] \
+    || [ $((registered_pass + registered_red)) -ne "$REGISTERED_EXECUTED" ]; then
+    echo "ERROR: scoped registered ledger does not match verdict counters: records=$registered_records/$REGISTERED_EXPECTED pass=$registered_pass/$REGISTERED_PASSED red=$registered_red/$REGISTERED_RED unrun=$registered_unrun/$REGISTERED_UNRUN executed=$((registered_pass + registered_red))/$REGISTERED_EXECUTED" >&2
+    failures=$((failures + 1))
+  fi
+  [ "$failures" -eq 0 ]
+}
+
+# Reclassify one previously pass/red child verdict as UNRUN. The original token
+# remains in the transcript as evidence of what the assertion reported; the
+# appended UNRUN+FAIL says why it is not a claim about one stable input. That is
+# the existing third-state contract, now applied to the child whose domain
+# actually moved instead of to the whole 35-minute aggregate.
+gate_scope_void_result() {
+  local i="$1"
+  local class="${GATE_SCOPE_CLASS[i]}"
+  local kind="${GATE_SCOPE_KIND[i]}"
+  local label="${GATE_SCOPE_LABEL[i]}"
+  local outcome="${GATE_SCOPE_OUTCOME[i]}"
+  local domain="${GATE_SCOPE_DOMAIN[i]}"
+
+  [ "$outcome" = unrun ] && return 0
+  case "$class" in
+    core)
+      CORE_EXECUTED=$((CORE_EXECUTED - 1))
+      if [ "$outcome" = pass ]; then
+        CORE_PASSED=$((CORE_PASSED - 1))
+      else
+        CORE_RED=$((CORE_RED - 1))
+      fi
+      CORE_UNRUN=$((CORE_UNRUN + 1))
+      gate_unrun "core: $label — tracked input domain $domain moved during check.sh"
+      ;;
+    registered)
+      REGISTERED_EXECUTED=$((REGISTERED_EXECUTED - 1))
+      decrement_registered_kind_executed "$kind"
+      if [ "$outcome" = pass ]; then
+        REGISTERED_PASSED=$((REGISTERED_PASSED - 1))
+      else
+        REGISTERED_RED=$((REGISTERED_RED - 1))
+      fi
+      REGISTERED_UNRUN=$((REGISTERED_UNRUN + 1))
+      gate_unrun "registered $kind $label — tracked input domain $domain moved during check.sh"
+      ;;
+    *)
+      GATE_SCOPE_FATAL=1
+      gate_unrun "check.sh: unknown recorded gate class $class; verdict cannot be attributed"
+      return 1
+      ;;
+  esac
+  GATE_SCOPE_OUTCOME[i]=unrun
+  return 0
+}
+
+# gate_scope_apply_tree_change <start-listing> <end-listing> <start-head> <end-head>
+#
+# Attribute one whole-run movement to every recorded child verdict. A HEAD move
+# invalidates all domains: gates may consult revision identity without a tracked
+# path spelling that dependency, and the landing lease should have prevented it
+# in the first place. For a worktree/index move, byte-compare each declared
+# tracked domain. Unknown/unreadable declarations fail closed as affected.
+gate_scope_apply_tree_change() {
+  local start_listing="$1" end_listing="$2" start_head="$3" end_head="$4"
+  local i domain outcome subject rc affected affected_count=0 retained_count=0
+  local head_moved=0
+
+  [ "$start_head" != "$end_head" ] && head_moved=1
+  gate_diag "  SCOPED CHILD VERDICTS:"
+  for ((i = 0; i < GATE_SCOPE_COUNT; i++)); do
+    domain="${GATE_SCOPE_DOMAIN[i]}"
+    outcome="${GATE_SCOPE_OUTCOME[i]}"
+    subject="$(gate_scope_subject_name "$i")"
+    affected=0
+    if [ "$head_moved" -eq 1 ]; then
+      affected=1
+    elif gate_tree_domain_changed "$start_listing" "$end_listing" "$domain"; then
+      affected=1
+    else
+      rc=$?
+      if [ "$rc" -ne 1 ]; then
+        # Status 2 is an unknown/unreadable declaration. It is all-tracked in
+        # effect, never an empty set that can retain a verdict.
+        affected=1
+        gate_diag "    DOMAIN ERROR  $subject [$domain] status=$rc; failing closed"
+      fi
+    fi
+
+    if [ "$affected" -eq 1 ]; then
+      affected_count=$((affected_count + 1))
+      gate_diag "    VOID  $subject [$domain] prior=$outcome"
+      gate_scope_void_result "$i" || true
+    else
+      retained_count=$((retained_count + 1))
+      gate_diag "    KEEP  $subject [$domain] verdict=$outcome"
+    fi
+  done
+
+  if [ "$GATE_SCOPE_COUNT" -eq 0 ] || [ "$affected_count" -eq 0 ]; then
+    GATE_SCOPE_FATAL=1
+    gate_unrun "check.sh: tree moved but no recorded gate domain accepted responsibility"
+    gate_diag "  A zero affected set is not evidence that movement was irrelevant;"
+    gate_diag "  it means the declaration layer failed open."
+    return 1
+  fi
+  gate_diag "  scoped attribution: $affected_count affected, $retained_count retained"
+  return 0
+}
+
+# Take check.sh's run-level end sample BEFORE printing the aggregate summary.
+# After attribution, re-baseline the shared EXIT-tripwire to this sample. That
+# leaves the tiny summary/exit window protected: movement after the scoped
+# sample still produces the older conservative whole-run UNRUN instead of
+# slipping through because GATE_TREE_CHECKED was set early.
+gate_scope_finalize_tree_stability() {
+  local list_end fp_end head_end
+  if ! gate_scope_records_complete; then
+    GATE_SCOPE_FATAL=1
+    gate_unrun "check.sh: scoped result ledger is incomplete; attribution is unsafe"
+  fi
+  gate_tree_snapshot_into list_end fp_end
+  head_end="$(gate_tree_head)"
+  if [ "$fp_end" != "$GATE_TREE_FP_START" ]; then
+    gate_diag "  tree moved during check.sh; attributing the movement by declared child domain:"
+    gate_diag "    HEAD at start: $GATE_TREE_HEAD_START"
+    gate_diag "    HEAD at end:   $head_end"
+    gate_diag "  WHAT MOVED:"
+    gate_tree_diff "$GATE_TREE_LIST_START" "$list_end"
+    gate_scope_apply_tree_change \
+      "$GATE_TREE_LIST_START" "$list_end" \
+      "$GATE_TREE_HEAD_START" "$head_end" || true
+  fi
+
+  # Protect the remaining summary/exit window with the ordinary tripwire.
+  GATE_TREE_LIST_START="$list_end"
+  GATE_TREE_FP_START="$fp_end"
+  GATE_TREE_HEAD_START="$head_end"
+  # shellcheck disable=SC2034 # consumed by gate_on_exit in the sourced library
+  GATE_TREE_CHECKED=0
+  return 0
 }
 
 # THE CONTROL FOR THE REPORTING CONTRACT (bead fgdb-checksh-red-not-fail-vbhd).
@@ -1312,6 +1768,251 @@ gate_verdict' >"$root/scripts/one_unrun.sh"
   return 0
 }
 
+tree_scope_beads_fixture() (
+  local work="$1"
+  local head start_listing end_listing
+  head="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  start_listing="$head
+0000000000000000000000000000000000000000000000000000000000000000  .beads/issues.jsonl
+1111111111111111111111111111111111111111111111111111111111111111  Cargo.toml
+2222222222222222222222222222222222222222222222222222222222222222  scripts/check.sh
+3333333333333333333333333333333333333333333333333333333333333333  scripts/lib/gate_verdict.sh
+4444444444444444444444444444444444444444444444444444444444444444  tools/registry-check/src/lib.rs"
+  end_listing="$head
+9999999999999999999999999999999999999999999999999999999999999999  .beads/issues.jsonl
+1111111111111111111111111111111111111111111111111111111111111111  Cargo.toml
+2222222222222222222222222222222222222222222222222222222222222222  scripts/check.sh
+3333333333333333333333333333333333333333333333333333333333333333  scripts/lib/gate_verdict.sh
+4444444444444444444444444444444444444444444444444444444444444444  tools/registry-check/src/lib.rs"
+
+  gate_scope_reset
+  CORE_EXPECTED=3
+  CORE_EXECUTED=3
+  CORE_PASSED=2
+  CORE_RED=1
+  CORE_UNRUN=0
+  gate_scope_record core "" "fmt fixture" pass rust-format
+  gate_scope_record core "" "UBS fixture" red tracked-rust
+  gate_scope_record core "" "cargo-test fixture" pass all-tracked
+  gate_scope_apply_tree_change \
+    "$start_listing" "$end_listing" "$head" "$head" \
+    >"$work/scope-beads.out" 2>"$work/scope-beads.err" || return 1
+
+  [ "$CORE_EXECUTED" -eq 2 ] \
+    && [ "$CORE_PASSED" -eq 1 ] \
+    && [ "$CORE_RED" -eq 1 ] \
+    && [ "$CORE_UNRUN" -eq 1 ] \
+    && [ "${GATE_SCOPE_OUTCOME[0]}" = pass ] \
+    && [ "${GATE_SCOPE_OUTCOME[1]}" = red ] \
+    && [ "${GATE_SCOPE_OUTCOME[2]}" = unrun ] \
+    && [ "$(grep -c '^UNRUN core: cargo-test fixture' "$work/scope-beads.out")" -eq 1 ] \
+    && ! grep -q '^UNRUN core: \(fmt\|UBS\) fixture' "$work/scope-beads.out"
+)
+
+tree_scope_rust_fixture() (
+  local work="$1"
+  local head start_listing end_listing
+  head="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  start_listing="$head
+0000000000000000000000000000000000000000000000000000000000000000  .beads/issues.jsonl
+1111111111111111111111111111111111111111111111111111111111111111  Cargo.toml
+2222222222222222222222222222222222222222222222222222222222222222  scripts/check.sh
+3333333333333333333333333333333333333333333333333333333333333333  scripts/lib/gate_verdict.sh
+4444444444444444444444444444444444444444444444444444444444444444  tools/registry-check/src/lib.rs"
+  end_listing="$head
+0000000000000000000000000000000000000000000000000000000000000000  .beads/issues.jsonl
+1111111111111111111111111111111111111111111111111111111111111111  Cargo.toml
+2222222222222222222222222222222222222222222222222222222222222222  scripts/check.sh
+3333333333333333333333333333333333333333333333333333333333333333  scripts/lib/gate_verdict.sh
+5555555555555555555555555555555555555555555555555555555555555555  tools/registry-check/src/lib.rs"
+
+  gate_scope_reset
+  CORE_EXPECTED=3
+  CORE_EXECUTED=3
+  CORE_PASSED=2
+  CORE_RED=1
+  CORE_UNRUN=0
+  gate_scope_record core "" "fmt fixture" pass rust-format
+  gate_scope_record core "" "UBS fixture" red tracked-rust
+  gate_scope_record core "" "cargo-test fixture" pass all-tracked
+  gate_scope_apply_tree_change \
+    "$start_listing" "$end_listing" "$head" "$head" \
+    >"$work/scope-rust.out" 2>"$work/scope-rust.err" || return 1
+
+  [ "$CORE_EXECUTED" -eq 0 ] \
+    && [ "$CORE_PASSED" -eq 0 ] \
+    && [ "$CORE_RED" -eq 0 ] \
+    && [ "$CORE_UNRUN" -eq 3 ] \
+    && [ "$(grep -c '^UNRUN core:' "$work/scope-rust.out")" -eq 3 ]
+)
+
+tree_scope_shell_fixture() (
+  local work="$1"
+  local head start_listing end_listing
+  head="cccccccccccccccccccccccccccccccccccccccc"
+  start_listing="$head
+0000000000000000000000000000000000000000000000000000000000000000  .beads/issues.jsonl
+1111111111111111111111111111111111111111111111111111111111111111  Cargo.toml
+2222222222222222222222222222222222222222222222222222222222222222  registries/checker_index.toml
+3333333333333333333333333333333333333333333333333333333333333333  scripts/check.sh
+4444444444444444444444444444444444444444444444444444444444444444  scripts/lib/gate_verdict.sh
+5555555555555555555555555555555555555555555555555555555555555555  tools/gate.sh
+6666666666666666666666666666666666666666666666666666666666666666  tools/registry-check/src/lib.rs"
+  end_listing="$head
+0000000000000000000000000000000000000000000000000000000000000000  .beads/issues.jsonl
+1111111111111111111111111111111111111111111111111111111111111111  Cargo.toml
+2222222222222222222222222222222222222222222222222222222222222222  registries/checker_index.toml
+3333333333333333333333333333333333333333333333333333333333333333  scripts/check.sh
+4444444444444444444444444444444444444444444444444444444444444444  scripts/lib/gate_verdict.sh
+7777777777777777777777777777777777777777777777777777777777777777  tools/gate.sh
+6666666666666666666666666666666666666666666666666666666666666666  tools/registry-check/src/lib.rs"
+
+  gate_scope_reset
+  CORE_EXPECTED=6
+  CORE_EXECUTED=6
+  CORE_PASSED=5
+  CORE_RED=1
+  CORE_UNRUN=0
+  gate_scope_record core "" "UBS fixture" red tracked-rust
+  gate_scope_record core "" "fmt fixture" pass rust-format
+  gate_scope_record core "" "shell-lint fixture" pass tracked-shell
+  gate_scope_record core "" "verdict-contract fixture" pass verdict-shell
+  gate_scope_record core "" "domain-closure fixture" pass domain-closure
+  gate_scope_record core "" "cargo-test fixture" pass all-tracked
+  gate_scope_apply_tree_change \
+    "$start_listing" "$end_listing" "$head" "$head" \
+    >"$work/scope-shell.out" 2>"$work/scope-shell.err" || return 1
+
+  [ "$CORE_EXECUTED" -eq 3 ] \
+    && [ "$CORE_PASSED" -eq 2 ] \
+    && [ "$CORE_RED" -eq 1 ] \
+    && [ "$CORE_UNRUN" -eq 3 ] \
+    && [ "${GATE_SCOPE_OUTCOME[0]}" = red ] \
+    && [ "${GATE_SCOPE_OUTCOME[1]}" = pass ] \
+    && [ "${GATE_SCOPE_OUTCOME[2]}" = unrun ] \
+    && [ "${GATE_SCOPE_OUTCOME[3]}" = unrun ] \
+    && [ "${GATE_SCOPE_OUTCOME[4]}" = pass ] \
+    && [ "${GATE_SCOPE_OUTCOME[5]}" = unrun ]
+)
+
+tree_scope_gate_source_fixture() {
+  local head start_listing end_listing domain
+  head="dddddddddddddddddddddddddddddddddddddddd"
+  start_listing="$head
+1111111111111111111111111111111111111111111111111111111111111111  scripts/check.sh
+2222222222222222222222222222222222222222222222222222222222222222  scripts/lib/gate_verdict.sh"
+  end_listing="$head
+3333333333333333333333333333333333333333333333333333333333333333  scripts/check.sh
+2222222222222222222222222222222222222222222222222222222222222222  scripts/lib/gate_verdict.sh"
+  for domain in all-tracked tracked-rust tracked-shell rust-format \
+      verdict-shell domain-closure; do
+    if ! gate_tree_domain_changed "$start_listing" "$end_listing" "$domain"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+tree_scope_control() {
+  local work="$1"
+  local closure_listing _closure_fp mutant_source ledger_mutant_source
+
+  gate_tree_snapshot_into closure_listing _closure_fp
+  GATE_TREE_LIST_START="$closure_listing"
+  if ! run_gate_domain_closure >"$work/domain-closure.out" 2>"$work/domain-closure.err"; then
+    echo "SELF-TEST RED: the live gate-domain declaration closure is not satisfied" >&2
+    return 1
+  fi
+  # Remove the live aggregate-attribution call from a scratch copy. The
+  # declaration checker must reject that copy, proving the closure guards the
+  # main-path wiring rather than only validating helpers which might never run.
+  mutant_source="$work/check-no-scope-finalize.sh"
+  if ! sed '/^gate_scope_finalize_tree_stability$/d' \
+      "$ROOT/scripts/check.sh" >"$mutant_source"; then
+    echo "SELF-TEST RED: could not construct the missing-finalizer control" >&2
+    return 1
+  fi
+  if grep -qx 'gate_scope_finalize_tree_stability' "$mutant_source"; then
+    echo "SELF-TEST RED: the missing-finalizer control did not apply" >&2
+    return 1
+  fi
+  if gate_domain_wiring_complete "$mutant_source" \
+      >"$work/domain-wiring-mutant.out" 2>"$work/domain-wiring-mutant.err"; then
+    echo "SELF-TEST RED: deleting live scoped final attribution left closure green" >&2
+    return 1
+  fi
+  ledger_mutant_source="$work/check-no-ledger-closure.sh"
+  if ! sed 's/^  if ! gate_scope_records_complete; then$/  if false; then/' \
+      "$ROOT/scripts/check.sh" >"$ledger_mutant_source"; then
+    echo "SELF-TEST RED: could not construct the missing-ledger-closure control" >&2
+    return 1
+  fi
+  if gate_domain_wiring_complete "$ledger_mutant_source" \
+      >"$work/ledger-wiring-mutant.out" 2>"$work/ledger-wiring-mutant.err"; then
+    echo "SELF-TEST RED: deleting live scoped ledger closure left wiring green" >&2
+    return 1
+  fi
+  # One emitted core verdict with no ledger record must fail cardinality
+  # closure. This is the exact omission that would otherwise escape attribution.
+  if (
+    gate_scope_reset
+    reset_registered_counters
+    CORE_EXPECTED=1
+    CORE_EXECUTED=1
+    CORE_PASSED=1
+    CORE_RED=0
+    CORE_UNRUN=0
+    gate_scope_records_complete
+  ) >"$work/ledger-cardinality-mutant.out" \
+      2>"$work/ledger-cardinality-mutant.err"; then
+    echo "SELF-TEST RED: an unrecorded child verdict left ledger closure green" >&2
+    return 1
+  fi
+  # Delete one core declaration semantically by overriding its reader. The
+  # closure must go red; otherwise its completeness claim is decorative.
+  if (
+    eval "$(declare -f core_gate_domain \
+      | sed '1s/^core_gate_domain /core_gate_domain_original /')"
+    core_gate_domain() {
+      if [ "$1" = "$CORE_GATE_UBS" ]; then return 1; fi
+      core_gate_domain_original "$@"
+    }
+    run_gate_domain_closure
+  ) >"$work/domain-closure-mutant.out" 2>"$work/domain-closure-mutant.err"; then
+    echo "SELF-TEST RED: deleting the UBS domain declaration left closure green" >&2
+    return 1
+  fi
+
+  if ! tree_scope_beads_fixture "$work"; then
+    echo "SELF-TEST RED: a Beads-only move did not retain Rust-domain verdicts and void all-tracked" >&2
+    return 1
+  fi
+  if ! tree_scope_rust_fixture "$work"; then
+    echo "SELF-TEST RED: a Rust-source move did not void every Rust-reading verdict" >&2
+    return 1
+  fi
+  if ! tree_scope_shell_fixture "$work"; then
+    echo "SELF-TEST RED: a shell-gate move did not separate shell and Rust domains" >&2
+    return 1
+  fi
+  if ! tree_scope_gate_source_fixture; then
+    echo "SELF-TEST RED: moving check.sh did not invalidate every declared domain" >&2
+    return 1
+  fi
+  # Neuter the intersection predicate. The Rust fixture must stop passing,
+  # proving its three UNRUNs came from domain attribution rather than from an
+  # unrelated counter or token.
+  mkdir -p "$work/mutant" || return 1
+  if (
+    gate_tree_domain_changed() { return 1; }
+    tree_scope_rust_fixture "$work/mutant"
+  ) >/dev/null 2>&1; then
+    echo "SELF-TEST RED: neutering domain intersection did not break the Rust mutation control" >&2
+    return 1
+  fi
+  return 0
+}
+
 run_mutation_self_test() {
   local work
   local fixture_root
@@ -1461,6 +2162,7 @@ EOF
 
   verdict_stream_control "$work" || return 1
   verdict_contract_control "$work" || return 1
+  tree_scope_control "$work" || return 1
 
   echo "CHECK.SH MUTATION SELF-TEST PASS"
   echo "  failing registered gate: RED"
@@ -1473,6 +2175,9 @@ EOF
   echo "    unreadable gate fails closed; a set -e abort still emits ^FAIL"
   echo "  three states: a gate executing no assertions reports UNRUN + FAIL, never"
   echo "    PASS, and exits nonzero; gate_unrun emits both tokens exactly once"
+  echo "  tree-domain scoping: Beads, Rust, shell, and gate-driver movements separate"
+  echo "    correctly; missing declarations, live wiring, ledger records, and the"
+  echo "    intersection each red under mutation"
   echo "  evidence retained at $work"
 }
 
@@ -1514,33 +2219,36 @@ export FGDB_LANDING_NAME="${FGDB_LANDING_NAME:-check.sh-$$}"
 # Installed here, not at load: --self-test runs fixtures in subshells, and a
 # bash subshell inherits and fires the parent's EXIT trap.
 gate_init "check.sh"
+GATE_SCOPE_TRACKING=1
 
-run_core_gate \
-  "file-coverage closure (every tracked file inspected or declared)" \
-  run_file_coverage
-run_core_gate \
-  "shell lint (bash -n + shellcheck) over tracked shell deliverables" \
-  run_shell_lint
-run_core_gate \
-  "verdict-contract closure (every gate reports under one token on one stream)" \
-  run_verdict_contract
-run_core_gate "cargo fmt --check" cargo fmt --check
-run_core_gate "cargo check --all-targets" cargo check --all-targets
-run_core_gate "cargo clippy --all-targets -- -D warnings" \
+run_core_gate "$CORE_GATE_FILE_COVERAGE" run_file_coverage
+run_core_gate "$CORE_GATE_SHELL_LINT" run_shell_lint
+run_core_gate "$CORE_GATE_VERDICT_CONTRACT" run_verdict_contract
+run_core_gate "$CORE_GATE_DOMAIN_CLOSURE" run_gate_domain_closure
+run_core_gate "$CORE_GATE_FMT" cargo fmt --check
+run_core_gate "$CORE_GATE_CHECK" cargo check --all-targets
+run_core_gate "$CORE_GATE_CLIPPY" \
   cargo clippy --all-targets -- -D warnings
 CARGO_TEST_LOG="$GATE_LOG_DIR/core-cargo-test.log"
-run_core_gate "cargo test --workspace --no-fail-fast" run_cargo_test_workspace
+run_core_gate "$CORE_GATE_TEST" run_cargo_test_workspace
 CARGO_TEST_RC="$LAST_GATE_RC"
-run_core_gate "UBS over every tracked Rust source" run_ubs
+run_core_gate "$CORE_GATE_UBS" run_ubs
 
 run_registered_gates "$ROOT" "$CHECKER_INDEX" "$CARGO_TEST_RC"
 
+# The aggregate sample comes after every child gate, but before the summary so
+# affected verdicts can be reclassified as UNRUN while disjoint real reds stay
+# authoritative. The ordinary EXIT tripwire is re-baselined inside this call and
+# still protects the remaining summary/exit window.
+gate_scope_finalize_tree_stability
+
 echo
-echo "CORE GATES: $CORE_EXECUTED of $CORE_EXPECTED executed; $CORE_PASSED passed; $CORE_RED red"
+echo "CORE GATES: $CORE_EXECUTED of $CORE_EXPECTED executed; $CORE_PASSED passed; $CORE_RED red; $CORE_UNRUN unrun"
 REGISTERED_SUMMARY_RC=0
 print_registered_summary || REGISTERED_SUMMARY_RC=$?
-if [ "$CORE_RED" -ne 0 ] || [ "$CORE_EXECUTED" -ne "$CORE_EXPECTED" ] \
-  || [ "$REGISTERED_SUMMARY_RC" -ne 0 ]; then
+if [ "$CORE_RED" -ne 0 ] || [ "$CORE_UNRUN" -ne 0 ] \
+  || [ "$CORE_EXECUTED" -ne "$CORE_EXPECTED" ] \
+  || [ "$REGISTERED_SUMMARY_RC" -ne 0 ] || [ "$GATE_SCOPE_FATAL" -ne 0 ]; then
   # The overall verdict goes to BOTH streams: it is the one line that must
   # reach a reader who captured only one of them. Every per-gate verdict above
   # is on stdout, so the stdout transcript is complete on its own.

@@ -46,6 +46,13 @@
 # then the helper exports it. A wrapper-only test would miss a config regression,
 # while a config-only test would miss an unguarded explicit sync.
 #
+# WHY CASE N EXISTS. Prevention makes routine Beads movement rare; it does not
+# make every other tracked write impossible. check.sh therefore attributes a
+# whole-run movement by each child gate's declared input domain. N runs
+# check.sh's mutation panel, which separates Beads, Rust, shell and gate-driver
+# movement, then proves declaration, ledger, live-wiring and intersection
+# mutations all turn the panel red.
+#
 # WHY THIS IS NOT FAIL-FAST. `set -e` is deliberately not set, for the reason
 # recorded in g0_negative_evidence_e2e.sh: a gate that stops at its first red
 # reports its own evaluation order rather than the tree's state.
@@ -68,6 +75,7 @@ LIB="$ROOT/scripts/lib/gate_verdict.sh"
 LANDING_LIB="$ROOT/scripts/lib/landing_lease.sh"
 BR_SYNC="$ROOT/scripts/br_sync.sh"
 BR_CONFIG="$ROOT/.beads/config.yaml"
+CHECK_SH="$ROOT/scripts/check.sh"
 
 # shellcheck source=lib/gate_verdict.sh
 . "$LIB"
@@ -77,6 +85,7 @@ gate_init "g0_tree_stability_e2e"
 WORK_ROOT="${FGDB_GATE_TMP:-/data/tmp/fgdb_swarm/g0_tree_stability}"
 CASES_RUN=0
 EXPORT_CASES_RUN=0
+SCOPE_CASES_RUN=0
 
 if [ ! -f "$LIB" ]; then
   gate_die "the library under test is missing: $LIB"
@@ -89,6 +98,9 @@ if [ ! -f "$BR_SYNC" ]; then
 fi
 if [ ! -f "$BR_CONFIG" ]; then
   gate_die "the Beads project config under test is missing: $BR_CONFIG"
+fi
+if [ ! -f "$CHECK_SH" ]; then
+  gate_die "the scoped aggregate under test is missing: $CHECK_SH"
 fi
 # shellcheck source=lib/landing_lease.sh
 . "$LANDING_LIB"
@@ -495,12 +507,37 @@ run_project_config_case() {
 }
 run_project_config_case
 
+# N: the aggregate scoping layer and both of its mutation controls.
+run_scope_case() {
+  local out="$RUN_DIR/N_scoped_aggregate.out"
+  local err="$RUN_DIR/N_scoped_aggregate.err"
+  local rc
+
+  bash "$CHECK_SH" --self-test >"$out" 2>"$err"
+  rc=$?
+  if [ "$rc" -eq 0 ] \
+    && grep -Fq "tree-domain scoping: Beads, Rust, shell, and gate-driver movements separate" "$out"; then
+    gate_pass "N: aggregate domain attribution and its closure mutants passed"
+  else
+    gate_fail "N: check.sh domain-attribution mutation panel failed (rc=$rc)"
+    gate_diag "  --- self-test stdout ---"
+    while IFS= read -r line; do gate_diag "  $line"; done <"$out"
+    gate_diag "  --- self-test stderr ---"
+    while IFS= read -r line; do gate_diag "  $line"; done <"$err"
+  fi
+  SCOPE_CASES_RUN=$((SCOPE_CASES_RUN + 1))
+}
+run_scope_case
+
 # --- the zero is licensed by accounting, not by finding nothing --------------
 if [ "$CASES_RUN" -ne 6 ]; then
   gate_unrun "expected 6 cases to execute, $CASES_RUN did"
 fi
 if [ "$EXPORT_CASES_RUN" -ne 7 ]; then
   gate_unrun "expected 7 Beads-export cases to execute, $EXPORT_CASES_RUN did"
+fi
+if [ "$SCOPE_CASES_RUN" -ne 1 ]; then
+  gate_unrun "expected 1 aggregate-scope case to execute, $SCOPE_CASES_RUN did"
 fi
 
 gate_verdict
