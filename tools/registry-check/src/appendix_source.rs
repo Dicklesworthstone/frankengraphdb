@@ -453,6 +453,7 @@ struct SchemaOccurrence {
     complete_top_level_map_definition: bool,
     declaration_range: Range<usize>,
     expression: Option<MappedText>,
+    supplemental_unions: Vec<MappedText>,
     expression_sha256: String,
 }
 
@@ -1227,6 +1228,43 @@ fn union_continuation_candidate(text: &str) -> bool {
     leading_assignment(text).is_none() && matches!(has_top_level_pipe(text), Ok(true))
 }
 
+fn complete_record_fragment(text: &str) -> bool {
+    let trimmed = trim_range(text, 0..text.len());
+    if text.as_bytes().get(trimmed.start) != Some(&b'{') {
+        return false;
+    }
+    matching_delimiter(text, trimmed.start).is_ok_and(|close| close + 1 == trimmed.end)
+}
+
+fn complete_union_arm_fragment(text: &str) -> bool {
+    let trimmed = trim_range(text, 0..text.len());
+    if trimmed.is_empty() || matches!(has_top_level_pipe(&text[trimmed.clone()]), Ok(true)) {
+        return false;
+    }
+    let candidate = &text[trimmed];
+    let Some(token) = first_arm_token(candidate) else {
+        return false;
+    };
+    let Some(open) = candidate.find('{') else {
+        return token.end == candidate.len();
+    };
+    trim_range(candidate, token.end..open).is_empty()
+        && matching_delimiter(candidate, open).is_ok_and(|close| close + 1 == candidate.len())
+}
+
+fn introduces_supplemental_union(value: &str) -> bool {
+    let normalized = normalize_whitespace(value).to_ascii_lowercase();
+    normalized.starts_with("and exactly one ")
+        && normalized.ends_with(':')
+        && normalized
+            .split_ascii_whitespace()
+            .any(|word| word.trim_end_matches(':') == "body")
+}
+
+fn is_exact_or_connector(value: &str) -> bool {
+    normalize_whitespace(value).eq_ignore_ascii_case("or")
+}
+
 fn reference_wrapper_owner(family: &str) -> bool {
     matches!(
         family,
@@ -1388,6 +1426,7 @@ struct ProseLink {
     display_name: String,
     owner_fragment: usize,
     rhs_fragments: Vec<usize>,
+    supplemental_union_fragments: Vec<usize>,
     cue: String,
 }
 
@@ -1474,23 +1513,59 @@ fn prose_schema_links(
             }) {
                 continue;
             }
+            let mut supplemental_union_fragments = Vec::new();
             if !rhs_fragments.is_empty() && cue_names_union(&cue) {
-                let mut separator_seen = false;
-                while let Some(candidate_index) = indexes.get(scan + 1).copied() {
-                    let previous = &fragments[indexes[scan]];
-                    if sentence_ends(&previous.after) {
-                        break;
-                    }
-                    separator_seen |= contains_continuation_separator(&previous.after);
+                let primary_is_record = complete_record_fragment(&fragments[rhs_fragments[0]].text);
+                if primary_is_record
+                    && introduces_supplemental_union(&fragments[indexes[scan]].after)
+                    && let Some(candidate_index) = indexes.get(scan + 1).copied()
+                {
                     let candidate = &fragments[candidate_index];
-                    if prose_definition_head(candidate).is_some() {
-                        break;
+                    if prose_definition_head(candidate).is_none() {
+                        if union_continuation_candidate(&candidate.text) {
+                            supplemental_union_fragments.push(candidate_index);
+                        } else if complete_union_arm_fragment(&candidate.text) {
+                            let mut arms = vec![candidate_index];
+                            let mut arm_scan = scan + 1;
+                            while let Some(next_index) = indexes.get(arm_scan + 1).copied() {
+                                let previous = &fragments[indexes[arm_scan]];
+                                if sentence_ends(&previous.after)
+                                    || !is_exact_or_connector(&previous.after)
+                                {
+                                    break;
+                                }
+                                let next = &fragments[next_index];
+                                if prose_definition_head(next).is_some()
+                                    || !complete_union_arm_fragment(&next.text)
+                                {
+                                    break;
+                                }
+                                arms.push(next_index);
+                                arm_scan += 1;
+                            }
+                            if arms.len() >= 2 {
+                                supplemental_union_fragments = arms;
+                            }
+                        }
                     }
-                    if separator_seen && union_continuation_candidate(&candidate.text) {
-                        rhs_fragments.push(candidate_index);
-                        separator_seen = false;
+                } else if !primary_is_record {
+                    let mut separator_seen = false;
+                    while let Some(candidate_index) = indexes.get(scan + 1).copied() {
+                        let previous = &fragments[indexes[scan]];
+                        if sentence_ends(&previous.after) {
+                            break;
+                        }
+                        separator_seen |= contains_continuation_separator(&previous.after);
+                        let candidate = &fragments[candidate_index];
+                        if prose_definition_head(candidate).is_some() {
+                            break;
+                        }
+                        if separator_seen && union_continuation_candidate(&candidate.text) {
+                            rhs_fragments.push(candidate_index);
+                            separator_seen = false;
+                        }
+                        scan += 1;
                     }
-                    scan += 1;
                 }
             }
             // A conjunction distributes the definition.  In "`A` and `B` are
@@ -1528,6 +1603,7 @@ fn prose_schema_links(
                     display_name: co_name,
                     owner_fragment: co_index,
                     rhs_fragments: rhs_fragments.clone(),
+                    supplemental_union_fragments: supplemental_union_fragments.clone(),
                     cue: cue.clone(),
                 });
             }
@@ -1535,6 +1611,7 @@ fn prose_schema_links(
                 display_name,
                 owner_fragment: fragment_index,
                 rhs_fragments,
+                supplemental_union_fragments,
                 cue,
             });
         }
@@ -1649,10 +1726,8 @@ fn make_schema_occurrence(
     expression: Option<MappedText>,
 ) -> Option<SchemaOccurrence> {
     let key = family_and_generic(&display_name)?;
-    let expression_sha256 = expression
-        .as_ref()
-        .map(|value| sha256_hex(normalize_whitespace(&value.text).as_bytes()))
-        .unwrap_or_else(|| sha256_hex(b""));
+    let supplemental_unions = Vec::new();
+    let expression_sha256 = schema_expression_sha256(&expression, &supplemental_unions);
     Some(SchemaOccurrence {
         key,
         display_name,
@@ -1664,8 +1739,30 @@ fn make_schema_occurrence(
         ),
         declaration_range,
         expression,
+        supplemental_unions,
         expression_sha256,
     })
+}
+
+fn schema_expression_sha256(
+    expression: &Option<MappedText>,
+    supplemental_unions: &[MappedText],
+) -> String {
+    if supplemental_unions.is_empty() {
+        return expression
+            .as_ref()
+            .map(|value| sha256_hex(normalize_whitespace(&value.text).as_bytes()))
+            .unwrap_or_else(|| sha256_hex(b""));
+    }
+    let mut transcript = b"fgdb:appendix-source-schema-with-supplemental-unions:v1".to_vec();
+    for part in expression.iter().chain(supplemental_unions) {
+        let normalized = normalize_whitespace(&part.text);
+        let length = normalized.len().to_string();
+        transcript.extend_from_slice(length.as_bytes());
+        transcript.push(b':');
+        transcript.extend_from_slice(normalized.as_bytes());
+    }
+    sha256_hex(&transcript)
 }
 
 fn affected_source_key(key: StructuralCandidateKey) -> BTreeSet<StructuralCandidateKey> {
@@ -1998,6 +2095,11 @@ fn extract_schema_occurrences(
     let mut linked_rhs = BTreeSet::new();
     for link in &prose_links {
         linked_rhs.extend(link.rhs_fragments.iter().map(|index| fragments[*index].id));
+        linked_rhs.extend(
+            link.supplemental_union_fragments
+                .iter()
+                .map(|index| fragments[*index].id),
+        );
     }
     linked_rhs.extend(
         bold_links
@@ -2085,6 +2187,21 @@ fn extract_schema_occurrences(
         ) {
             occurrence.complete_top_level_map_definition =
                 starts_with_word(&link.cue, "is") || starts_with_word(&link.cue, "are");
+            if !link.supplemental_union_fragments.is_empty() {
+                let supplemental_ranges: Vec<_> = link
+                    .supplemental_union_fragments
+                    .iter()
+                    .map(|index| fragments[*index].source_range.clone())
+                    .collect();
+                occurrence
+                    .supplemental_unions
+                    .push(MappedText::joined(source_map.source, &supplemental_ranges));
+                occurrence.expression_sha256 = schema_expression_sha256(
+                    &occurrence.expression,
+                    &occurrence.supplemental_unions,
+                );
+                claimed_ranges.extend(supplemental_ranges);
+            }
             occurrences.push(occurrence);
             claimed_ranges.extend(ranges);
         }
@@ -2886,6 +3003,29 @@ fn extract_fields_and_arms(
             &mut rows,
             0,
         );
+        for supplemental in &schema.supplemental_unions {
+            if !parse_union(
+                schema,
+                supplemental,
+                &schema.display_name,
+                &structural_schema_key,
+                &mut rows,
+                0,
+                false,
+            ) {
+                rows.ambiguities.push(AmbiguityOccurrence {
+                    kind: AmbiguityKind::AliasExpressionUnparsed,
+                    schema_family: Some(schema.key.family.clone()),
+                    path: Some(schema.display_name.clone()),
+                    raw: normalize_whitespace(&supplemental.text),
+                    reason:
+                        "supplemental union body is not a top-level pipe union under its confirmed owner"
+                            .to_owned(),
+                    affected_source_keys: affected_source_key(structural_schema_key.clone()),
+                    source_range: supplemental.source_range(0..supplemental.text.len()),
+                });
+            }
+        }
     }
     rows.fields.sort_by(|left, right| {
         (
@@ -5057,6 +5197,167 @@ mod tests {
             ]
         );
         assert_eq!(census.counts.ambiguities, 0);
+    }
+
+    #[test]
+    fn supplemental_body_union_is_owned_for_joined_and_split_arm_spellings() {
+        for (label, source) in [
+            (
+                "joined",
+                concat!(
+                    "`Manifest` is the closed union with common `{id:u64}` ",
+                    "and exactly one posture body: ",
+                    "`Local{local_value:u8}|Sharded{sharded_value:u16}`.\n",
+                ),
+            ),
+            (
+                "split",
+                concat!(
+                    "`Manifest` is the closed union with common `{id:u64}` ",
+                    "and exactly one body: `Local{local_value:u8}` or ",
+                    "`Sharded{sharded_value:u16}`.\n",
+                ),
+            ),
+        ] {
+            let slices = [SourceSliceSpec {
+                id: label,
+                start_line: 20,
+                end_line: 20,
+            }];
+            let census = census_appendix_source(source.as_bytes(), 20, &slices)
+                .expect("a confirmed owner must retain its supplemental union");
+
+            for path in [
+                "Manifest.id",
+                "Manifest.Local.local_value",
+                "Manifest.Sharded.sharded_value",
+            ] {
+                assert!(
+                    census
+                        .fields
+                        .iter()
+                        .any(|candidate| candidate.key.path == path),
+                    "{label}: missing {path}"
+                );
+            }
+            let union = census
+                .unions
+                .iter()
+                .find(|candidate| {
+                    candidate.key.schema_family == "Manifest"
+                        && candidate.key.union_path == "Manifest"
+                })
+                .expect("the posture body must be a union owned by Manifest");
+            assert_eq!(union.arm_names, ["Local".to_owned(), "Sharded".to_owned()]);
+            assert!(
+                census
+                    .schemas
+                    .iter()
+                    .all(|candidate| !matches!(candidate.key.family.as_str(), "Local" | "Sharded")),
+                "{label}: an arm was misclassified as a top-level schema"
+            );
+            assert!(
+                census
+                    .ambiguities
+                    .iter()
+                    .all(|candidate| candidate.key.kind != AmbiguityKind::UnparsedTrailingTokens),
+                "{label}: the supplemental union was left as trailing tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn one_braced_fragment_does_not_invent_a_supplemental_union() {
+        let source = concat!(
+            "`Manifest` is the closed union with common `{id:u64}` ",
+            "and exactly one body: `Local{local_value:u8}`.\n",
+        );
+        let slices = [SourceSliceSpec {
+            id: "one-arm",
+            start_line: 30,
+            end_line: 30,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 30, &slices)
+            .expect("an incomplete body union must remain explicit");
+        assert!(
+            census
+                .unions
+                .iter()
+                .all(|candidate| candidate.key.schema_family != "Manifest"),
+            "one braced fragment is not evidence for a closed union"
+        );
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| candidate.key.path != "Manifest.Local.local_value"),
+            "the unlicensed arm was silently attached to Manifest"
+        );
+    }
+
+    #[test]
+    fn appendix_supplemental_body_unions_recover_a18_and_a20_members() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let slices = [SourceSliceSpec {
+            id: "appendix-a",
+            start_line: 1388,
+            end_line: 2728,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the pinned Appendix A source must census");
+
+        for path in [
+            "RestoreServicePromotionManifest.Local.local_prepare_evidence",
+            "RestoreServicePromotionManifest.Local.local_configuration_and_endpoint_commitment",
+            "RestoreAbandonmentManifest.Local.target_tombstone_skeleton_recipe",
+            "RestoreAbandonmentManifest.Local.no_target_observation_proof_public_commitment",
+            "RestoreAbandonmentManifest.Local.local_pending_owner_public_commitment",
+        ] {
+            assert!(
+                census
+                    .fields
+                    .iter()
+                    .any(|candidate| candidate.key.path == path),
+                "the real-source control {path} is still invisible"
+            );
+        }
+        for owner in [
+            "RestoreAbandonmentManifest",
+            "RestoreServicePromotionManifest",
+        ] {
+            let union = census
+                .unions
+                .iter()
+                .find(|candidate| {
+                    candidate.key.schema_family == owner && candidate.key.union_path == owner
+                })
+                .expect("the real Appendix owner must retain its posture body union");
+            assert_eq!(union.arm_names, ["Local".to_owned(), "Sharded".to_owned()]);
+        }
+        assert!(
+            census
+                .schemas
+                .iter()
+                .all(|candidate| candidate.key.family != "Sharded"),
+            "the a20 body arm remains misclassified as a top-level schema"
+        );
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| candidate.key.stable_name != "fabricated_qh3r_control"),
+            "fabricated-absent control unexpectedly matched"
+        );
     }
 
     #[test]

@@ -539,14 +539,14 @@ expected_projection_classes = ["logical_object_kinds", "prebootstrap_artifact_ki
 definition_status = "declared"
 top_level_candidate_count = 109
 top_level_candidate_ids_sha256 = "d5882e79c10e0dc176276d4fa863e0279b39401640fa19ffbaee0ea3e3327858"
-field_candidate_count = 1218
-field_candidate_ids_sha256 = "d186017817b1a14b4d1947fd7855e2ac655dae4781e9ddc85327bb414764b73d"
-union_candidate_count = 57
-union_candidate_ids_sha256 = "52ae2f44f362406390ea8ebcd99e03f879b44717778c9dcf4c01bcee08078862"
-arm_candidate_count = 163
-arm_candidate_ids_sha256 = "b4187eb43e8a76d0d0d08df571cdb8764198926e0e1a26cd7843287a39d0ea04"
-ambiguity_count = 892
-ambiguity_ids_sha256 = "cf3e0436c557d63b08048a5a2a237be69dd34e08f1603b4d42615a299c3338b7"
+field_candidate_count = 1232
+field_candidate_ids_sha256 = "95583d2bcdb4f524b33ddd0c5ed6dd10d77d1661420c50fa338efd35fcff32c8"
+union_candidate_count = 58
+union_candidate_ids_sha256 = "35e55441e5a403a774e54e0edbe6477c7d01d266714f4d26ab4a540b6525c344"
+arm_candidate_count = 165
+arm_candidate_ids_sha256 = "9ff5f9a848b71b768843b94a4e511eec5f3c63a99223839776b03bdab226607a"
+ambiguity_count = 902
+ambiguity_ids_sha256 = "91220aaef2326fecd9e08f935ec89e2b3352066e2e3f734ab1c9606d93a9e3e4"
 
 [[slice]]
 ordinal = 19
@@ -587,16 +587,16 @@ predecessor = "a19"
 successor = "a21"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 26
-top_level_candidate_ids_sha256 = "8e5e1fb12aa6580058f29fc03136d543dcf495f65065262d585ba22e88edc09b"
-field_candidate_count = 182
-field_candidate_ids_sha256 = "2e7bd1beaa5e9977a203b14172d55f6282184160dfcb257020f39bb298fb0a9b"
-union_candidate_count = 6
-union_candidate_ids_sha256 = "133b529dcba2dedc03e4e6e216c37903010c95647579c1968161d898ffde7382"
-arm_candidate_count = 17
-arm_candidate_ids_sha256 = "99315207439758d8e55f2147719cb82a0118197282e95f1018e524afdc403121"
-ambiguity_count = 146
-ambiguity_ids_sha256 = "28a06724af32174b8367ac3eac7da9def38a61d294f8d57faa05248fe7c964c7"
+top_level_candidate_count = 25
+top_level_candidate_ids_sha256 = "108660e46fec5780062267c93566a8d8f08ccdb15f8ec1b85450588725c145fb"
+field_candidate_count = 184
+field_candidate_ids_sha256 = "4fda16571285d820f4e9d71b007fe2026ed8864ee190f0b02fb1d9404320c6be"
+union_candidate_count = 7
+union_candidate_ids_sha256 = "2c0ed35947d743254b4efadc8f05c88d87cb58942ca690693f94c2e428824ed3"
+arm_candidate_count = 19
+arm_candidate_ids_sha256 = "295b543e07b178e7427db36987a20ffa7cdbc7b91e74eb84c68cac0dc6fdbcd2"
+ambiguity_count = 145
+ambiguity_ids_sha256 = "4c9301d2f8cea0ec07af3a6e09bf7ac6025180a1b7bb3c36bd6fd8792545d0b6"
 
 [[slice]]
 ordinal = 21
@@ -59604,16 +59604,6 @@ source_key = "top|ShardTopologyCopyApplySpec"
 source_kind = "confirmed"
 identity_class = "unclassified"
 source_locations = ["a08:1874"]
-
-[[top_level_candidate]]
-row_id = "a20:top-level-candidate:sharded-484eb28941778afb"
-slice_id = "a20"
-symbol = "Sharded"
-generic_signature = ""
-source_key = "top|Sharded"
-source_kind = "ambiguous"
-identity_class = "unclassified"
-source_locations = ["a20:2575"]
 
 [[top_level_candidate]]
 row_id = "a05:top-level-candidate:sharded-genesis-certificate-1d9c7664e5a72870"
