@@ -9808,7 +9808,36 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     assert_eq!(
         pre_erratum.ordinary_unions.len() + 378,
         current_union_count,
-        "the historical witness must remove every post-erratum union through the ymqm self-edge repair"
+        "historical witness ordinary-union cohort drift: the post-erratum filters \
+         removed a number of unions other than 378. This assert compares a \
+         DIFFERENCE and so it sees the OVER-filter direction only — a union removed \
+         that should have stayed. It is blind to the under-filter direction, because \
+         a newly landed union that no filter names increments both of its sides \
+         together; the absolute width pin below is what catches that."
+    );
+    // ABSOLUTE WIDTH PIN — the under-filter direction the cohort assert above
+    // cannot see (fgdb-historical-witness-cohort-asserts-blind-38tv).
+    //
+    // THE DEFECT THIS CLOSES, mutation-proven rather than reasoned. Appending one
+    // `[[union]]` row that no post_erratum_* filter names used to pass EVERY cohort
+    // assert in this function and fail only at the assignment-pin hash far below.
+    // That made the hash the sole detector for these cohorts — and the hash is the
+    // artifact that gets legitimately re-baselined under the fgdb-e55p owner ruling,
+    // so every accounted re-baseline reset the only guard they had and absorbed any
+    // already-landed under-filtered row into the new baseline silently.
+    //
+    // The pre-erratum namespace is a HISTORICAL CONSTANT. Its width is not a value
+    // that follows the tree, which is exactly why pinning it as a difference let the
+    // tree drag it. Same reasoning, same remedy, and same standing instruction as
+    // the field width pin below: fix a failure here by extending the post_erratum_*
+    // filter that should have claimed the new row. Do NOT change these numbers, and
+    // do NOT re-pin A10_COMMAND_REF_ERRATUM_PREVIOUS_FIELDS_PIN.
+    assert_eq!(
+        pre_erratum.ordinary_unions.len(),
+        7,
+        "the historical witness ordinary-union reconstruction is a frozen historical \
+         width. A newly landed union row that was not added to a post_erratum_* \
+         filter widens it and is INVISIBLE to the cohort assert above."
     );
     assert_eq!(
         pre_erratum
@@ -9826,6 +9855,21 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         current_reference_union_count - expected_reference_unions_removed,
         "reference-union control must fire"
     );
+    // ABSOLUTE WIDTH PIN — see the ordinary-union pin above for the mechanism.
+    //
+    // This cohort is the WEAKEST of the four and the control above does not rescue
+    // it. `post_erratum_reference_union` is `|_| false` and nothing retains
+    // `pre_erratum.unions`, so the cohort assert reduces to `len() == len()`: it is
+    // true for ANY corpus, not merely blind in one direction. The `reference_control`
+    // assert proves the COMPARISON can fail on a hand-pushed clone; it cannot prove
+    // the PREDICATE detects a reference union that actually landed. Only this pin can.
+    assert_eq!(
+        pre_erratum.unions.len(),
+        5,
+        "the historical witness reference-union reconstruction is a frozen historical \
+         width. A newly landed reference union is INVISIBLE to the cohort assert \
+         above, which compares the vector with itself."
+    );
     assert_eq!(
         pre_erratum
             .unions
@@ -9834,6 +9878,20 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             .sum::<usize>(),
         current_reference_arm_count,
         "historical witness reference-union arm cohort drift (unrecognised arm)"
+    );
+    // ABSOLUTE WIDTH PIN — see the ordinary-union pin above for the mechanism.
+    // Same `len() == len()` weakness as the reference-union cohort: nothing retains
+    // `pre_erratum.unions`, so the sum is compared against itself.
+    assert_eq!(
+        pre_erratum
+            .unions
+            .iter()
+            .map(|u| u.arms.len())
+            .sum::<usize>(),
+        8,
+        "the historical witness reference-union ARM reconstruction is a frozen \
+         historical width. A newly landed reference union arm is INVISIBLE to the \
+         cohort assert above."
     );
     assert_eq!(
         pre_erratum
@@ -9844,6 +9902,21 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             + 1_108,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
+    );
+    // ABSOLUTE WIDTH PIN — see the ordinary-union pin above for the mechanism.
+    // This is the one the 38tv mutation proof reached last: appending two
+    // `[[union_arm]]` rows to an unfiltered probe union passed the cohort assert
+    // above and left the hash as the only detector.
+    assert_eq!(
+        pre_erratum
+            .ordinary_unions
+            .iter()
+            .map(|u| u.arms.len())
+            .sum::<usize>(),
+        22,
+        "the historical witness ordinary-union ARM reconstruction is a frozen \
+         historical width. A newly landed union arm that was not added to a \
+         post_erratum_* filter widens it and is INVISIBLE to the cohort assert above."
     );
     assert_eq!(
         // 751 -> 750 (fgdb-census-slash-token-truncation-avex): the a10:1920
