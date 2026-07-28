@@ -5180,7 +5180,7 @@ fn idr_restore_service_promotion_manifest_coherence_is_enforced() {
             for authority_profile_tag in [0x01, 0x02, 0x03] {
                 let expected = matches!(
                     (target_posture_tag, body_tag, authority_profile_tag),
-                    (0x01, 0x01, 0x01 | 0x02 | 0x03) | (0x02, 0x02, 0x01)
+                    (0x01, 0x01, 0x01..=0x03) | (0x02, 0x02, 0x01)
                 );
                 let actual = identity::restore_service_promotion_manifest_tags_are_coherent(
                     target_posture_tag,
@@ -5234,10 +5234,12 @@ fn idr_restore_service_promotion_manifest_coherence_is_enforced() {
     body_tag_drift
         .ordinary_unions
         .iter_mut()
+        // ubs:ignore -- public durable union identity, not secret material.
         .find(|union| union.union_name == "RestoreServicePromotionManifest")
         .expect("manifest BODY union")
         .arms
         .iter_mut()
+        // ubs:ignore -- public durable arm identity, not secret material.
         .find(|arm| arm.source_arm_name == "Sharded")
         .expect("Sharded BODY arm")
         .arm_tag = 0x0004;
@@ -5250,10 +5252,12 @@ fn idr_restore_service_promotion_manifest_coherence_is_enforced() {
     directory_profile_broadened
         .ordinary_unions
         .iter_mut()
+        // ubs:ignore -- public durable union identity, not secret material.
         .find(|union| union.union_name == "RestorePromotionAuthorityProfile")
         .expect("authority-profile union")
         .arms
         .iter_mut()
+        // ubs:ignore -- public durable arm identity, not secret material.
         .find(|arm| arm.source_arm_name == "DirectoryBoundCataloged")
         .expect("DirectoryBoundCataloged authority arm")
         .role_predicate = "true".to_owned();
@@ -5266,6 +5270,7 @@ fn idr_restore_service_promotion_manifest_coherence_is_enforced() {
     let wrapper = wrapper_admits_local
         .wire
         .iter_mut()
+        // ubs:ignore -- public wire-family identity, not secret material.
         .find(|row| row.name == "ExternalCasRestoreServicePromotionManifestRef")
         .expect("ExternalCas-refined manifest wrapper");
     wrapper.encoding_context = wrapper.encoding_context.replace(
