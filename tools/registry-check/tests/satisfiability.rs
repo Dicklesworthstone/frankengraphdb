@@ -797,10 +797,10 @@ fn demonstrates_code(body: &str, code: &str) -> bool {
             continue;
         }
         // (b) one arm of a multi-arm disjunction is satisfied by any other arm
-        if let Some(span) = enclosing_matches(body, pos) {
-            if quoted_idents(span).len() > 1 {
-                continue;
-            }
+        if let Some(span) = enclosing_matches(body, pos)
+            && quoted_idents(span).len() > 1
+        {
+            continue;
         }
         // (c) an absence assertion is the opposite of a demonstration
         if is_absence_assertion(statement_at(body, pos)) {

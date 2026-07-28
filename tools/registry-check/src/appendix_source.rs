@@ -1230,10 +1230,10 @@ fn union_continuation_candidate(text: &str) -> bool {
 
 fn complete_record_fragment(text: &str) -> bool {
     let trimmed = trim_range(text, 0..text.len());
-    if text.as_bytes().get(trimmed.start) != Some(&b'{') {
+    if !matches!(text.as_bytes().get(trimmed.start), Some(b'{')) {
         return false;
     }
-    matching_delimiter(text, trimmed.start).is_ok_and(|close| close + 1 == trimmed.end)
+    matching_delimiter(text, trimmed.start).is_ok_and(|close| (close + 1).eq(&trimmed.end))
 }
 
 fn complete_union_arm_fragment(text: &str) -> bool {
@@ -1246,10 +1246,10 @@ fn complete_union_arm_fragment(text: &str) -> bool {
         return false;
     };
     let Some(open) = candidate.find('{') else {
-        return token.end == candidate.len();
+        return token.end.eq(&candidate.len());
     };
     trim_range(candidate, token.end..open).is_empty()
-        && matching_delimiter(candidate, open).is_ok_and(|close| close + 1 == candidate.len())
+        && matching_delimiter(candidate, open).is_ok_and(|close| (close + 1).eq(&candidate.len()))
 }
 
 fn introduces_supplemental_union(value: &str) -> bool {
@@ -1258,7 +1258,7 @@ fn introduces_supplemental_union(value: &str) -> bool {
         && normalized.ends_with(':')
         && normalized
             .split_ascii_whitespace()
-            .any(|word| word.trim_end_matches(':') == "body")
+            .any(|word| word.trim_end_matches(':').eq("body"))
 }
 
 fn is_exact_or_connector(value: &str) -> bool {
@@ -5236,7 +5236,7 @@ mod tests {
                     census
                         .fields
                         .iter()
-                        .any(|candidate| candidate.key.path == path),
+                        .any(|candidate| candidate.key.path.eq(path)),
                     "{label}: missing {path}"
                 );
             }
@@ -5244,8 +5244,8 @@ mod tests {
                 .unions
                 .iter()
                 .find(|candidate| {
-                    candidate.key.schema_family == "Manifest"
-                        && candidate.key.union_path == "Manifest"
+                    candidate.key.schema_family.eq("Manifest")
+                        && candidate.key.union_path.eq("Manifest")
                 })
                 .expect("the posture body must be a union owned by Manifest");
             assert_eq!(union.arm_names, ["Local".to_owned(), "Sharded".to_owned()]);
@@ -5257,10 +5257,12 @@ mod tests {
                 "{label}: an arm was misclassified as a top-level schema"
             );
             assert!(
-                census
-                    .ambiguities
-                    .iter()
-                    .all(|candidate| candidate.key.kind != AmbiguityKind::UnparsedTrailingTokens),
+                census.ambiguities.iter().all(|candidate| {
+                    !candidate
+                        .key
+                        .kind
+                        .eq(&AmbiguityKind::UnparsedTrailingTokens)
+                }),
                 "{label}: the supplemental union was left as trailing tokens"
             );
         }
@@ -5283,14 +5285,14 @@ mod tests {
             census
                 .unions
                 .iter()
-                .all(|candidate| candidate.key.schema_family != "Manifest"),
+                .all(|candidate| !candidate.key.schema_family.eq("Manifest")),
             "one braced fragment is not evidence for a closed union"
         );
         assert!(
             census
                 .fields
                 .iter()
-                .all(|candidate| candidate.key.path != "Manifest.Local.local_value"),
+                .all(|candidate| !candidate.key.path.eq("Manifest.Local.local_value")),
             "the unlicensed arm was silently attached to Manifest"
         );
     }
@@ -5327,7 +5329,7 @@ mod tests {
                 census
                     .fields
                     .iter()
-                    .any(|candidate| candidate.key.path == path),
+                    .any(|candidate| candidate.key.path.eq(path)),
                 "the real-source control {path} is still invisible"
             );
         }
@@ -5339,7 +5341,7 @@ mod tests {
                 .unions
                 .iter()
                 .find(|candidate| {
-                    candidate.key.schema_family == owner && candidate.key.union_path == owner
+                    candidate.key.schema_family.eq(owner) && candidate.key.union_path.eq(owner)
                 })
                 .expect("the real Appendix owner must retain its posture body union");
             assert_eq!(union.arm_names, ["Local".to_owned(), "Sharded".to_owned()]);
@@ -5348,14 +5350,14 @@ mod tests {
             census
                 .schemas
                 .iter()
-                .all(|candidate| candidate.key.family != "Sharded"),
+                .all(|candidate| !candidate.key.family.eq("Sharded")),
             "the a20 body arm remains misclassified as a top-level schema"
         );
         assert!(
             census
                 .fields
                 .iter()
-                .all(|candidate| candidate.key.stable_name != "fabricated_qh3r_control"),
+                .all(|candidate| !candidate.key.stable_name.eq("fabricated_qh3r_control")),
             "fabricated-absent control unexpectedly matched"
         );
     }

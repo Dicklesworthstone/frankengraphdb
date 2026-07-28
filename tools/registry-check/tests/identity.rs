@@ -2110,7 +2110,11 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     //   top|ReservedReservationUseRef<Role>
     //   top|RestoreReconciliationEvidenceRef<Role>
     //   top|ExternalCasRestoreServicePromotionManifestRef
-    assert_eq!(baseline.top_level_candidates.len(), 1_250);
+    // 1_250 -> 1_249: fgdb-qh3r attached a20's Local/Sharded posture body to
+    // RestoreServicePromotionManifest. `top|Sharded` was a parser-created arm
+    // pseudo-owner, not a source-declared top-level type, so its catalog row was
+    // removed when the two arms became a correctly owned union.
+    assert_eq!(baseline.top_level_candidates.len(), 1_249);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT
