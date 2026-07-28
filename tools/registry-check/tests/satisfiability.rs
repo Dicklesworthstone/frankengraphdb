@@ -660,6 +660,225 @@ fn pending_backlog_is_ratcheted() {
     );
 }
 
+// ------------------------------------------------- demonstration classifier
+//
+// `WitnessedElsewhere` claims a code is DEMONSTRATED FIRING somewhere else. The
+// original check tested only that the code STRING occurred in the named test's
+// body, which is a one-directional classifier: an absent string does prove the
+// absence of a witness, but a present string does not prove the presence of
+// one. Measured 2026-07-27 on the Appendix A owner (fgdb-witness-census-named-
+// not-witnessed-11fo): 9 of 82 codes counted as witnessed had never been shown
+// to fire individually — 6 appeared only as one arm of a multi-arm `matches!`,
+// 1 only inside an assertion that the code must be ABSENT, and 2 only inside a
+// comment. All three shapes satisfy `contains`.
+//
+// So an occurrence is a DEMONSTRATION unless it is one of those three, and a
+// row is live only when at least one occurrence survives. The rejected shapes
+// are the closed set this classifier claims to recognise — it is deliberately
+// conservative in the safe direction: an unrecognised shape counts as a
+// demonstration, so this can under-report a defect but never invent one.
+// `demonstration_classifier_rejects_mere_mentions` is its non-vacuity control.
+
+/// The source line containing `pos`.
+fn line_at(body: &str, pos: usize) -> &str {
+    let start = body[..pos].rfind('\n').map_or(0, |offset| offset + 1);
+    let end = body[pos..].find('\n').map_or(body.len(), |off| pos + off);
+    &body[start..end]
+}
+
+/// The innermost `matches!( .. )` span containing `pos`, paren-balanced.
+fn enclosing_matches(body: &str, pos: usize) -> Option<&str> {
+    let mut best: Option<&str> = None;
+    let mut search = 0;
+    while let Some(found) = body[search..].find("matches!") {
+        // Capture the macro's own start BEFORE advancing the cursor. Deriving it
+        // from the mutated `search` yields a garbage lower bound that lets a
+        // disjunction arm through; the synthetic control passed anyway and only
+        // a downgrade of a REAL witness exposed it.
+        let macro_start = search + found;
+        let open = macro_start + "matches!".len();
+        search = open;
+        let Some(paren) = body[open..].find('(').map(|off| open + off) else {
+            break;
+        };
+        let mut depth = 0usize;
+        let mut close = paren;
+        for (offset, ch) in body[paren..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = paren + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if close > paren && macro_start <= pos && pos <= close {
+            best = Some(&body[paren..=close]);
+        }
+    }
+    best
+}
+
+/// Distinct double-quoted identifiers inside `span`.
+fn quoted_idents(span: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    let mut rest = span;
+    while let Some(open) = rest.find('"') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('"') else { break };
+        let literal = &after[..close];
+        if !literal.is_empty()
+            && literal
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            && !out.contains(&literal)
+        {
+            out.push(literal);
+        }
+        rest = &after[close + 1..];
+    }
+    out
+}
+
+/// The statement around `pos`: back to the previous `;` or `{`, forward to the
+/// next `;`. Coarse but sufficient to see a negation applied to the assertion.
+fn statement_at(body: &str, pos: usize) -> &str {
+    let start = body[..pos].rfind([';', '{']).map_or(0, |offset| offset + 1);
+    let end = body[pos..].find(';').map_or(body.len(), |off| pos + off);
+    &body[start..end]
+}
+
+/// Negated bindings that mark an assertion of ABSENCE.
+const NEGATED_BINDINGS: &[&str] = &[
+    "!body",
+    "!codes",
+    "!violations",
+    "!baseline",
+    "!identity_tests",
+];
+
+/// Is `statement` asserting the code must be ABSENT? A code named only in such
+/// an assertion has by construction never been seen to fire.
+///
+/// The `assert!` arm must be decided by the first non-whitespace character of
+/// the macro's argument, NOT by a literal `"assert!(\n"`: rustfmt breaks nearly
+/// every multi-line assertion that way, so the literal form rejected 7 of the 10
+/// live rows — a false red found by running this against the real corpus before
+/// landing it.
+fn is_absence_assertion(statement: &str) -> bool {
+    let mut search = 0;
+    while let Some(found) = statement[search..].find("assert!(") {
+        let after = search + found + "assert!(".len();
+        search = after;
+        if statement[after..].trim_start().starts_with('!') {
+            return true;
+        }
+    }
+    statement.contains(".is_empty()")
+        || NEGATED_BINDINGS
+            .iter()
+            .any(|marker| statement.contains(marker))
+}
+
+/// Does `body` DEMONSTRATE `code` firing, rather than merely mention it?
+fn demonstrates_code(body: &str, code: &str) -> bool {
+    let needle = format!("\"{code}\"");
+    let mut search = 0;
+    while let Some(found) = body[search..].find(&needle) {
+        let pos = search + found;
+        search = pos + needle.len();
+
+        // (a) a comment is not an assertion
+        if line_at(body, pos).trim_start().starts_with("//") {
+            continue;
+        }
+        // (b) one arm of a multi-arm disjunction is satisfied by any other arm
+        if let Some(span) = enclosing_matches(body, pos) {
+            if quoted_idents(span).len() > 1 {
+                continue;
+            }
+        }
+        // (c) an absence assertion is the opposite of a demonstration
+        if is_absence_assertion(statement_at(body, pos)) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// NON-VACUITY CONTROL for [`demonstrates_code`]. Each rejected shape is a real
+/// one taken from the corpus, and the accepting case must still accept, so the
+/// classifier cannot pass by rejecting everything or by accepting everything.
+#[test]
+fn demonstration_classifier_rejects_mere_mentions() {
+    let code = "catalog_target_duplicate";
+
+    let comment_only = "
+        // the historical reason we care about \"catalog_target_duplicate\" here
+        assert!(codes.contains(&\"unrelated_code\".to_owned()));
+    ";
+    assert!(
+        !demonstrates_code(comment_only, code),
+        "a code named only in a comment must not count as demonstrated"
+    );
+
+    // The leading body is load-bearing: it pushes the disjunction to a realistic
+    // offset. A first version of `enclosing_matches` derived the macro's start
+    // from an already-advanced cursor, which is correct only near offset zero —
+    // a padded fixture fails it, an unpadded one does not.
+    let disjunction = "
+        let mut mutated = base();
+        mutated.fields[0].identity_class = \"scalar\".into();
+        let violations = validate_identity(&mutated);
+        assert!(violations.iter().any(|violation| matches!(
+            violation.code.as_str(),
+            \"catalog_target_duplicate\" | \"catalog_row_duplicate\"
+        )));
+    ";
+    assert!(
+        !demonstrates_code(disjunction, code),
+        "one arm of a multi-arm disjunction is satisfied by the other arm"
+    );
+
+    let absence = "
+        assert!(!codes.iter().any(|entry| entry == \"catalog_target_duplicate\"));
+    ";
+    assert!(
+        !demonstrates_code(absence, code),
+        "a code named only in an absence assertion has never been seen to fire"
+    );
+
+    let demonstration = "
+        let codes = codes(&mutated);
+        assert!(codes.contains(&\"catalog_target_duplicate\".to_owned()));
+    ";
+    assert!(
+        demonstrates_code(demonstration, code),
+        "a genuine exact-code assertion must still count as demonstrated"
+    );
+
+    let single_arm_matches = "
+        assert!(violations.iter().any(|violation| matches!(
+            violation.code.as_str(),
+            \"catalog_target_duplicate\"
+        )));
+    ";
+    assert!(
+        demonstrates_code(single_arm_matches, code),
+        "a single-arm matches! is code-determining and must still count"
+    );
+
+    assert!(
+        !demonstrates_code(demonstration, "catalog_row_duplicate"),
+        "a code absent from the body must never count"
+    );
+}
+
 /// A `WitnessedElsewhere` row must keep pointing at a live witness.
 ///
 /// Read from `tests/identity.rs` itself, so the claim is checked against the
@@ -693,15 +912,22 @@ fn witnessed_elsewhere_sites_are_live() {
                 broken.push(format!("{code}: test {name} no longer exists"));
                 continue;
             };
-            // The named test must still assert THIS code. Bound the search to
-            // the function's own body so a neighbouring test cannot satisfy it.
+            // The named test must still DEMONSTRATE THIS code firing. Bound the
+            // search to the function's own body so a neighbouring test cannot
+            // satisfy it, then require an occurrence that is not a comment, not
+            // one arm of a disjunction, and not an absence assertion — because
+            // all three read identically to a `contains` check while proving
+            // nothing (fgdb-witness-census-named-not-witnessed-11fo).
             let body = &identity_tests[start..];
             let end = body[1..]
                 .find("\n#[test]")
                 .map(|offset| offset + 1)
                 .unwrap_or(body.len());
-            if !body[..end].contains(&format!("\"{code}\"")) {
-                broken.push(format!("{code}: test {name} no longer names it"));
+            if !demonstrates_code(&body[..end], code) {
+                broken.push(format!(
+                    "{code}: test {name} no longer demonstrates it firing (a comment, a \
+                     disjunction arm, or an absence assertion is not a demonstration)"
+                ));
             }
         }
     }
