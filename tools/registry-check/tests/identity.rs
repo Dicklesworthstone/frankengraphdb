@@ -2705,6 +2705,7 @@ fn appendix_a_wire_backed_union_requires_confirmed_owner_and_exact_arm_set() {
         "KeyDestroyExternalAckRef",
         "KeyDestroyFloorRef",
         "KeyDestructionTarget",
+        "RestoreServicePromotionManifest",
     ] {
         let mut missing_arm = real_appendix_catalog();
         let union = missing_arm
@@ -2820,6 +2821,8 @@ fn appendix_a_inline_record_unions_require_exact_payload_digests() {
         ("KeyDestructionTarget", "StorageMemberReplica"),
         ("RoleTransitionActivationState", "Meta"),
         ("RoleTransitionActivationState", "Shard"),
+        ("RestoreServicePromotionManifest", "Local"),
+        ("RestoreServicePromotionManifest", "Sharded"),
     ] {
         let mut wrong_payload = real_appendix_catalog();
         let arm = wrong_payload
@@ -4979,6 +4982,164 @@ fn idr_a20_structural_body_promotion_commands_and_activation_union_are_exact() {
         assert_ne!(targets[0].target_kind, "field");
         assert_eq!(targets[0].definition_status, "declared");
     }
+}
+
+#[test]
+fn idr_a20_restore_service_promotion_manifest_body_is_exact() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+
+    let projection = identity
+        .wire
+        .iter()
+        .find(|row| row.name == "PortableCertificateProjection")
+        .expect("the generic portable certificate projection family is registered");
+    assert_eq!(projection.wire_type_id, 0x055a);
+    assert_eq!(projection.kind, "record");
+    assert_eq!(projection.status, "reserved");
+    assert_eq!(
+        projection.encoding_context,
+        "generic portable certificate projection family embedding the target RemoteObjectIdentity, \
+         complete export projection bytes, canonical configuration/trust evidence bytes, and \
+         signatures; contains no StrongRef, CertifiedRemoteStrongRef, or consumer-local locator \
+         (a20:2575)"
+    );
+    assert_eq!(
+        projection.allowed_containing_schemas,
+        [
+            "RestoreServicePromotionManifest",
+            "RoleTransitionServicePromotionManifest",
+        ],
+        "one generic-free wire family must cover all five source instantiations"
+    );
+    assert_eq!(projection.max_size_bytes, 16_777_216);
+    assert!(
+        catalog
+            .reservations
+            .iter()
+            .all(|row| row.symbol != "PortableCertificateProjection"),
+        "an inline portable record family must not acquire a StrongRef reservation"
+    );
+
+    let projection_targets = catalog
+        .targets
+        .iter()
+        .filter(|row| row.source_key == "projection|wire_types|PortableCertificateProjection")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        projection_targets.len(),
+        1,
+        "the source reader has no `embeds` top-level cue, so the explicit wire fallback is singular"
+    );
+    assert_eq!(
+        projection_targets[0].target_row_id,
+        "a20:wire-type:portable-certificate-projection"
+    );
+    assert_eq!(projection_targets[0].target_kind, "wire-type");
+    assert_eq!(projection_targets[0].definition_status, "declared");
+
+    let body = identity
+        .ordinary_unions
+        .iter()
+        .find(|row| row.union_name == "RestoreServicePromotionManifest")
+        .expect("the manifest BODY union is registered separately from target_posture");
+    assert_eq!(body.containing_schema, "RestoreServicePromotionManifest");
+    assert_eq!(body.union_path, "RestoreServicePromotionManifest");
+    assert_eq!(body.field_tag, None);
+    assert_eq!(body.tag_wire_type, "u8");
+    assert_eq!(body.encoding_context, "closed-tagged");
+    assert_eq!(
+        body.allowed_containing_schemas,
+        ["RestoreServicePromotionManifest"]
+    );
+    assert_eq!(body.role_predicate, "true");
+    assert_eq!(body.version_status, "reserved");
+    assert_eq!(body.max_size_bytes, 16_777_216);
+    assert_eq!(
+        body.arms
+            .iter()
+            .map(|arm| {
+                (
+                    arm.arm_tag,
+                    arm.source_arm_name.as_str(),
+                    arm.stable_name.as_str(),
+                    arm.payload_kind.as_str(),
+                    arm.payload_sha256.as_deref(),
+                    arm.role_predicate.as_str(),
+                    arm.version_status.as_str(),
+                    arm.max_size_bytes,
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0x0001,
+                "Local",
+                "Local",
+                "inline-record",
+                Some("3bc32783b1a18f6ca068c78b4761b09acdee15f1580917396cfe8f7fbc8cdc1e"),
+                "true",
+                "reserved",
+                16_777_216,
+            ),
+            (
+                0x0002,
+                "Sharded",
+                "Sharded",
+                "inline-record",
+                Some("bcd5f764841bde67b6d43f866c5a873da0eca60b06e23932b054eda99484d5b6"),
+                "true",
+                "reserved",
+                16_777_216,
+            ),
+        ],
+        "BODY arm tags follow source spelling order and hashes own all five interior members"
+    );
+
+    for (source_key, target_row_id, target_kind) in [
+        (
+            "union|RestoreServicePromotionManifest|RestoreServicePromotionManifest",
+            "a20:union:restore-service-promotion-manifest-2d0396db03360a0b",
+            "union",
+        ),
+        (
+            "arm|RestoreServicePromotionManifest|RestoreServicePromotionManifest|Local",
+            "a20:union-arm:restore-service-promotion-manifest-local-2822a252b41ea330",
+            "union-arm",
+        ),
+        (
+            "arm|RestoreServicePromotionManifest|RestoreServicePromotionManifest|Sharded",
+            "a20:union-arm:restore-service-promotion-manifest-sharded-87f71c47ff1d0659",
+            "union-arm",
+        ),
+    ] {
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{source_key} must have one exact target");
+        assert_eq!(targets[0].target_row_id, target_row_id);
+        assert_eq!(targets[0].target_kind, target_kind);
+        assert_eq!(targets[0].definition_status, "declared");
+    }
+
+    let body_member_names = [
+        "local_prepare_evidence",
+        "local_configuration_and_endpoint_commitment",
+        "meta_prepare_evidence",
+        "sorted_shard_ready_evidence",
+        "complete_group_topology_configuration_and_endpoint_commitment",
+    ];
+    assert!(
+        identity.fields.iter().all(|field| {
+            !field
+                .containing_schema
+                .starts_with("RestoreServicePromotionManifest")
+                || !body_member_names.contains(&field.stable_name.as_str())
+        }),
+        "arm-interior members are committed by payload SHA and must not become pseudo-schema fields"
+    );
 }
 
 #[test]
@@ -7882,6 +8043,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "TerminalAuditGate"
                 | "RoleTransitionActivationState"
                 | "RestoreSourceAcquisitionSourceGate"
+                | "RestoreServicePromotionManifest"
                 | "LeaseWindowSuccessorProof"
                 | "TimeAuthorityObservationImport"
                 | "RoleTimeBoundSubjectInventoryClosure<Role:AuthorityOwningRole>"
@@ -9810,7 +9972,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             )
     });
     assert_eq!(
-        pre_erratum.ordinary_unions.len() + 378,
+        // 378 -> 379 (fgdb-peyc): the source-backed whole-schema BODY union
+        // for RestoreServicePromotionManifest is younger than the witness.
+        pre_erratum.ordinary_unions.len() + 379,
         current_union_count,
         "historical witness ordinary-union cohort drift: the post-erratum filters \
          removed a number of unions other than 378. This assert compares a \
@@ -9903,7 +10067,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             .iter()
             .map(|u| u.arms.len())
             .sum::<usize>()
-            + 1_108,
+            // 1_108 -> 1_110 (fgdb-peyc): Local and Sharded are the two
+            // payload-carrying BODY arms of RestoreServicePromotionManifest.
+            + 1_110,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );

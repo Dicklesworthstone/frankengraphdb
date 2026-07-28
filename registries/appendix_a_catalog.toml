@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3648
-projection_fallback_count = 134
-target_source_assignment_sha256 = "3480caa065cbaaf9f6df3574c6ca21bdf2e59f3b71ec981490d0c55dbb97ebc9"
+target_count = 3652
+projection_fallback_count = 135
+target_source_assignment_sha256 = "408ccce96218f8d90c1b9028e21f0ed016383221091117c9f90262c63d611b51"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -112010,4 +112010,90 @@ target_row_id = "a20:field:local-restore-service-completion-spec-expected-restor
 slice_id = "a20"
 source_key = "field|LocalRestoreServiceCompletionSpec|LocalRestoreServiceCompletionSpec.expected_restore_registry_state|expected_restore_registry_state"
 target_kind = "field"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a20"
+row_id = "a20:wire-type:portable-certificate-projection"
+wire_type_id = 0x055a
+name = "PortableCertificateProjection"
+kind = "record"
+status = "reserved"
+encoding_context = "generic portable certificate projection family embedding the target RemoteObjectIdentity, complete export projection bytes, canonical configuration/trust evidence bytes, and signatures; contains no StrongRef, CertifiedRemoteStrongRef, or consumer-local locator (a20:2575)"
+allowed_containing_schemas = ["RestoreServicePromotionManifest", "RoleTransitionServicePromotionManifest"]
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a20:target:wire-type-portable-certificate-projection"
+target_row_id = "a20:wire-type:portable-certificate-projection"
+slice_id = "a20"
+source_key = "projection|wire_types|PortableCertificateProjection"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[union]]
+slice_id = "a20"
+row_id = "a20:union:restore-service-promotion-manifest-2d0396db03360a0b"
+union_name = "RestoreServicePromotionManifest"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreServicePromotionManifest"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:restore-service-promotion-manifest-local-2822a252b41ea330"
+union_name = "RestoreServicePromotionManifest"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "Local"
+payload_kind = "inline-record"
+payload_sha256 = "3bc32783b1a18f6ca068c78b4761b09acdee15f1580917396cfe8f7fbc8cdc1e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a20"
+row_id = "a20:union-arm:restore-service-promotion-manifest-sharded-87f71c47ff1d0659"
+union_name = "RestoreServicePromotionManifest"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "Sharded"
+payload_kind = "inline-record"
+payload_sha256 = "bcd5f764841bde67b6d43f866c5a873da0eca60b06e23932b054eda99484d5b6"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a20:target:union-restore-service-promotion-manifest-2d0396db03360a0b"
+target_row_id = "a20:union:restore-service-promotion-manifest-2d0396db03360a0b"
+slice_id = "a20"
+source_key = "union|RestoreServicePromotionManifest|RestoreServicePromotionManifest"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-restore-service-promotion-manifest-local-2822a252b41ea330"
+target_row_id = "a20:union-arm:restore-service-promotion-manifest-local-2822a252b41ea330"
+slice_id = "a20"
+source_key = "arm|RestoreServicePromotionManifest|RestoreServicePromotionManifest|Local"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a20:target:union-arm-restore-service-promotion-manifest-sharded-87f71c47ff1d0659"
+target_row_id = "a20:union-arm:restore-service-promotion-manifest-sharded-87f71c47ff1d0659"
+slice_id = "a20"
+source_key = "arm|RestoreServicePromotionManifest|RestoreServicePromotionManifest|Sharded"
+target_kind = "union-arm"
 definition_status = "declared"

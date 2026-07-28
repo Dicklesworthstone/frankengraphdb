@@ -17683,6 +17683,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RestoreServicePromotionManifest"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RestoreServicePromotionManifest"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RestoreServicePromotionManifestTargetPosture"
 containing_schema = "RestoreServicePromotionManifest"
 union_path = "RestoreServicePromotionManifest.target_posture"
@@ -29472,6 +29483,32 @@ source_arm_name = "TerminalPinBasis"
 stable_name = "terminal_pin_basis"
 payload_kind = "inline-record"
 payload_sha256 = "d827318676abe5160760d64ad207dfbee120919c46abb59c8bd130d8a5ca412d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreServicePromotionManifest"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest"
+arm_tag = 0x0001
+source_arm_name = "Local"
+stable_name = "Local"
+payload_kind = "inline-record"
+payload_sha256 = "3bc32783b1a18f6ca068c78b4761b09acdee15f1580917396cfe8f7fbc8cdc1e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RestoreServicePromotionManifest"
+containing_schema = "RestoreServicePromotionManifest"
+union_path = "RestoreServicePromotionManifest"
+arm_tag = 0x0002
+source_arm_name = "Sharded"
+stable_name = "Sharded"
+payload_kind = "inline-record"
+payload_sha256 = "bcd5f764841bde67b6d43f866c5a873da0eca60b06e23932b054eda99484d5b6"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

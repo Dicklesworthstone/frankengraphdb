@@ -5804,3 +5804,12 @@ status = "reserved"
 encoding_context = "generated tag-refined discriminant whose validator admits only the PromotedAwaitingReopen arm (arm_tag 0x0003) of the LocalRestorePhase union (a18:2381); a precondition field carries the refined union's u8 tag and never the arm payload (a20:2605)"
 allowed_containing_schemas = ["LocalRestoreServiceCompletionSpec"]
 max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x055a
+name = "PortableCertificateProjection"
+kind = "record"
+status = "reserved"
+encoding_context = "generic portable certificate projection family embedding the target RemoteObjectIdentity, complete export projection bytes, canonical configuration/trust evidence bytes, and signatures; contains no StrongRef, CertifiedRemoteStrongRef, or consumer-local locator (a20:2575)"
+allowed_containing_schemas = ["RestoreServicePromotionManifest", "RoleTransitionServicePromotionManifest"]
+max_size_bytes = 16777216
