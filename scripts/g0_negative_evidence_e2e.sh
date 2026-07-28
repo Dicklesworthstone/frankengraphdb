@@ -65,7 +65,7 @@ fail() { gate_fail "$1"; }
 # current gate depends on:
 #   46e654e — the known-ancient revert law 4 requires;
 #   37c28c0 — the ledger/gate introduction;
-#   6a9be0e — the current ledger-only-disposition semantics.
+#   6a9be0e — the later law-4 repair lineage.
 # If any is absent, this checkout cannot adjudicate missing history. It is
 # UNRUN, not RED. Individual bad citations still fail normally once the anchors
 # prove this is a history-bearing repository.
@@ -79,6 +79,124 @@ missing_history_anchors() { # repository-root
     git -C "$repository" cat-file -e "${anchor}^{commit}" 2>/dev/null \
       || printf '%s\n' "$anchor"
   done
+}
+
+canonical_revert_target() { # repository-root commit
+  local repository="$1"
+  local commit="$2"
+
+  # Git's own revert message is an exact, target-bearing declaration. Parse the
+  # complete line, not a subject word: "write reverted" can describe work that
+  # was withdrawn before the commit and therefore changed no repository bytes.
+  git -C "$repository" show -s --format=%B "$commit" \
+    | sed -nE 's/^This reverts commit ([0-9a-f]{40})\.$/\1/p' \
+    | awk '
+        NR == 1 { target = $0 }
+        END {
+          if (NR == 1) print target
+          else exit 1
+        }
+      '
+}
+
+exact_inverse_revert() { # repository-root revert-commit target-commit
+  local repository="$1"
+  local revert_commit="$2"
+  local target_commit="$3"
+  local revert_parent reverse_patch target_parents target_parent target_patch
+
+  revert_parent="$(git -C "$repository" show -s --format=%P "$revert_commit")"
+  [ "$(printf '%s\n' "$revert_parent" | wc -w)" -eq 1 ] || return 1
+  git -C "$repository" merge-base --is-ancestor \
+    "$target_commit" "$revert_parent" || return 1
+
+  # Reverse the candidate commit, then compare that delta with each possible
+  # parent-relative target delta. This admits an ordinary or merge-mainline
+  # revert only when the committed bytes actually undo the declared target.
+  reverse_patch="$(
+    git -C "$repository" diff --no-ext-diff --binary \
+      "$revert_commit" "$revert_parent" \
+      | git patch-id --stable \
+      | awk 'NR == 1 { print $1 }'
+  )"
+  [ -n "$reverse_patch" ] || return 1
+
+  target_parents="$(git -C "$repository" show -s --format=%P "$target_commit")"
+  if [ -z "$target_parents" ]; then
+    target_parents="$(git -C "$repository" hash-object -t tree /dev/null)"
+  fi
+  for target_parent in $target_parents; do
+    target_patch="$(
+      git -C "$repository" diff --no-ext-diff --binary \
+        "$target_parent" "$target_commit" \
+        | git patch-id --stable \
+        | awk 'NR == 1 { print $1 }'
+    )"
+    if [ -n "$target_patch" ] && [ "$target_patch" = "$reverse_patch" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+dispositions_contain_commit() { # newline-delimited-dispositions full-commit
+  local dispositions="$1"
+  local commit="$2"
+  local disposition resolved
+
+  while IFS= read -r disposition; do
+    [ -n "$disposition" ] || continue
+    resolved="$(git -C "$ROOT" rev-parse --verify "${disposition}^{commit}" 2>/dev/null)" \
+      || continue
+    [ "$resolved" = "$commit" ] && return 0
+  done <<<"$dispositions"
+  return 1
+}
+
+run_revert_classifier_self_test() {
+  local failures_before="$GATE_FAIL"
+  local target=""
+  local mention
+  local known_target="7f3670291c76190761d33119019ced636980af37"
+  local mention_only=(4d20077 649cbf7 3a7248f 1994b8e)
+
+  if ! target="$(canonical_revert_target "$ROOT" 46e654e)"; then
+    fail "revert classifier rejected known canonical revert 46e654e"
+  elif [ "$target" != "$known_target" ]; then
+    fail "revert classifier resolved 46e654e to $target, expected $known_target"
+  elif ! exact_inverse_revert "$ROOT" 46e654e "$target"; then
+    fail "revert classifier did not verify 46e654e as the exact inverse of $target"
+  fi
+
+  # The wrong-target control proves the patch comparison is load-bearing rather
+  # than a message-only check.
+  if exact_inverse_revert \
+      "$ROOT" 46e654e 684ae2b7921ecc32888d7817fa547686b0696b6c; then
+    fail "revert classifier accepted the wrong-target mutant for 46e654e"
+  fi
+
+  # Every one of these subjects contains revert vocabulary. None committed a
+  # rollback: three describe withdrawn working changes and one documents them.
+  for mention in "${mention_only[@]}"; do
+    if canonical_revert_target "$ROOT" "$mention" >/dev/null; then
+      fail "revert classifier misclassified mention-only commit $mention"
+    fi
+  done
+
+  if ! dispositions_contain_commit \
+      $'3a7248f\n46e654e\n1994b8e' \
+      46e654e5f4cf36b6cbe7fe3e28e1b7c4935fb603; then
+    fail "revert disposition resolver rejected the known 46e654e row"
+  fi
+  if dispositions_contain_commit \
+      $'3a7248f\n1994b8e\n649cbf7' \
+      46e654e5f4cf36b6cbe7fe3e28e1b7c4935fb603; then
+    fail "revert disposition resolver accepted a population missing 46e654e"
+  fi
+
+  if [ "$GATE_FAIL" -eq "$failures_before" ]; then
+    pass "revert classifier and disposition resolver pass positive, wrong-target, mention-only, and missing-row controls"
+  fi
 }
 
 run_history_precondition_self_test() {
@@ -169,6 +287,7 @@ case "${1:-}" in
   --self-test)
     echo "== g0 negative-evidence history-precondition self-test =="
     run_history_precondition_self_test
+    run_revert_classifier_self_test
     print_tally
     if [ "$GATE_FAIL" -ne 0 ]; then
       exit 1
@@ -403,14 +522,17 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# LAW 4 — the literal AGENTS.md clause: every revert is memorialized.
+# LAW 4 — the literal AGENTS.md clause: every committed revert is memorialized.
 #
-# The population is small (measured: 3 in 705 commits, none a doctrine violation)
-# because AGENTS.md's own Backwards Compatibility section mandates repairing in
-# place. That finding is recorded in the ledger's preamble. The law is enforced
-# anyway and costs nothing: the moment a revert does land, it must be dispositioned.
+# The original gate searched subjects for a revert-shaped word. That is not an
+# operation classifier: "write reverted" can truthfully say that a working-tree
+# experiment was withdrawn before this commit, while the commit itself changes
+# only a Beads note. A committed revert now needs all three structural facts:
+# one canonical target line, a reachable target, and a reverse patch-id equal to
+# one parent-relative target patch-id. A subject that only names a revert is
+# reported but is not promoted into the operation population.
 # -----------------------------------------------------------------------------
-echo "  [law 4] every revert-semantics commit has a disposition"
+echo "  [law 4] every structurally verified revert commit has a disposition"
 
 # Dispositions are read STRUCTURALLY, from the § Reverts section only.
 #
@@ -423,53 +545,61 @@ echo "  [law 4] every revert-semantics commit has a disposition"
 disposed="$(awk '/^## Reverts$/ {r=1; next} /^## / {r=0} r' "$LEDGER" \
               | sed -nE 's/^- `([0-9a-f]+)`.*/\1/p')"
 
-# A DISPOSITION IS NOT A REVERT. Measured 2026-07-27: this law went red on
-# `4d20077 docs(negative-evidence): dispose 649cbf7 — the first revert to reach
-# the gate`, which is the commit that DISPOSITIONED a revert. The subject scan
-# below matches any commit that *mentions* reverts, so satisfying law 4 emits a
-# commit that violates law 4, whose disposition would emit another. An infinite
-# regress, and it fires the first time anyone ever obeys the law — which is why
-# it lay dormant until tonight: 649cbf7 was the first revert to reach this gate
-# at all, so 4d20077 was the first disposition ever written.
-#
-# The discriminator is STRUCTURAL, in the same spirit as the § Reverts parse
-# above: a disposition act touches the ledger and NOTHING else. A real revert
-# always restores content somewhere outside it. Anything touching a second path
-# stays in the population, so a commit that both reverts and disposes is still
-# scanned, and a `Revert "docs(negative-evidence): ..."` — a revert OF the ledger
-# — is excluded only if it changes the ledger alone, in which case it is exactly
-# the ledger-only edit this rule is about.
-#
-# The exclusion is REPORTED, never silent: a discriminator that can swallow the
-# population without saying so is the failure this whole gate exists to prevent.
+run_revert_classifier_self_test
+
+# Preserve the old subject population as an explicit measurement. It is useful
+# for proving the classifier moved for the intended reason, but it carries no
+# authority: four of today's five matches did not commit a reversal.
+subject_mentions=0
+subject_only_mentions=0
+while IFS= read -r sha; do
+  [ -n "$sha" ] || continue
+  subject_mentions=$((subject_mentions + 1))
+  if ! canonical_revert_target "$ROOT" "$sha" >/dev/null; then
+    subject_only_mentions=$((subject_only_mentions + 1))
+  fi
+done < <(git -C "$ROOT" log --all --pretty=format:'%H|%s' \
+           | grep -iE '\brevert(s|ed|ing)?\b' \
+           | cut -d'|' -f1)
+echo "    [law 4] $subject_only_mentions of $subject_mentions revert-word subject(s) are mention-only"
+
+n_candidates=0
 n_reverts=0
 missing_reverts=0
-n_disposition_acts=0
-while IFS= read -r sha; do
+invalid_reverts=0
+while IFS= read -r sha || [ -n "$sha" ]; do
   [ -z "$sha" ] && continue
-  touched="$(git -C "$ROOT" show --pretty=format: --name-only "$sha" | grep -c .)"
-  ledger_only="$(git -C "$ROOT" show --pretty=format: --name-only "$sha" \
-                   | grep -cx 'docs/NEGATIVE_EVIDENCE.md')"
-  if [ "$touched" -ge 1 ] && [ "$touched" -eq "$ledger_only" ]; then
-    n_disposition_acts=$((n_disposition_acts + 1))
+  n_candidates=$((n_candidates + 1))
+  subject="$(git -C "$ROOT" log -1 --pretty=format:%s "$sha")"
+  target=""
+  if ! target="$(canonical_revert_target "$ROOT" "$sha")"; then
+    fail "revert-shaped commit lacks exactly one canonical target line: $sha — $subject"
+    invalid_reverts=$((invalid_reverts + 1))
+    continue
+  fi
+  if ! git -C "$ROOT" cat-file -e "${target}^{commit}" 2>/dev/null; then
+    fail "revert commit names an unreachable target: $sha -> $target"
+    invalid_reverts=$((invalid_reverts + 1))
+    continue
+  fi
+  if ! exact_inverse_revert "$ROOT" "$sha" "$target"; then
+    fail "revert commit is not the exact inverse of its reachable target: $sha -> $target"
+    invalid_reverts=$((invalid_reverts + 1))
     continue
   fi
   n_reverts=$((n_reverts + 1))
-  printf '%s\n' "$disposed" | grep -Fxq "$sha" || {
-    subject="$(git -C "$ROOT" log -1 --pretty=format:%s "$sha")"
+  dispositions_contain_commit "$disposed" "$sha" || {
     fail "revert commit has no disposition in the ledger: $sha — $subject"
     missing_reverts=$((missing_reverts + 1))
   }
-done < <(git -C "$ROOT" log --all --pretty=format:'%h|%s' \
-           | grep -iE '\brevert(s|ed|ing)?\b' \
-           | cut -d'|' -f1)
+done < <(git -C "$ROOT" log --all --pretty=format:'%H' --extended-regexp \
+           --grep='^Revert ".*"$' \
+           --grep='^This reverts commit .*$')
 
-echo "    [law 4] $n_disposition_acts ledger-only disposition act(s) excluded from the revert population"
-
-if [ "$n_reverts" -eq 0 ]; then
-  fail "found ZERO revert-semantics commits — this repository is known to contain at least one (46e654e), so the scan is broken"
-elif [ "$missing_reverts" -eq 0 ]; then
-  pass "$n_reverts revert-semantics commit(s) all dispositioned"
+if [ "$n_candidates" -eq 0 ] || [ "$n_reverts" -eq 0 ]; then
+  fail "found ZERO structurally verified reverts — this repository contains exact inverse 46e654e, so the scan is broken"
+elif [ "$invalid_reverts" -eq 0 ] && [ "$missing_reverts" -eq 0 ]; then
+  pass "$n_reverts exact target-and-inverse revert commit(s) all dispositioned"
 fi
 
 # -----------------------------------------------------------------------------

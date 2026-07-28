@@ -609,9 +609,12 @@ unit = "artifact"
 # --- decorative. This gate carries four laws: AGENTS.md self-containment (every
 # --- repository path it names resolves, and the three it names under "NEVER
 # --- create" must NOT), ledger well-formedness, referential integrity of every
-# --- doctrine/bead/commit citation, and a disposition for every revert-semantics
-# --- commit. It reports the unclassified closed-bead residue rather than failing
-# --- on it, and says so, so the gap is measured rather than mistaken for cover.
+# --- doctrine/bead/commit citation, and a disposition for every revert commit
+# --- whose canonical target is reachable and whose reverse patch-id exactly
+# --- matches one target-parent delta. Revert words in a subject are reported,
+# --- never treated as proof that the commit performed a rollback. It reports the
+# --- unclassified closed-bead residue rather than failing on it, and says so, so
+# --- the gap is measured rather than mistaken for cover.
 
 [[checker]]
 symbol = "g0_negative_evidence_e2e"

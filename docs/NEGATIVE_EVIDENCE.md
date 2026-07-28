@@ -44,9 +44,10 @@ by construction.
 
 **This file is therefore keyed to the event that actually occurs: a doctrine or
 enforcement claim that was found to be false.** The revert-keyed reading is still
-enforced (§ Reverts below), so the literal clause is not unguarded — it is simply
-not the load-bearing population. Re-wording the `AGENTS.md` sentence to match is
-filed as residue on the owner bead.
+enforced (§ Reverts below) from a canonical target plus the committed inverse
+patch, so the literal clause is not unguarded — it is simply not the load-bearing
+population. Re-wording the `AGENTS.md` sentence to match is filed as residue on
+the owner bead.
 
 ## Scope rule
 
@@ -513,14 +514,18 @@ be a commit reachable in this repository.
 
 ## Reverts
 
-The literal `AGENTS.md` clause, enforced. Every commit in this repository whose
-subject carries revert semantics must appear here with a disposition. None to date
-is a doctrine violation; see the finding at the top of this file.
+The literal `AGENTS.md` clause, enforced. A performed revert has exactly one
+canonical `This reverts commit <sha>.` target, that target is reachable, and the
+new commit's reverse patch-id equals one parent-relative target patch-id. Subject
+vocabulary is not execution evidence. The older mention-only dispositions remain
+here because they explain the measurement that exposed the classifier defect;
+they are reported separately and no longer inflate the performed-revert count.
+None to date is a doctrine violation; see the finding at the top of this file.
 
-- `46e654e` — `Revert "chore(beads): re-split a03 and a05 on pane2's basis"` — beads bookkeeping; a bead split re-measured and undone. Not a doctrine violation.
-- `3a7248f` — `hand pane2 the provenance-churn measurement; revert my stale +1` — beads bookkeeping; a stale pin increment withdrawn. Not a doctrine violation.
-- `1994b8e` — `a03 — unions cannot land before the identity kinds; write reverted` — a catalog write withdrawn because a construction-order law forbade it. The law worked; this is the system functioning, not a violation of it.
-- `649cbf7` — `chore(beads): dkjg mint designed and checker-advanced to the pin boundary, then reverted [fgdb-dkjg]` — an exploratory a20 mint carried through base-name resolution, reservation-bijection, a derived construction order, and two full checker rounds, then deliberately withdrawn at the pin boundary with the tree left exactly as found (`git status` clean, checker `appendix` exit 0). The derivation survives in the commit message, so the next agent inherits the measurement without inheriting an unlanded write. Not a doctrine violation.
+- `46e654e` — **performed; exact inverse of `7f3670291c76190761d33119019ced636980af37`** — `Revert "chore(beads): re-split a03 and a05 on pane2's basis"` — beads bookkeeping; a bead split re-measured and undone. Not a doctrine violation.
+- `3a7248f` — **mention only; no committed rollback** — `hand pane2 the provenance-churn measurement; revert my stale +1` — beads bookkeeping recording that a stale working-tree pin increment was withdrawn before this commit. Not a doctrine violation.
+- `1994b8e` — **mention only; no committed rollback** — `a03 — unions cannot land before the identity kinds; write reverted` — records a catalog write withdrawn from the working tree because a construction-order law forbade it. The law worked; this is the system functioning, not a violation of it.
+- `649cbf7` — **mention only; no committed rollback** — `chore(beads): dkjg mint designed and checker-advanced to the pin boundary, then reverted [fgdb-dkjg]` — an exploratory a20 mint carried through base-name resolution, reservation-bijection, a derived construction order, and two full checker rounds, then deliberately withdrawn before this Beads-only commit with the tree left exactly as found (`git status` clean, checker `appendix` exit 0). The derivation survives in the commit message, so the next agent inherits the measurement without inheriting an unlanded write. Not a doctrine violation.
 
 ---
 
@@ -533,7 +538,7 @@ the laws in `scripts/g0_negative_evidence_e2e.sh`:
    declared prohibition that must NOT resolve;
 2. every entry's `doctrine` resolves in `registries/constitution.toml`, `bead` in
    `.beads/issues.jsonl`, and `repair` to a commit in this repository;
-3. every revert-semantics commit has a disposition in § Reverts;
+3. every target-bearing, exact-inverse revert commit has a disposition in § Reverts;
 4. the entry count never decreases below its declared floor.
 
 **What these laws do not catch**, stated so it is not mistaken for coverage: a
