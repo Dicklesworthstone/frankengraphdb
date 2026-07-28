@@ -732,8 +732,17 @@ run_ubs() {
 # settled pre-change root (`git archive 0c2d593 | tar -x` plus `git init`, since
 # UBS refuses a shadow workspace outside a repo): tests/identity.rs 338 -> 340,
 # src/identity.rs and tests/satisfiability.rs unchanged at 0.
+# MOVED 2026-07-28 (fgdb-a10-active-spec-gap-nowp): timing-safe 798 -> 799, +1,
+# in `tools/registry-check/tests/identity.rs`. The one finding is the only `==`
+# comparison added by the historical-witness filter for the landed wrapper rows:
+#     let post_erratum_a10_wrapper_field = |schema: &str| schema == "SequenceNeutralSpec<Tag>";
+# A schema-name lookup in a test filter — the same false-positive class as the
+# 340 this file already contributes; no secret, signature or token is involved.
+# ATTRIBUTED BY DIFFERENTIAL per the standing recipe: per-file count against the
+# settled pre-change copy, tests/identity.rs 340 -> 341, every other changed
+# file unchanged.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=798"
+  "Secret/token comparisons without timing-safe equality=799"
   "panic!/unreachable!/todo!/unimplemented!=135"
   "JWT decode, validation bypass, or missing claim binding=120"
 )

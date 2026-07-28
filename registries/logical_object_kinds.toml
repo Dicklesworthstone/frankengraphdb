@@ -4993,3 +4993,12 @@ construction_order = 30
 role_predicate = "role-local"
 max_size_bytes = 16777216
 golden_corpus = "corpus/logical/configuration_transition_spec/"
+
+[[kind]]
+object_kind = 0x057d
+name = "AuditFreezeField"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_freeze_field/"

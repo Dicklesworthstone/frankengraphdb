@@ -12650,6 +12650,48 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "SequenceNeutralSpec<Tag>"
+field_tag = 0x0001
+stable_name = "wire_tag"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1914 source-position tag 1; the u16 registered spec tag selecting the concrete sequence-neutral family row, embedded by value and retained and cut with SequenceNeutralSpec<Tag>, and never traversed as a reachability edge"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "SequenceNeutralSpec<Tag>"
+field_tag = 0x0004
+stable_name = "terminal_audit_freeze"
+exact_wire_type = "AuditFreezeField<Tag>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1914 source-position tag 4; the generated closed AuditFreezeField<Tag> wrapper field with exactly one Required arm per final protected terminal tag and Forbidden elsewhere under the SequenceNeutralSpec law, embedded by value and retained and cut with SequenceNeutralSpec<Tag>; the Required arm carries its separately registered retaining edges"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "SequenceNeutralSpec<Tag>"
+field_tag = 0x0005
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1914 source-position tag 5; the one source-required TerminalAuditGate wrapper field under the SequenceNeutralSpec law, embedded by value and retained and cut with SequenceNeutralSpec<Tag>; the Required arm carries its separately registered retaining edges"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
 containing_schema = "ShardAppliedAck"
 field_tag = 0x0008
 stable_name = "resulting_post_visibility_shard_state_root_ref"
@@ -14562,6 +14604,17 @@ union_path = "AuditCoverageClaimRef"
 tag_wire_type = "u8"
 encoding_context = "closed-tagged"
 allowed_containing_schemas = ["AuditCoverageClaimRef"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "AuditFreezeField<Tag>"
+containing_schema = "AuditFreezeField<Tag>"
+union_path = "AuditFreezeField<Tag>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuditFreezeField<Tag>", "SequenceNeutralSpec<Tag>"]
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
@@ -18994,6 +19047,32 @@ source_arm_name = "Meta"
 stable_name = "meta"
 payload_kind = "inline-record"
 payload_sha256 = "92193765cb4950c73e1bf3f4a19cd0d9d7529d9cefcf11750410d47d2069b98b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditFreezeField<Tag>"
+containing_schema = "AuditFreezeField<Tag>"
+union_path = "AuditFreezeField<Tag>"
+arm_tag = 0x0001
+source_arm_name = "Required"
+stable_name = "required"
+payload_kind = "inline-record"
+payload_sha256 = "234bcbb64981fea93c6570d72ffdfa81a2532630ba05558f8e022f4355a099f0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "AuditFreezeField<Tag>"
+containing_schema = "AuditFreezeField<Tag>"
+union_path = "AuditFreezeField<Tag>"
+arm_tag = 0x0002
+source_arm_name = "Forbidden"
+stable_name = "forbidden"
+payload_kind = "inline-record"
+payload_sha256 = "7d2e5a831a66cd2527ea6b6b656d11f5a67a02a8665ff1c9545286435f38e970"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

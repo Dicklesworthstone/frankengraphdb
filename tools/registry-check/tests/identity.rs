@@ -8182,6 +8182,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "KeyDestructionTarget"
                 | "ExpectedStateCondition"
                 | "TerminalAuditGate"
+                // Landed by fgdb-a10-active-spec-gap-nowp: the whole-schema
+                // audit-freeze union of the SequenceNeutralSpec wrapper
+                // (a10:1914), logical-backed at 0x057d, younger than the witness.
+                | "AuditFreezeField<Tag>"
                 | "RoleTransitionActivationState"
                 | "RestoreSourceAcquisitionSourceGate"
                 | "RestoreServicePromotionManifest"
@@ -9002,6 +9006,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     // a21 landed DurableCapabilityValidationEvidence's field table after the
     // erratum, so those rows are not part of the pre-erratum namespace.
     let post_erratum_a21_field = |schema: &str| schema == "DurableCapabilityValidationEvidence";
+    // Landed by fgdb-a10-active-spec-gap-nowp: every SequenceNeutralSpec<Tag>
+    // wrapper field row (a10:1914) is younger than the witness — the schema had
+    // zero field rows before that increment, so the schema scope cannot
+    // over-filter a historical row.
+    let post_erratum_a10_wrapper_field = |schema: &str| schema == "SequenceNeutralSpec<Tag>";
     // The a19 StrongRef field tranche. Every row is a post-erratum
     // addition, so the historical witness must reconstruct the namespace
     // that predates it.
@@ -10111,11 +10120,15 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 &field.containing_schema,
                 &field.stable_name,
             )
+            && !post_erratum_a10_wrapper_field(&field.containing_schema)
     });
     assert_eq!(
         // 378 -> 379 (fgdb-peyc): the source-backed whole-schema BODY union
         // for RestoreServicePromotionManifest is younger than the witness.
-        pre_erratum.ordinary_unions.len() + 379,
+        // 379 -> 380 (fgdb-a10-active-spec-gap-nowp): the AuditFreezeField<Tag>
+        // whole-schema union of the SequenceNeutralSpec wrapper is younger
+        // than the witness.
+        pre_erratum.ordinary_unions.len() + 380,
         current_union_count,
         "historical witness ordinary-union cohort drift: the post-erratum filters \
          removed a number of unions other than 378. This assert compares a \
@@ -10210,7 +10223,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             .sum::<usize>()
             // 1_108 -> 1_110 (fgdb-peyc): Local and Sharded are the two
             // payload-carrying BODY arms of RestoreServicePromotionManifest.
-            + 1_110,
+            // 1_110 -> 1_112 (fgdb-a10-active-spec-gap-nowp): Required and
+            // Forbidden are the two source-spelled arms of AuditFreezeField<Tag>.
+            + 1_112,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
@@ -10275,7 +10290,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // LocalRestoreServiceCompletionSpec.expected_restore_registry_state, admitted
         // to post_erratum_a20_field and enumerated there. current_field_count carries
         // it (983 -> 984) and the reconstruction stays at the frozen 225.
-        pre_erratum.fields.len() + 759,
+        // 759 -> 762 (fgdb-a10-active-spec-gap-nowp): the three landed
+        // SequenceNeutralSpec<Tag> wrapper fields (wire_tag,
+        // terminal_audit_freeze, terminal_audit_gate), claimed by
+        // post_erratum_a10_wrapper_field. current_field_count carries them
+        // (984 -> 987) and the reconstruction stays at the frozen 225.
+        pre_erratum.fields.len() + 762,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
     );

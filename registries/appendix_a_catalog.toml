@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3652
+target_count = 3659
 projection_fallback_count = 134
-target_source_assignment_sha256 = "8b5864af83f66bd8de214a8a7b608cf24c8271a9285dcf94e56fdfa383a9c884"
+target_source_assignment_sha256 = "ca4c5aad09c4b29130cd9b961c7ecea7c5657591f17c823989bbfd9a86fcd201"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -49082,7 +49082,7 @@ symbol = "AuditFreezeField"
 generic_signature = "<Tag>"
 source_key = "top|AuditFreezeField<Tag>"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "logical"
 source_locations = ["a10:1914"]
 
 [[top_level_candidate]]
@@ -112126,4 +112126,162 @@ target_row_id = "a20:union-arm:restore-service-promotion-manifest-sharded-87f71c
 slice_id = "a20"
 source_key = "arm|RestoreServicePromotionManifest|RestoreServicePromotionManifest|Sharded"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[union]]
+slice_id = "a10"
+row_id = "a10:union:audit-freeze-field-tag-14493f48a6c4bae5"
+union_name = "AuditFreezeField<Tag>"
+containing_schema = "AuditFreezeField<Tag>"
+union_path = "AuditFreezeField<Tag>"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["AuditFreezeField<Tag>", "SequenceNeutralSpec<Tag>"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:audit-freeze-field-tag-required-7ba6a9e309b055bb"
+union_name = "AuditFreezeField<Tag>"
+containing_schema = "AuditFreezeField<Tag>"
+union_path = "AuditFreezeField<Tag>"
+arm_tag = 0x0001
+source_arm_name = "Required"
+stable_name = "required"
+payload_kind = "inline-record"
+payload_sha256 = "234bcbb64981fea93c6570d72ffdfa81a2532630ba05558f8e022f4355a099f0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a10"
+row_id = "a10:union-arm:audit-freeze-field-tag-forbidden-54ccd3a4510bc90f"
+union_name = "AuditFreezeField<Tag>"
+containing_schema = "AuditFreezeField<Tag>"
+union_path = "AuditFreezeField<Tag>"
+arm_tag = 0x0002
+source_arm_name = "Forbidden"
+stable_name = "forbidden"
+payload_kind = "inline-record"
+payload_sha256 = "7d2e5a831a66cd2527ea6b6b656d11f5a67a02a8665ff1c9545286435f38e970"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:sequence-neutral-spec-tag-wire-tag"
+containing_schema = "SequenceNeutralSpec<Tag>"
+field_tag = 0x0001
+stable_name = "wire_tag"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1914 source-position tag 1; the u16 registered spec tag selecting the concrete sequence-neutral family row, embedded by value and retained and cut with SequenceNeutralSpec<Tag>, and never traversed as a reachability edge"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:sequence-neutral-spec-tag-terminal-audit-freeze"
+containing_schema = "SequenceNeutralSpec<Tag>"
+field_tag = 0x0004
+stable_name = "terminal_audit_freeze"
+exact_wire_type = "AuditFreezeField<Tag>"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1914 source-position tag 4; the generated closed AuditFreezeField<Tag> wrapper field with exactly one Required arm per final protected terminal tag and Forbidden elsewhere under the SequenceNeutralSpec law, embedded by value and retained and cut with SequenceNeutralSpec<Tag>; the Required arm carries its separately registered retaining edges"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[field]]
+slice_id = "a10"
+row_id = "a10:field:sequence-neutral-spec-tag-terminal-audit-gate"
+containing_schema = "SequenceNeutralSpec<Tag>"
+field_tag = 0x0005
+stable_name = "terminal_audit_gate"
+exact_wire_type = "TerminalAuditGate"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "role-local"
+retention_and_cut_rule = "a10:1914 source-position tag 5; the one source-required TerminalAuditGate wrapper field under the SequenceNeutralSpec law, embedded by value and retained and cut with SequenceNeutralSpec<Tag>; the Required arm carries its separately registered retaining edges"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a10:target:union-audit-freeze-field-tag-14493f48a6c4bae5"
+target_row_id = "a10:union:audit-freeze-field-tag-14493f48a6c4bae5"
+slice_id = "a10"
+source_key = "union|AuditFreezeField<Tag>|AuditFreezeField<Tag>"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-audit-freeze-field-tag-required-7ba6a9e309b055bb"
+target_row_id = "a10:union-arm:audit-freeze-field-tag-required-7ba6a9e309b055bb"
+slice_id = "a10"
+source_key = "arm|AuditFreezeField<Tag>|AuditFreezeField<Tag>|Required"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:union-arm-audit-freeze-field-tag-forbidden-54ccd3a4510bc90f"
+target_row_id = "a10:union-arm:audit-freeze-field-tag-forbidden-54ccd3a4510bc90f"
+slice_id = "a10"
+source_key = "arm|AuditFreezeField<Tag>|AuditFreezeField<Tag>|Forbidden"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-sequence-neutral-spec-tag-wire-tag"
+target_row_id = "a10:field:sequence-neutral-spec-tag-wire-tag"
+slice_id = "a10"
+source_key = "field|SequenceNeutralSpec<Tag>|SequenceNeutralSpec<Tag>.wire_tag|wire_tag"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-sequence-neutral-spec-tag-terminal-audit-freeze"
+target_row_id = "a10:field:sequence-neutral-spec-tag-terminal-audit-freeze"
+slice_id = "a10"
+source_key = "field|SequenceNeutralSpec<Tag>|SequenceNeutralSpec<Tag>.terminal_audit_freeze|terminal_audit_freeze"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a10:target:field-sequence-neutral-spec-tag-terminal-audit-gate"
+target_row_id = "a10:field:sequence-neutral-spec-tag-terminal-audit-gate"
+slice_id = "a10"
+source_key = "field|SequenceNeutralSpec<Tag>|SequenceNeutralSpec<Tag>.terminal_audit_gate|terminal_audit_gate"
+target_kind = "field"
+definition_status = "declared"
+
+[[logical_kind]]
+slice_id = "a10"
+row_id = "a10:logical-kind:audit-freeze-field"
+object_kind = 0x057d
+name = "AuditFreezeField"
+status = "reserved"
+construction_order = 10
+role_predicate = "true"
+max_size_bytes = 16777216
+golden_corpus = "corpus/logical/audit_freeze_field/"
+
+[[target]]
+row_id = "a10:target:logical-kind-audit-freeze-field"
+target_row_id = "a10:logical-kind:audit-freeze-field"
+slice_id = "a10"
+source_key = "top|AuditFreezeField<Tag>"
+target_kind = "logical-kind"
 definition_status = "declared"
