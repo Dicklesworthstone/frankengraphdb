@@ -140,6 +140,52 @@ compare_runs() {
   return "$rc"
 }
 
+# The measured shared-target race has a narrow rustc signature: Cargo launched
+# rustc with an --extern path, and that dependency artifact no longer existed
+# when rustc opened it. This is not a failed test or a comparison drift; the
+# workspace assertions never completed. Keep the classifier deliberately
+# narrower than generic "No such file" text so a missing source file or an
+# ordinary failing test remains RED.
+cargo_extern_artifact_disappeared() { # cargo-test-log
+  local log="$1"
+
+  [ -f "$log" ] || return 1
+  awk '
+    /^error: extern location for [[:alnum:]_]+ does not exist:$/ {
+      if ((getline artifact) > 0 \
+          && artifact ~ /^[[:space:]]+.*\/(debug|release)\/deps\/lib[^[:space:]]+\.(rlib|rmeta)$/) {
+        found = 1
+      }
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' "$log"
+}
+
+workspace_test_failed() { # stage log exit-code genuine-failure-diagnostic
+  local stage="$1"
+  local log="$2"
+  local rc="$3"
+  local failure_diagnostic="$4"
+
+  if cargo_extern_artifact_disappeared "$log"; then
+    gate_diag "INDETERMINATE: a Cargo dependency artifact disappeared during $stage."
+    gate_diag "  The workspace assertions did not complete; this is NOT a determinism finding."
+    grep -A1 '^error: extern location for .* does not exist:$' "$log" \
+      | head -10 >&2 || true
+    gate_diag "retained evidence: $EVIDENCE_DIR"
+    gate_abort_unrun "$stage: Cargo dependency artifact disappeared before the workspace suite completed"
+  fi
+
+  gate_diag "$failure_diagnostic (exit $rc)"
+  grep -E '^(test result: FAILED|error)' "$log" | head -20 >&2 || true
+  gate_diag "retained evidence: $EVIDENCE_DIR"
+  gate_die "$stage failed before the determinism gate could pass"
+}
+
 # --- the red-proof -----------------------------------------------------------
 # Four mutants over one synthetic transcript. Three MUST go red; the fourth
 # (pure reordering and retiming) MUST stay green, because a gate that reds on
@@ -188,12 +234,50 @@ FIXTURE
       fails=$((fails + 1))
     fi
   done
+
+  # The environmental classifier must identify the measured missing-rlib
+  # signature and reject nearby real failures. These two negative controls keep
+  # a generic compiler error or a failed test from borrowing UNRUN.
+  cat >"$d/artifact-missing.txt" <<'FIXTURE'
+error: extern location for fgdb_bigint does not exist:
+  /data/tmp/cargo-target/debug/deps/libfgdb_bigint-20abfb7010900144.rlib
+error: aborting due to 1 previous error
+FIXTURE
+  cat >"$d/compiler-error.txt" <<'FIXTURE'
+error[E0308]: mismatched types
+  --> crates/fgdb-bigint/src/lib.rs:42:9
+error: aborting due to 1 previous error
+FIXTURE
+  cat >"$d/test-failure.txt" <<'FIXTURE'
+test result: FAILED. 41 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+error: test failed, to rerun pass `-p fgdb-bigint --lib`
+FIXTURE
+  local classifier_case expect_classifier got_classifier
+  for classifier_case in \
+    artifact-missing:match compiler-error:reject test-failure:reject; do
+    expect_classifier="${classifier_case#*:}"
+    classifier_case="${classifier_case%%:*}"
+    if cargo_extern_artifact_disappeared "$d/$classifier_case.txt"; then
+      got_classifier=match
+    else
+      got_classifier=reject
+    fi
+    if [ "$got_classifier" = "$expect_classifier" ]; then
+      printf '    %-16s expected %-6s got %-6s OK\n' \
+        "$classifier_case" "$expect_classifier" "$got_classifier"
+    else
+      printf '    %-16s expected %-6s got %-6s MISCLASSIFIED\n' \
+        "$classifier_case" "$expect_classifier" "$got_classifier"
+      fails=$((fails + 1))
+    fi
+  done
   if [ "$fails" -ne 0 ]; then
-    echo "ERROR: the determinism comparator cannot detect $fails of its own mutants" >&2
+    echo "ERROR: $fails determinism/classification controls failed" >&2
     echo "retained self-test evidence: $d" >&2
     return 1
   fi
-  echo "    comparator red-proof GREEN; retained evidence: $d"
+  gate_pass "determinism comparator mutants and Cargo artifact-race classifier controls"
+  echo "    retained self-test evidence: $d"
 }
 
 # Hash of every input that can legitimately change the verdict. Used to detect
@@ -248,37 +332,39 @@ HEAD_BEFORE="$(git rev-parse HEAD 2>/dev/null || echo 'not-a-git-tree')"
 echo "    HEAD=$HEAD_BEFORE source=$PIN_BEFORE"
 
 echo "==> workspace test run 1 of 2"
-cargo test --locked --workspace --no-fail-fast >"$EVIDENCE_DIR/run1.txt" 2>&1 || {
-  echo "ERROR: run 1 did not pass; determinism is not the question yet" >&2
-  grep -E '^(test result: FAILED|error)' "$EVIDENCE_DIR/run1.txt" | head -20 >&2 || true
-  echo "retained evidence: $EVIDENCE_DIR" >&2
-  exit 1
-}
+if cargo test --locked --workspace --no-fail-fast \
+    >"$EVIDENCE_DIR/run1.txt" 2>&1; then
+  :
+else
+  workspace_test_failed "run 1" "$EVIDENCE_DIR/run1.txt" "$?" \
+    "ERROR: run 1 did not pass; determinism is not the question yet"
+fi
 
 PIN_MID="$(source_pin)"
 if [ "$PIN_MID" != "$PIN_BEFORE" ]; then
-  echo "INDETERMINATE: the source tree changed during run 1 (another agent committed)." >&2
-  echo "  before=$PIN_BEFORE  after=$PIN_MID" >&2
-  echo "  This is NOT a determinism finding. Re-run against a quiet tree." >&2
-  echo "retained evidence: $EVIDENCE_DIR" >&2
-  exit 2
+  gate_diag "INDETERMINATE: the source tree changed during run 1 (another agent committed)."
+  gate_diag "  before=$PIN_BEFORE  after=$PIN_MID"
+  gate_diag "  This is NOT a determinism finding. Re-run against a quiet tree."
+  gate_diag "retained evidence: $EVIDENCE_DIR"
+  gate_abort_unrun "source tree changed during run 1; the determinism comparison did not run"
 fi
 
 echo "==> workspace test run 2 of 2"
-cargo test --locked --workspace --no-fail-fast >"$EVIDENCE_DIR/run2.txt" 2>&1 || {
-  echo "ERROR: run 2 did not pass although run 1 did — that is itself nondeterminism" >&2
-  grep -E '^(test result: FAILED|error)' "$EVIDENCE_DIR/run2.txt" | head -20 >&2 || true
-  echo "retained evidence: $EVIDENCE_DIR" >&2
-  exit 1
-}
+if cargo test --locked --workspace --no-fail-fast \
+    >"$EVIDENCE_DIR/run2.txt" 2>&1; then
+  :
+else
+  workspace_test_failed "run 2" "$EVIDENCE_DIR/run2.txt" "$?" \
+    "ERROR: run 2 did not pass although run 1 did — that is itself nondeterminism"
+fi
 
 PIN_AFTER="$(source_pin)"
 if [ "$PIN_AFTER" != "$PIN_BEFORE" ]; then
-  echo "INDETERMINATE: the source tree changed during run 2 (another agent committed)." >&2
-  echo "  before=$PIN_BEFORE  after=$PIN_AFTER" >&2
-  echo "  This is NOT a determinism finding. Re-run against a quiet tree." >&2
-  echo "retained evidence: $EVIDENCE_DIR" >&2
-  exit 2
+  gate_diag "INDETERMINATE: the source tree changed during run 2 (another agent committed)."
+  gate_diag "  before=$PIN_BEFORE  after=$PIN_AFTER"
+  gate_diag "  This is NOT a determinism finding. Re-run against a quiet tree."
+  gate_diag "retained evidence: $EVIDENCE_DIR"
+  gate_abort_unrun "source tree changed during run 2; the determinism comparison did not run"
 fi
 
 echo "==> normalize and byte-compare the two runs"

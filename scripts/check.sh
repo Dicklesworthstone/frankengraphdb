@@ -1036,22 +1036,82 @@ record_registered_result() {
   fi
 }
 
+# A child may refine its non-green exit as UNRUN only when BOTH channels of the
+# shared contract agree:
+#   1. exit GATE_EXIT_UNRUN (the authoritative non-green status), and
+#   2. stdout contains one or more exactly paired UNRUN + FAIL lines, with no
+#      standalone FAIL or RED line.
+#
+# The pairing is load-bearing. Several live scripts historically used exit 2
+# for build/usage errors; accepting the code alone would relabel a real failure
+# as environmental. Reading the merged log is also unsafe because diagnostics
+# on stderr are deliberately unconstrained, so run_registered_command captures
+# the contract transcript and diagnostics separately.
+registered_command_reported_only_unrun() { # exit-code stdout-transcript
+  local rc="$1"
+  local transcript="$2"
+
+  [ "$rc" -eq "$GATE_EXIT_UNRUN" ] || return 1
+  [ -f "$transcript" ] || return 1
+  awk '
+    /^UNRUN / {
+      detail = substr($0, 7)
+      unrun[detail]++
+      unrun_count++
+      next
+    }
+    /^FAIL / {
+      detail = substr($0, 6)
+      fail[detail]++
+      fail_count++
+      next
+    }
+    /^RED / {
+      red_count++
+      next
+    }
+    END {
+      if (unrun_count == 0 || fail_count != unrun_count || red_count != 0) {
+        exit 1
+      }
+      for (detail in unrun) {
+        if (unrun[detail] != fail[detail]) {
+          exit 1
+        }
+      }
+      for (detail in fail) {
+        if (fail[detail] != unrun[detail]) {
+          exit 1
+        }
+      }
+    }
+  ' "$transcript"
+}
+
 run_registered_command() {
   local kind="$1"
   local artifact="$2"
   shift 2
   local log
+  local diagnostics_log
   local gate_rc
 
   REGISTERED_SEQ=$((REGISTERED_SEQ + 1))
   log="$GATE_LOG_DIR/registered-$REGISTERED_SEQ.log"
+  diagnostics_log="$GATE_LOG_DIR/registered-$REGISTERED_SEQ.diagnostics.log"
   echo "==> registered $kind: $artifact"
-  if "$@" >"$log" 2>&1; then
-    record_registered_result "$kind" "$artifact" pass "exit 0; log $log"
+  if "$@" >"$log" 2>"$diagnostics_log"; then
+    record_registered_result "$kind" "$artifact" pass \
+      "exit 0; transcript $log; diagnostics $diagnostics_log"
   else
     gate_rc=$?
-    record_registered_result "$kind" "$artifact" red \
-      "exit $gate_rc; log $log"
+    if registered_command_reported_only_unrun "$gate_rc" "$log"; then
+      record_registered_result "$kind" "$artifact" unrun \
+        "exit $gate_rc; transcript $log; diagnostics $diagnostics_log"
+    else
+      record_registered_result "$kind" "$artifact" red \
+        "exit $gate_rc; transcript $log; diagnostics $diagnostics_log"
+    fi
   fi
 }
 
@@ -1725,8 +1785,8 @@ gate_pass "never reached"' >"$root/scripts/skips.sh"
   ( cd "$root" && bash scripts/skips.sh ) \
     >"$work/contract-skip.out" 2>/dev/null
   skip_rc=$?
-  if [ "$skip_rc" -eq 0 ]; then
-    echo "SELF-TEST RED: a gate that executed no assertions exited 0" >&2
+  if [ "$skip_rc" -ne "$GATE_EXIT_UNRUN" ]; then
+    echo "SELF-TEST RED: a gate that executed no assertions exited $skip_rc, expected UNRUN exit $GATE_EXIT_UNRUN" >&2
     return 1
   fi
   if [ "$(grep -cE '^UNRUN ' "$work/contract-skip.out")" -ne 1 ]; then
@@ -1755,8 +1815,8 @@ gate_verdict' >"$root/scripts/one_unrun.sh"
   ( cd "$root" && bash scripts/one_unrun.sh ) \
     >"$work/contract-unrun.out" 2>/dev/null
   unrun_rc=$?
-  if [ "$unrun_rc" -eq 0 ]; then
-    echo "SELF-TEST RED: a gate with one UNRUN check reported a green verdict" >&2
+  if [ "$unrun_rc" -ne "$GATE_EXIT_UNRUN" ]; then
+    echo "SELF-TEST RED: a gate with one UNRUN check exited $unrun_rc, expected $GATE_EXIT_UNRUN" >&2
     return 1
   fi
   if [ "$(grep -cE '^UNRUN ' "$work/contract-unrun.out")" -ne 1 ] \
@@ -2018,11 +2078,14 @@ run_mutation_self_test() {
   local fixture_root
   local failing_log
   local unrun_log
+  local child_state_log
 
   work="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-check-self-test.XXXXXX")"
   fixture_root="$work/root"
-  mkdir -p "$fixture_root/registries" "$fixture_root/scripts" \
+  mkdir -p "$fixture_root/registries" "$fixture_root/scripts/lib" \
     "$fixture_root/tools"
+  cp "$GATE_VERDICT_LIB" "$fixture_root/scripts/lib/gate_verdict.sh" \
+    || return 1
   GATE_LOG_DIR="$work/gate-logs"
   mkdir -p "$GATE_LOG_DIR"
 
@@ -2055,6 +2118,109 @@ EOF
     echo "SELF-TEST RED: failing registration printed a green verdict" >&2
     return 1
   fi
+
+  # A registered child has a three-state contract of its own. Exit 2 alone is
+  # not enough — several scripts use it for usage/build errors — and UNRUN text
+  # alone is not enough either. Only a dedicated exit plus exactly paired
+  # UNRUN+FAIL stdout lines may propagate as UNRUN. A standalone FAIL dominates
+  # and stays RED.
+  cat >"$fixture_root/scripts/child_unrun.sh" <<'EOF'
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/lib/gate_verdict.sh"
+gate_init "child_unrun"
+gate_pass "the precondition probe ran"
+gate_abort_unrun "a required Cargo artifact disappeared"
+EOF
+  cat >"$fixture_root/scripts/child_bare_exit2.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "usage/build error" >&2
+exit 2
+EOF
+  cat >"$fixture_root/scripts/child_mixed.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'UNRUN a required Cargo artifact disappeared\n'
+printf 'FAIL a required Cargo artifact disappeared\n'
+printf 'FAIL a real assertion also failed\n'
+exit 2
+EOF
+  cat >"$fixture_root/scripts/child_wrong_exit.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'UNRUN a required Cargo artifact disappeared\n'
+printf 'FAIL a required Cargo artifact disappeared\n'
+exit 1
+EOF
+  cat >"$fixture_root/scripts/child_stderr_unrun.sh" <<'EOF'
+#!/usr/bin/env bash
+un=UN
+fa=FA
+printf '%s %s\n' "${un}RUN" 'a required Cargo artifact disappeared' >&2
+printf '%s %s\n' "${fa}IL" 'a required Cargo artifact disappeared' >&2
+exit 2
+EOF
+  cat >"$fixture_root/registries/child_states.toml" <<'EOF'
+[[checker]]
+symbol = "mutation_child_unrun"
+kind = "script"
+artifact = "scripts/child_unrun.sh"
+status = "live"
+
+[[checker]]
+symbol = "mutation_child_bare_exit2"
+kind = "script"
+artifact = "scripts/child_bare_exit2.sh"
+status = "live"
+
+[[checker]]
+symbol = "mutation_child_mixed"
+kind = "script"
+artifact = "scripts/child_mixed.sh"
+status = "live"
+
+[[checker]]
+symbol = "mutation_child_wrong_exit"
+kind = "script"
+artifact = "scripts/child_wrong_exit.sh"
+status = "live"
+
+[[checker]]
+symbol = "mutation_child_stderr_unrun"
+kind = "script"
+artifact = "scripts/child_stderr_unrun.sh"
+status = "live"
+EOF
+  child_state_log="$work/registered-child-states.log"
+  if (
+    reset_registered_counters
+    GATE_LOG_DIR="$work/registered-child-gate-logs"
+    mkdir -p "$GATE_LOG_DIR"
+    run_registered_gates \
+      "$fixture_root" "$fixture_root/registries/child_states.toml" 0
+    print_registered_summary
+  ) >"$child_state_log" 2>&1; then
+    echo "SELF-TEST RED: registered child-state controls produced a green exit" >&2
+    return 1
+  fi
+  if ! grep -Fq "UNRUN registered script scripts/child_unrun.sh" \
+      "$child_state_log"; then
+    echo "SELF-TEST RED: a conforming child UNRUN was collapsed into RED" >&2
+    return 1
+  fi
+  local malformed_child
+  for malformed_child in \
+    child_bare_exit2.sh child_mixed.sh child_wrong_exit.sh \
+    child_stderr_unrun.sh; do
+    if ! grep -Fq "RED registered script scripts/$malformed_child" \
+        "$child_state_log"; then
+      echo "SELF-TEST RED: malformed child $malformed_child was not RED" >&2
+      return 1
+    fi
+    if grep -Fq "UNRUN registered script scripts/$malformed_child" \
+        "$child_state_log"; then
+      echo "SELF-TEST RED: malformed child $malformed_child borrowed UNRUN" >&2
+      return 1
+    fi
+  done
 
   cat >"$fixture_root/tools/unwired.rs" <<'EOF'
 // Existing artifact with no supported binary runner mapping.
@@ -2166,6 +2332,8 @@ EOF
 
   echo "CHECK.SH MUTATION SELF-TEST PASS"
   echo "  failing registered gate: RED"
+  echo "  registered child outcomes: paired stdout + exit-2 UNRUN propagated;"
+  echo "    bare, mixed, wrong-exit, and stderr-only evidence stayed RED"
   echo "  registered gate without a runner: UNRUN and nonzero"
   echo "  cargo-test attribution: pass / red / unrun / ambiguous all separated"
   echo "  unrun cargo-test artifact: UNRUN and nonzero"

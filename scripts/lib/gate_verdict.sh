@@ -102,6 +102,13 @@ GATE_TREE_LIST_START=""
 GATE_TREE_HEAD_START=""
 GATE_TREE_CHECKED=0
 
+# A non-green exit still answers only the binary question "did every assertion
+# execute and pass?". This code is the refinement for the third state: the gate
+# could not finish its assertions, and it reported only paired UNRUN + FAIL
+# contract lines. A parent must validate both the code and the transcript before
+# propagating UNRUN; several legacy tools also use exit 2 for usage errors.
+GATE_EXIT_UNRUN=2
+
 # gate_tree_fingerprint — the identity of the tree a gate is judging.
 #
 # WHY THIS EXISTS. A gate's assertions are only meaningful about the tree they
@@ -531,6 +538,18 @@ gate_unrun() {
   printf 'FAIL %s\n' "$*"
 }
 
+# gate_abort_unrun <detail> — fail-fast third state.
+#
+# Use when continuing would manufacture a verdict: a required corpus vanished,
+# a build artifact disappeared, or another environmental precondition ceased to
+# hold after the gate began. The dedicated exit code lets a conforming parent
+# preserve UNRUN instead of collapsing it into RED; the paired transcript is
+# still required so a bare usage-error exit 2 cannot borrow this state.
+gate_abort_unrun() {
+  gate_unrun "$*"
+  exit "$GATE_EXIT_UNRUN"
+}
+
 # gate_diag <line...> — the WHY. stderr, unconstrained, never a verdict.
 gate_diag() {
   printf '%s\n' "$*" >&2
@@ -565,7 +584,13 @@ gate_verdict() {
   gate_check_tree_stable || true
   printf '%s: %d passed, %d failed, %d unrun\n' \
     "$GATE_NAME" "$GATE_PASS" "$GATE_FAIL" "$GATE_UNRUN"
-  [ "$GATE_FAIL" -eq 0 ] && [ "$GATE_UNRUN" -eq 0 ]
+  if [ "$GATE_FAIL" -ne 0 ]; then
+    return 1
+  fi
+  if [ "$GATE_UNRUN" -ne 0 ]; then
+    return "$GATE_EXIT_UNRUN"
+  fi
+  return 0
 }
 
 # gate_on_exit — the EXIT trap. `local rc=$?` MUST be the first statement.
@@ -600,7 +625,7 @@ gate_on_exit() {
   # real-gate proof, because the synthetic probe moved the tree BEFORE
   # gate_verdict and so never exercised this window.
   if ! gate_check_tree_stable; then
-    [ "$rc" -eq 0 ] && exit 1
+    [ "$rc" -eq 0 ] && exit "$GATE_EXIT_UNRUN"
   fi
   # A GREEN EXIT OVER ZERO EXECUTED ASSERTIONS IS THE THIRD STATE, NOT THE
   # FIRST. This is the path that catches a gate whose body was skipped whole —
@@ -611,7 +636,7 @@ gate_on_exit() {
     && [ $((GATE_PASS + GATE_FAIL + GATE_UNRUN)) -eq 0 ]; then
     GATE_CONTRACT_LINE_EMITTED=1
     gate_unrun "${GATE_NAME:-gate}: exited 0 having executed no assertions"
-    exit 1
+    exit "$GATE_EXIT_UNRUN"
   fi
   # An UNRUN already carries the FAIL token, so it counts as "reported". Testing
   # GATE_FAIL alone here emitted a SECOND FAIL line for a gate whose only
