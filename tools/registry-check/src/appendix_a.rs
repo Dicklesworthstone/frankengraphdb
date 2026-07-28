@@ -15516,12 +15516,13 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&uncertified).len(),
-            82,
-            "the coverage law must still evaluate a20's 82 uncovered keys"
+            74,
+            "the coverage law must still evaluate a20's 74 uncovered keys after fgdb-peyc \
+             covers the BODY union, both arms, and all five arm-interior members"
         );
 
         // CONFORMANT CONTROL: certify the universe and only the universe code
-        // disappears. The 82 stay, so the certification gates the CLAIM and
+        // disappears. The 74 stay, so the certification gates the CLAIM and
         // does not weaken the coverage law it guards.
         let certified = run_coverage(&forced, &census, &[], &["a20"]);
         assert!(
@@ -15531,7 +15532,7 @@ name = "Probe"
         );
         assert_eq!(
             uncovered_field_violations(&certified).len(),
-            82,
+            74,
             "certification must not change what the coverage law finds"
         );
     }

@@ -4992,6 +4992,7 @@ fn idr_a20_restore_service_promotion_manifest_body_is_exact() {
     let projection = identity
         .wire
         .iter()
+        // ubs:ignore -- public wire-family discriminator, not secret material.
         .find(|row| row.name == "PortableCertificateProjection")
         .expect("the generic portable certificate projection family is registered");
     assert_eq!(projection.wire_type_id, 0x055a);
@@ -5024,6 +5025,7 @@ fn idr_a20_restore_service_promotion_manifest_body_is_exact() {
     let projection_targets = catalog
         .targets
         .iter()
+        // ubs:ignore -- public catalog source identity, not secret material.
         .filter(|row| row.source_key == "projection|wire_types|PortableCertificateProjection")
         .collect::<Vec<_>>();
     assert_eq!(
@@ -5116,6 +5118,7 @@ fn idr_a20_restore_service_promotion_manifest_body_is_exact() {
         let targets = catalog
             .targets
             .iter()
+            // ubs:ignore -- public catalog source identity, not secret material.
             .filter(|row| row.source_key == source_key)
             .collect::<Vec<_>>();
         assert_eq!(targets.len(), 1, "{source_key} must have one exact target");
