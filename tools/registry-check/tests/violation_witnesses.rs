@@ -405,8 +405,10 @@ fn topology_live_tree_witnesses() -> Vec<TopologyWitness> {
     TopologyWitness { code: "internal_dependency_not_path", fact: "a reserved crate row is renamed onto a git-sourced package", mutate: |r| crate_row_mut(r, "fgdb-shard").name = "asupersync".into() },
     TopologyWitness { code: "dependency_on_inactive_crate", fact: "a depended-on crate row is demoted to planned", mutate: |r| crate_row_mut(r, "fgdb-types").activation_status = "planned".into() },
     TopologyWitness { code: "forbidden_dependency", fact: "a forbidden package prefix is repointed at a linked foundation package", mutate: |r| r.forbidden_dependencies[0].package_prefix = "asupersync".into() },
+    TopologyWitness { code: "ordinary_crate_relaxes_unsafe", fact: "an unsafe island is relabelled forbid, exposing its ledgered allow sites to the ordinary-crate live-root law", mutate: |r| crate_row_mut(r, "fgdb-unsafe-simd").unsafe_policy = "forbid".into() },
     TopologyWitness { code: "design_only_linked", fact: "a linked foundation project is relabelled design_only", mutate: |r| project_mut(r, "asupersync").linkage = "design_only".into() },
     TopologyWitness { code: "foundation_source_drift", fact: "a foundation project's git_url is repointed", mutate: |r| project_mut(r, "asupersync").git_url = "https://example.invalid/elsewhere".into() },
+    TopologyWitness { code: "default_feature_escape", fact: "franken_networkx is changed to require disabled defaults while fgdb-codec consumes fnx-generators with defaults", mutate: |r| project_mut(r, "franken_networkx").default_features_must_be_disabled = true },
     ]
 }
 
@@ -905,7 +907,7 @@ fn every_witness_row_names_a_distinct_law() {
     codes.extend(threat_witnesses().iter().map(|row| row.code));
     codes.extend(registry_witnesses().iter().map(|row| row.code));
 
-    assert_eq!(codes.len(), 107, "table row count moved");
+    assert_eq!(codes.len(), 109, "table row count moved");
     let distinct: BTreeSet<&str> = codes.iter().copied().collect();
     // `active_not_a_member`/`active_manifest_missing` and
     // `island_inherits_forbid`/`island_root_missing_deny` are two laws each
