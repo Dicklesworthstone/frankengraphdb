@@ -7774,12 +7774,11 @@ const COMPLETE_CENSUS_DOMAIN_WAIVERS: &[CompleteCensusDomainWaiver] =
 /// EMPTY, and the emptiness is the enforcement rather than a second vacuity: a
 /// slice marked complete while absent from this list is a violation naming the
 /// universe, so the coverage certificate cannot be issued over a census known to
-/// drop source. `fgdb-qh3r` is the blocker — the census drops the body of every
-/// braced arm whose head is `Local`, `Meta` or `Shard` (110 of 114 sites), and
-/// at 5 of those sites no member of the body appears anywhere in the census, so
-/// 11 source-spelled members are outside the universe at ANY setting of
-/// `definition_status`. Add a slice here only with the measurement that shows
-/// its census emits every member its source spells.
+/// drop source. `fgdb-qh3r` recovered the owner-bound supplemental posture
+/// unions in a18 and a20, but did not certify either slice's whole census. The
+/// separate a03 anonymous-common-header ownership gap remains tracked by
+/// `fgdb-ckb9`. Add a slice here only with the measurement that its census emits
+/// every member its source spells.
 const CENSUS_UNIVERSE_CERTIFIED_SLICES: &[&str] = &[];
 
 /// The complete-slice field census law (fgdb-z35a): every census field key of
@@ -15551,15 +15550,17 @@ name = "Probe"
     }
 
     /// The certified list is EMPTY at HEAD and that emptiness is load-bearing:
-    /// it is what makes every completeness claim red while `fgdb-qh3r` is open.
-    /// If a slice is ever certified, this test is the one that forces the
-    /// certifier to state the measurement.
+    /// `fgdb-qh3r` repaired two owner-bound unions but did not produce a
+    /// source-complete measurement for any whole slice; `fgdb-ckb9` tracks the
+    /// remaining known a03 ownership gap. If a slice is ever certified, this
+    /// test is the one that forces the certifier to state the measurement.
     #[test]
-    fn the_certified_universe_list_is_empty_until_qh3r_lands() {
+    fn the_certified_universe_list_is_empty_without_a_source_complete_measurement() {
         assert!(
             CENSUS_UNIVERSE_CERTIFIED_SLICES.is_empty(),
             "certifying a census universe requires the measurement that its census emits every \
-             member its source spells; fgdb-qh3r is open, got {CENSUS_UNIVERSE_CERTIFIED_SLICES:?}"
+             member its source spells; remaining known gaps include fgdb-ckb9, got \
+             {CENSUS_UNIVERSE_CERTIFIED_SLICES:?}"
         );
     }
 
