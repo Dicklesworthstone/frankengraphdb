@@ -40,8 +40,8 @@ occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51
 
 [target_manifest]
 target_count = 3652
-projection_fallback_count = 135
-target_source_assignment_sha256 = "408ccce96218f8d90c1b9028e21f0ed016383221091117c9f90262c63d611b51"
+projection_fallback_count = 134
+target_source_assignment_sha256 = "8b5864af83f66bd8de214a8a7b608cf24c8271a9285dcf94e56fdfa383a9c884"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -187,16 +187,16 @@ predecessor = "a03"
 successor = "a05"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 27
-top_level_candidate_ids_sha256 = "3e49b908821efaf475c0dcbe57fb973f7b3aec0ff8ef5e883ad04a71b3fa7f93"
-field_candidate_count = 263
-field_candidate_ids_sha256 = "f71a864797be0a20f41d46b3fcf048c390f605e75a82b9e181c27de54df8ab99"
+top_level_candidate_count = 28
+top_level_candidate_ids_sha256 = "241f0fc9ae5b593987505fcb3854cce92d284140ab9388a710c43b42153c22fc"
+field_candidate_count = 273
+field_candidate_ids_sha256 = "f9c7bc3ea127b36f27b4027b85d0913567df1200b0ae72084ba1a4c099a226f6"
 union_candidate_count = 14
 union_candidate_ids_sha256 = "2a98b59e5fdde61d2551ce3ab35fbfbac5066f590aa5026011e7c7c6239226dd"
 arm_candidate_count = 48
 arm_candidate_ids_sha256 = "977c725fde3710ac8aa048c573b003275e0ca47c66586fbfedca7a10aecf812d"
-ambiguity_count = 205
-ambiguity_ids_sha256 = "8f0cf2457ae7e83528b303b1efdb70e304773f8ccaf2a38738ca3ccc452e24f1"
+ambiguity_count = 214
+ambiguity_ids_sha256 = "774819ae20e7b6be3bd8281ff2c34fe9925595ffee7e5b2d1735b0f5ca3d0266"
 
 [[slice]]
 ordinal = 5
@@ -587,16 +587,16 @@ predecessor = "a19"
 successor = "a21"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 25
-top_level_candidate_ids_sha256 = "108660e46fec5780062267c93566a8d8f08ccdb15f8ec1b85450588725c145fb"
+top_level_candidate_count = 26
+top_level_candidate_ids_sha256 = "98307d767a2d3ea9e764bf6c632806f1a7ad354f796fcf95ffb543831ae19585"
 field_candidate_count = 184
 field_candidate_ids_sha256 = "4fda16571285d820f4e9d71b007fe2026ed8864ee190f0b02fb1d9404320c6be"
 union_candidate_count = 7
 union_candidate_ids_sha256 = "2c0ed35947d743254b4efadc8f05c88d87cb58942ca690693f94c2e428824ed3"
 arm_candidate_count = 19
 arm_candidate_ids_sha256 = "295b543e07b178e7427db36987a20ffa7cdbc7b91e74eb84c68cac0dc6fdbcd2"
-ambiguity_count = 145
-ambiguity_ids_sha256 = "4c9301d2f8cea0ec07af3a6e09bf7ac6025180a1b7bb3c36bd6fd8792545d0b6"
+ambiguity_count = 146
+ambiguity_ids_sha256 = "2995e9054a05c44c2cfe4504a1b83ce487a6683001e25feec40daa7629711a82"
 
 [[slice]]
 ordinal = 21
@@ -612,16 +612,16 @@ predecessor = "a20"
 successor = ""
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 120
-top_level_candidate_ids_sha256 = "320b32e94fc5619ad02dd4f9f1a1ed9bb20487a5f83648502fb1645d3ee79c72"
+top_level_candidate_count = 121
+top_level_candidate_ids_sha256 = "5bdb81dca27d93cf76a81039f3770e84f3b191c811b8b11d71f1fad24ffa4785"
 field_candidate_count = 864
 field_candidate_ids_sha256 = "177bcabf03ff52e2940ad06e2a14486b83cabb1a4f685038c9d97fe706ee0208"
 union_candidate_count = 67
 union_candidate_ids_sha256 = "70acab74406a8d20d18fde88604786459c3dc0bbe021dae06f896d930f74c252"
 arm_candidate_count = 200
 arm_candidate_ids_sha256 = "4e4cba1b4034dd0654eae6a69f58b8ba2d80144de309a47eff0825d3be30853f"
-ambiguity_count = 622
-ambiguity_ids_sha256 = "cd27ed0d1ed148a583b2c54607823a08f6e6e072cdcab4fb247598b254450acf"
+ambiguity_count = 623
+ambiguity_ids_sha256 = "b95360c61b6249ec92a593e1052b1f152d16175b761466a729e0e4a71ead564d"
 
 [[projection_epoch]]
 registry = "logical_object_kinds"
@@ -52666,6 +52666,16 @@ identity_class = "wire"
 source_locations = ["a04:1570"]
 
 [[top_level_candidate]]
+row_id = "a21:top-level-candidate:imported-non-required-audit-evidence-50472d31d2de61a8"
+slice_id = "a21"
+symbol = "ImportedNonRequiredAuditEvidence"
+generic_signature = ""
+source_key = "top|ImportedNonRequiredAuditEvidence"
+source_kind = "name-only"
+identity_class = "unclassified"
+source_locations = ["a21:2623"]
+
+[[top_level_candidate]]
 row_id = "a21:top-level-candidate:imported-operation-audit-admission-evidence-adcc0ee2ed378d08"
 slice_id = "a21"
 symbol = "ImportedOperationAuditAdmissionEvidence"
@@ -54376,6 +54386,16 @@ identity_class = "wire"
 source_locations = ["a05:1638"]
 
 [[top_level_candidate]]
+row_id = "a04:top-level-candidate:metadata-tree-bootstrap-0579076c3c22862b"
+slice_id = "a04"
+symbol = "MetadataTreeBootstrap"
+generic_signature = ""
+source_key = "top|MetadataTreeBootstrap"
+source_kind = "confirmed"
+identity_class = "unclassified"
+source_locations = ["a04:1552"]
+
+[[top_level_candidate]]
 row_id = "a21:top-level-candidate:mutation-99b10f12436c23c5"
 slice_id = "a21"
 symbol = "Mutation"
@@ -54784,6 +54804,16 @@ source_key = "top|PortableArchiveLeaseTerminalTimeEvidence"
 source_kind = "confirmed"
 identity_class = "unclassified"
 source_locations = ["a18:2409"]
+
+[[top_level_candidate]]
+row_id = "a20:top-level-candidate:portable-certificate-projection-t-f7d482c9f17f9baa"
+slice_id = "a20"
+symbol = "PortableCertificateProjection"
+generic_signature = "<T>"
+source_key = "top|PortableCertificateProjection<T>"
+source_kind = "name-only"
+identity_class = "wire"
+source_locations = ["a20:2575"]
 
 [[top_level_candidate]]
 row_id = "a17:top-level-candidate:portable-claimed-reservation-gate-member-8b2378ba4d3ed382"
@@ -112027,7 +112057,7 @@ max_size_bytes = 16777216
 row_id = "a20:target:wire-type-portable-certificate-projection"
 target_row_id = "a20:wire-type:portable-certificate-projection"
 slice_id = "a20"
-source_key = "projection|wire_types|PortableCertificateProjection"
+source_key = "top|PortableCertificateProjection<T>"
 target_kind = "wire-type"
 definition_status = "declared"
 

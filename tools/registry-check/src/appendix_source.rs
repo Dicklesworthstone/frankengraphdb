@@ -1454,7 +1454,12 @@ fn prose_definition_head(fragment: &MarkdownFragment) -> Option<String> {
         return None;
     }
     let display_name = simple_type_display(&fragment.text)?;
-    has_definition_cue(&fragment.after).then_some(display_name)
+    // `embeds` is deliberately prose-head-only. The pinned Appendix contains
+    // three bare `Name` embeds heads and zero `Name{...}` embeds heads; adding
+    // it to the shared direct-record cue set would expand source authority
+    // beyond the measured defect population.
+    (has_definition_cue(&fragment.after) || starts_with_word(&fragment.after, "embeds"))
+        .then_some(display_name)
 }
 
 fn prose_schema_links(
@@ -5427,6 +5432,281 @@ mod tests {
                 .iter()
                 .any(|field| field.key.schema_family == "Second")
         );
+    }
+
+    #[test]
+    fn embeds_definition_cue_is_token_aware_and_mutation_proved() {
+        let source = concat!(
+            "`EmbeddedRecord` embeds `{embedded_value:u8}`.\n",
+            "`NamedEvidence` embeds exact imported bytes without an inline schema.\n",
+            "`PrefixCollision` embedsExtra fields but defines no schema.\n",
+            "`IncidentalConcept` precedes a successor that embeds an imported plan.\n",
+            "`IncidentalRecord{value:u8}` embeds nothing further.\n",
+        );
+        let slices = [SourceSliceSpec {
+            id: "embeds",
+            start_line: 30,
+            end_line: 34,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 30, &slices)
+            .expect("an exact embeds cue must remain conservative");
+
+        let record = census
+            .schemas
+            .iter()
+            .find(|schema| schema.key.family.eq("EmbeddedRecord"))
+            .expect("embeds plus an adjacent record is an explicit definition");
+        assert!(
+            record
+                .owner_statuses
+                .contains(&super::SchemaOwnerStatus::ConfirmedTopLevel)
+        );
+        assert!(census.fields.iter().any(|field| {
+            field.key.schema_owner.eq("EmbeddedRecord")
+                && field.key.stable_name.eq("embedded_value")
+        }));
+
+        let name_only = census
+            .schemas
+            .iter()
+            .find(|schema| schema.key.family.eq("NamedEvidence"))
+            .expect("embeds without a structural body still names the exact type");
+        assert!(
+            name_only
+                .owner_statuses
+                .contains(&super::SchemaOwnerStatus::NamedConceptNoBody)
+        );
+        assert!(census.ambiguities.iter().any(|ambiguity| {
+            ambiguity
+                .key
+                .kind
+                .eq(&AmbiguityKind::DefinitionWithoutStructuralBody)
+                && ambiguity
+                    .key
+                    .schema_family
+                    .as_deref()
+                    .is_some_and(|family| family.eq("NamedEvidence"))
+                && ambiguity
+                    .affected_source_keys
+                    .iter()
+                    .map(String::as_str)
+                    .eq(["top|NamedEvidence"])
+        }));
+
+        for incidental in ["PrefixCollision", "IncidentalConcept"] {
+            assert!(
+                census
+                    .schemas
+                    .iter()
+                    .all(|schema| !schema.key.family.eq(incidental)),
+                "{incidental} is not headed by the exact embeds token"
+            );
+        }
+        let incidental_record = census
+            .schemas
+            .iter()
+            .find(|schema| schema.key.family.eq("IncidentalRecord"))
+            .expect("the direct record remains visible as ambiguous structure");
+        assert!(
+            incidental_record
+                .owner_statuses
+                .contains(&super::SchemaOwnerStatus::AmbiguousUnownedStructure)
+        );
+        assert!(
+            !incidental_record
+                .owner_statuses
+                .contains(&super::SchemaOwnerStatus::ConfirmedTopLevel),
+            "a later standalone embeds token must not promote an earlier direct record"
+        );
+
+        // INJECTED FAULT / VACUITY CONTROL: erase only the positive definition
+        // cue. The structural owner and its field must disappear, proving that
+        // the test does not pass through an independent record reader.
+        let faulted_source = source.replacen(" embeds ", " resembles ", 1);
+        assert_ne!(faulted_source, source, "the cue mutation must fire");
+        let faulted = census_appendix_source(faulted_source.as_bytes(), 30, &slices)
+            .expect("the faulted source must remain syntactically valid");
+        assert!(
+            faulted
+                .schemas
+                .iter()
+                .all(|schema| !schema.key.family.eq("EmbeddedRecord"))
+        );
+        assert!(
+            faulted
+                .fields
+                .iter()
+                .all(|field| !field.key.schema_owner.eq("EmbeddedRecord"))
+        );
+    }
+
+    #[test]
+    fn appendix_embeds_definition_population_has_exact_corpus_delta() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let slices = [SourceSliceSpec {
+            id: "appendix-a",
+            start_line: 1388,
+            end_line: 2728,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the current Appendix A source must census");
+        assert_eq!(
+            source
+                .split(|character: char| { !character.is_ascii_alphanumeric() && character != '_' })
+                .filter(|word| word.eq_ignore_ascii_case("embeds"))
+                .count(),
+            7,
+            "the Appendix-wide embeds population must be re-audited before this grammar widens"
+        );
+        let incidental_record = census
+            .schemas
+            .iter()
+            .find(|row| {
+                row.key
+                    .family
+                    .eq("PreBootstrapJournalAbandonmentTerminalizationReceipt")
+            })
+            .expect("the a17 direct-record incidental control remains visible");
+        assert!(
+            incidental_record
+                .owner_statuses
+                .contains(&super::SchemaOwnerStatus::AmbiguousUnownedStructure)
+                && !incidental_record
+                    .owner_statuses
+                    .contains(&super::SchemaOwnerStatus::ConfirmedTopLevel),
+            "a later incidental embeds token must not promote the a17 direct record"
+        );
+        assert!(
+            census
+                .schemas
+                .iter()
+                .all(|row| !row.key.family.eq("PrepareAdmissionScaffolding")),
+            "a21 incidental prose before embeds must not become a definition head"
+        );
+
+        // INJECTED FAULT / OLD-GRAMMAR CONTROL: erase exactly the three
+        // definition-head tokens this grammar addition is meant to recover.
+        // Incidental uses remain byte-identical, so any collateral authority
+        // change appears in the exact set differences below.
+        let mut faulted_source = source.clone();
+        for head in [
+            "`MetadataTreeBootstrap` embeds ",
+            "`PortableCertificateProjection<T>` embeds ",
+            "`ImportedNonRequiredAuditEvidence` embeds ",
+        ] {
+            assert_eq!(
+                faulted_source.matches(head).count(),
+                1,
+                "each measured definition head must occur exactly once"
+            );
+            let replacement = head.replacen(" embeds ", " resembles ", 1);
+            let next = faulted_source.replacen(head, &replacement, 1);
+            assert_ne!(next, faulted_source, "the old-grammar mutation must fire");
+            faulted_source = next;
+        }
+        let faulted = census_appendix_source(faulted_source.as_bytes(), 1388, &slices)
+            .expect("the old-grammar control must remain syntactically valid");
+
+        let schema_keys = census
+            .schemas
+            .iter()
+            .map(|row| row.key.source_key())
+            .collect::<std::collections::BTreeSet<_>>();
+        let faulted_schema_keys = faulted
+            .schemas
+            .iter()
+            .map(|row| row.key.source_key())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            schema_keys
+                .difference(&faulted_schema_keys)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "top|ImportedNonRequiredAuditEvidence",
+                "top|MetadataTreeBootstrap",
+                "top|PortableCertificateProjection<T>",
+            ]
+        );
+        assert!(
+            faulted_schema_keys
+                .difference(&schema_keys)
+                .next()
+                .is_none(),
+            "recognizing embeds must not retire an unrelated top-level candidate"
+        );
+
+        let field_keys = census
+            .fields
+            .iter()
+            .map(|row| row.key.source_key())
+            .collect::<std::collections::BTreeSet<_>>();
+        let faulted_field_keys = faulted
+            .fields
+            .iter()
+            .map(|row| row.key.source_key())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            field_keys
+                .difference(&faulted_field_keys)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.cipher_descriptor|cipher_descriptor",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.ciphertext_id|ciphertext_id",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.closure_digest|closure_digest",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.encoding_descriptor|encoding_descriptor",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.placement_records|placement_records",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.root_oid|root_oid",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.tree_generation|tree_generation",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.tree_key_id|tree_key_id",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.tree_key_opener|tree_key_opener",
+                "field|MetadataTreeBootstrap|MetadataTreeBootstrap.tree_kind|tree_kind",
+            ]
+        );
+        assert!(
+            faulted_field_keys.difference(&field_keys).next().is_none(),
+            "recognizing embeds must not retire an unrelated field candidate"
+        );
+
+        assert_eq!(
+            census.counts.schema_candidates,
+            faulted.counts.schema_candidates + 3
+        );
+        assert_eq!(
+            census.counts.field_candidates,
+            faulted.counts.field_candidates + 10
+        );
+        assert_eq!(census.counts.ambiguities, faulted.counts.ambiguities + 11);
+        assert_eq!(census.transcripts.unions, faulted.transcripts.unions);
+        assert_eq!(census.transcripts.arms, faulted.transcripts.arms);
+        let named = census
+            .schemas
+            .iter()
+            .filter(|row| {
+                row.owner_statuses
+                    .contains(&super::SchemaOwnerStatus::NamedConceptNoBody)
+            })
+            .count();
+        let faulted_named = faulted
+            .schemas
+            .iter()
+            .filter(|row| {
+                row.owner_statuses
+                    .contains(&super::SchemaOwnerStatus::NamedConceptNoBody)
+            })
+            .count();
+        assert_eq!(named, faulted_named + 2);
     }
 
     #[test]

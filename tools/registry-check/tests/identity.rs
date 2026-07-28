@@ -2114,7 +2114,12 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     // RestoreServicePromotionManifest. `top|Sharded` was a parser-created arm
     // pseudo-owner, not a source-declared top-level type, so its catalog row was
     // removed when the two arms became a correctly owned union.
-    assert_eq!(baseline.top_level_candidates.len(), 1_249);
+    // 1_249 -> 1_252: fgdb-tdv8 recognized the exact token-aware prose cue
+    // `embeds`, exposing MetadataTreeBootstrap,
+    // PortableCertificateProjection<T>, and
+    // ImportedNonRequiredAuditEvidence. The mutation-proved source test pins
+    // those three additions and rejects incidental or direct-record widening.
+    assert_eq!(baseline.top_level_candidates.len(), 1_252);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT
@@ -5022,23 +5027,30 @@ fn idr_a20_restore_service_promotion_manifest_body_is_exact() {
         "an inline portable record family must not acquire a StrongRef reservation"
     );
 
-    let projection_targets = catalog
+    let exact_targets = catalog
         .targets
         .iter()
         // ubs:ignore -- public catalog source identity, not secret material.
-        .filter(|row| row.source_key == "projection|wire_types|PortableCertificateProjection")
+        .filter(|row| row.source_key == "top|PortableCertificateProjection<T>")
         .collect::<Vec<_>>();
     assert_eq!(
-        projection_targets.len(),
+        exact_targets.len(),
         1,
-        "the source reader has no `embeds` top-level cue, so the explicit wire fallback is singular"
+        "the explicit embeds definition must singularly back the portable wire family"
     );
     assert_eq!(
-        projection_targets[0].target_row_id,
+        exact_targets[0].target_row_id,
         "a20:wire-type:portable-certificate-projection"
     );
-    assert_eq!(projection_targets[0].target_kind, "wire-type");
-    assert_eq!(projection_targets[0].definition_status, "declared");
+    assert_eq!(exact_targets[0].target_kind, "wire-type");
+    assert_eq!(exact_targets[0].definition_status, "declared");
+    assert!(
+        catalog.targets.iter().all(|row| {
+            // ubs:ignore -- public catalog source identity, not secret material.
+            row.source_key != "projection|wire_types|PortableCertificateProjection"
+        }),
+        "the obsolete projection fallback must disappear once exact source identity exists"
+    );
 
     let body = identity
         .ordinary_unions
@@ -15817,9 +15829,13 @@ fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
     // rows, not two coincident counts. The control is still a control: it moved
     // by a reader repair that made already-declared source visible, and the
     // Appendix A byte range and sha256 are unchanged by that commit.
+    // 215 -> 217: fgdb-tdv8 additionally exposes the bodyless embeds definitions
+    // PortableCertificateProjection<T> and ImportedNonRequiredAuditEvidence;
+    // MetadataTreeBootstrap owns an adjacent structural record and is therefore
+    // intentionally absent from this set.
     assert_eq!(
         global_bodyless.len(),
-        215,
+        217,
         "the Appendix-wide definition-without-body control moved"
     );
     let a12_bodyless: BTreeSet<_> = a12
