@@ -680,6 +680,11 @@ role = "runner"
 reason = "the runner itself: it derives and invokes the registered gates, so registering it would make it invoke itself"
 
 [[script_disposition]]
+path = "scripts/br_sync.sh"
+role = "advisory"
+reason = "fgdb-wv3v: the operator entrypoint for an explicit, landing-lease-aware beads export, not a repository checker. Registering this state-mutating helper would make check.sh rewrite tracked .beads/issues.jsonl during its own frozen-input window. Its fail-closed BINDING path, loud fail-open degraded paths, real-br composition, and mutation control are exercised by the registered scripts/g0_tree_stability_e2e.sh gate"
+
+[[script_disposition]]
 path = "scripts/bead_provenance_preflight.sh"
 role = "advisory"
 reason = "pre-commit advisory for .beads/ authors, not part of any gate chain; its own header says 'Run it BEFORE you commit'. The defect that used to be recorded here (exit 0 on the case it exists to catch) is FIXED — fgdb-bead-provenance-preflight-misses-pin-drift-a5kb: its probe now reports validate_architecture's own bead_provenance verdict and red-proves itself on every run. It stays advisory rather than registered on purpose: check.sh already runs architecture-check, which reports the same violations, and a second reader of one fact inside the gate chain is the defect this project keeps closing"
