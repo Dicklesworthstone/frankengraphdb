@@ -58,17 +58,130 @@ TALLY_PRINTED=0
 pass() { gate_pass "$1"; }
 fail() { gate_fail "$1"; }
 
+# Laws 3 and 4 assert facts about repository HISTORY, not only the checked-out
+# files. A settled-root copy made with tar + `git init` has the right bytes and
+# one synthetic commit, so every real repair SHA is absent and the old gate
+# reported roughly thirty false failures. These anchors span the population the
+# current gate depends on:
+#   46e654e — the known-ancient revert law 4 requires;
+#   37c28c0 — the ledger/gate introduction;
+#   6a9be0e — the current ledger-only-disposition semantics.
+# If any is absent, this checkout cannot adjudicate missing history. It is
+# UNRUN, not RED. Individual bad citations still fail normally once the anchors
+# prove this is a history-bearing repository.
+HISTORY_ANCHORS=(46e654e 37c28c0 6a9be0e)
+
+missing_history_anchors() { # repository-root
+  local repository="$1"
+  local anchor
+
+  for anchor in "${HISTORY_ANCHORS[@]}"; do
+    git -C "$repository" cat-file -e "${anchor}^{commit}" 2>/dev/null \
+      || printf '%s\n' "$anchor"
+  done
+}
+
+run_history_precondition_self_test() {
+  local work scratch stdout_log stderr_log missing rc
+
+  work="$(mktemp -d "${TMPDIR:-/tmp}/fgdb-negative-history.XXXXXX")"
+  scratch="$work/one-commit-root"
+  stdout_log="$work/one-commit.out"
+  stderr_log="$work/one-commit.err"
+
+  # The conformant half: a guard hard-wired to "history absent" must not pass.
+  missing="$(missing_history_anchors "$ROOT")"
+  if [ -n "$missing" ]; then
+    fail "full-history control is missing required anchor(s): $(echo "$missing" | tr '\n' ' ')"
+  fi
+
+  # The behavioural half: reproduce the exact settled-root trap with the
+  # minimum files the gate opens and one synthetic commit. The evidence is
+  # retained; repository policy forbids automated deletion.
+  mkdir -p "$scratch/scripts/lib" "$scratch/docs" \
+    "$scratch/registries" "$scratch/.beads" || {
+      fail "could not create one-commit history fixture at $scratch"
+      return
+    }
+  if ! cp "$ROOT/scripts/g0_negative_evidence_e2e.sh" \
+      "$scratch/scripts/g0_negative_evidence_e2e.sh" \
+    || ! cp "$ROOT/scripts/lib/gate_verdict.sh" \
+      "$scratch/scripts/lib/gate_verdict.sh" \
+    || ! cp "$AGENTS" "$scratch/AGENTS.md" \
+    || ! cp "$LEDGER" "$scratch/docs/NEGATIVE_EVIDENCE.md" \
+    || ! cp "$CONSTITUTION" "$scratch/registries/constitution.toml" \
+    || ! cp "$BEADS" "$scratch/.beads/issues.jsonl"; then
+    fail "could not populate one-commit history fixture at $scratch"
+    return
+  fi
+  if ! git -C "$scratch" init -q \
+    || ! git -C "$scratch" add . \
+    || ! git -C "$scratch" \
+      -c user.name=fgdb-history-control \
+      -c user.email=history-control@invalid \
+      -c commit.gpgsign=false \
+      commit -q -m "one-commit settled-root control"; then
+    fail "could not initialize one-commit history fixture at $scratch"
+    return
+  fi
+
+  if (cd "$scratch" && bash scripts/g0_negative_evidence_e2e.sh) \
+      >"$stdout_log" 2>"$stderr_log"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne "$GATE_EXIT_UNRUN" ]; then
+    fail "one-commit root exited $rc, expected UNRUN exit $GATE_EXIT_UNRUN"
+  elif [ "$(grep -c '^UNRUN repository history prerequisite missing;' \
+      "$stdout_log")" -ne 1 ] \
+    || [ "$(grep -c '^FAIL repository history prerequisite missing;' \
+      "$stdout_log")" -ne 1 ]; then
+    fail "one-commit root did not emit exactly paired UNRUN + FAIL history verdicts"
+  elif grep -q '^FAIL repair commit is not reachable' "$stdout_log"; then
+    fail "one-commit root still mislabeled absent history as broken repair citations"
+  elif grep -q '^  \[law [1-4]\]' "$stdout_log"; then
+    fail "one-commit root entered history-dependent laws after its precondition failed"
+  else
+    pass "full-history control resolves all anchors; one-commit root exits 2 with one paired UNRUN"
+  fi
+  echo "  retained history-precondition self-test evidence: $work"
+}
+
 print_tally() {
   [ "$TALLY_PRINTED" -eq 1 ] && return 0
   TALLY_PRINTED=1
   echo
   echo "  negative-evidence gate: $GATE_PASS passed, $GATE_FAIL failed, $GATE_UNRUN unrun"
-  if [ "$GATE_FAIL" -ne 0 ] || [ "$GATE_UNRUN" -ne 0 ]; then
+  if [ "$GATE_FAIL" -ne 0 ]; then
     gate_diag "  docs/NEGATIVE_EVIDENCE.md is the memorial AGENTS.md designates;"
     gate_diag "  a failure here means the doctrine's enforcement clause is unbacked again."
+  elif [ "$GATE_UNRUN" -ne 0 ]; then
+    gate_diag "  an UNRUN means a required input domain was absent; no doctrine"
+    gate_diag "  verdict was reached and no ledger defect should be inferred."
   fi
 }
 gate_init "g0_negative_evidence_e2e" print_tally
+
+case "${1:-}" in
+  "")
+    ;;
+  --self-test)
+    echo "== g0 negative-evidence history-precondition self-test =="
+    run_history_precondition_self_test
+    print_tally
+    if [ "$GATE_FAIL" -ne 0 ]; then
+      exit 1
+    fi
+    if [ "$GATE_UNRUN" -ne 0 ]; then
+      exit "$GATE_EXIT_UNRUN"
+    fi
+    exit 0
+    ;;
+  *)
+    gate_die "usage: scripts/g0_negative_evidence_e2e.sh [--self-test]"
+    ;;
+esac
 
 echo "== g0 negative-evidence gate =="
 
@@ -86,6 +199,20 @@ fi
 for f in "$AGENTS" "$CONSTITUTION" "$BEADS"; do
   [ -f "$f" ] || { fail "required input missing: ${f#"$ROOT"/}"; print_tally; exit 1; }
 done
+
+# The overall gate includes Laws 3 and 4, which make claims over real repository
+# history. Establish that prerequisite before entering the remaining suite, so
+# no partial result can look like a complete gate and no missing commit can be
+# mislabeled as a ledger defect.
+missing_history="$(missing_history_anchors "$ROOT")"
+if [ -n "$missing_history" ]; then
+  gate_diag "  repository history is incomplete; missing required anchor(s):"
+  while IFS= read -r anchor; do
+    [ -n "$anchor" ] && gate_diag "    $anchor"
+  done <<<"$missing_history"
+  gate_diag "  Use a history-preserving root such as git clone --local."
+  gate_abort_unrun "repository history prerequisite missing; history-dependent laws did not run"
+fi
 
 # -----------------------------------------------------------------------------
 # LAW 1 — AGENTS.md self-containment.
@@ -362,7 +489,10 @@ echo "    $closed_total closed beads; $ledgered are ledgered here; residue is un
 
 print_tally
 # Three states, not two: an UNRUN law is not a passing law (fgdb-udco).
-if [ "$GATE_FAIL" -ne 0 ] || [ "$GATE_UNRUN" -ne 0 ]; then
+if [ "$GATE_FAIL" -ne 0 ]; then
   exit 1
+fi
+if [ "$GATE_UNRUN" -ne 0 ]; then
+  exit "$GATE_EXIT_UNRUN"
 fi
 exit 0
