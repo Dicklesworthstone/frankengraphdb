@@ -15155,6 +15155,7 @@ fn idr_refinement_claims_resolve_to_a_registered_arm() {
     let base_codes = codes_without_assignment_drift(&base);
     for code in [
         "refinement_claim_unparseable",
+        "refinement_conjunction_invalid",
         "refinement_union_unresolved",
         "refinement_arm_unresolved",
         "refinement_arm_tag_mismatch",
@@ -15171,7 +15172,12 @@ fn idr_refinement_claims_resolve_to_a_registered_arm() {
     let claimants: BTreeSet<&str> = base
         .wire
         .iter()
-        .filter(|w| w.encoding_context.contains("admits only the "))
+        .filter(|w| {
+            w.encoding_context
+                .contains(identity::REFINEMENT_CLAIM_MARKER)
+                || w.encoding_context
+                    .contains(identity::REFINEMENT_CONJUNCTION_MARKER)
+        })
         .map(|w| w.name.as_str())
         .collect();
     // 6 -> 7 (fgdb-a20-restore-promotion-ivsp): PromotedAwaitingReopenLocalRestorePhase,
@@ -15185,6 +15191,16 @@ fn idr_refinement_claims_resolve_to_a_registered_arm() {
         "refinement-claim population moved; a new tag-refined wrapper must be added here \
          deliberately, not discovered by a green run: {claimants:?}"
     );
+    let conjunction_claimants: BTreeSet<&str> = base
+        .wire
+        .iter()
+        .filter(|w| {
+            w.encoding_context
+                .contains(identity::REFINEMENT_CONJUNCTION_MARKER)
+        })
+        .map(|w| w.name.as_str())
+        .collect();
+    assert_eq!(conjunction_claimants, BTreeSet::new()); // ubs:ignore -- test census intentionally panics.
 
     // The subject: a landed wrapper whose claim is already in the grammar.
     let subject = |r: &IdentityRegistries| -> usize {
@@ -15277,6 +15293,7 @@ fn idr_refinement_claims_resolve_to_a_registered_arm() {
     let ok_codes = codes_without_assignment_drift(&ok);
     for code in [
         "refinement_claim_unparseable",
+        "refinement_conjunction_invalid",
         "refinement_union_unresolved",
         "refinement_arm_unresolved",
         "refinement_arm_tag_mismatch",
@@ -15286,6 +15303,121 @@ fn idr_refinement_claims_resolve_to_a_registered_arm() {
             "conformant control must stay green, but {code} fires"
         );
     }
+}
+
+/// A two-location refinement is one atomic claim, not two independently green
+/// facts (fgdb-refinement-claim-grammar-cannot-conjoin-78tr).
+#[test]
+fn idr_refinement_conjunction_is_atomic_and_total() {
+    let with_context = |context: &str| {
+        let mut identity = real_identity();
+        let found = identity
+            .wire
+            .iter_mut()
+            // ubs:ignore -- public registry symbol, not secret-bearing data.
+            .find(|w| w.name == "OperationalRestoreTerminalPinBasisRef")
+            .map(|row| row.encoding_context = context.to_owned())
+            .is_some();
+        (found, identity)
+    };
+    let refinement_codes = |(found, identity): &(bool, IdentityRegistries)| -> BTreeSet<String> {
+        if !found {
+            return BTreeSet::from(["fixture_subject_missing".to_owned()]);
+        }
+        codes_without_assignment_drift(identity)
+            .into_iter()
+            .filter(|code| code.starts_with("refinement_"))
+            .collect()
+    };
+    let assert_refinement_codes = |label: &str,
+                                   fixture: (bool, IdentityRegistries),
+                                   expected: &[&str]| {
+        let expected: BTreeSet<String> = expected.iter().map(|code| (*code).to_owned()).collect();
+        let actual = refinement_codes(&fixture);
+        assert_eq!(actual, expected, "{label}"); // ubs:ignore -- test witness intentionally panics.
+    };
+
+    // Both clauses name independently registered, live locations. The exact
+    // combination is a parser/validator fixture, not a semantic claim about
+    // this wrapper; the existing singleton suite uses its other-arm control on
+    // the same terms.
+    let canonical = "generated conjunctive refinement whose validator admits only when both the \
+        Operational arm (arm_tag 0x0001) of the RestoreTerminalPinBasis<Role> union and the \
+        Sharded arm (arm_tag 0x0002) of the RestoreServicePromotionManifestTargetPosture union";
+    assert_refinement_codes("valid conjunction", with_context(canonical), &[]);
+
+    // TOTALITY: corrupt only the SECOND clause. A parser that checked the first
+    // clause and stopped would stay green on all three mutations.
+    assert_refinement_codes(
+        "second arm resolves",
+        with_context(&canonical.replace("the Sharded arm", "the Shardedd arm")),
+        &["refinement_arm_unresolved"],
+    );
+    assert_refinement_codes(
+        "second arm tag resolves",
+        with_context(&canonical.replace(
+            "Sharded arm (arm_tag 0x0002)",
+            "Sharded arm (arm_tag 0x0001)",
+        )),
+        &["refinement_arm_tag_mismatch"],
+    );
+    assert_refinement_codes(
+        "second union resolves",
+        with_context(&canonical.replace(
+            "RestoreServicePromotionManifestTargetPosture union",
+            "NoSuchUnion union",
+        )),
+        &["refinement_union_unresolved"],
+    );
+
+    // ATOMICITY: missing, duplicate, third, and mixed clauses all advertise a
+    // conjunction they do not actually encode, so they own one dedicated
+    // diagnostic instead of falling back to a valid singleton.
+    assert_refinement_codes(
+        "missing second clause",
+        with_context(&canonical.replace(
+            " and the Sharded arm (arm_tag 0x0002) of the \
+             RestoreServicePromotionManifestTargetPosture union",
+            "",
+        )),
+        &["refinement_conjunction_invalid"],
+    );
+    assert_refinement_codes(
+        "duplicate clause",
+        with_context(&canonical.replace(
+            "Sharded arm (arm_tag 0x0002) of the RestoreServicePromotionManifestTargetPosture union",
+            "Operational arm (arm_tag 0x0001) of the RestoreTerminalPinBasis<Role> union",
+        )),
+        &["refinement_conjunction_invalid"],
+    );
+    assert_refinement_codes(
+        "third clause",
+        with_context(&format!(
+            "{canonical} and the ExternalCasCataloged arm (arm_tag 0x0001) of the \
+             RestoreServicePromotionReceipt union"
+        )),
+        &["refinement_conjunction_invalid"],
+    );
+    assert_refinement_codes(
+        "mixed dialect",
+        with_context(&format!(
+            "{canonical}; independently admits only the Operational arm (arm_tag 0x0001) of the \
+             RestoreTerminalPinBasis<Role> union"
+        )),
+        &["refinement_conjunction_invalid"],
+    );
+
+    // Two singleton markers are not an alternate spelling of conjunction.
+    assert_refinement_codes(
+        "two singleton markers",
+        with_context(
+            "generated split refinement whose validator admits only the Operational arm \
+             (arm_tag 0x0001) of the RestoreTerminalPinBasis<Role> union and independently admits \
+             only the Sharded arm (arm_tag 0x0002) of the \
+             RestoreServicePromotionManifestTargetPosture union",
+        ),
+        &["refinement_claim_unparseable"],
+    );
 }
 
 #[test]

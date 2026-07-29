@@ -48,6 +48,7 @@
 //!   bodydigest_pin_mismatch       recipe drift against the FNV pin
 //!   unregistered_field      encodability check: field not in the table
 //!   refinement_claim_unparseable  arm-refinement prose outside the grammar
+//!   refinement_conjunction_invalid  conjunctive refinement is malformed or duplicates a location
 //!   refinement_union_unresolved   refined union is not a registered union
 //!   refinement_arm_unresolved     refined arm name is not an arm of that union
 //!   refinement_arm_tag_mismatch   arm resolves but under a different arm_tag
@@ -142,36 +143,105 @@ fn declared_field_reference_semantics(exact_wire_type: &str) -> Option<&'static 
 /// reference target."
 pub const REFINEMENT_CLAIM_MARKER: &str = "admits only the ";
 
-/// The canonical, machine-readable spelling of an arm-refinement claim:
-///
-/// ```text
-/// admits only the <SourceArmName> arm (arm_tag 0x<hex>) of the <Union> union
-/// ```
-///
-/// Returns `(source_arm_name, arm_tag, union_name)`. The union may carry a
-/// generic suffix in the prose (`RestoreTerminalPinBasis<Role>`); it is left
-/// intact here and stripped at lookup, because the registered `union_name`
-/// spelling is the caller's business, not the grammar's.
-///
-/// `None` means the claim is outside the grammar. The caller MUST report that
-/// as a violation rather than skipping it: a refinement written in prose is
-/// exactly the row this law exists to reach, so a silent `None` fails open on
-/// its own domain.
-fn parse_refinement_claim(encoding_context: &str) -> Option<(&str, i64, &str)> {
-    let rest = encoding_context.split_once(REFINEMENT_CLAIM_MARKER)?.1;
-    let (arm, rest) = rest.split_once(" arm (arm_tag 0x")?;
+/// The marker for one atomic two-location refinement. Exactly two is
+/// deliberate: this is the minimum language needed for source spellings such
+/// as `OperationalPendingIndependentReopen::Sealed`, without growing a general
+/// Boolean-expression language inside registry prose.
+pub const REFINEMENT_CONJUNCTION_MARKER: &str = "admits only when both the ";
+
+/// Why a refinement claim that advertises itself as machine-readable could not
+/// be parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefinementClaimParseError {
+    Single,
+    Conjunction,
+}
+
+type RefinementClause<'a> = (&'a str, i64, &'a str);
+
+/// Parse one `<Arm> arm (arm_tag 0x<hex>) of the <Union> union` clause and
+/// return the unconsumed suffix.
+fn parse_refinement_clause(input: &str) -> Option<(RefinementClause<'_>, &str)> {
+    let (arm, rest) = input.split_once(" arm (arm_tag 0x")?;
     let (tag_hex, rest) = rest.split_once(") of the ")?;
-    let union = rest.split_once(" union")?.0;
+    let (union, tail) = rest.split_once(" union")?;
     if arm.is_empty() || union.is_empty() {
         return None;
     }
-    // The arm name is one identifier; a multi-word phrase ("Sharded/ExternalCas
+    // Each name is one identifier. A multi-word phrase ("Sharded/ExternalCas
     // RestoreServicePromotionManifest") is the prose dialect, not this grammar.
     if arm.contains(' ') || union.contains(' ') {
         return None;
     }
     let tag = i64::from_str_radix(tag_hex, 16).ok()?;
-    Some((arm, tag, union))
+    Some(((arm, tag, union), tail))
+}
+
+/// The canonical, machine-readable spellings of an arm-refinement claim:
+///
+/// ```text
+/// admits only the <SourceArmName> arm (arm_tag 0x<hex>) of the <Union> union
+/// admits only when both the <Arm1> arm (arm_tag 0x<hex>) of the <Union1> union
+///     and the <Arm2> arm (arm_tag 0x<hex>) of the <Union2> union
+/// ```
+///
+/// A conjunction is one claim with exactly two DISTINCT locations. It is not
+/// two independent claims: every returned clause must resolve or the row
+/// fails. Repeated markers, a third clause, mixing the two dialects, and a
+/// duplicate clause all fail closed.
+///
+/// `None` means the row makes no refinement claim. `Some(Err(_))` means it
+/// advertises one but is outside its grammar; callers MUST report that rather
+/// than skip it. Union generic suffixes remain intact here and are stripped at
+/// lookup.
+fn parse_refinement_claim(
+    encoding_context: &str,
+) -> Option<Result<Vec<RefinementClause<'_>>, RefinementClaimParseError>> {
+    let single_count = encoding_context.matches(REFINEMENT_CLAIM_MARKER).count();
+    let conjunction_count = encoding_context
+        .matches(REFINEMENT_CONJUNCTION_MARKER)
+        .count();
+
+    match (single_count, conjunction_count) {
+        (0, 0) => None,
+        (1, 0) => {
+            let Some((_, rest)) = encoding_context.split_once(REFINEMENT_CLAIM_MARKER) else {
+                return Some(Err(RefinementClaimParseError::Single));
+            };
+            let parsed = parse_refinement_clause(rest)
+                .ok_or(RefinementClaimParseError::Single)
+                .and_then(|(clause, tail)| {
+                    if tail.trim_start().starts_with("and the ") {
+                        Err(RefinementClaimParseError::Single)
+                    } else {
+                        Ok(vec![clause])
+                    }
+                });
+            Some(parsed)
+        }
+        (0, 1) => {
+            let Some((_, rest)) = encoding_context.split_once(REFINEMENT_CONJUNCTION_MARKER) else {
+                return Some(Err(RefinementClaimParseError::Conjunction));
+            };
+            let parsed = parse_refinement_clause(rest)
+                .ok_or(RefinementClaimParseError::Conjunction)
+                .and_then(|(first, rest)| {
+                    let rest = rest
+                        .strip_prefix(" and the ")
+                        .ok_or(RefinementClaimParseError::Conjunction)?;
+                    let (second, tail) = parse_refinement_clause(rest)
+                        .ok_or(RefinementClaimParseError::Conjunction)?;
+                    if first == second || tail.trim_start().starts_with("and the ") {
+                        return Err(RefinementClaimParseError::Conjunction);
+                    }
+                    Ok(vec![first, second])
+                });
+            Some(parsed)
+        }
+        (0, _) => Some(Err(RefinementClaimParseError::Conjunction)),
+        (_, 0) => Some(Err(RefinementClaimParseError::Single)),
+        _ => Some(Err(RefinementClaimParseError::Conjunction)),
+    }
 }
 
 /// The registered `union_name` for a prose union spelling: generics are dropped
@@ -181,6 +251,64 @@ fn refinement_union_base(name: &str) -> &str {
     match name.split_once('<') {
         Some((base, _)) => base,
         None => name,
+    }
+}
+
+/// Resolve one parsed refinement clause through the ordinary-union catalog.
+///
+/// Keeping this outside the caller's bounded one-or-two-clause loop also keeps
+/// diagnostic construction out of the loop itself.
+fn validate_refinement_clause(
+    ordinary_unions_by_base: &BTreeMap<&str, Vec<&OrdinaryUnion>>,
+    wire_name: &str,
+    (arm, tag, union): RefinementClause<'_>,
+    out: &mut Vec<Violation>,
+) {
+    let base = refinement_union_base(union);
+    match ordinary_unions_by_base.get(base) {
+        None => out.push(v(
+            "refinement_union_unresolved",
+            "wire_types",
+            wire_name,
+            format!(
+                "refinement names union {union:?}, which has no [[union]] row \
+                 under base name {base:?}; a wrapper may not refine a union that \
+                 is not registered"
+            ),
+        )),
+        Some(unions) => {
+            let named: Vec<&OrdinaryUnionArm> = unions
+                .iter()
+                .flat_map(|u| u.arms.iter())
+                .filter(|a| a.source_arm_name == arm)
+                .collect();
+            if named.is_empty() {
+                out.push(v(
+                    "refinement_arm_unresolved",
+                    "wire_types",
+                    wire_name,
+                    format!(
+                        "refinement names arm {arm:?} of union {base:?}, which \
+                         has no [[union_arm]] row with that source_arm_name"
+                    ),
+                ));
+            } else if !named.iter().any(|a| a.arm_tag == tag) {
+                let actual: Vec<String> = named
+                    .iter()
+                    .map(|a| format!("{:#06x}", a.arm_tag))
+                    .collect();
+                out.push(v(
+                    "refinement_arm_tag_mismatch",
+                    "wire_types",
+                    wire_name,
+                    format!(
+                        "refinement claims arm {arm:?} of union {base:?} at \
+                         arm_tag {tag:#06x}; the registered arm carries {}",
+                        actual.join(", ")
+                    ),
+                ));
+            }
+        }
     }
 }
 
@@ -1249,8 +1377,15 @@ fn check_restore_service_promotion_manifest_coherence(
             if row.kind == "reference_wrapper"
                 && matches!(
                     parse_refinement_claim(&row.encoding_context),
-                    Some(("Sharded", tag, POSTURE))
-                        if tag == i64::from(RESTORE_MANIFEST_SHARDED_TAG)
+                    Some(Ok(claims))
+                        if matches!(
+                            claims.as_slice(),
+                            [claim]
+                                if claim.0 == "Sharded"
+                                    && claim.1
+                                        == i64::from(RESTORE_MANIFEST_SHARDED_TAG)
+                                    && claim.2 == POSTURE
+                        )
                 )
     );
 
@@ -1890,66 +2025,41 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         // parse to `None` and would simply be skipped. One construct in two
         // dialects at n=6 is the same defect fgdb-gpms forecasts at n=190, so
         // the unparseable case is a violation, not a pass.
-        if w.encoding_context.contains(REFINEMENT_CLAIM_MARKER) {
-            match parse_refinement_claim(&w.encoding_context) {
-                None => out.push(v(
-                    "refinement_claim_unparseable",
-                    "wire_types",
-                    &w.name,
-                    format!(
-                        "encoding_context claims an arm refinement but is outside the grammar \
-                         \"{REFINEMENT_CLAIM_MARKER}<SourceArmName> arm (arm_tag 0x<hex>) of the \
-                         <Union> union\"; a refinement stated only in prose is unresolvable and \
-                         therefore unenforced"
-                    ),
-                )),
-                Some((arm, tag, union)) => {
-                    let base = refinement_union_base(union);
-                    match ordinary_unions_by_base.get(base) {
-                        None => out.push(v(
-                            "refinement_union_unresolved",
-                            "wire_types",
-                            &w.name,
-                            format!(
-                                "refinement names union {union:?}, which has no [[union]] row \
-                                 under base name {base:?}; a wrapper may not refine a union that \
-                                 is not registered"
-                            ),
-                        )),
-                        Some(unions) => {
-                            let named: Vec<&OrdinaryUnionArm> = unions
-                                .iter()
-                                .flat_map(|u| u.arms.iter())
-                                .filter(|a| a.source_arm_name == arm)
-                                .collect();
-                            if named.is_empty() {
-                                out.push(v(
-                                    "refinement_arm_unresolved",
-                                    "wire_types",
-                                    &w.name,
-                                    format!(
-                                        "refinement names arm {arm:?} of union {base:?}, which \
-                                         has no [[union_arm]] row with that source_arm_name"
-                                    ),
-                                ));
-                            } else if !named.iter().any(|a| a.arm_tag == tag) {
-                                let actual: Vec<String> = named
-                                    .iter()
-                                    .map(|a| format!("{:#06x}", a.arm_tag))
-                                    .collect();
-                                out.push(v(
-                                    "refinement_arm_tag_mismatch",
-                                    "wire_types",
-                                    &w.name,
-                                    format!(
-                                        "refinement claims arm {arm:?} of union {base:?} at \
-                                         arm_tag {tag:#06x}; the registered arm carries {}",
-                                        actual.join(", ")
-                                    ),
-                                ));
-                            }
-                        }
-                    }
+        //
+        // A source spelling such as `X::Sealed` can constrain TWO registered
+        // locations. Those clauses form one atomic claim: validating either
+        // one alone would overstate coverage. The conjunction grammar is
+        // therefore closed at exactly two distinct clauses, and this loop
+        // resolves every returned clause through the same laws as a singleton.
+        match parse_refinement_claim(&w.encoding_context) {
+            None => {}
+            Some(Err(RefinementClaimParseError::Single)) => out.push(v(
+                "refinement_claim_unparseable",
+                "wire_types",
+                &w.name,
+                format!(
+                    "encoding_context claims an arm refinement but is outside the grammar \
+                     \"{REFINEMENT_CLAIM_MARKER}<SourceArmName> arm (arm_tag 0x<hex>) of the \
+                     <Union> union\"; a refinement stated only in prose is unresolvable and \
+                     therefore unenforced"
+                ),
+            )),
+            Some(Err(RefinementClaimParseError::Conjunction)) => out.push(v(
+                "refinement_conjunction_invalid",
+                "wire_types",
+                &w.name,
+                format!(
+                    "encoding_context claims a conjunctive arm refinement but is outside the \
+                     exactly-two-distinct-clause grammar \
+                     \"{REFINEMENT_CONJUNCTION_MARKER}<Arm1> arm (arm_tag 0x<hex>) of the \
+                     <Union1> union and the <Arm2> arm (arm_tag 0x<hex>) of the <Union2> \
+                     union\"; repeated, mixed, missing, third, or duplicate clauses are \
+                     unenforced"
+                ),
+            )),
+            Some(Ok(clauses)) => {
+                for clause in clauses {
+                    validate_refinement_clause(&ordinary_unions_by_base, &w.name, clause, &mut out);
                 }
             }
         }

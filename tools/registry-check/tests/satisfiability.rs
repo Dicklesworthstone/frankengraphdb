@@ -203,17 +203,24 @@ const REGISTRY: &[(&str, Coverage)] = &[
         ),
     ),
     // ---- refinement family: the tag-refined-wrapper law (fgdb-gpms) -------------------
-    // All four land witnessed rather than on the backlog, because the law shipped
-    // with its fixture: `idr_refinement_claims_resolve_to_a_registered_arm` mutates
-    // one LANDED wire row per code on the real corpus and pairs the four with a
-    // conformant control. The unparseable case is the completeness half — it fires
-    // on the PRE-CHANGE prose spelling of a row that is now canonicalized, so the
-    // witness proves the law reaches the rows that motivated it, not only synthetic
-    // ones.
+    // All five land witnessed rather than on the backlog, because the laws shipped
+    // with fixtures: `idr_refinement_claims_resolve_to_a_registered_arm` mutates
+    // one LANDED wire row per singleton code on the real corpus and pairs the four
+    // with a conformant control. The unparseable case is the completeness half — it
+    // fires on the PRE-CHANGE prose spelling of a row that is now canonicalized, so
+    // the witness proves the law reaches the rows that motivated it, not only
+    // synthetic ones. `idr_refinement_conjunction_is_atomic_and_total` supplies the
+    // distinct two-location witness for the conjunctive grammar.
     (
         "refinement_claim_unparseable",
         Coverage::WitnessedElsewhere {
             trigger_tests: &["idr_refinement_claims_resolve_to_a_registered_arm"],
+        },
+    ),
+    (
+        "refinement_conjunction_invalid",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_refinement_conjunction_is_atomic_and_total"],
         },
     ),
     (
