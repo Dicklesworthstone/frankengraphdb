@@ -22,12 +22,12 @@
 //! The order is therefore not an optimisation, it is the correctness argument.
 //!
 //! THE TORN-TAIL RULE. A crash during D2 can leave a partial marker entry at
-//! the end of the log. Recovery **discards a torn tail rather than erroring**:
+//! the end of the log. Recovery **truncates a torn tail rather than erroring**:
 //! an incomplete final entry means the commit never completed, which is a
 //! normal outcome of crashing, not corruption. A torn entry anywhere EARLIER
 //! is corruption, because entries before it were durable.
 
-use crate::marker::{ChainError, CommitMarker, MarkerChain, MarkerRef};
+use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain, MarkerRef};
 use fgdb_crypto::Digest;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::ObjectId;
@@ -61,6 +61,17 @@ pub enum CommitError {
     Io(std::io::Error),
     /// The marker violated a structural law of the chain.
     Chain(ChainError),
+    /// The caller's capsule identity disagrees with the identity authenticated
+    /// by the marker. Writing either object would create an unopenable commit.
+    CapsuleRefMismatch {
+        capsule_oid: ObjectId,
+        marker_capsule_ref: ObjectId,
+    },
+    /// The marker body is outside the framing profile recovery accepts.
+    MarkerTooLarge {
+        body_len: usize,
+        max_body_len: usize,
+    },
     /// A log entry before the final one is malformed. Unlike a torn tail this
     /// is corruption: entries preceding it were durable, so the damage is not
     /// explained by a crash.
@@ -82,6 +93,21 @@ impl core::fmt::Display for CommitError {
         match self {
             Self::Io(error) => write!(f, "commit I/O failed: {error}"),
             Self::Chain(error) => write!(f, "marker rejected: {error}"),
+            Self::CapsuleRefMismatch {
+                capsule_oid,
+                marker_capsule_ref,
+            } => write!(
+                f,
+                "capsule identity {capsule_oid:?} disagrees with marker reference \
+                 {marker_capsule_ref:?}"
+            ),
+            Self::MarkerTooLarge {
+                body_len,
+                max_body_len,
+            } => write!(
+                f,
+                "marker body is {body_len} bytes, above the {max_body_len}-byte framing limit"
+            ),
             Self::CorruptLogEntry { commit_seq } => {
                 write!(f, "commit log entry at seq {commit_seq} is corrupt")
             }
@@ -285,6 +311,30 @@ impl CommitCoordinator {
             )));
         }
 
+        // ---- Validate the marker and its framing BEFORE writing the capsule.
+        // Writer/reader symmetry is a durability law: acknowledging a marker
+        // that recovery must reject is data loss on the next restart. The
+        // capsule reference is part of the marker's authenticated transcript,
+        // so it must name the exact object this call is about.
+        let marker = marker_for(commit_seq);
+        let marker_capsule_ref = match &marker.effect_source {
+            EffectSource::Local { capsule_ref, .. } => *capsule_ref,
+        };
+        // ubs:ignore -- authenticated public object identity, not secret material.
+        if marker_capsule_ref != capsule_oid {
+            return Err(CommitError::CapsuleRefMismatch {
+                capsule_oid,
+                marker_capsule_ref,
+            });
+        }
+        let chained = self.chain.validate(&marker)?;
+        let chain_hash = chained.chain_hash;
+        let entry = Self::encode_entry(&marker, chain_hash)?;
+        let marker_ref = MarkerRef {
+            marker_oid: chained.marker_oid,
+            commit_seq: chained.marker.commit_seq,
+        };
+
         // ---- Build + D1: the capsule becomes durable BEFORE any marker can
         // name it. A marker pointing at non-durable bytes would be a commit
         // pointing at bytes that may not exist.
@@ -303,16 +353,8 @@ impl CommitCoordinator {
             return Err(CommitError::Io(std::io::Error::other("crash: after D1")));
         }
 
-        // ---- The marker. Validated against every chain law BEFORE it is
-        // written, so a log entry that exists is an entry that was legal.
-        let marker = marker_for(commit_seq);
-        let chained = self.chain.validate(&marker)?;
-        let chain_hash = chained.chain_hash;
-        let marker_ref = MarkerRef {
-            marker_oid: chained.marker_oid,
-            commit_seq: chained.marker.commit_seq,
-        };
-
+        // ---- The marker. Every structural and framing law was checked before
+        // D1, so a log entry that exists is an entry recovery can decode.
         let mut log = OpenOptions::new()
             .append(true)
             .create(true)
@@ -325,7 +367,7 @@ impl CommitCoordinator {
         // committed again would re-issue `commit_seq` and append a duplicate —
         // turning a survivable crash into a log that fails recovery outright.
         self.poisoned = true;
-        log.write_all(&Self::encode_entry(&marker, chain_hash))?;
+        log.write_all(&entry)?;
         if crash_at == Some(CrashPoint::AfterMarkerBeforeD2) {
             return Err(CommitError::Io(std::io::Error::other("crash: before D2")));
         }
@@ -341,14 +383,24 @@ impl CommitCoordinator {
     ///
     /// The chain hash is stored rather than recomputed on the fly so recovery
     /// can detect a torn entry by *disagreement* as well as by short read.
-    fn encode_entry(marker: &CommitMarker, chain_hash: Digest) -> Vec<u8> {
+    fn encode_entry(marker: &CommitMarker, chain_hash: Digest) -> Result<Vec<u8>, CommitError> {
         let body = marker.canonical_bytes();
+        if body.len() > MAX_ENTRY_BODY {
+            return Err(CommitError::MarkerTooLarge {
+                body_len: body.len(),
+                max_body_len: MAX_ENTRY_BODY,
+            });
+        }
+        let body_len = u32::try_from(body.len()).map_err(|_| CommitError::MarkerTooLarge {
+            body_len: body.len(),
+            max_body_len: MAX_ENTRY_BODY,
+        })?;
         let mut entry = Vec::with_capacity(4 + 4 + body.len() + 32);
         entry.extend_from_slice(&ENTRY_MAGIC);
-        entry.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        entry.extend_from_slice(&body_len.to_be_bytes());
         entry.extend_from_slice(&body);
         entry.extend_from_slice(&chain_hash.0);
-        entry
+        Ok(entry)
     }
 
     /// Recover the chain from the durable log.
@@ -356,7 +408,7 @@ impl CommitCoordinator {
     /// THE TORN-TAIL RULE lives here, and it turns on one distinction:
     /// **missing bytes versus wrong bytes.** The file ending mid-entry is a
     /// crash during D2 — a commit that never completed — so the partial entry
-    /// is discarded and recovery succeeds. Bytes that are *present but not a
+    /// is truncated and recovery succeeds. Bytes that are *present but not a
     /// valid entry* are damage to something that was already durable, and that
     /// fails closed.
     ///
@@ -406,7 +458,26 @@ impl CommitCoordinator {
                 .map_err(|_| CommitError::CorruptLogEntry { commit_seq: seq })?;
             cursor += consumed;
         }
-        Ok((chain, bytes.len() - cursor))
+        let discarded_tail_bytes = bytes.len() - cursor;
+        if discarded_tail_bytes != 0 {
+            // O_APPEND uses the file's physical end, not the recovered
+            // chain's logical end. Leaving the torn bytes in place would put
+            // the next acknowledged entry after an undecodable prefix; the
+            // following restart would stop at that old prefix and silently
+            // lose the acknowledged commit. The next successful D2 sync makes
+            // this truncation durable together with the appended entry.
+            let valid_len = u64::try_from(cursor).map_err(|_| {
+                CommitError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "commit log length does not fit u64",
+                ))
+            })?;
+            OpenOptions::new()
+                .write(true)
+                .open(&path)?
+                .set_len(valid_len)?;
+        }
+        Ok((chain, discarded_tail_bytes))
     }
 
     /// Decode one entry, or say which way it failed.

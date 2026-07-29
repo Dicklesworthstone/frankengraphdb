@@ -33,7 +33,7 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::commit::{
-    CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator, CommitError, CrashPoint,
+    CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator, CommitError, CrashPoint, MAX_ENTRY_BODY,
 };
 use fgdb_chronicle::marker::{CommitMarker, EffectSource, HeadUpdate, MarkerChain};
 use fgdb_crypto::Digest;
@@ -429,6 +429,60 @@ fn a_torn_tail_from_an_interrupted_d2_is_discarded() {
     });
 }
 
+/// Recovery must remove the physical torn suffix, not merely ignore it in
+/// memory. Otherwise O_APPEND places the next successful marker after those
+/// stale bytes, and the following restart stops at the same torn prefix before
+/// it ever reaches the newly acknowledged commit.
+#[test]
+fn a_commit_after_torn_tail_recovery_survives_restart() {
+    let dir = scratch_dir("torn-tail-then-append");
+    under_lab(25, move |cx| {
+        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        commit_ok(&mut coordinator, cx, 1);
+        commit_ok(&mut coordinator, cx, 2);
+        let committed_len = log_bytes(&dir).len();
+
+        let chain_snapshot = coordinator.chain().clone();
+        let crashed = coordinator.commit_with_crash(
+            cx,
+            capsule_oid(3),
+            &capsule_bytes(3),
+            |seq| marker_for(seq, &chain_snapshot),
+            Some(CrashPoint::AfterMarkerBeforeD2),
+        );
+        assert!(crashed.is_err());
+        drop(coordinator);
+
+        let written = log_bytes(&dir).len();
+        assert!(
+            written > committed_len,
+            "the interrupted marker was written"
+        );
+        CommitCoordinator::tear_log_tail_for_test(&dir, (written - committed_len) as u64 - 4)
+            .expect("tear");
+
+        let mut recovered = CommitCoordinator::open(&dir).expect("recover torn tail");
+        assert_eq!(recovered.discarded_tail_bytes(), 4);
+        commit_ok(&mut recovered, cx, 3);
+        drop(recovered);
+
+        let reopened = CommitCoordinator::open(&dir).expect("reopen after replacement commit");
+        let sequences: Vec<u64> = reopened
+            .chain()
+            .entries()
+            .iter()
+            .map(|entry| entry.marker.commit_seq)
+            .collect();
+        assert_eq!(
+            sequences,
+            vec![1, 2, 3],
+            "the replacement commit must remain reachable after another restart"
+        );
+        assert_eq!(reopened.discarded_tail_bytes(), 0);
+        assert_eq!(reopened.chain().verify(), Ok(()));
+    });
+}
+
 /// The other arm: the un-fsynced entry happened to survive intact. It is a
 /// complete, chain-consistent entry, so recovery accepts it — the window where
 /// a commit may or may not have happened is real, and both resolutions are
@@ -496,6 +550,92 @@ fn the_next_commit_after_a_crash_is_gap_free() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Writer/reader symmetry. Anything the writer acknowledges must be inside the
+// exact profile recovery accepts, and all cross-object references must agree
+// before the first durable byte is written.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_marker_that_names_another_capsule_is_rejected_before_any_write() {
+    let dir = scratch_dir("capsule-ref-mismatch");
+    under_lab(26, move |cx| {
+        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let chain_snapshot = coordinator.chain().clone();
+        let marker_capsule_ref = capsule_oid(99);
+        let result = coordinator.commit(cx, capsule_oid(1), &capsule_bytes(1), |seq| {
+            let mut marker = marker_for(seq, &chain_snapshot);
+            marker.effect_source = EffectSource::Local {
+                capsule_ref: marker_capsule_ref,
+                logical_delta_template_digest: digest(2),
+            };
+            marker
+        });
+        assert!(
+            matches!(
+                result,
+                Err(CommitError::CapsuleRefMismatch {
+                    capsule_oid: found_capsule_oid,
+                    marker_capsule_ref: found_marker_ref,
+                }) if found_capsule_oid == capsule_oid(1)
+                    && found_marker_ref == marker_capsule_ref
+            ),
+            "the mismatch must be typed and preserve both identities; got {result:?}"
+        );
+        assert!(!coordinator.is_poisoned());
+        assert_eq!(coordinator.next_commit_seq(), 1);
+        assert_eq!(capsule_file_count(&dir), 0, "no capsule may be written");
+        assert!(log_bytes(&dir).is_empty(), "no marker may be written");
+
+        commit_ok(&mut coordinator, cx, 1);
+        assert_eq!(
+            coordinator.chain().len(),
+            1,
+            "a pre-write refusal must leave the coordinator usable"
+        );
+    });
+}
+
+#[test]
+fn a_marker_above_the_recovery_bound_is_rejected_before_any_write() {
+    let dir = scratch_dir("marker-too-large");
+    under_lab(27, move |cx| {
+        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let chain_snapshot = coordinator.chain().clone();
+        let result = coordinator.commit(cx, capsule_oid(1), &capsule_bytes(1), |seq| {
+            let mut marker = marker_for(seq, &chain_snapshot);
+            marker.head_updates = (0..4_000)
+                .map(|branch| HeadUpdate {
+                    graph: 7,
+                    branch,
+                    expected_previous: None,
+                })
+                .collect();
+            marker
+        });
+        assert!(
+            matches!(
+                result,
+                Err(CommitError::MarkerTooLarge {
+                    body_len,
+                    max_body_len: MAX_ENTRY_BODY,
+                }) if body_len > MAX_ENTRY_BODY
+            ),
+            "the writer must enforce recovery's framing limit; got {result:?}"
+        );
+        assert!(!coordinator.is_poisoned());
+        assert_eq!(coordinator.next_commit_seq(), 1);
+        assert_eq!(capsule_file_count(&dir), 0, "no capsule may be written");
+        assert!(log_bytes(&dir).is_empty(), "no marker may be written");
+
+        commit_ok(&mut coordinator, cx, 1);
+        drop(coordinator);
+        let reopened = CommitCoordinator::open(&dir).expect("reopen after valid commit");
+        assert_eq!(reopened.chain().len(), 1);
+        assert_eq!(reopened.chain().verify(), Ok(()));
+    });
+}
+
 /// Repeated crashes must not accumulate damage. Ten crash/reopen cycles
 /// interleaved with real commits, verified at every step.
 #[test]
@@ -521,11 +661,19 @@ fn repeated_crashes_leave_a_verifiable_chain() {
                 expected_orphans += 1;
             }
             let chain_snapshot = coordinator.chain().clone();
+            let interrupted_capsule_oid = capsule_oid(1_000 + round);
             let _ = coordinator.commit_with_crash(
                 cx,
-                capsule_oid(1_000 + round),
+                interrupted_capsule_oid,
                 &capsule_bytes(1_000 + round),
-                |seq| marker_for(seq, &chain_snapshot),
+                |seq| {
+                    let mut marker = marker_for(seq, &chain_snapshot);
+                    marker.effect_source = EffectSource::Local {
+                        capsule_ref: interrupted_capsule_oid,
+                        logical_delta_template_digest: digest(seq as u8 + 1),
+                    };
+                    marker
+                },
                 Some(point),
             );
             drop(coordinator);
