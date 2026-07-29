@@ -882,6 +882,96 @@ fn a_middle_entry_with_an_oversized_length_is_corruption_not_a_tail() {
 }
 
 #[test]
+fn a_bounded_length_increase_on_the_final_durable_entry_fails_closed() {
+    let dir = scratch_dir("bounded-final-length");
+    under_lab(37, move |cx| {
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        commit_ok(&mut coordinator, cx, 1);
+        drop(coordinator);
+
+        let mut bytes = log_bytes(&dir);
+        let original_len = u32::from_be_bytes(bytes[4..8].try_into().expect("entry length field"));
+        let added_bit = (0..u32::BITS)
+            .find(|bit| {
+                let mask = 1u32 << bit;
+                original_len & mask == 0 && (original_len | mask) as usize <= MAX_ENTRY_BODY
+            })
+            .expect("fixture body has a bounded zero bit");
+        let damaged_len = original_len | (1u32 << added_bit);
+        assert!(
+            damaged_len > original_len && (damaged_len as usize) <= MAX_ENTRY_BODY,
+            "the causal mutation must increase exactly one bit while remaining in profile"
+        );
+        bytes[4..8].copy_from_slice(&damaged_len.to_be_bytes());
+        write_log(&dir, &bytes);
+
+        let result = CommitCoordinator::open(&dir, keys());
+        assert!(
+            matches!(result, Err(CommitError::CorruptLogEntry { commit_seq: 1 })),
+            "a complete durable entry whose bounded length bit changed is corruption, \
+             not an unfsynced torn tail; got {result:?}"
+        );
+        assert_eq!(
+            log_bytes(&dir),
+            bytes,
+            "fail-closed recovery must not truncate the corruption evidence"
+        );
+    });
+}
+
+#[test]
+fn a_corrupt_final_entry_trailer_length_fails_closed() {
+    let dir = scratch_dir("corrupt-trailer-length");
+    under_lab(38, move |cx| {
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        commit_ok(&mut coordinator, cx, 1);
+        drop(coordinator);
+
+        let mut bytes = log_bytes(&dir);
+        let trailer_length_offset = bytes.len() - 8;
+        bytes[trailer_length_offset] ^= 0x01;
+        write_log(&dir, &bytes);
+
+        let result = CommitCoordinator::open(&dir, keys());
+        assert!(
+            matches!(result, Err(CommitError::CorruptLogEntry { commit_seq: 1 })),
+            "the duplicated length is part of the durable frame contract; got {result:?}"
+        );
+        assert_eq!(
+            log_bytes(&dir),
+            bytes,
+            "recovery must preserve the corrupt frame as evidence"
+        );
+    });
+}
+
+#[test]
+fn a_corrupt_final_entry_trailer_magic_fails_closed() {
+    let dir = scratch_dir("corrupt-trailer-magic");
+    under_lab(39, move |cx| {
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        commit_ok(&mut coordinator, cx, 1);
+        drop(coordinator);
+
+        let mut bytes = log_bytes(&dir);
+        let final_byte = bytes.last_mut().expect("complete framed entry");
+        *final_byte ^= 0x01;
+        write_log(&dir, &bytes);
+
+        let result = CommitCoordinator::open(&dir, keys());
+        assert!(
+            matches!(result, Err(CommitError::CorruptLogEntry { commit_seq: 1 })),
+            "the end sentinel is part of the durable frame contract; got {result:?}"
+        );
+        assert_eq!(
+            log_bytes(&dir),
+            bytes,
+            "recovery must preserve the corrupt frame as evidence"
+        );
+    });
+}
+
+#[test]
 fn a_corrupt_marker_body_fails_closed() {
     let dir = scratch_dir("corrupt-body");
     under_lab(32, move |cx| {

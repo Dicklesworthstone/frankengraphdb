@@ -46,9 +46,19 @@ pub const COMMIT_LOG_NAME: &str = "commits.log";
 /// deterministic candidate without allocating a second capsule-sized `Vec`.
 const CAPSULE_COMPARE_BUFFER_BYTES: usize = 8 * 1024;
 
-/// Per-entry framing magic, so a torn tail is distinguishable from a valid
-/// entry that happens to start with a small length.
-pub const ENTRY_MAGIC: [u8; 4] = *b"FGCM";
+/// Version-2 per-entry framing magic.
+///
+/// Version 2 adds an end trailer carrying the body length again. Recovery
+/// deliberately rejects the earlier `FGCM` shape: accepting two shapes without
+/// a migration contract would make damaged framing ambiguous.
+pub const ENTRY_MAGIC: [u8; 4] = *b"FGC2";
+
+/// End sentinel for a complete version-2 entry.
+const ENTRY_TRAILER_MAGIC: [u8; 4] = *b"FGE2";
+
+const ENTRY_HEADER_BYTES: usize = 8;
+const CHAIN_HASH_BYTES: usize = 32;
+const ENTRY_TRAILER_BYTES: usize = 8;
 
 /// The largest entry body the writer will ever emit.
 ///
@@ -503,10 +513,12 @@ impl CommitCoordinator {
         Ok(marker_ref)
     }
 
-    /// One log entry: magic, length, canonical marker bytes, chain hash.
+    /// One log entry: version magic, length, canonical marker bytes, chain
+    /// hash, duplicated length, trailer magic.
     ///
-    /// The chain hash is stored rather than recomputed on the fly so recovery
-    /// can detect a torn entry by *disagreement* as well as by short read.
+    /// The trailer makes a complete frame self-delimiting without trusting the
+    /// leading length. The chain hash is stored rather than recomputed on the
+    /// fly so recovery can detect content tampering as well as framing damage.
     fn encode_entry(marker: &CommitMarker, chain_hash: Digest) -> Result<Vec<u8>, CommitError> {
         let body = marker.canonical_bytes();
         if body.len() > MAX_ENTRY_BODY {
@@ -519,11 +531,15 @@ impl CommitCoordinator {
             body_len: body.len(),
             max_body_len: MAX_ENTRY_BODY,
         })?;
-        let mut entry = Vec::with_capacity(4 + 4 + body.len() + 32);
+        let mut entry = Vec::with_capacity(
+            ENTRY_HEADER_BYTES + body.len() + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES,
+        );
         entry.extend_from_slice(&ENTRY_MAGIC);
         entry.extend_from_slice(&body_len.to_be_bytes());
         entry.extend_from_slice(&body);
         entry.extend_from_slice(&chain_hash.0);
+        entry.extend_from_slice(&body_len.to_be_bytes());
+        entry.extend_from_slice(&ENTRY_TRAILER_MAGIC);
         Ok(entry)
     }
 
@@ -609,22 +625,59 @@ impl CommitCoordinator {
         if bytes.len() >= ENTRY_MAGIC.len() && bytes[..ENTRY_MAGIC.len()] != ENTRY_MAGIC {
             return Err(EntryDefect::Corrupt);
         }
-        if bytes.len() < 8 {
+        if bytes.len() < ENTRY_HEADER_BYTES {
             return Err(EntryDefect::Truncated);
         }
         let body_len = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
         if body_len > MAX_ENTRY_BODY {
             return Err(EntryDefect::Corrupt);
         }
-        let total = 8 + body_len + 32;
+        let total = ENTRY_HEADER_BYTES + body_len + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES;
         if bytes.len() < total {
+            // A complete marker prefix followed by the full fixed suffix means
+            // the physical frame is present under its intrinsic body extent.
+            // The leading length is therefore damaged; silently calling this a
+            // torn tail would discard an acknowledged final commit.
+            if Self::has_complete_intrinsic_entry_extent(bytes) {
+                return Err(EntryDefect::Corrupt);
+            }
             return Err(EntryDefect::Truncated);
         }
-        let marker =
-            crate::marker::decode_canonical(&bytes[8..8 + body_len]).ok_or(EntryDefect::Corrupt)?;
+        let body_end = ENTRY_HEADER_BYTES + body_len;
+        let marker = crate::marker::decode_canonical(&bytes[ENTRY_HEADER_BYTES..body_end])
+            .ok_or(EntryDefect::Corrupt)?;
+        let chain_end = body_end + CHAIN_HASH_BYTES;
         let mut chain_hash = [0u8; 32];
-        chain_hash.copy_from_slice(&bytes[8 + body_len..total]);
+        chain_hash.copy_from_slice(&bytes[body_end..chain_end]);
+        let duplicated_body_len = u32::from_be_bytes([
+            bytes[chain_end],
+            bytes[chain_end + 1],
+            bytes[chain_end + 2],
+            bytes[chain_end + 3],
+        ]) as usize;
+        if duplicated_body_len != body_len || bytes[chain_end + 4..total] != ENTRY_TRAILER_MAGIC {
+            return Err(EntryDefect::Corrupt);
+        }
         Ok((marker, Digest(chain_hash), total))
+    }
+
+    /// Does `bytes` contain a whole version-2 entry under the marker's
+    /// self-described canonical extent, independently of the leading length?
+    fn has_complete_intrinsic_entry_extent(bytes: &[u8]) -> bool {
+        let Some(marker_and_suffix) = bytes.get(ENTRY_HEADER_BYTES..) else {
+            return false;
+        };
+        let Some((_, intrinsic_body_len)) =
+            crate::marker::decode_canonical_prefix(marker_and_suffix)
+        else {
+            return false;
+        };
+        if intrinsic_body_len > MAX_ENTRY_BODY {
+            return false;
+        }
+        let intrinsic_total =
+            ENTRY_HEADER_BYTES + intrinsic_body_len + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES;
+        bytes.len() >= intrinsic_total
     }
 
     /// Capsules on disk that no committed marker names.

@@ -444,6 +444,17 @@ impl MarkerChain {
 /// after a crash) from corruption (not), and only the caller knows which
 /// position the entry occupied.
 pub fn decode_canonical(bytes: &[u8]) -> Option<CommitMarker> {
+    let (marker, consumed) = decode_canonical_prefix(bytes)?;
+    (consumed == bytes.len()).then_some(marker)
+}
+
+/// Decode one canonical marker prefix and report its exact byte extent.
+///
+/// The commit-log framing layer uses this only when the declared frame length
+/// runs past EOF. Finding a complete marker plus the fixed framing suffix proves
+/// that the bytes are a complete damaged frame, not a genuinely torn write.
+/// Other callers must use [`decode_canonical`], which rejects trailing bytes.
+pub(crate) fn decode_canonical_prefix(bytes: &[u8]) -> Option<(CommitMarker, usize)> {
     let mut cursor = ByteReader::new(bytes);
 
     let logical_command_seq = cursor.u64()?;
@@ -492,31 +503,29 @@ pub fn decode_canonical(bytes: &[u8]) -> Option<CommitMarker> {
     };
     let flags = cursor.u32()?;
 
-    // Trailing bytes mean the encoding disagrees with this reader, which is
-    // exactly the situation a durable format must refuse rather than tolerate.
-    if !cursor.is_exhausted() {
-        return None;
-    }
-
-    Some(CommitMarker {
-        logical_command_seq,
-        commit_seq,
-        effect_source,
-        prev_global,
-        head_updates,
-        merge_record_oid,
-        coordinate_schema_transition_digest,
-        topology_epoch,
-        policy_epoch,
-        revocation_index,
-        txn_token,
-        commit_hlc,
-        final_effect_digest,
-        authorization_decision_digest,
-        resource_effect_digest,
-        payload_availability_certificate_oid,
-        flags,
-    })
+    let consumed = cursor.position();
+    Some((
+        CommitMarker {
+            logical_command_seq,
+            commit_seq,
+            effect_source,
+            prev_global,
+            head_updates,
+            merge_record_oid,
+            coordinate_schema_transition_digest,
+            topology_epoch,
+            policy_epoch,
+            revocation_index,
+            txn_token,
+            commit_hlc,
+            final_effect_digest,
+            authorization_decision_digest,
+            resource_effect_digest,
+            payload_availability_certificate_oid,
+            flags,
+        },
+        consumed,
+    ))
 }
 
 /// A bounds-checked big-endian reader. Every accessor returns `Option` so a
@@ -531,8 +540,8 @@ impl<'a> ByteReader<'a> {
         Self { bytes, position: 0 }
     }
 
-    fn is_exhausted(&self) -> bool {
-        self.position == self.bytes.len()
+    fn position(&self) -> usize {
+        self.position
     }
 
     fn take(&mut self, len: usize) -> Option<&'a [u8]> {
