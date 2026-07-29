@@ -108,8 +108,8 @@ embedded_source_blocks = [
 # without moving these is schema drift, not an edit.
 layer_count = 14
 crate_count = 70
-active_crate_count = 13
-planned_crate_count = 56
+active_crate_count = 14
+planned_crate_count = 55
 reserved_crate_count = 1
 owner_scope_count = 14
 foundation_project_count = 3
@@ -129,7 +129,7 @@ dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
 id_table_hash = "fnv1a64:b422bc59c3da23ca"
-semantic_contract_hash = "fnv1a64:bf2acabde6c032d0"
+semantic_contract_hash = "fnv1a64:6c9f1cec89bbb21c"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -834,12 +834,12 @@ layer_position = 11
 role = "Keyed identity, AEAD/KDF profiles, and the primitives no audited foundation supplies."
 role_basis = "layer_charter"
 unsafe_policy = "forbid"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "all"
 posture_basis = "product_shape"
 owner = "W1"
 owner_bead = "fgdb-w1-crypto-y5o"
-manifest_dir = ""
+manifest_dir = "crates/fgdb-crypto"
 
 [[crate]]
 name = "fgdb-calibrate"

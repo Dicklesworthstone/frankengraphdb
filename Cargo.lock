@@ -522,6 +522,10 @@ name = "fgdb-collections"
 version = "0.0.1"
 
 [[package]]
+name = "fgdb-crypto"
+version = "0.0.1"
+
+[[package]]
 name = "fgdb-delta-types"
 version = "0.0.1"
 dependencies = [

@@ -8,7 +8,7 @@
 This document is generated from `registries/workspace_topology.toml` and checked byte-exact in CI. The registry is the master; this file is its rendering. Every plan excerpt below is embedded verbatim under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the map.
 
 * **Layers:** 14
-* **Crates:** 70 (13 active, 56 planned, 1 reserved)
+* **Crates:** 70 (14 active, 55 planned, 1 reserved)
 * **Inventory rows:** 51 (23 build-here, 19 consume-from, 9 design-only)
 * **Replay:** `cargo run -p registry-check --bin topology-check -- --root .`
 * **Constraints bound:** FG-CON-01, FG-CON-02
@@ -56,7 +56,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 | 8 | `fgdb-codec` | active | `forbid` | all | W1 | fgdb-w1-codecs-3x8 | In-house compression kernels for the registered durable codec layer. |
 | 9 | `fgdb-sketch` | active | `forbid` | all | W1 | fgdb-w1-sketch-calibrate-tpj | Deterministic frequency, degree, and cardinality summaries. |
 | 10 | `fgdb-collections` | active | `forbid` | all | W1 | fgdb-w1-collections-lcg | ART/radix structures, succinct rank/select, and vectorized hash tables as safe scalar kernels. |
-| 11 | `fgdb-crypto` | planned | `forbid` | all | W1 | fgdb-w1-crypto-y5o | Keyed identity, AEAD/KDF profiles, and the primitives no audited foundation supplies. |
+| 11 | `fgdb-crypto` | active | `forbid` | all | W1 | fgdb-w1-crypto-y5o | Keyed identity, AEAD/KDF profiles, and the primitives no audited foundation supplies. |
 | 12 | `fgdb-calibrate` | active | `forbid` | all | W1 | fgdb-w1-sketch-calibrate-tpj | Identity-bound calibration wrappers over the runtime's e-process/conformal machinery. |
 | 13 | `fgdb-evidence` | active | `forbid` | all | W1 | fgdb-w1-foundation-types-tjk | Evidence envelopes and the disclosure fields every statistical claim must carry. |
 
@@ -383,4 +383,4 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 ## Pins
 
 * `id_table_hash` = `fnv1a64:b422bc59c3da23ca` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:bf2acabde6c032d0` — every normative decision, prose excluded.
+* `semantic_contract_hash` = `fnv1a64:6c9f1cec89bbb21c` — every normative decision, prose excluded.
