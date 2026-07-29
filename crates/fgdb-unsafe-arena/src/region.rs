@@ -92,9 +92,9 @@ pub enum ArenaError {
     /// block lengths would exceed `max_live_bytes`.
     RegionFull { requested: usize, remaining: usize },
     /// The region's resident-byte limit is exhausted: the next chunk would
-    /// push total chunk capacity past `max_resident_bytes`. Charged per chunk,
-    /// before any allocation or metadata mutation, so a refusal changes
-    /// nothing.
+    /// push retained chunk capacity past `max_resident_bytes`. Charged per
+    /// chunk before any region-visible or retained allocation or metadata
+    /// mutation, so a refusal changes nothing the region keeps.
     ResidentLimitExceeded { requested: usize, remaining: usize },
     /// The process allocator refused backing storage or region metadata.
     BackingAllocationFailed { requested: usize },
@@ -788,10 +788,12 @@ impl RegionAlloc for Region {
         let new_chunk = match placed {
             Some(_) => None,
             None => {
-                // The resident charge is checked before the chunk exists:
-                // refusal here is deterministic and leaves the region
-                // byte-identical. Chunks are never freed early, so this limit
-                // — not the live budget — is what bounds the region's actual
+                // Two resident checks, both deterministic and both before
+                // anything region-visible mutates: the requested-capacity
+                // lower bound is checked before the chunk exists, and the
+                // accepted capacity is measured on the still-local chunk
+                // below. Chunks are never freed early, so this limit — not
+                // the live budget — is what bounds the region's actual
                 // footprint under allocate/release churn.
                 let resident_remaining =
                     self.max_resident_bytes.saturating_sub(self.resident_bytes);
