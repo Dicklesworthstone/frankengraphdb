@@ -7279,7 +7279,7 @@ fn idr_role_transition_activation_state_is_a_logical_backed_whole_schema_union()
     ] {
         let seal_union = seal_unions
             .iter()
-            .find(|row| row.union_name == name)
+            .find(|row| row.union_name.as_str().eq(name))
             .expect("source-censused seal_state union exists");
         assert!(
             seal_union.field_tag.is_none()
@@ -7326,7 +7326,7 @@ fn idr_role_transition_activation_state_is_a_logical_backed_whole_schema_union()
         assert_eq!(
             sealed.payload_sha256.as_deref(),
             Some(sealed_payload_sha256),
-            "{name} must retain the role-specific Sealed payload digest"
+            "{name} must retain the role-specific Sealed payload SHA-256"
         );
     }
     let logical_parent = identity
