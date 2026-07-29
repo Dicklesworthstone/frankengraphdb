@@ -505,6 +505,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgdb-chronicle"
+version = "0.0.1"
+dependencies = [
+ "fgdb-crypto",
+ "fgdb-types",
+]
+
+[[package]]
 name = "fgdb-claim"
 version = "0.0.1"
 

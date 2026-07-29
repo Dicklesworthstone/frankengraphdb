@@ -1200,10 +1200,22 @@ fn has_definition_cue(value: &str) -> bool {
 }
 
 fn cue_names_union(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    ["union", "tag", "arm", "one of"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    const UNION_WORDS: [&str; 6] = ["union", "unions", "tag", "tags", "arm", "arms"];
+    let mut previous_was_one = false;
+    for word in value
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|word| !word.is_empty())
+    {
+        if UNION_WORDS
+            .iter()
+            .any(|candidate| word.eq_ignore_ascii_case(candidate))
+            || (previous_was_one && word.eq_ignore_ascii_case("of"))
+        {
+            return true;
+        }
+        previous_was_one = word.eq_ignore_ascii_case("one");
+    }
+    false
 }
 
 fn contains_continuation_separator(value: &str) -> bool {
@@ -3933,7 +3945,7 @@ mod tests {
         AmbiguityCandidate, AmbiguityKind, AmbiguityOccurrence, CensusErrorKind, DelimiterIssue,
         FieldCandidateKey, OPENING_DELIMITERS, SchemaCandidateKey, SourceMap, SourceSliceSpec,
         SplitSpan, StructuralCandidateKey, affected_source_key, bold_owner_name_range,
-        canonical_ambiguities, census_appendix_source, half_open_interval_end,
+        canonical_ambiguities, census_appendix_source, cue_names_union, half_open_interval_end,
         is_generic_angle_open, matching_delimiter, normalize_whitespace, opening_delimiter_for,
         sha256_hex, source_key_transcript, split_top_level, top_level_arrow,
     };
@@ -5270,6 +5282,99 @@ mod tests {
                 }),
                 "{label}: the supplemental union was left as trailing tokens"
             );
+        }
+    }
+
+    #[test]
+    fn supplemental_union_cues_require_whole_words_or_an_exact_phrase() {
+        for cue in [
+            "is a closed union with",
+            "defines two unions with",
+            "uses a tag for",
+            "records the tags for",
+            "has one arm with",
+            "owns both arms with",
+            "selects one of",
+            "selects one-of",
+        ] {
+            assert!(cue_names_union(cue), "missed union cue: {cue}");
+        }
+        for non_cue in [
+            "is staged with",
+            "is a reunion with",
+            "is a farm with",
+            "uses union_state with",
+            "selects one_offer with",
+        ] {
+            assert!(
+                !cue_names_union(non_cue),
+                "identifier substring became a union cue: {non_cue}"
+            );
+        }
+    }
+
+    #[test]
+    fn incidental_union_substrings_do_not_license_a_supplemental_body() {
+        for (label, source) in [
+            (
+                "staged",
+                concat!(
+                    "`Manifest` is staged with common `{id:u64}` ",
+                    "and exactly one body: ",
+                    "`Local{local_value:u8}|Sharded{sharded_value:u16}`.\n",
+                ),
+            ),
+            (
+                "reunion",
+                concat!(
+                    "`Manifest` is a reunion with common `{id:u64}` ",
+                    "and exactly one body: ",
+                    "`Local{local_value:u8}|Sharded{sharded_value:u16}`.\n",
+                ),
+            ),
+            (
+                "farm",
+                concat!(
+                    "`Manifest` is a farm with common `{id:u64}` ",
+                    "and exactly one body: ",
+                    "`Local{local_value:u8}|Sharded{sharded_value:u16}`.\n",
+                ),
+            ),
+        ] {
+            let slices = [SourceSliceSpec {
+                id: label,
+                start_line: 30,
+                end_line: 30,
+            }];
+            let census = census_appendix_source(source.as_bytes(), 30, &slices)
+                .expect("the primary record remains independently censusable");
+
+            assert!(
+                census
+                    .fields
+                    .iter()
+                    .any(|candidate| candidate.key.path.eq("Manifest.id")),
+                "{label}: the control record was not linked to Manifest"
+            );
+            assert!(
+                census
+                    .unions
+                    .iter()
+                    .all(|candidate| !candidate.key.schema_family.eq("Manifest")),
+                "{label}: an incidental substring licensed a Manifest union"
+            );
+            for path in [
+                "Manifest.Local.local_value",
+                "Manifest.Sharded.sharded_value",
+            ] {
+                assert!(
+                    census
+                        .fields
+                        .iter()
+                        .all(|candidate| !candidate.key.path.eq(path)),
+                    "{label}: an incidental substring licensed {path}"
+                );
+            }
         }
     }
 

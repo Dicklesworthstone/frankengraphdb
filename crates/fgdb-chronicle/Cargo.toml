@@ -1,0 +1,13 @@
+[package]
+name = "fgdb-chronicle"
+version = "0.0.1"
+edition = "2024"
+description = "Chronicle (bet B1): the content-addressed durability substrate. This increment lands plan §5.1's noncircular object-identity pipeline — keyed ObjectId, object AEAD, CiphertextId, EncodingId, PlacementId — as typed transitions that cannot be assembled out of order; bead fgdb-w2-object-identity-t0f."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+fgdb-crypto = { path = "../fgdb-crypto" }
+fgdb-types = { path = "../fgdb-types" }

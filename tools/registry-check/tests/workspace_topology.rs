@@ -34,7 +34,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:6c9f1cec89bbb21c";
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:e2c363389ddb586e";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -160,9 +160,10 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
             .iter()
             .filter(|row| row.activation_status == "active")
             .count(),
-        14,
-        "eleven ordinary crates (fgdb-crypto activated by fgdb-w1-crypto-y5o's \
-         BLAKE3 kernel) plus all three landed islands: fgdb-unsafe-simd, \
+        15,
+        "twelve ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's BLAKE3/AEAD \
+         kernel, fgdb-chronicle by fgdb-w2-object-identity-t0f's §5.1 identity \
+         pipeline) plus all three landed islands: fgdb-unsafe-simd, \
          fgdb-unsafe-arena and fgdb-unsafe-vfs"
     );
     assert_eq!(

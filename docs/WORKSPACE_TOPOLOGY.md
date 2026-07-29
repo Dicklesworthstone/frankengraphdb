@@ -8,7 +8,7 @@
 This document is generated from `registries/workspace_topology.toml` and checked byte-exact in CI. The registry is the master; this file is its rendering. Every plan excerpt below is embedded verbatim under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the map.
 
 * **Layers:** 14
-* **Crates:** 70 (14 active, 55 planned, 1 reserved)
+* **Crates:** 70 (15 active, 54 planned, 1 reserved)
 * **Inventory rows:** 51 (23 build-here, 19 consume-from, 9 design-only)
 * **Replay:** `cargo run -p registry-check --bin topology-check -- --root .`
 * **Constraints bound:** FG-CON-01, FG-CON-02
@@ -74,7 +74,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 |---|---|---|---|---|---|---|---|
 | 1 | `fgdb-ecs` | planned | `forbid` | all | W2 | — | identity/encoding/bootstrap/object locator |
 | 2 | `fgdb-order` | planned | `forbid` | all | W2 | fgdb-w2-order-raft-0a90 | durable Raft log/state core and quorum-one driver |
-| 3 | `fgdb-chronicle` | planned | `forbid` | all | W2 | — | capsule/marker/logical-local roots, allocator, outcomes, checkpoints/retention, recovery/GC/scrub |
+| 3 | `fgdb-chronicle` | active | `forbid` | all | W2 | fgdb-w2-object-identity-t0f | capsule/marker/logical-local roots, allocator, outcomes, checkpoints/retention, recovery/GC/scrub |
 | 4 | `fgdb-branch` | planned | `forbid` | all | W2 | — | Branch fork, merge, grants, and retirement over the shared commit stream. |
 | 5 | `fgdb-keymgr` | planned | `forbid` | all | W2 | — | Key-envelope DAG, rotation, and the two-stage key lifecycle. |
 | 6 | `fgdb-audit` | planned | `forbid` | all | W2 | — | The durable audit stream, its admission gates, and visibility pipeline. |
@@ -383,4 +383,4 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 ## Pins
 
 * `id_table_hash` = `fnv1a64:b422bc59c3da23ca` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:6c9f1cec89bbb21c` — every normative decision, prose excluded.
+* `semantic_contract_hash` = `fnv1a64:e2c363389ddb586e` — every normative decision, prose excluded.
