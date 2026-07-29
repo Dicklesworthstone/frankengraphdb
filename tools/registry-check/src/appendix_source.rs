@@ -5849,7 +5849,7 @@ mod tests {
         assert!(census.ambiguities.iter().any(|row| {
             row.key.kind == AmbiguityKind::UnparsedTrailingTokens
                 && row.raw == "junk"
-                && row.affected_source_keys == ["arm|Choice|Choice|Left"]
+                && row.affected_source_keys.eq(&["arm|Choice|Choice|Left"])
         }));
         assert!(census.ambiguities.iter().any(|row| {
             row.key.kind == AmbiguityKind::UnparsedUnionArm
@@ -5992,7 +5992,7 @@ mod tests {
         }));
         assert!(conflicting.iter().any(|row| {
             row.key.reason == "the same arm source key has divergent payloads"
-                && row.affected_source_keys == ["arm|Same|Same|Left"]
+                && row.affected_source_keys.eq(&["arm|Same|Same|Left"])
         }));
         for ambiguity in &census.ambiguities {
             assert_ambiguity_relation_digest(ambiguity);
@@ -6369,8 +6369,14 @@ mod tests {
             let faulted = joined.replacen(second_head, faulted_head, 1);
             assert_ne!(faulted, joined, "{label}: fault injection was inert");
             let faulted_census = census_801o_fixture(&faulted);
-            if faulted_census.transcripts.unions != joined_census.transcripts.unions
-                && faulted_census.transcripts.arms != joined_census.transcripts.arms
+            if faulted_census
+                .transcripts
+                .unions
+                .ne(&joined_census.transcripts.unions)
+                && faulted_census
+                    .transcripts
+                    .arms
+                    .ne(&joined_census.transcripts.arms)
             {
                 fault_controls_fired += 1;
             }
