@@ -10338,14 +10338,16 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     | ("LocalBeginReservationRecord", "applied_control_ref")
             )
     };
-    // The a03 flat-field residue re-measurement lands one further source-forced
-    // inline field. Like every tranche here it postdates the erratum, so it is
-    // filtered OUT of the historical witness rather than re-pinning the witness
-    // constant -- the constant is a frozen historical fact, not a live pin.
+    // The a03 flat-field residue and state-value re-measurements land two further
+    // source-forced inline fields. Like every tranche here they postdate the
+    // erratum, so they are filtered OUT of the historical witness rather than
+    // re-pinning the witness constant -- the constant is a frozen historical
+    // fact, not a live pin.
     let post_erratum_a03_flat_residue_field = |schema: &str, name: &str| {
         matches!(
             (schema, name),
             ("LocalPrepareAdmissionSpec", "expected_conflict_index_basis")
+                | ("AdmittedTxnAbortCommand", "required_selection")
         )
     };
     // yenh opens five exact A03 wire/ordinary-union consumer closures and
@@ -10611,7 +10613,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // terminal_audit_freeze, terminal_audit_gate), claimed by
         // post_erratum_a10_wrapper_field. current_field_count carries them
         // (984 -> 987) and the reconstruction stays at the frozen 225.
-        pre_erratum.fields.len() + 762,
+        // 762 -> 763 (fgdb-5uj5): AdmittedTxnAbortCommand.required_selection,
+        // claimed by post_erratum_a03_flat_residue_field. The current field
+        // count carries it and the reconstruction stays at the frozen 225.
+        pre_erratum.fields.len() + 763,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
     );
@@ -15501,9 +15506,11 @@ fn idr_refinement_claims_resolve_to_a_registered_arm() {
     // fgdb-gpms ruling extends the tag-refined instrument from the reference position
     // to the value position, so a `kind = "discriminant"` row now carries a refinement
     // claim and this law's domain covers it on exactly the same terms.
+    // 7 -> 8 (fgdb-5uj5): LocalAbortFinalCertificationSelection, wire 0x0562,
+    // applies that same law to AdmittedTxnAbortCommand.required_selection.
     assert_eq!(
         claimants.len(),
-        7,
+        8,
         "refinement-claim population moved; a new tag-refined wrapper must be added here \
          deliberately, not discovered by a green run: {claimants:?}"
     );

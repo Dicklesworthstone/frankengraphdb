@@ -95,6 +95,20 @@ version_status = "reserved"
 max_size_bytes = 256
 
 [[field]]
+containing_schema = "AdmittedTxnAbortCommand"
+field_tag = 0x0008
+stable_name = "required_selection"
+exact_wire_type = "LocalAbortFinalCertificationSelection"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline required-selection precondition refined to the LocalAbort arm (arm_tag 0x0002) of FinalCertificationSelection; the command rejects any other selection, while required_selected_terminal_digest and final_certification_reservation_ref bind the selected arm body, so this row carries only the refined union's u8 tag and creates no reachability edge (a03:1538, a07:1746)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[field]]
 containing_schema = "AttemptCompactionAttestation"
 field_tag = 0x0001
 stable_name = "visibility_certificate_ref"

@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "64535886e6dbb525694d6676b315397b959291e2901b9bcd456ae0e61861d4d3"
 
 [target_manifest]
-target_count = 3682
-projection_fallback_count = 134
-target_source_assignment_sha256 = "2162b89734852b0dde868d46aed1ca08e6b0d23d6fb2a803fc9f5901be905de3"
+target_count = 3684
+projection_fallback_count = 135
+target_source_assignment_sha256 = "06d6c2a14168944b9391d0a1c51452b9c3941e53067cd23e931ebd9969fc2db8"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -112788,4 +112788,47 @@ target_row_id = "a18:union-arm:meta-restore-phase-awaiting-source-access-cleanup
 slice_id = "a18"
 source_key = "arm|MetaRestorePhase|MetaRestorePhase.AwaitingSourceAccessCleanup.terminal|Abandoned"
 target_kind = "union-arm"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a03"
+row_id = "a03:wire-type:local-abort-final-certification-selection"
+wire_type_id = 0x0562
+name = "LocalAbortFinalCertificationSelection"
+kind = "discriminant"
+status = "reserved"
+encoding_context = "generated tag-refined discriminant whose validator admits only the LocalAbort arm (arm_tag 0x0002) of the FinalCertificationSelection union; the required_selection precondition carries the refined union's u8 tag and never the arm payload, while required_selected_terminal_digest and the referenced Active reservation bind the selected terminal body (a03:1538, a07:1746)"
+allowed_containing_schemas = ["AdmittedTxnAbortCommand"]
+max_size_bytes = 1
+
+[[target]]
+row_id = "a03:target:wire-type-local-abort-final-certification-selection"
+target_row_id = "a03:wire-type:local-abort-final-certification-selection"
+slice_id = "a03"
+source_key = "projection|wire_types|LocalAbortFinalCertificationSelection"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[field]]
+slice_id = "a03"
+row_id = "a03:field:admitted-txn-abort-command-required-selection"
+containing_schema = "AdmittedTxnAbortCommand"
+field_tag = 0x0008
+stable_name = "required_selection"
+exact_wire_type = "LocalAbortFinalCertificationSelection"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "inline required-selection precondition refined to the LocalAbort arm (arm_tag 0x0002) of FinalCertificationSelection; the command rejects any other selection, while required_selected_terminal_digest and final_certification_reservation_ref bind the selected arm body, so this row carries only the refined union's u8 tag and creates no reachability edge (a03:1538, a07:1746)"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[target]]
+row_id = "a03:target:field-admitted-txn-abort-command-required-selection"
+target_row_id = "a03:field:admitted-txn-abort-command-required-selection"
+slice_id = "a03"
+source_key = "field|AdmittedTxnAbortCommand|AdmittedTxnAbortCommand.required_selection|required_selection"
+target_kind = "field"
 definition_status = "declared"
