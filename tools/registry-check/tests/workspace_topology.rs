@@ -34,7 +34,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const ID_TABLE_PIN: &str = "fnv1a64:b422bc59c3da23ca";
-const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:e2c363389ddb586e";
+// Re-frozen when fgdb-reference activated (planned -> active, 08bfadf). The
+// semantic contract covers activation_status, so activating a crate MUST move
+// this — a pin that survived the change would be pinning nothing.
+const SEMANTIC_CONTRACT_PIN: &str = "fnv1a64:348414046a3639d2";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -160,10 +163,11 @@ fn topology_cardinalities_are_exactly_the_plan_enumeration() {
             .iter()
             .filter(|row| row.activation_status == "active")
             .count(),
-        15,
-        "twelve ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's BLAKE3/AEAD \
+        16,
+        "thirteen ordinary crates (fgdb-crypto by fgdb-w1-crypto-y5o's BLAKE3/AEAD \
          kernel, fgdb-chronicle by fgdb-w2-object-identity-t0f's §5.1 identity \
-         pipeline) plus all three landed islands: fgdb-unsafe-simd, \
+         pipeline, fgdb-reference by fgdb-w2-delta-batches-og6n's semantics \
+         oracle) plus all three landed islands: fgdb-unsafe-simd, \
          fgdb-unsafe-arena and fgdb-unsafe-vfs"
     );
     assert_eq!(
