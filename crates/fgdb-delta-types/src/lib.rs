@@ -26,12 +26,14 @@
 #![forbid(unsafe_code)]
 
 mod canonical;
+mod index;
 mod zweight;
 
 use fgdb_types::{BranchId, CanonicalScalar, CommitCx, EId, GraphId, MarkerRef, ObjectId, VId};
 
 pub use canonical::{CanonicalError, DELTA_FORMAT_V1, canonicalize};
 pub use fgdb_bigint::{ArithmeticOperation as ZWeightOperation, LimbLimit};
+pub use index::{INDEX_FORMAT_V1, IndexError, LocalDeltaBatchIndex};
 pub use zweight::{ZWeight, ZWeightError};
 
 /// Catalog-interned label ordinal (durable pinning: `fgdb-w4-schema-catalog`).
@@ -446,6 +448,32 @@ impl LogicalDeltaBatch {
             // `frontier: Local{commit_seq}`): a local batch advances the
             // frontier to exactly the commit that produced it.
             frontier: commit_seq,
+        }
+    }
+
+    /// Build a batch from parts, INCLUDING inconsistent ones.
+    ///
+    /// Test-facing, and it exists because `order` derives `commit_seq` and
+    /// `frontier` from the marker, so a wrong-marker or wrong-frontier batch is
+    /// unconstructible through the safe API. `LocalDeltaBatchIndex` checks for
+    /// both anyway — a batch decoded from durable bytes carries no construction
+    /// guarantee — and a check nothing can reach is a check nothing has tested.
+    /// This is what lets those two laws be witnessed rather than asserted.
+    #[doc(hidden)]
+    pub fn from_parts_for_test(
+        coordinate_entries: Vec<CoordinateEntry>,
+        source_template_digest: [u8; 32],
+        commit_marker_identity: MarkerRef,
+        commit_seq: fgdb_types::CommitSeq,
+        frontier: fgdb_types::CommitSeq,
+    ) -> Self {
+        LogicalDeltaBatch {
+            format: DELTA_FORMAT_V1,
+            coordinate_entries,
+            source_template_digest,
+            commit_marker_identity,
+            commit_seq,
+            frontier,
         }
     }
 
