@@ -315,6 +315,21 @@ impl MarkerChain {
     /// mutated — so a refused append leaves the chain and every head exactly
     /// as they were.
     pub fn append(&mut self, marker: CommitMarker) -> Result<&ChainedMarker, ChainError> {
+        let chained = self.validate(&marker)?;
+        self.adopt(chained)
+    }
+
+    /// Check every law and compute what the marker WOULD become, without
+    /// touching the chain.
+    ///
+    /// This split exists for the durable commit path. A marker must be fully
+    /// validated before it is written, but the in-memory chain must not move
+    /// until the write is durable — otherwise a crash between the two leaves
+    /// memory claiming a commit the disk never got. Separating the decision
+    /// from the mutation makes that ordering structural instead of a comment,
+    /// and it is what lets the coordinator avoid cloning the whole chain per
+    /// commit just to have something safe to validate against.
+    pub fn validate(&self, marker: &CommitMarker) -> Result<ChainedMarker, ChainError> {
         let expected_seq = self.next_commit_seq();
         if marker.commit_seq != expected_seq {
             return Err(ChainError::NonContiguousCommitSeq {
@@ -357,10 +372,33 @@ impl MarkerChain {
         // history identity rather than a content coincidence.
         let marker_oid = ObjectId(chain_hash.0);
 
-        for update in &marker.head_updates {
+        Ok(ChainedMarker {
+            marker: marker.clone(),
+            marker_oid,
+            chain_hash,
+        })
+    }
+
+    /// Adopt a marker that [`validate`](Self::validate) already approved.
+    ///
+    /// Crate-private on purpose: an outside caller must not be able to push a
+    /// marker that was never checked. The sequence is re-checked here because
+    /// a `ChainedMarker` validated against an older state is stale — its chain
+    /// hash was computed over a history that has since moved — and adopting it
+    /// would silently fork the chain value.
+    pub(crate) fn adopt(&mut self, chained: ChainedMarker) -> Result<&ChainedMarker, ChainError> {
+        let expected_seq = self.next_commit_seq();
+        if chained.marker.commit_seq != expected_seq {
+            return Err(ChainError::NonContiguousCommitSeq {
+                expected: expected_seq,
+                found: chained.marker.commit_seq,
+            });
+        }
+
+        for update in &chained.marker.head_updates {
             let new_head = MarkerRef {
-                marker_oid,
-                commit_seq: marker.commit_seq,
+                marker_oid: chained.marker_oid,
+                commit_seq: chained.marker.commit_seq,
             };
             match self
                 .heads
@@ -372,11 +410,7 @@ impl MarkerChain {
             }
         }
 
-        self.entries.push(ChainedMarker {
-            marker,
-            marker_oid,
-            chain_hash,
-        });
+        self.entries.push(chained);
         Ok(self.entries.last().expect("just pushed"))
     }
 
@@ -397,5 +431,158 @@ impl MarkerChain {
             chain = recomputed;
         }
         Ok(())
+    }
+}
+
+/// Decode a marker from its canonical bytes, or `None` if they are short or
+/// malformed.
+///
+/// This is the inverse of [`CommitMarker::canonical_bytes`] and exists because
+/// the durable commit log stores exactly those bytes: recovery must be able to
+/// rebuild a marker from the stream WITHOUT any index. Returning `None` rather
+/// than erroring is deliberate — the caller distinguishes a torn tail (normal
+/// after a crash) from corruption (not), and only the caller knows which
+/// position the entry occupied.
+pub fn decode_canonical(bytes: &[u8]) -> Option<CommitMarker> {
+    let mut cursor = ByteReader::new(bytes);
+
+    let logical_command_seq = cursor.u64()?;
+    let commit_seq = cursor.u64()?;
+
+    let effect_source = match cursor.byte()? {
+        0x01 => EffectSource::Local {
+            capsule_ref: ObjectId(cursor.array32()?),
+            logical_delta_template_digest: Digest(cursor.array32()?),
+        },
+        // An unknown arm tag is rejected, never skipped: a reader that does
+        // not know a tag must not pretend to have understood the marker.
+        _ => return None,
+    };
+
+    let prev_global = cursor.optional_marker_ref()?;
+
+    let head_count = cursor.u32()? as usize;
+    let mut head_updates = Vec::with_capacity(head_count.min(1024));
+    for _ in 0..head_count {
+        head_updates.push(HeadUpdate {
+            graph: cursor.u64()?,
+            branch: cursor.u64()?,
+            expected_previous: cursor.optional_marker_ref()?,
+        });
+    }
+
+    let merge_record_oid = match cursor.byte()? {
+        0x00 => None,
+        0x01 => Some(ObjectId(cursor.array32()?)),
+        _ => return None,
+    };
+    let coordinate_schema_transition_digest = Digest(cursor.array32()?);
+    let topology_epoch = cursor.u64()?;
+    let policy_epoch = cursor.u64()?;
+    let revocation_index = cursor.u64()?;
+    let txn_token = cursor.array16()?;
+    let commit_hlc = cursor.u64()?;
+    let final_effect_digest = Digest(cursor.array32()?);
+    let authorization_decision_digest = Digest(cursor.array32()?);
+    let resource_effect_digest = Digest(cursor.array32()?);
+    let payload_availability_certificate_oid = match cursor.byte()? {
+        0x00 => None,
+        0x01 => Some(ObjectId(cursor.array32()?)),
+        _ => return None,
+    };
+    let flags = cursor.u32()?;
+
+    // Trailing bytes mean the encoding disagrees with this reader, which is
+    // exactly the situation a durable format must refuse rather than tolerate.
+    if !cursor.is_exhausted() {
+        return None;
+    }
+
+    Some(CommitMarker {
+        logical_command_seq,
+        commit_seq,
+        effect_source,
+        prev_global,
+        head_updates,
+        merge_record_oid,
+        coordinate_schema_transition_digest,
+        topology_epoch,
+        policy_epoch,
+        revocation_index,
+        txn_token,
+        commit_hlc,
+        final_effect_digest,
+        authorization_decision_digest,
+        resource_effect_digest,
+        payload_availability_certificate_oid,
+        flags,
+    })
+}
+
+/// A bounds-checked big-endian reader. Every accessor returns `Option` so a
+/// truncated buffer can never produce a partially-populated marker.
+struct ByteReader<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> ByteReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.position == self.bytes.len()
+    }
+
+    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+        let end = self.position.checked_add(len)?;
+        let slice = self.bytes.get(self.position..end)?;
+        self.position = end;
+        Some(slice)
+    }
+
+    fn byte(&mut self) -> Option<u8> {
+        self.take(1).map(|slice| slice[0])
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        let slice = self.take(4)?;
+        Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        let slice = self.take(8)?;
+        let mut value = [0u8; 8];
+        value.copy_from_slice(slice);
+        Some(u64::from_be_bytes(value))
+    }
+
+    fn array16(&mut self) -> Option<[u8; 16]> {
+        let slice = self.take(16)?;
+        let mut value = [0u8; 16];
+        value.copy_from_slice(slice);
+        Some(value)
+    }
+
+    fn array32(&mut self) -> Option<[u8; 32]> {
+        let slice = self.take(32)?;
+        let mut value = [0u8; 32];
+        value.copy_from_slice(slice);
+        Some(value)
+    }
+
+    /// The `Option<MarkerRef>` encoding: a presence byte then, if present, the
+    /// oid and sequence. The outer Option is "did the bytes parse"; the inner
+    /// one is "was a ref present".
+    fn optional_marker_ref(&mut self) -> Option<Option<MarkerRef>> {
+        match self.byte()? {
+            0x00 => Some(None),
+            0x01 => Some(Some(MarkerRef {
+                marker_oid: ObjectId(self.array32()?),
+                commit_seq: self.u64()?,
+            })),
+            _ => None,
+        }
     }
 }

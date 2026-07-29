@@ -20,6 +20,7 @@
 //! two-fsync protocol, the `WriteCoordinator`, retention tiers, and branches.
 #![forbid(unsafe_code)]
 
+pub mod commit;
 pub mod identity;
 pub mod marker;
 pub mod pack;
@@ -29,6 +30,7 @@ pub mod store;
 pub mod symbol;
 pub mod symbolize;
 
+pub use commit::{CommitCoordinator, CommitError, CrashPoint};
 pub use identity::{
     CipherDescriptor, EncodedObject, EncodingDescriptor, IdentifiedObject, LocationForm,
     PlacedObject, PlacementDescriptor, ProtectedObject,

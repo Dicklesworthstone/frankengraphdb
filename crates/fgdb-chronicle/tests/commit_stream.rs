@@ -105,12 +105,15 @@ fn a_chain_verifies_and_every_marker_advances_the_chain_value() {
     }
 }
 
+/// A named single-field edit, used to sweep the transcript field by field.
+type FieldMutation = (&'static str, fn(&mut CommitMarker));
+
 /// THE CHAIN-HASH LAW. Changing any field of any marker must invalidate the
 /// chain from that point — a field outside the transcript is a field history
 /// does not commit to.
 #[test]
 fn tampering_with_any_marker_field_breaks_the_chain_at_that_sequence() {
-    let mutations: Vec<(&str, fn(&mut CommitMarker))> = vec![
+    let mutations: Vec<FieldMutation> = vec![
         ("logical_command_seq", |m| m.logical_command_seq ^= 1),
         ("commit_seq", |m| m.commit_seq ^= 64),
         ("effect_source", |m| {
