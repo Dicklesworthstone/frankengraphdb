@@ -59,7 +59,7 @@
 
 use registry_check::model::{self, Registries, ScriptDisposition};
 use registry_check::threat::{self, ThreatRegistry};
-use registry_check::topology::{self, TopologyRegistry};
+use registry_check::topology::{self, TopologyRegistry, WorkspaceScan};
 use registry_check::{appendix_a, liveness, unsafe_ledger, validate};
 use std::collections::BTreeSet;
 use std::fs;
@@ -288,6 +288,16 @@ struct TopologyWitness {
     mutate: fn(&mut TopologyRegistry),
 }
 
+/// One live-tree law whose one-defect fixture mutates the scan rather than the
+/// registry. These rows prove the filesystem facts independently: relabelling
+/// an ordinary crate as an island makes both island laws fire at once and is
+/// therefore not a witness for either individual branch.
+struct LiveTreeWitness {
+    code: &'static str,
+    fact: &'static str,
+    mutate: fn(&mut WorkspaceScan),
+}
+
 fn crate_row_mut<'a>(r: &'a mut TopologyRegistry, name: &str) -> &'a mut topology::CrateRow {
     r.crates
         .iter_mut()
@@ -321,6 +331,16 @@ fn source_block_mut<'a>(r: &'a mut TopologyRegistry, id: &str) -> &'a mut topolo
         .iter_mut()
         .find(|row| row.id == id)
         .unwrap_or_else(|| panic!("source block {id:?} exists"))
+}
+
+fn scanned_crate_mut<'a>(
+    scan: &'a mut WorkspaceScan,
+    name: &str,
+) -> &'a mut topology::ScannedCrate {
+    scan.crates
+        .iter_mut()
+        .find(|row| row.package_name == name)
+        .expect("scanned crate exists")
 }
 
 #[rustfmt::skip]
@@ -400,8 +420,6 @@ fn topology_live_tree_witnesses() -> Vec<TopologyWitness> {
     TopologyWitness { code: "active_not_a_member", fact: "an active row's manifest_dir is repointed off the workspace", mutate: |r| crate_row_mut(r, "fgdb-types").manifest_dir = "crates/not-a-member".into() },
     TopologyWitness { code: "active_manifest_missing", fact: "an active row's manifest_dir is repointed at an absent manifest", mutate: |r| crate_row_mut(r, "fgdb-types").manifest_dir = "crates/not-a-member".into() },
     TopologyWitness { code: "package_name_drift", fact: "an active row is renamed away from its manifest package", mutate: |r| crate_row_mut(r, "fgdb-types").name = "fgdb-types-renamed".into() },
-    TopologyWitness { code: "island_inherits_forbid", fact: "an ordinary crate's unsafe_policy is relabelled deny_ledgered", mutate: |r| crate_row_mut(r, "fgdb-claim").unsafe_policy = "deny_ledgered".into() },
-    TopologyWitness { code: "island_root_missing_deny", fact: "an ordinary crate's unsafe_policy is relabelled deny_ledgered", mutate: |r| crate_row_mut(r, "fgdb-claim").unsafe_policy = "deny_ledgered".into() },
     TopologyWitness { code: "internal_dependency_not_path", fact: "a reserved crate row is renamed onto a git-sourced package", mutate: |r| crate_row_mut(r, "fgdb-shard").name = "asupersync".into() },
     TopologyWitness { code: "dependency_on_inactive_crate", fact: "a depended-on crate row is demoted to planned", mutate: |r| crate_row_mut(r, "fgdb-types").activation_status = "planned".into() },
     TopologyWitness { code: "forbidden_dependency", fact: "a forbidden package prefix is repointed at a linked foundation package", mutate: |r| r.forbidden_dependencies[0].package_prefix = "asupersync".into() },
@@ -409,6 +427,14 @@ fn topology_live_tree_witnesses() -> Vec<TopologyWitness> {
     TopologyWitness { code: "design_only_linked", fact: "a linked foundation project is relabelled design_only", mutate: |r| project_mut(r, "asupersync").linkage = "design_only".into() },
     TopologyWitness { code: "foundation_source_drift", fact: "a foundation project's git_url is repointed", mutate: |r| project_mut(r, "asupersync").git_url = "https://example.invalid/elsewhere".into() },
     TopologyWitness { code: "default_feature_escape", fact: "franken_networkx is changed to require disabled defaults while fgdb-codec consumes fnx-generators with defaults", mutate: |r| project_mut(r, "franken_networkx").default_features_must_be_disabled = true },
+    ]
+}
+
+#[rustfmt::skip]
+fn unsafe_island_live_tree_witnesses() -> Vec<LiveTreeWitness> {
+    vec![
+    LiveTreeWitness { code: "island_inherits_forbid", fact: "an unsafe island grows [lints] workspace = true", mutate: |scan| scanned_crate_mut(scan, "fgdb-unsafe-simd").lints_workspace = true },
+    LiveTreeWitness { code: "island_root_missing_deny", fact: "an unsafe island loses #![deny(unsafe_code)] at its crate root", mutate: |scan| scanned_crate_mut(scan, "fgdb-unsafe-simd").root_denies_unsafe = false },
     ]
 }
 
@@ -463,6 +489,43 @@ fn run_topology_witnesses(rows: Vec<TopologyWitness>) {
     );
 }
 
+fn run_unsafe_island_live_tree_witnesses(rows: Vec<LiveTreeWitness>) {
+    let root = repo_root();
+    let registry = topology::load_from_repo(&root).expect("unmodified topology registry loads");
+    let base_scan = topology::scan_workspace(&root).expect("unmodified workspace scans");
+    let control: BTreeSet<String> = topology::live_tree_violations(&registry, &root, &base_scan)
+        .into_iter()
+        .map(|violation| violation.code)
+        .collect();
+    assert!(
+        control.is_empty(),
+        "the live-tree control must be clean, or no scan mutation below is a witness: {control:?}"
+    );
+
+    let mut failures = Vec::new();
+    for row in rows {
+        let mut mutated = base_scan.clone();
+        (row.mutate)(&mut mutated);
+        let codes: BTreeSet<String> = topology::live_tree_violations(&registry, &root, &mutated)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect();
+        let expected = BTreeSet::from([row.code.to_owned()]);
+        if codes != expected {
+            failures.push(format!(
+                "{} [{}] -> expected {expected:?}, got {codes:?}",
+                row.code, row.fact
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} unsafe-island laws were not isolated by their one-defect scan mutation:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 #[test]
 fn topology_header_laws_are_seen_to_fire() {
     run_topology_witnesses(topology_header_witnesses());
@@ -486,6 +549,11 @@ fn topology_derivation_laws_are_seen_to_fire() {
 #[test]
 fn topology_live_tree_laws_are_seen_to_fire() {
     run_topology_witnesses(topology_live_tree_witnesses());
+}
+
+#[test]
+fn unsafe_island_live_tree_laws_are_seen_to_fire_independently() {
+    run_unsafe_island_live_tree_witnesses(unsafe_island_live_tree_witnesses());
 }
 
 #[test]
@@ -904,15 +972,19 @@ fn every_witness_row_names_a_distinct_law() {
     ] {
         codes.extend(group.iter().map(|row| row.code));
     }
+    codes.extend(
+        unsafe_island_live_tree_witnesses()
+            .iter()
+            .map(|row| row.code),
+    );
     codes.extend(threat_witnesses().iter().map(|row| row.code));
     codes.extend(registry_witnesses().iter().map(|row| row.code));
 
     assert_eq!(codes.len(), 109, "table row count moved");
     let distinct: BTreeSet<&str> = codes.iter().copied().collect();
-    // `active_not_a_member`/`active_manifest_missing` and
-    // `island_inherits_forbid`/`island_root_missing_deny` are two laws each
-    // reached by one fact, so they are two rows with two codes; nothing here
-    // may share a code.
+    // `active_not_a_member`/`active_manifest_missing` are two laws reached by
+    // one fact. The island rows above deliberately use separate scan facts.
+    // In both cases every row still owns one distinct code.
     assert_eq!(
         distinct.len(),
         codes.len(),

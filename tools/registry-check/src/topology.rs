@@ -3294,6 +3294,21 @@ fn validate_live_tree(registry: &TopologyRegistry, root: &Path, violations: &mut
             return;
         }
     };
+    violations.extend(live_tree_violations(registry, root, &scan));
+}
+
+/// Evaluate the live-tree laws against an already-produced workspace scan.
+///
+/// Production obtains the scan from [`scan_workspace`] immediately before
+/// calling this evaluator. Accepting the scan separately is load-bearing test
+/// plumbing: a mutation fixture can present a missing island-root deny or an
+/// inherited workspace forbid without editing a real crate on disk.
+pub fn live_tree_violations(
+    registry: &TopologyRegistry,
+    root: &Path,
+    scan: &WorkspaceScan,
+) -> Vec<Violation> {
+    let mut violations = Vec::new();
     if scan.workspace_unsafe_lint != registry.registry.workspace_unsafe_lint {
         violations.push(Violation::new(
             "workspace_unsafe_lint_drift",
@@ -3645,7 +3660,7 @@ fn validate_live_tree(registry: &TopologyRegistry, root: &Path, violations: &mut
     }
 
     // --- Crate-graph acyclicity, named edges, posture closures ---
-    let cycle = crate_graph_cycle(&scan);
+    let cycle = crate_graph_cycle(scan);
     if !cycle.is_empty() {
         violations.push(Violation::new(
             "crate_graph_cycle",
@@ -3654,7 +3669,7 @@ fn validate_live_tree(registry: &TopologyRegistry, root: &Path, violations: &mut
             "the live crate graph is not acyclic; the one reciprocal LAYER pair is only sound while this holds",
         ));
     }
-    let edge_coverage = required_edge_coverage(registry, &scan);
+    let edge_coverage = required_edge_coverage(registry, scan);
     for status in &edge_coverage.statuses {
         if status.status == "fail" {
             let anchor = registry
@@ -3675,7 +3690,7 @@ fn validate_live_tree(registry: &TopologyRegistry, root: &Path, violations: &mut
         }
     }
     violations.extend(required_edge_floor_violations(registry, &edge_coverage));
-    for closure in posture_closures(registry, &scan) {
+    for closure in posture_closures(registry, scan) {
         for illegal in &closure.illegal {
             violations.push(Violation::new(
                 "posture_closure_violation",
@@ -3702,6 +3717,7 @@ fn validate_live_tree(registry: &TopologyRegistry, root: &Path, violations: &mut
             ));
         }
     }
+    violations
 }
 
 pub fn validate_topology(registry: &TopologyRegistry, root: &Path) -> Vec<Violation> {
