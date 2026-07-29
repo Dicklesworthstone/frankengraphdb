@@ -3959,6 +3959,299 @@ fn idr_weak_epoch_identity_reserved_wire_record_is_exact() {
 }
 
 #[test]
+fn idr_a13_branch_reference_fields_are_source_determined() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let cases = [
+        (
+            "BranchEpochBoundaryReservation",
+            "source_spec_ref",
+            0x0001,
+            "one",
+            "BranchEpochBoundaryReserveSpec",
+            20,
+            "branch-epoch-boundary-reservation-source-spec-ref",
+        ),
+        (
+            "BranchForkBundle<Role:AuthorityOwningRole>",
+            "boundary_reservation_ref",
+            0x0001,
+            "one",
+            "BranchEpochBoundaryReservation",
+            30,
+            "branch-fork-bundle-role-authority-owning-role-boundary-reservation-ref",
+        ),
+        (
+            "BranchForkBundle<Role:AuthorityOwningRole>",
+            "closed_parent_envelope_epoch_record_ref",
+            0x0009,
+            "one",
+            "BranchKeyEpochRecord",
+            40,
+            "branch-fork-bundle-role-authority-owning-role-closed-parent-envelope-epoch-record-ref",
+        ),
+        (
+            "BranchForkBundle<Role:AuthorityOwningRole>",
+            "closed_parent_write_epoch_record_ref",
+            0x000a,
+            "one",
+            "BranchKeyEpochRecord",
+            40,
+            "branch-fork-bundle-role-authority-owning-role-closed-parent-write-epoch-record-ref",
+        ),
+        (
+            "BranchForkBundle<Role:AuthorityOwningRole>",
+            "frozen_parent_root_ref",
+            0x000b,
+            "one",
+            "KeyEnvelopeRoot",
+            50,
+            "branch-fork-bundle-role-authority-owning-role-frozen-parent-root-ref",
+        ),
+        (
+            "BranchForkBundle<Role:AuthorityOwningRole>",
+            "parent_successor_root_ref",
+            0x000e,
+            "one",
+            "KeyEnvelopeRoot",
+            50,
+            "branch-fork-bundle-role-authority-owning-role-parent-successor-root-ref",
+        ),
+        (
+            "BranchForkBundle<Role:AuthorityOwningRole>",
+            "child_root_ref",
+            0x0011,
+            "one",
+            "KeyEnvelopeRoot",
+            50,
+            "branch-fork-bundle-role-authority-owning-role-child-root-ref",
+        ),
+        (
+            "BranchForkBundle<Role:AuthorityOwningRole>",
+            "resulting_key_grant_registry_ref",
+            0x0015,
+            "one",
+            "KeyGrantRegistry",
+            70,
+            "branch-fork-bundle-role-authority-owning-role-resulting-key-grant-registry-ref",
+        ),
+        (
+            "BranchForkSpec<Role:AuthorityOwningRole>",
+            "boundary_reservation_ref",
+            0x0001,
+            "one",
+            "BranchEpochBoundaryReservation",
+            30,
+            "branch-fork-spec-role-authority-owning-role-boundary-reservation-ref",
+        ),
+        (
+            "BranchForkSpec<Role:AuthorityOwningRole>",
+            "bundle_ref",
+            0x0003,
+            "one",
+            "BranchForkBundle",
+            80,
+            "branch-fork-spec-role-authority-owning-role-bundle-ref",
+        ),
+        (
+            "BranchForkSpec<Role:AuthorityOwningRole>",
+            "bundle_payload_availability_certificate_ref",
+            0x0004,
+            "one",
+            "PayloadAvailabilityCertificate",
+            10,
+            "branch-fork-spec-role-authority-owning-role-bundle-payload-availability-certificate-ref",
+        ),
+        (
+            "BranchGrantBundle<Role:AuthorityOwningRole>",
+            "boundary_reservation_ref",
+            0x0001,
+            "one",
+            "BranchEpochBoundaryReservation",
+            30,
+            "branch-grant-bundle-role-authority-owning-role-boundary-reservation-ref",
+        ),
+        (
+            "BranchGrantBundle<Role:AuthorityOwningRole>",
+            "frozen_root_ref",
+            0x0009,
+            "optional",
+            "KeyEnvelopeRoot",
+            50,
+            "branch-grant-bundle-role-authority-owning-role-frozen-root-ref",
+        ),
+        (
+            "BranchGrantBundle<Role:AuthorityOwningRole>",
+            "successor_root_ref",
+            0x000c,
+            "one",
+            "KeyEnvelopeRoot",
+            50,
+            "branch-grant-bundle-role-authority-owning-role-successor-root-ref",
+        ),
+        (
+            "BranchGrantBundle<Role:AuthorityOwningRole>",
+            "expected_key_grant_registry_ref",
+            0x000f,
+            "one",
+            "KeyGrantRegistry",
+            70,
+            "branch-grant-bundle-role-authority-owning-role-expected-key-grant-registry-ref",
+        ),
+        (
+            "BranchGrantBundle<Role:AuthorityOwningRole>",
+            "resulting_key_grant_registry_ref",
+            0x0010,
+            "one",
+            "KeyGrantRegistry",
+            70,
+            "branch-grant-bundle-role-authority-owning-role-resulting-key-grant-registry-ref",
+        ),
+        (
+            "BranchGrantSpec<Role:AuthorityOwningRole>",
+            "bundle_ref",
+            0x0003,
+            "one",
+            "BranchGrantBundle",
+            80,
+            "branch-grant-spec-role-authority-owning-role-bundle-ref",
+        ),
+        (
+            "BranchKeyEpochRecord",
+            "boundary_reservation_ref",
+            0x000c,
+            "one",
+            "BranchEpochBoundaryReservation",
+            30,
+            "branch-key-epoch-record-boundary-reservation-ref",
+        ),
+        (
+            "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>",
+            "portable_grant_bytes_ref",
+            0x0005,
+            "one",
+            "KeyEnvelopeGrantBytes",
+            20,
+            "key-envelope-grant-record-role-authority-owning-role-portable-grant-bytes-ref",
+        ),
+        (
+            "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>",
+            "envelope_root_ref",
+            0x0009,
+            "one",
+            "KeyEnvelopeRoot",
+            50,
+            "key-envelope-grant-record-role-authority-owning-role-envelope-root-ref",
+        ),
+        (
+            "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>",
+            "time_basis_ref",
+            0x0011,
+            "one",
+            "KeyEnvelopeGrantWindow",
+            17,
+            "key-envelope-grant-record-role-authority-owning-role-time-basis-ref",
+        ),
+        (
+            "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>",
+            "issuance_time_validation_evidence_ref",
+            0x0012,
+            "one",
+            "TimeValidationEvidence",
+            30,
+            "key-envelope-grant-record-role-authority-owning-role-issuance-time-validation-evidence-ref",
+        ),
+        (
+            "KeyEnvelopeNode",
+            "write_epoch_record_ref",
+            0x0020,
+            "one",
+            "BranchKeyEpochRecord",
+            40,
+            "key-envelope-node-write-epoch-record-ref",
+        ),
+        (
+            "KeyEnvelopeRoot",
+            "envelope_epoch_record_ref",
+            0x0006,
+            "one",
+            "BranchKeyEpochRecord",
+            40,
+            "key-envelope-root-envelope-epoch-record-ref",
+        ),
+        (
+            "KeyEnvelopeRoot",
+            "current_write_epoch_record_ref",
+            0x0007,
+            "one",
+            "BranchKeyEpochRecord",
+            40,
+            "key-envelope-root-current-write-epoch-record-ref",
+        ),
+    ];
+
+    assert_eq!(cases.len(), 25);
+    for (owner, name, tag, cardinality, target, target_order, row_slug) in cases {
+        let fields = identity
+            .fields
+            .iter()
+            .filter(|row| row.containing_schema == owner && row.stable_name == name)
+            .collect::<Vec<_>>();
+        assert_eq!(fields.len(), 1, "{owner}.{name} must exist exactly once");
+        let field = fields[0];
+        assert_eq!(field.field_tag, tag);
+        assert_eq!(field.exact_wire_type, "StrongRef");
+        assert_eq!(field.cardinality, cardinality);
+        assert_eq!(field.identity_class, "logical");
+        assert_eq!(field.reference_semantics, "strong");
+        assert_eq!(field.target_schema_id.as_deref(), Some(target));
+        let owner_order = identity
+            .logical
+            .iter()
+            .find(|row| row.name == identity::generic_free_family(owner))
+            .expect("A13 field owner resolves")
+            .construction_order;
+        assert_eq!(field.construction_order, owner_order);
+        let resolved_target_order = identity
+            .logical
+            .iter()
+            .find(|row| row.name == identity::generic_free_family(target))
+            .expect("A13 StrongRef target resolves")
+            .construction_order;
+        assert_eq!(resolved_target_order, target_order);
+        assert!(target_order <= owner_order);
+        assert!(
+            field
+                .retention_and_cut_rule
+                .contains(&format!("acyclic order {target_order} <= {owner_order}")),
+            "{owner}.{name} must retain the source-derived order witness"
+        );
+        assert_eq!(field.role_predicate, "true");
+        assert_eq!(field.version_status, "reserved");
+        assert_eq!(field.max_size_bytes, 40);
+
+        let source_path = if owner == "KeyEnvelopeNode" {
+            "KeyEnvelopeNode.write_epochs.record.write_epoch_record_ref".to_owned()
+        } else {
+            format!("{owner}.{name}")
+        };
+        let source_key = format!("field|{owner}|{source_path}|{name}");
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{source_key} maps exactly once");
+        let target_row = targets[0];
+        assert_eq!(target_row.row_id, format!("a13:target:field-{row_slug}"));
+        assert_eq!(target_row.target_row_id, format!("a13:field:{row_slug}"));
+        assert_eq!(target_row.slice_id, "a13");
+        assert_eq!(target_row.target_kind, "field");
+        assert_eq!(target_row.definition_status, "declared");
+    }
+}
+
+#[test]
 fn idr_a13_branch_install_specs_are_forced_logical_at_the_source_floor() {
     let identity = real_identity();
     let catalog = real_appendix_catalog();
@@ -10369,6 +10662,90 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     // second, drift-prone copy of the source reader's field list.
     let post_erratum_a12_exact_order_field =
         |retention_and_cut_rule: &str| retention_and_cut_rule.contains("source-position tag");
+    let post_erratum_a13_branch_reference_field = |schema: &str, name: &str| {
+        matches!(
+            (schema, name),
+            ("BranchEpochBoundaryReservation", "source_spec_ref")
+                | (
+                    "BranchForkBundle<Role:AuthorityOwningRole>",
+                    "boundary_reservation_ref"
+                )
+                | (
+                    "BranchForkBundle<Role:AuthorityOwningRole>",
+                    "closed_parent_envelope_epoch_record_ref"
+                )
+                | (
+                    "BranchForkBundle<Role:AuthorityOwningRole>",
+                    "closed_parent_write_epoch_record_ref"
+                )
+                | (
+                    "BranchForkBundle<Role:AuthorityOwningRole>",
+                    "frozen_parent_root_ref"
+                )
+                | (
+                    "BranchForkBundle<Role:AuthorityOwningRole>",
+                    "parent_successor_root_ref"
+                )
+                | (
+                    "BranchForkBundle<Role:AuthorityOwningRole>",
+                    "child_root_ref"
+                )
+                | (
+                    "BranchForkBundle<Role:AuthorityOwningRole>",
+                    "resulting_key_grant_registry_ref"
+                )
+                | (
+                    "BranchForkSpec<Role:AuthorityOwningRole>",
+                    "boundary_reservation_ref"
+                )
+                | ("BranchForkSpec<Role:AuthorityOwningRole>", "bundle_ref")
+                | (
+                    "BranchForkSpec<Role:AuthorityOwningRole>",
+                    "bundle_payload_availability_certificate_ref"
+                )
+                | (
+                    "BranchGrantBundle<Role:AuthorityOwningRole>",
+                    "boundary_reservation_ref"
+                )
+                | (
+                    "BranchGrantBundle<Role:AuthorityOwningRole>",
+                    "frozen_root_ref"
+                )
+                | (
+                    "BranchGrantBundle<Role:AuthorityOwningRole>",
+                    "successor_root_ref"
+                )
+                | (
+                    "BranchGrantBundle<Role:AuthorityOwningRole>",
+                    "expected_key_grant_registry_ref"
+                )
+                | (
+                    "BranchGrantBundle<Role:AuthorityOwningRole>",
+                    "resulting_key_grant_registry_ref"
+                )
+                | ("BranchGrantSpec<Role:AuthorityOwningRole>", "bundle_ref")
+                | ("BranchKeyEpochRecord", "boundary_reservation_ref")
+                | (
+                    "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>",
+                    "portable_grant_bytes_ref"
+                )
+                | (
+                    "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>",
+                    "envelope_root_ref"
+                )
+                | (
+                    "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>",
+                    "time_basis_ref"
+                )
+                | (
+                    "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>",
+                    "issuance_time_validation_evidence_ref"
+                )
+                | ("KeyEnvelopeNode", "write_epoch_record_ref")
+                | ("KeyEnvelopeRoot", "envelope_epoch_record_ref")
+                | ("KeyEnvelopeRoot", "current_write_epoch_record_ref")
+        )
+    };
     pre_erratum.fields.retain(|field| {
         !post_erratum_a21_field(&field.containing_schema)
             && !post_erratum_union(&field.exact_wire_type)
@@ -10420,6 +10797,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             && !post_erratum_a03_flat_residue_field(&field.containing_schema, &field.stable_name)
             && !post_erratum_a03_wire_consumer_fields(&field.containing_schema, &field.stable_name)
             && !post_erratum_a12_exact_order_field(&field.retention_and_cut_rule)
+            && !post_erratum_a13_branch_reference_field(
+                &field.containing_schema,
+                &field.stable_name,
+            )
             // The fgdb-k3sa B2 ruling recorded seven collections that the durable
             // format did not carry at all: their repeated field rows are
             // post-erratum, so keep them out of the historical namespace exactly
@@ -10616,9 +10997,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // 762 -> 763 (fgdb-5uj5): AdmittedTxnAbortCommand.required_selection,
         // claimed by post_erratum_a03_flat_residue_field. The current field
         // count carries it and the reconstruction stays at the frozen 225.
-        pre_erratum.fields.len() + 763,
+        // 763 -> 788 (fgdb-ppy5): the 25 source-spelled A13 branch/key
+        // StrongRef fields are claimed by post_erratum_a13_branch_reference_field.
+        // The current field count carries them and the reconstruction stays at
+        // the frozen 225.
+        pre_erratum.fields.len() + 788,
         current_field_count,
-        "the historical witness must remove every post-erratum field cohort through the ymqm self-edge repair"
+        "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
     assert_eq!(
         pre_erratum.fields.len(),

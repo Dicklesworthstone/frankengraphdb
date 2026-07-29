@@ -910,6 +910,261 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "BranchEpochBoundaryReservation"
+field_tag = 0x0001
+stable_name = "source_spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchEpochBoundaryReserveSpec"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchEpochBoundaryReserveSpec this BranchEpochBoundaryReservation names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a13:2002)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "boundary_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchEpochBoundaryReservation"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchEpochBoundaryReservation this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 30 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "closed_parent_envelope_epoch_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchKeyEpochRecord this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 40 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "closed_parent_write_epoch_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchKeyEpochRecord this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 40 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "frozen_parent_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000e
+stable_name = "parent_successor_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0011
+stable_name = "child_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0015
+stable_name = "resulting_key_grant_registry_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyGrantRegistry"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyGrantRegistry this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 70 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkSpec<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "boundary_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchEpochBoundaryReservation"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchEpochBoundaryReservation this BranchForkSpec<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 30 <= 80 keeps the reference backward-only (a13:2031)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkSpec<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "bundle_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchForkBundle"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchForkBundle this BranchForkSpec<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 80 <= 80 keeps the reference backward-only (a13:2031)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkSpec<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "bundle_payload_availability_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PayloadAvailabilityCertificate"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PayloadAvailabilityCertificate this BranchForkSpec<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 10 <= 80 keeps the reference backward-only (a13:2031)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "boundary_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchEpochBoundaryReservation"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchEpochBoundaryReservation this BranchGrantBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 30 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "frozen_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchGrantBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "successor_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchGrantBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000f
+stable_name = "expected_key_grant_registry_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyGrantRegistry"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyGrantRegistry this BranchGrantBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 70 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0010
+stable_name = "resulting_key_grant_registry_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyGrantRegistry"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyGrantRegistry this BranchGrantBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 70 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchGrantSpec<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "bundle_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchGrantBundle"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchGrantBundle this BranchGrantSpec<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 80 <= 80 keeps the reference backward-only (a13:2031)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "BranchKeyEpochRecord"
 field_tag = 0x0008
 stable_name = "predecessor"
@@ -922,6 +1177,21 @@ role_predicate = "true"
 retention_and_cut_rule = "closed epoch-predecessor union lives and dies with the epoch record; SameEpochLifecycle authenticates the prior lifecycle value through a comparison-only WeakDigest and PriorEpoch remains weak-identity-bound, so neither arm creates a reachability edge (a13:2004)"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[field]]
+containing_schema = "BranchKeyEpochRecord"
+field_tag = 0x000c
+stable_name = "boundary_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchEpochBoundaryReservation"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchEpochBoundaryReservation this BranchKeyEpochRecord names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a13:2004)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "BufferedResultManifest"
@@ -5214,6 +5484,66 @@ max_size_bytes = 32
 digest_class = "weak_identity"
 
 [[field]]
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "portable_grant_bytes_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeGrantBytes"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeGrantBytes this KeyEnvelopeGrantRecord<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 20 <= 60 keeps the reference backward-only (a13:2027)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "envelope_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this KeyEnvelopeGrantRecord<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 60 keeps the reference backward-only (a13:2027)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0011
+stable_name = "time_basis_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeGrantWindow"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeGrantWindow this KeyEnvelopeGrantRecord<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 17 <= 60 keeps the reference backward-only (a13:2027)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0012
+stable_name = "issuance_time_validation_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this KeyEnvelopeGrantRecord<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a13:2027)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
 containing_schema = "KeyEnvelopeNode"
 field_tag = 0x0018
 stable_name = "inherited_roots"
@@ -5225,6 +5555,21 @@ target_schema_id = "KeyEnvelopeNodeInheritedRootsRecord"
 construction_order = 50
 role_predicate = "true"
 retention_and_cut_rule = "repeated strong reference to the KeyEnvelopeNodeInheritedRootsRecord elements this record carries; retained while the owner is retained, and order 50 <= 50 keeps the edge backward-only (fgdb-k3sa B2 ruling)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "KeyEnvelopeNode"
+field_tag = 0x0020
+stable_name = "write_epoch_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchKeyEpochRecord this KeyEnvelopeNode names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a13:2006)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -5257,6 +5602,36 @@ retention_and_cut_rule = "target digest of the selected inherited-root ciphertex
 version_status = "reserved"
 max_size_bytes = 32
 digest_class = "target"
+
+[[field]]
+containing_schema = "KeyEnvelopeRoot"
+field_tag = 0x0006
+stable_name = "envelope_epoch_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchKeyEpochRecord this KeyEnvelopeRoot names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a13:2006)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "KeyEnvelopeRoot"
+field_tag = 0x0007
+stable_name = "current_write_epoch_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchKeyEpochRecord this KeyEnvelopeRoot names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a13:2006)"
+version_status = "reserved"
+max_size_bytes = 40
 
 [[field]]
 containing_schema = "LegacyRetentionAuthorityTransferCertificate"

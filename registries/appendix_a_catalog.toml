@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "64535886e6dbb525694d6676b315397b959291e2901b9bcd456ae0e61861d4d3"
 
 [target_manifest]
-target_count = 3684
+target_count = 3709
 projection_fallback_count = 135
-target_source_assignment_sha256 = "06d6c2a14168944b9391d0a1c51452b9c3941e53067cd23e931ebd9969fc2db8"
+target_source_assignment_sha256 = "ed7340f2267af2d93b4eb17e306c202c6484ac115ef4fe72c58f15bb83ecb0f5"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -112825,10 +112825,635 @@ retention_and_cut_rule = "inline required-selection precondition refined to the 
 version_status = "reserved"
 max_size_bytes = 1
 
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-epoch-boundary-reservation-source-spec-ref"
+containing_schema = "BranchEpochBoundaryReservation"
+field_tag = 0x0001
+stable_name = "source_spec_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchEpochBoundaryReserveSpec"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchEpochBoundaryReserveSpec this BranchEpochBoundaryReservation names; retained while the referrer is retained, and the acyclic order 20 <= 30 keeps the reference backward-only (a13:2002)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-boundary-reservation-ref"
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "boundary_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchEpochBoundaryReservation"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchEpochBoundaryReservation this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 30 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-closed-parent-envelope-epoch-record-ref"
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "closed_parent_envelope_epoch_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchKeyEpochRecord this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 40 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-closed-parent-write-epoch-record-ref"
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000a
+stable_name = "closed_parent_write_epoch_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchKeyEpochRecord this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 40 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-frozen-parent-root-ref"
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "frozen_parent_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-parent-successor-root-ref"
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000e
+stable_name = "parent_successor_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-child-root-ref"
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0011
+stable_name = "child_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-resulting-key-grant-registry-ref"
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0015
+stable_name = "resulting_key_grant_registry_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyGrantRegistry"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyGrantRegistry this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 70 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-fork-spec-role-authority-owning-role-boundary-reservation-ref"
+containing_schema = "BranchForkSpec<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "boundary_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchEpochBoundaryReservation"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchEpochBoundaryReservation this BranchForkSpec<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 30 <= 80 keeps the reference backward-only (a13:2031)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-fork-spec-role-authority-owning-role-bundle-ref"
+containing_schema = "BranchForkSpec<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "bundle_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchForkBundle"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchForkBundle this BranchForkSpec<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 80 <= 80 keeps the reference backward-only (a13:2031)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-fork-spec-role-authority-owning-role-bundle-payload-availability-certificate-ref"
+containing_schema = "BranchForkSpec<Role:AuthorityOwningRole>"
+field_tag = 0x0004
+stable_name = "bundle_payload_availability_certificate_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "PayloadAvailabilityCertificate"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the PayloadAvailabilityCertificate this BranchForkSpec<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 10 <= 80 keeps the reference backward-only (a13:2031)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-grant-bundle-role-authority-owning-role-boundary-reservation-ref"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0001
+stable_name = "boundary_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchEpochBoundaryReservation"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchEpochBoundaryReservation this BranchGrantBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 30 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-grant-bundle-role-authority-owning-role-frozen-root-ref"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "frozen_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchGrantBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-grant-bundle-role-authority-owning-role-successor-root-ref"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000c
+stable_name = "successor_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchGrantBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-grant-bundle-role-authority-owning-role-expected-key-grant-registry-ref"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000f
+stable_name = "expected_key_grant_registry_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyGrantRegistry"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyGrantRegistry this BranchGrantBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 70 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-grant-bundle-role-authority-owning-role-resulting-key-grant-registry-ref"
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0010
+stable_name = "resulting_key_grant_registry_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyGrantRegistry"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyGrantRegistry this BranchGrantBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 70 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-grant-spec-role-authority-owning-role-bundle-ref"
+containing_schema = "BranchGrantSpec<Role:AuthorityOwningRole>"
+field_tag = 0x0003
+stable_name = "bundle_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchGrantBundle"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchGrantBundle this BranchGrantSpec<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 80 <= 80 keeps the reference backward-only (a13:2031)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:branch-key-epoch-record-boundary-reservation-ref"
+containing_schema = "BranchKeyEpochRecord"
+field_tag = 0x000c
+stable_name = "boundary_reservation_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchEpochBoundaryReservation"
+construction_order = 40
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchEpochBoundaryReservation this BranchKeyEpochRecord names; retained while the referrer is retained, and the acyclic order 30 <= 40 keeps the reference backward-only (a13:2004)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:key-envelope-grant-record-role-authority-owning-role-portable-grant-bytes-ref"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0005
+stable_name = "portable_grant_bytes_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeGrantBytes"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeGrantBytes this KeyEnvelopeGrantRecord<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 20 <= 60 keeps the reference backward-only (a13:2027)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:key-envelope-grant-record-role-authority-owning-role-envelope-root-ref"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0009
+stable_name = "envelope_root_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeRoot"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this KeyEnvelopeGrantRecord<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 60 keeps the reference backward-only (a13:2027)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:key-envelope-grant-record-role-authority-owning-role-time-basis-ref"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0011
+stable_name = "time_basis_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeGrantWindow"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the KeyEnvelopeGrantWindow this KeyEnvelopeGrantRecord<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 17 <= 60 keeps the reference backward-only (a13:2027)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:key-envelope-grant-record-role-authority-owning-role-issuance-time-validation-evidence-ref"
+containing_schema = "KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>"
+field_tag = 0x0012
+stable_name = "issuance_time_validation_evidence_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "TimeValidationEvidence"
+construction_order = 60
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the TimeValidationEvidence this KeyEnvelopeGrantRecord<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 30 <= 60 keeps the reference backward-only (a13:2027)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:key-envelope-node-write-epoch-record-ref"
+containing_schema = "KeyEnvelopeNode"
+field_tag = 0x0020
+stable_name = "write_epoch_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchKeyEpochRecord this KeyEnvelopeNode names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a13:2006)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:key-envelope-root-envelope-epoch-record-ref"
+containing_schema = "KeyEnvelopeRoot"
+field_tag = 0x0006
+stable_name = "envelope_epoch_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchKeyEpochRecord this KeyEnvelopeRoot names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a13:2006)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+slice_id = "a13"
+row_id = "a13:field:key-envelope-root-current-write-epoch-record-ref"
+containing_schema = "KeyEnvelopeRoot"
+field_tag = 0x0007
+stable_name = "current_write_epoch_record_ref"
+exact_wire_type = "StrongRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 50
+role_predicate = "true"
+retention_and_cut_rule = "strong reference to the BranchKeyEpochRecord this KeyEnvelopeRoot names; retained while the referrer is retained, and the acyclic order 40 <= 50 keeps the reference backward-only (a13:2006)"
+version_status = "reserved"
+max_size_bytes = 40
+
 [[target]]
 row_id = "a03:target:field-admitted-txn-abort-command-required-selection"
 target_row_id = "a03:field:admitted-txn-abort-command-required-selection"
 slice_id = "a03"
 source_key = "field|AdmittedTxnAbortCommand|AdmittedTxnAbortCommand.required_selection|required_selection"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-epoch-boundary-reservation-source-spec-ref"
+target_row_id = "a13:field:branch-epoch-boundary-reservation-source-spec-ref"
+slice_id = "a13"
+source_key = "field|BranchEpochBoundaryReservation|BranchEpochBoundaryReservation.source_spec_ref|source_spec_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-fork-bundle-role-authority-owning-role-boundary-reservation-ref"
+target_row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-boundary-reservation-ref"
+slice_id = "a13"
+source_key = "field|BranchForkBundle<Role:AuthorityOwningRole>|BranchForkBundle<Role:AuthorityOwningRole>.boundary_reservation_ref|boundary_reservation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-fork-bundle-role-authority-owning-role-closed-parent-envelope-epoch-record-ref"
+target_row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-closed-parent-envelope-epoch-record-ref"
+slice_id = "a13"
+source_key = "field|BranchForkBundle<Role:AuthorityOwningRole>|BranchForkBundle<Role:AuthorityOwningRole>.closed_parent_envelope_epoch_record_ref|closed_parent_envelope_epoch_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-fork-bundle-role-authority-owning-role-closed-parent-write-epoch-record-ref"
+target_row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-closed-parent-write-epoch-record-ref"
+slice_id = "a13"
+source_key = "field|BranchForkBundle<Role:AuthorityOwningRole>|BranchForkBundle<Role:AuthorityOwningRole>.closed_parent_write_epoch_record_ref|closed_parent_write_epoch_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-fork-bundle-role-authority-owning-role-frozen-parent-root-ref"
+target_row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-frozen-parent-root-ref"
+slice_id = "a13"
+source_key = "field|BranchForkBundle<Role:AuthorityOwningRole>|BranchForkBundle<Role:AuthorityOwningRole>.frozen_parent_root_ref|frozen_parent_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-fork-bundle-role-authority-owning-role-parent-successor-root-ref"
+target_row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-parent-successor-root-ref"
+slice_id = "a13"
+source_key = "field|BranchForkBundle<Role:AuthorityOwningRole>|BranchForkBundle<Role:AuthorityOwningRole>.parent_successor_root_ref|parent_successor_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-fork-bundle-role-authority-owning-role-child-root-ref"
+target_row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-child-root-ref"
+slice_id = "a13"
+source_key = "field|BranchForkBundle<Role:AuthorityOwningRole>|BranchForkBundle<Role:AuthorityOwningRole>.child_root_ref|child_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-fork-bundle-role-authority-owning-role-resulting-key-grant-registry-ref"
+target_row_id = "a13:field:branch-fork-bundle-role-authority-owning-role-resulting-key-grant-registry-ref"
+slice_id = "a13"
+source_key = "field|BranchForkBundle<Role:AuthorityOwningRole>|BranchForkBundle<Role:AuthorityOwningRole>.resulting_key_grant_registry_ref|resulting_key_grant_registry_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-fork-spec-role-authority-owning-role-boundary-reservation-ref"
+target_row_id = "a13:field:branch-fork-spec-role-authority-owning-role-boundary-reservation-ref"
+slice_id = "a13"
+source_key = "field|BranchForkSpec<Role:AuthorityOwningRole>|BranchForkSpec<Role:AuthorityOwningRole>.boundary_reservation_ref|boundary_reservation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-fork-spec-role-authority-owning-role-bundle-ref"
+target_row_id = "a13:field:branch-fork-spec-role-authority-owning-role-bundle-ref"
+slice_id = "a13"
+source_key = "field|BranchForkSpec<Role:AuthorityOwningRole>|BranchForkSpec<Role:AuthorityOwningRole>.bundle_ref|bundle_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-fork-spec-role-authority-owning-role-bundle-payload-availability-certificate-ref"
+target_row_id = "a13:field:branch-fork-spec-role-authority-owning-role-bundle-payload-availability-certificate-ref"
+slice_id = "a13"
+source_key = "field|BranchForkSpec<Role:AuthorityOwningRole>|BranchForkSpec<Role:AuthorityOwningRole>.bundle_payload_availability_certificate_ref|bundle_payload_availability_certificate_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-grant-bundle-role-authority-owning-role-boundary-reservation-ref"
+target_row_id = "a13:field:branch-grant-bundle-role-authority-owning-role-boundary-reservation-ref"
+slice_id = "a13"
+source_key = "field|BranchGrantBundle<Role:AuthorityOwningRole>|BranchGrantBundle<Role:AuthorityOwningRole>.boundary_reservation_ref|boundary_reservation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-grant-bundle-role-authority-owning-role-frozen-root-ref"
+target_row_id = "a13:field:branch-grant-bundle-role-authority-owning-role-frozen-root-ref"
+slice_id = "a13"
+source_key = "field|BranchGrantBundle<Role:AuthorityOwningRole>|BranchGrantBundle<Role:AuthorityOwningRole>.frozen_root_ref|frozen_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-grant-bundle-role-authority-owning-role-successor-root-ref"
+target_row_id = "a13:field:branch-grant-bundle-role-authority-owning-role-successor-root-ref"
+slice_id = "a13"
+source_key = "field|BranchGrantBundle<Role:AuthorityOwningRole>|BranchGrantBundle<Role:AuthorityOwningRole>.successor_root_ref|successor_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-grant-bundle-role-authority-owning-role-expected-key-grant-registry-ref"
+target_row_id = "a13:field:branch-grant-bundle-role-authority-owning-role-expected-key-grant-registry-ref"
+slice_id = "a13"
+source_key = "field|BranchGrantBundle<Role:AuthorityOwningRole>|BranchGrantBundle<Role:AuthorityOwningRole>.expected_key_grant_registry_ref|expected_key_grant_registry_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-grant-bundle-role-authority-owning-role-resulting-key-grant-registry-ref"
+target_row_id = "a13:field:branch-grant-bundle-role-authority-owning-role-resulting-key-grant-registry-ref"
+slice_id = "a13"
+source_key = "field|BranchGrantBundle<Role:AuthorityOwningRole>|BranchGrantBundle<Role:AuthorityOwningRole>.resulting_key_grant_registry_ref|resulting_key_grant_registry_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-grant-spec-role-authority-owning-role-bundle-ref"
+target_row_id = "a13:field:branch-grant-spec-role-authority-owning-role-bundle-ref"
+slice_id = "a13"
+source_key = "field|BranchGrantSpec<Role:AuthorityOwningRole>|BranchGrantSpec<Role:AuthorityOwningRole>.bundle_ref|bundle_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-branch-key-epoch-record-boundary-reservation-ref"
+target_row_id = "a13:field:branch-key-epoch-record-boundary-reservation-ref"
+slice_id = "a13"
+source_key = "field|BranchKeyEpochRecord|BranchKeyEpochRecord.boundary_reservation_ref|boundary_reservation_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-key-envelope-grant-record-role-authority-owning-role-portable-grant-bytes-ref"
+target_row_id = "a13:field:key-envelope-grant-record-role-authority-owning-role-portable-grant-bytes-ref"
+slice_id = "a13"
+source_key = "field|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.portable_grant_bytes_ref|portable_grant_bytes_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-key-envelope-grant-record-role-authority-owning-role-envelope-root-ref"
+target_row_id = "a13:field:key-envelope-grant-record-role-authority-owning-role-envelope-root-ref"
+slice_id = "a13"
+source_key = "field|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.envelope_root_ref|envelope_root_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-key-envelope-grant-record-role-authority-owning-role-time-basis-ref"
+target_row_id = "a13:field:key-envelope-grant-record-role-authority-owning-role-time-basis-ref"
+slice_id = "a13"
+source_key = "field|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.time_basis_ref|time_basis_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-key-envelope-grant-record-role-authority-owning-role-issuance-time-validation-evidence-ref"
+target_row_id = "a13:field:key-envelope-grant-record-role-authority-owning-role-issuance-time-validation-evidence-ref"
+slice_id = "a13"
+source_key = "field|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.issuance_time_validation_evidence_ref|issuance_time_validation_evidence_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-key-envelope-node-write-epoch-record-ref"
+target_row_id = "a13:field:key-envelope-node-write-epoch-record-ref"
+slice_id = "a13"
+source_key = "field|KeyEnvelopeNode|KeyEnvelopeNode.write_epochs.record.write_epoch_record_ref|write_epoch_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-key-envelope-root-envelope-epoch-record-ref"
+target_row_id = "a13:field:key-envelope-root-envelope-epoch-record-ref"
+slice_id = "a13"
+source_key = "field|KeyEnvelopeRoot|KeyEnvelopeRoot.envelope_epoch_record_ref|envelope_epoch_record_ref"
+target_kind = "field"
+definition_status = "declared"
+
+[[target]]
+row_id = "a13:target:field-key-envelope-root-current-write-epoch-record-ref"
+target_row_id = "a13:field:key-envelope-root-current-write-epoch-record-ref"
+slice_id = "a13"
+source_key = "field|KeyEnvelopeRoot|KeyEnvelopeRoot.current_write_epoch_record_ref|current_write_epoch_record_ref"
 target_kind = "field"
 definition_status = "declared"
