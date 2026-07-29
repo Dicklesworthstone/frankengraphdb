@@ -16197,9 +16197,11 @@ fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
     // PortableCertificateProjection<T> and ImportedNonRequiredAuditEvidence;
     // MetadataTreeBootstrap owns an adjacent structural record and is therefore
     // intentionally absent from this set.
+    // 217 -> 216: fgdb-mtxm source-spells MetaRestorePhase's structural union,
+    // so that candidate is no longer a definition without a structural body.
     assert_eq!(
         global_bodyless.len(),
-        217,
+        216,
         "the Appendix-wide definition-without-body control moved"
     );
     let a12_bodyless: BTreeSet<_> = a12
