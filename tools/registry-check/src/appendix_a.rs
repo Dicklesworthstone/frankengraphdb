@@ -33,9 +33,9 @@ pub const HASH_ALGORITHM: &str = "sha256";
 pub const APPENDIX_START_LINE: i64 = 1388;
 pub const APPENDIX_END_LINE: i64 = 2728;
 pub const APPENDIX_LINE_COUNT: i64 = 1341;
-pub const APPENDIX_BYTE_COUNT: i64 = 1_023_079;
+pub const APPENDIX_BYTE_COUNT: i64 = 1_025_644;
 pub const APPENDIX_SHA256: &str =
-    "d9a3dfad58deaf2a82796d6c4cc867f2ec33ec7273dcc0f533dbaa99e46a8a7d";
+    "9fd40acad843c7395e98971ef48b53cd5a1c1a1950b060d1f9c5d4a64c096d92";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
 pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3665;
@@ -71,9 +71,9 @@ pub const EXPECTED_RESERVATION_ASSIGNMENT_SHA256: &str =
     "53b4c274c45c3bc878618b6018e1746429a609376f3f874300c13c6abd775e0d";
 pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
-pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_442;
+pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_454;
 pub const EXPECTED_REFERENCE_OCCURRENCE_SHA256: &str =
-    "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9";
+    "64535886e6dbb525694d6676b315397b959291e2901b9bcd456ae0e61861d4d3";
 pub const EXPECTED_G0_PROJECTION_ROW_COUNT: usize = 35;
 pub const EXPECTED_G0_PROJECTION_ROW_IDS_SHA256: &str =
     "ff344794c0f061e83016f9f4844591a75d07bff597d439258d2b2632fc810d61";
@@ -5420,8 +5420,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 2349,
         end_line: 2458,
         line_count: 110,
-        byte_count: 94_976,
-        sha256: "5fc84607d338774d06f4dcd1a0aed6f48165f427c7da4716b90d4bbbc949161c",
+        byte_count: 97_541,
+        sha256: "76908642d120d573816116f5535631492a4b13bbf61af9fe3e17e0522d2d6fc9",
     },
     SlicePin {
         ordinal: 19,

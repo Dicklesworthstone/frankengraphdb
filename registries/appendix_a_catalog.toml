@@ -27,16 +27,16 @@ plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 start_line = 1388
 end_line = 2728
 line_count = 1341
-byte_count = 1023079
-sha256 = "d9a3dfad58deaf2a82796d6c4cc867f2ec33ec7273dcc0f533dbaa99e46a8a7d"
+byte_count = 1025644
+sha256 = "9fd40acad843c7395e98971ef48b53cd5a1c1a1950b060d1f9c5d4a64c096d92"
 heading = "## Appendix A — On-Disk Object Formats (normative contract)"
 next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 
 [reference_manifest]
 target_count = 813
 target_ids_sha256 = "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"
-occurrence_count = 2442
-occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
+occurrence_count = 2454
+occurrence_transcript_sha256 = "64535886e6dbb525694d6676b315397b959291e2901b9bcd456ae0e61861d4d3"
 
 [target_manifest]
 target_count = 3665
@@ -531,22 +531,22 @@ title = "Appendix A exact catalog: Restore registry, cleanup, terminal history, 
 start_line = 2349
 end_line = 2458
 line_count = 110
-byte_count = 94976
-sha256 = "5fc84607d338774d06f4dcd1a0aed6f48165f427c7da4716b90d4bbbc949161c"
+byte_count = 97541
+sha256 = "76908642d120d573816116f5535631492a4b13bbf61af9fe3e17e0522d2d6fc9"
 predecessor = "a17"
 successor = "a19"
 expected_projection_classes = ["logical_object_kinds", "prebootstrap_artifact_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
 top_level_candidate_count = 109
 top_level_candidate_ids_sha256 = "d5882e79c10e0dc176276d4fa863e0279b39401640fa19ffbaee0ea3e3327858"
-field_candidate_count = 1232
-field_candidate_ids_sha256 = "95583d2bcdb4f524b33ddd0c5ed6dd10d77d1661420c50fa338efd35fcff32c8"
-union_candidate_count = 58
-union_candidate_ids_sha256 = "35e55441e5a403a774e54e0edbe6477c7d01d266714f4d26ab4a540b6525c344"
-arm_candidate_count = 165
-arm_candidate_ids_sha256 = "9ff5f9a848b71b768843b94a4e511eec5f3c63a99223839776b03bdab226607a"
-ambiguity_count = 902
-ambiguity_ids_sha256 = "91220aaef2326fecd9e08f935ec89e2b3352066e2e3f734ab1c9606d93a9e3e4"
+field_candidate_count = 1266
+field_candidate_ids_sha256 = "43d5e25663b52ccfb427befb35a070f587460131bd044c021aa66657142cc38b"
+union_candidate_count = 60
+union_candidate_ids_sha256 = "cf3f0bd8864484edb0da07210aed947e6380e63bec8e94c592bada3ad40548f5"
+arm_candidate_count = 173
+arm_candidate_ids_sha256 = "54b8b512d2bb51b4fc68046e2228bb367083b84762c0e9a3d35303f04fece79a"
+ambiguity_count = 901
+ambiguity_ids_sha256 = "0bba402d9bc6964b970394266775cd0376e5f749580cba1b8ed1a5722269b49d"
 
 [[slice]]
 ordinal = 19
@@ -44825,8 +44825,8 @@ code_reservation = "0x0357"
 disposition = "existing"
 
 [[reservation]]
-row_id = "a20:reservation:meta-restore-independent-reopen-proof"
-slice_id = "a20"
+row_id = "a18:reservation:meta-restore-independent-reopen-proof"
+slice_id = "a18"
 symbol = "MetaRestoreIndependentReopenProof"
 row_kind = "logical-kind"
 identity_class = "logical"
@@ -54426,7 +54426,7 @@ slice_id = "a18"
 symbol = "MetaRestorePhase"
 generic_signature = ""
 source_key = "top|MetaRestorePhase"
-source_kind = "name-only"
+source_kind = "confirmed"
 identity_class = "unclassified"
 source_locations = ["a18:2381"]
 
@@ -88543,7 +88543,7 @@ row_id = "a18:source-symbol-disposition:global-restore-abandon-participant-apply
 slice_id = "a18"
 symbol = "GlobalRestoreAbandonParticipantApplyCertificate"
 disposition = "appendix-ambiguous-structure"
-source_locations = ["a18:2439", "a18:2451"]
+source_locations = ["a18:2381", "a18:2439", "a18:2451"]
 
 [[source_symbol_disposition]]
 row_id = "a18:source-symbol-disposition:global-restore-participant-pin-release-completion-certificate"
@@ -89134,11 +89134,11 @@ disposition = "reference-only"
 source_locations = ["a20:2605"]
 
 [[source_symbol_disposition]]
-row_id = "a20:source-symbol-disposition:meta-restore-independent-reopen-proof"
-slice_id = "a20"
+row_id = "a18:source-symbol-disposition:meta-restore-independent-reopen-proof"
+slice_id = "a18"
 symbol = "MetaRestoreIndependentReopenProof"
 disposition = "reference-only"
-source_locations = ["a20:2601"]
+source_locations = ["a18:2381", "a20:2601"]
 
 [[source_symbol_disposition]]
 row_id = "a20:source-symbol-disposition:restore-service-promotion-manifest"

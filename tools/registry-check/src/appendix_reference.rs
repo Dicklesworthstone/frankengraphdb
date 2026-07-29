@@ -544,25 +544,24 @@ mod tests {
             census.target_ids_sha256,
             "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"
         );
-        // MOVED ONCE, BY 65a21da (fgdb-ymqm, "cut fourteen source self-edges"), which
-        // updated the catalog's [reference_manifest] and left this pin behind. Measured
-        // at that commit's parent e92ced6 this census is exactly 2_455 / bb3ca3c8.. and
-        // this test PASSES, so the delta is that single commit and not an accumulation.
+        // MOVED BY fgdb-mtxm when the previously name-only MetaRestorePhase acquired its
+        // exact six-arm body and exact two-arm nested terminal union. The prior pin was
+        // 2_442 / ea5ea31e..; the twelve added occurrences are the source-spelled
+        // StrongRef payloads in those arms, not newly allocated target families.
         //
         // This is a CURRENT-STATE census of the committed plan, not a historical
-        // witness: precedent c5570ce and cc9fc26 both moved it when the plan legitimately
-        // changed. The values below are re-derived from the plan bytes and independently
-        // corroborated by the catalog's [reference_manifest], which the appendix checker
-        // validates against the same source and passes.
+        // witness: precedent c5570ce, cc9fc26, 65a21da, and fgdb-mtxm all moved it when
+        // the plan legitimately changed. The values below are re-derived from the plan
+        // bytes and independently corroborated by the catalog's [reference_manifest],
+        // which the appendix checker validates against the same source.
         //
         // THE PARTITION IS THE POINT: target_count and target_ids_sha256 above are
-        // UNCHANGED, so no reference TARGET was added or removed. Only 13 OCCURRENCES of
-        // those same 813 targets disappeared, which is what cutting self-edges does --
-        // it removes uses, not targets.
-        assert_eq!(census.occurrence_count, 2_442);
+        // UNCHANGED, so no reference TARGET was added or removed. Only OCCURRENCES of
+        // those same 813 targets were added by the exact Meta phase payloads.
+        assert_eq!(census.occurrence_count, 2_454);
         assert_eq!(
             census.occurrence_transcript_sha256,
-            "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
+            "64535886e6dbb525694d6676b315397b959291e2901b9bcd456ae0e61861d4d3"
         );
     }
 }

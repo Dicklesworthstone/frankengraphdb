@@ -3942,12 +3942,13 @@ pub fn census_appendix_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        AmbiguityCandidate, AmbiguityKind, AmbiguityOccurrence, CensusErrorKind, DelimiterIssue,
-        FieldCandidateKey, OPENING_DELIMITERS, SchemaCandidateKey, SourceMap, SourceSliceSpec,
-        SplitSpan, StructuralCandidateKey, affected_source_key, bold_owner_name_range,
-        canonical_ambiguities, census_appendix_source, cue_names_union, half_open_interval_end,
-        is_generic_angle_open, matching_delimiter, normalize_whitespace, opening_delimiter_for,
-        sha256_hex, source_key_transcript, split_top_level, top_level_arrow,
+        AmbiguityCandidate, AmbiguityKind, AmbiguityOccurrence, AppendixSourceCensus,
+        CensusErrorKind, DefinitionKind, DelimiterIssue, FieldCandidateKey, OPENING_DELIMITERS,
+        SchemaCandidateKey, SchemaOwnerStatus, SourceMap, SourceSliceSpec, SplitSpan,
+        StructuralCandidateKey, affected_source_key, bold_owner_name_range, canonical_ambiguities,
+        census_appendix_source, cue_names_union, half_open_interval_end, is_generic_angle_open,
+        matching_delimiter, normalize_whitespace, opening_delimiter_for, sha256_hex,
+        source_key_transcript, split_top_level, top_level_arrow,
     };
 
     // ===================================================================
@@ -6407,6 +6408,230 @@ mod tests {
         );
     }
 
+    #[test]
+    fn meta_restore_phase_is_exact_source_ordered_and_mutation_sensitive() {
+        const TOP: &str = "MetaRestorePhase";
+        const TERMINAL: &str = "MetaRestorePhase.AwaitingSourceAccessCleanup.terminal";
+
+        fn a18_census(source: &str) -> AppendixSourceCensus {
+            let slices = [SourceSliceSpec {
+                id: "a18",
+                start_line: 2349,
+                end_line: 2458,
+            }];
+            census_appendix_source(source.as_bytes(), 2349, &slices)
+                .expect("the a18 source must census")
+        }
+
+        fn source_ordered_arms(census: &AppendixSourceCensus, union_path: &str) -> Vec<String> {
+            let mut arms = census
+                .arms
+                .iter()
+                .filter(|arm| arm.key.schema_owner == TOP && arm.key.union_path == union_path)
+                .collect::<Vec<_>>();
+            arms.sort_by_key(|arm| {
+                arm.locations
+                    .first()
+                    .map(|location| location.start)
+                    .expect("a source-backed arm has a location")
+            });
+            arms.into_iter()
+                .map(|arm| arm.key.arm_name.clone())
+                .collect()
+        }
+
+        fn payload<'a>(
+            census: &'a AppendixSourceCensus,
+            union_path: &str,
+            arm_name: &str,
+        ) -> &'a str {
+            let arm = census
+                .arms
+                .iter()
+                .find(|arm| {
+                    arm.key.schema_owner == TOP
+                        && arm.key.union_path == union_path
+                        && arm.key.arm_name == arm_name
+                })
+                .expect("the source-backed MetaRestorePhase arm exists");
+            assert!(!arm.payload_conflict, "{union_path}.{arm_name}");
+            assert_eq!(arm.payload_sha256s.len(), 1, "{union_path}.{arm_name}");
+            &arm.payload_sha256s[0]
+        }
+
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(2348)
+            .take(2458 - 2349 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            sha256_hex(source.as_bytes()),
+            "76908642d120d573816116f5535631492a4b13bbf61af9fe3e17e0522d2d6fc9",
+            "the MetaRestorePhase ruling was measured on a different a18 source"
+        );
+        assert!(
+            source.contains(concat!(
+                "AwaitingSourceRelease = 0x0006; the nested terminal tags are ",
+                "Operational = 0x0001 and Abandoned = 0x0002"
+            )),
+            "the source must freeze both dense u8 tag sequences"
+        );
+
+        let census = a18_census(&source);
+        let schema = census
+            .schemas
+            .iter()
+            .find(|schema| schema.key.family == TOP)
+            .expect("MetaRestorePhase is a top-level source candidate");
+        assert_eq!(
+            schema.owner_statuses,
+            [SchemaOwnerStatus::ConfirmedTopLevel]
+        );
+        assert_eq!(
+            schema.definition_kinds,
+            [DefinitionKind::ProseLinkedStructural]
+        );
+        assert!(!schema.body_conflict);
+
+        let unions = census
+            .unions
+            .iter()
+            .filter(|union| union.key.schema_owner == TOP)
+            .collect::<Vec<_>>();
+        assert_eq!(unions.len(), 2, "MetaRestorePhase owns only its two unions");
+        assert!(unions.iter().all(|union| {
+            union.unparsed_arm_count == 0 && !union.arm_set_conflict && union.occurrence_count == 1
+        }));
+
+        let top_order = [
+            "ActiveHidden",
+            "AbandonAuthorizedHidden",
+            "PromotedAwaitingReopen",
+            "AbandonedAwaitingTerminalPin",
+            "AwaitingSourceAccessCleanup",
+            "AwaitingSourceRelease",
+        ];
+        let terminal_order = ["Operational", "Abandoned"];
+        assert_eq!(source_ordered_arms(&census, TOP), top_order);
+        assert_eq!(source_ordered_arms(&census, TERMINAL), terminal_order);
+
+        for (union_path, arm_name, expected_sha256) in [
+            (
+                TOP,
+                "ActiveHidden",
+                "7ca0fce9d492be43bba310839ac59e473fa8734cc92fc5df7361c55c2bd3fe2e",
+            ),
+            (
+                TOP,
+                "AbandonAuthorizedHidden",
+                "6e30b8c7b5a280500987616ce55de2e3ddc7da84bf66a0a0572d26745984225d",
+            ),
+            (
+                TOP,
+                "PromotedAwaitingReopen",
+                "34df00498bbc6513828eba98c738e6b845093a0b51b94f0183e93ffb4df80546",
+            ),
+            (
+                TOP,
+                "AbandonedAwaitingTerminalPin",
+                "d99107150d7a963ce2a6abdcfcf1f4b74b6a3be5071c7bea92874020f45cb1ee",
+            ),
+            (
+                TOP,
+                "AwaitingSourceAccessCleanup",
+                "ec6139a595acbedfd12c1dfdefc6ce63f81f66ddd9c4bbd50c8e819cdb0e7301",
+            ),
+            (
+                TOP,
+                "AwaitingSourceRelease",
+                "9d9f52e7fb85b05bb70ec609d517f7a768d7cb1e5c45d4fcccff2c473c81f5e5",
+            ),
+            (
+                TERMINAL,
+                "Operational",
+                "a4a2ce8151ad7e073843bd1ddc4c3068bdfa13b5678947179c9721895616ecd4",
+            ),
+            (
+                TERMINAL,
+                "Abandoned",
+                "86c9aed8b7f831b123423f1d1908a8447df54cd30f7801b52205c854fe6e5d63",
+            ),
+        ] {
+            assert_eq!(
+                payload(&census, union_path, arm_name),
+                expected_sha256,
+                "{union_path}.{arm_name}"
+            );
+        }
+
+        let meta_fields = census
+            .fields
+            .iter()
+            .filter(|field| field.key.schema_owner == TOP)
+            .collect::<Vec<_>>();
+        assert_eq!(meta_fields.len(), 34);
+        assert!(meta_fields.iter().all(|field| {
+            !field.ambiguous
+                && !field.type_conflict
+                && field.exact_types.len() == 1
+                && !field.exact_types[0].is_empty()
+        }));
+        assert!(census.ambiguities.iter().all(|ambiguity| {
+            ambiguity.key.schema_family.as_deref() != Some(TOP)
+                && !ambiguity
+                    .key
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with(TOP))
+        }));
+
+        let renamed = source.replacen(
+            "`MetaRestorePhase` is the exact `u8` union `ActiveHidden{",
+            "`MetaRestorePhase` is the exact `u8` union `ActiveHiddenMutant{",
+            1,
+        );
+        assert_ne!(renamed, source, "the arm-name mutant must fire");
+        assert_ne!(
+            source_ordered_arms(&a18_census(&renamed), TOP),
+            top_order,
+            "renaming one arm must violate the pinned source arm set"
+        );
+
+        let active = "ActiveHidden{restore_state_ref:MetaRestoreStateRef}";
+        let abandon_authorized = concat!(
+            "AbandonAuthorizedHidden{restore_state_ref:MetaRestoreStateRef,",
+            "abandon_operation_record_ref:",
+            "StrongRef<RestoreAbandonOperationRecord<Meta>>}"
+        );
+        let ordered_prefix = format!("{active}|{abandon_authorized}|");
+        let swapped_prefix = format!("{abandon_authorized}|{active}|");
+        let reordered = source.replacen(&ordered_prefix, &swapped_prefix, 1);
+        assert_ne!(reordered, source, "the source-order mutant must fire");
+        assert_ne!(
+            source_ordered_arms(&a18_census(&reordered), TOP),
+            top_order,
+            "swapping two arms must violate the dense tag assignment"
+        );
+
+        let payload_mutated = source.replacen(
+            "PromotedAwaitingReopen{promotion_applied_ref:AuthorityAppliedRef,",
+            "PromotedAwaitingReopen{promotion_applied_ref:WeakDigest,",
+            1,
+        );
+        assert_ne!(payload_mutated, source, "the payload mutant must fire");
+        assert_ne!(
+            payload(&a18_census(&payload_mutated), TOP, "PromotedAwaitingReopen"),
+            "34df00498bbc6513828eba98c738e6b845093a0b51b94f0183e93ffb4df80546",
+            "changing one exact member type must violate the payload digest"
+        );
+    }
+
     /// The complete real-source partition. The Appendix A population is small
     /// enough to name: four sentences, eight owners.
     #[test]
@@ -6430,7 +6655,7 @@ mod tests {
         // is a re-measurement rather than a re-pin.
         assert_eq!(
             sha256_hex(source.as_bytes()),
-            "d9a3dfad58deaf2a82796d6c4cc867f2ec33ec7273dcc0f533dbaa99e46a8a7d",
+            "9fd40acad843c7395e98971ef48b53cd5a1c1a1950b060d1f9c5d4a64c096d92",
             "the two-union population was measured on a different Appendix A source"
         );
 
