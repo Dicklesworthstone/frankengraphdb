@@ -187,6 +187,67 @@ pub struct SealedCapsule {
     pub symbols: Vec<Vec<u8>>,
 }
 
+/// The identity `plaintext` will have as a capsule, without sealing it.
+///
+/// Sealing runs the AEAD and the erasure coder; a caller that only needs to
+/// know *which object* some bytes are should not pay for either. Same inputs as
+/// [`seal`], so the two can never disagree about identity.
+pub fn identify(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    object_kind: u16,
+    plaintext: &[u8],
+) -> ObjectId {
+    IdentifiedObject::new(k_oid, namespace, object_kind, &[], plaintext).object_id()
+}
+
+/// The key material and coding policy a coordinator seals capsules under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapsuleKeys {
+    pub k_oid: [u8; 32],
+    pub namespace: DatabaseSecurityNamespaceId,
+    pub dek: [u8; 32],
+    pub object_kind: u16,
+    pub profile: CapsuleProfile,
+}
+
+impl CapsuleKeys {
+    /// The identity these keys give `plaintext`.
+    pub fn identify(&self, plaintext: &[u8]) -> ObjectId {
+        identify(&self.k_oid, self.namespace, self.object_kind, plaintext)
+    }
+
+    /// Seal `plaintext` under these keys.
+    pub fn seal(&self, plaintext: &[u8]) -> Result<SealedCapsule, CapsuleError> {
+        seal(
+            &self.k_oid,
+            self.namespace,
+            &self.dek,
+            self.object_kind,
+            plaintext,
+            self.profile,
+        )
+    }
+
+    /// Recover `plaintext` from a container's descriptor and symbols, proving
+    /// it is `expected_object_id`.
+    pub fn recover(
+        &self,
+        descriptor: &CapsuleDescriptor,
+        symbols: &[Vec<u8>],
+        expected_object_id: ObjectId,
+    ) -> Result<Vec<u8>, CapsuleError> {
+        recover(
+            descriptor,
+            symbols,
+            expected_object_id,
+            &self.k_oid,
+            self.namespace,
+            &self.dek,
+        )
+    }
+}
+
 /// Run the §5.1 pipeline over `plaintext` and erasure-code the result.
 ///
 /// The object id is DERIVED here rather than accepted, so a caller cannot name

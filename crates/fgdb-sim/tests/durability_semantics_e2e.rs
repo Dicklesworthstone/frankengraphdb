@@ -17,6 +17,7 @@
 //! Everything runs under asupersync's lab runtime with a real `CommitCx`.
 
 use asupersync::lab::run_async_under_lab;
+use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{CommitCoordinator, CrashPoint};
 use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, LabelId, LogicalDeltaTemplate, PropertyKeyId, RelationId,
@@ -36,6 +37,20 @@ const BRANCH: BranchId = BranchId(1);
 const REL_KNOWS: RelationId = RelationId(1);
 const LABEL_PERSON: LabelId = LabelId(10);
 const PROP_NAME: PropertyKeyId = PropertyKeyId(100);
+
+/// The capsule keys every coordinator here opens under. They MUST agree with
+/// what `prepare_capsule` uses, or the identity the store derives and the one
+/// the caller computed would differ — which is exactly what
+/// `a_prepared_capsule_agrees_with_the_stores_derived_identity` checks.
+fn keys() -> CapsuleKeys {
+    CapsuleKeys {
+        k_oid: K_OID,
+        namespace: NAMESPACE,
+        dek: [0x3c; 32],
+        object_kind: fgdb_sim::CAPSULE_OBJECT_KIND,
+        profile: CapsuleProfile::balanced(),
+    }
+}
 
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fgdb-sim-e2e-{}-{name}", std::process::id()));
@@ -166,13 +181,13 @@ fn a_graph_committed_to_disk_is_rebuilt_after_a_restart() {
     let dir = scratch_dir("restart");
     under_lab(1, move |cx| {
         let capsules = three_commits();
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         for capsule in &capsules {
             commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
         }
         drop(coordinator);
 
-        let reopened = CommitCoordinator::open(&dir).expect("reopen");
+        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
         assert_eq!(reopened.chain().len(), 3);
         let database = materialize(&reopened).expect("materializes");
         expect_graph_after(&database, 3);
@@ -197,7 +212,7 @@ fn a_graph_committed_to_disk_is_rebuilt_after_a_restart() {
 fn materializing_twice_yields_identical_state() {
     let dir = scratch_dir("deterministic");
     under_lab(2, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         for capsule in &three_commits() {
             commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
         }
@@ -233,22 +248,21 @@ fn a_crash_at_any_instant_materializes_exactly_the_committed_prefix() {
         let dir = scratch_dir(&format!("prefix-{index}"));
         under_lab(10 + index as u64, move |cx| {
             let capsules = three_commits();
-            let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+            let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
             commit_capsule(&mut coordinator, cx, &capsules[0], vec![]).expect("commit 1");
             commit_capsule(&mut coordinator, cx, &capsules[1], vec![]).expect("commit 2");
 
             let third = capsules[2].clone();
             let crashed = coordinator.commit_with_crash(
                 cx,
-                third.object_id,
                 &third.bytes,
-                |seq| fgdb_sim::marker_for_capsule(seq, &third, vec![]),
+                |seq, oid| fgdb_sim::marker_for_capsule(seq, oid, &third, vec![]),
                 Some(point),
             );
             assert!(crashed.is_err(), "{point:?} must not report success");
             drop(coordinator);
 
-            let reopened = CommitCoordinator::open(&dir).expect("reopen after crash");
+            let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen after crash");
             let database = materialize(&reopened).expect("materializes");
 
             expect_graph_after(&database, 2);
@@ -284,7 +298,7 @@ fn a_torn_tail_removes_its_effects_and_the_sequence_is_reused() {
     let dir = scratch_dir("torn");
     under_lab(20, move |cx| {
         let capsules = three_commits();
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         commit_capsule(&mut coordinator, cx, &capsules[0], vec![]).expect("commit 1");
         commit_capsule(&mut coordinator, cx, &capsules[1], vec![]).expect("commit 2");
         let committed_len = log_len(&dir);
@@ -292,9 +306,8 @@ fn a_torn_tail_removes_its_effects_and_the_sequence_is_reused() {
         let third = capsules[2].clone();
         let _ = coordinator.commit_with_crash(
             cx,
-            third.object_id,
             &third.bytes,
-            |seq| fgdb_sim::marker_for_capsule(seq, &third, vec![]),
+            |seq, oid| fgdb_sim::marker_for_capsule(seq, oid, &third, vec![]),
             Some(CrashPoint::AfterMarkerBeforeD2),
         );
         drop(coordinator);
@@ -305,7 +318,7 @@ fn a_torn_tail_removes_its_effects_and_the_sequence_is_reused() {
         CommitCoordinator::tear_log_tail_for_test(&dir, (written - committed_len) as u64 - 4)
             .expect("tear");
 
-        let mut reopened = CommitCoordinator::open(&dir).expect("reopen");
+        let mut reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
         assert_eq!(reopened.chain().len(), 2);
         expect_graph_after(&materialize(&reopened).expect("materializes"), 2);
 
@@ -327,45 +340,86 @@ fn log_len(dir: &Path) -> usize {
 // The digest cross-check has teeth
 // ---------------------------------------------------------------------------
 
-/// FG-INV-09's shape at the semantic layer: a capsule whose bytes were altered
-/// after commit must be REFUSED, not materialized.
+/// A capsule rewritten on disk is REFUSED, not materialized.
 ///
-/// The corruption used here is deliberately one that still decodes into a valid
-/// template — a different graph, not a broken file. Corrupting the bytes into
-/// garbage would be caught by the decoder and would prove only that the decoder
-/// works; this proves the digest is what stands between a rewritten capsule and
-/// silently different graph state.
+/// WHICH LAYER CATCHES IT CHANGED when capsules became erasure-coded, and the
+/// test says so rather than pretending otherwise. The file is now a container
+/// whose recovery must reproduce the ObjectId the MARKER names, and the
+/// ObjectId is the keyed hash of the plaintext — so any substituted content is
+/// rejected by content-addressing before the template digest is ever consulted.
+/// The impostor here is a properly SEALED container for different content, not
+/// garbage, so this measures that law and not the container parser.
 #[test]
 fn a_rewritten_capsule_is_refused_rather_than_materialized() {
     let dir = scratch_dir("rewritten");
     under_lab(30, move |cx| {
         let capsules = three_commits();
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         for capsule in &capsules {
             commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
         }
         drop(coordinator);
 
-        // Swap the FIRST capsule's bytes for a different, perfectly valid
-        // template: same coordinate, different people.
+        // A valid template for a different graph, sealed exactly as the store
+        // would seal it.
         let impostor = capsule_of(vec![person(1, 1, "mallory"), person(2, 2, "eve")]);
-        assert!(
-            LogicalDeltaTemplate::decode_canonical(&impostor.bytes).is_ok(),
-            "the replacement must be valid, or this tests the decoder instead"
-        );
+        let sealed = keys().seal(&impostor.bytes).expect("seals");
         let path = dir
             .join(fgdb_chronicle::commit::CAPSULE_DIR)
             .join(format!("{}.capsule", hex(&capsules[0].object_id.0)));
-        std::fs::write(&path, &impostor.bytes).expect("rewrite capsule");
+        std::fs::write(&path, fgdb_chronicle::capsule::encode_container(&sealed))
+            .expect("rewrite capsule");
 
-        let reopened = CommitCoordinator::open(&dir).expect("reopen");
+        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+        let result = materialize(&reopened);
+        assert!(
+            result.is_err(),
+            "a substituted capsule must never materialize; got {result:?}"
+        );
+
+        // Nothing partial was applied on the way to failing.
+        assert!(
+            reopened.read_capsule(capsules[0].object_id).is_err(),
+            "the substituted container must not recover under the committed identity"
+        );
+    });
+}
+
+/// The template digest is still load-bearing, on the case that is now the
+/// reachable one: a MARKER that declares a digest its capsule does not have.
+///
+/// On-disk tampering can no longer reach this check — content-addressing fires
+/// first — but the marker's declared digest is supplied by the apply path, so a
+/// caller that computed it from the wrong bytes is a live failure mode, and it
+/// is the one that would otherwise let the commit stream and the effect set
+/// disagree silently.
+#[test]
+fn a_marker_declaring_the_wrong_template_digest_is_refused() {
+    let dir = scratch_dir("wrong-digest");
+    under_lab(31, move |cx| {
+        let capsule = three_commits()[0].clone();
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        coordinator
+            .commit(cx, &capsule.bytes, |seq, oid| {
+                let mut marker = fgdb_sim::marker_for_capsule(seq, oid, &capsule, vec![]);
+                marker.effect_source = fgdb_chronicle::marker::EffectSource::Local {
+                    capsule_ref: oid,
+                    // A digest of something else entirely.
+                    logical_delta_template_digest: fgdb_crypto::Digest([0xab; 32]),
+                };
+                marker
+            })
+            .expect("the commit itself is well formed");
+        drop(coordinator);
+
+        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
         let result = materialize(&reopened);
         assert!(
             matches!(
                 result,
                 Err(ReplayError::TemplateDigestMismatch { commit_seq: 1, .. })
             ),
-            "a rewritten capsule must fail closed and name the commit; got {result:?}"
+            "the declared digest must be checked against the recovered bytes; got {result:?}"
         );
     });
 }
@@ -378,7 +432,7 @@ fn a_missing_capsule_under_a_committed_marker_fails_closed() {
     let dir = scratch_dir("missing");
     under_lab(31, move |cx| {
         let capsules = three_commits();
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         for capsule in &capsules {
             commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
         }
@@ -389,7 +443,7 @@ fn a_missing_capsule_under_a_committed_marker_fails_closed() {
             .join(format!("{}.capsule", hex(&capsules[1].object_id.0)));
         std::fs::remove_file(&path).expect("remove the second capsule");
 
-        let reopened = CommitCoordinator::open(&dir).expect("reopen");
+        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
         let result = materialize(&reopened);
         assert!(
             matches!(
@@ -408,6 +462,72 @@ fn hex(bytes: &[u8; 32]) -> String {
         out.push(char::from_digit(u32::from(byte & 0xf), 16).expect("nibble"));
     }
     out
+}
+
+/// TWO INDEPENDENT COMPUTATIONS OF ONE IDENTITY MUST AGREE. `prepare_capsule`
+/// derives the object id from the template bytes; the coordinator derives it
+/// again from the bytes it actually seals. Nothing forces them to match except
+/// that both are the §5.1 transcript over the same inputs — so if they ever
+/// diverge, a commit would name an object the store did not write, and every
+/// recovery would fail on an identity mismatch it could not explain.
+#[test]
+fn a_prepared_capsule_agrees_with_the_stores_derived_identity() {
+    let dir = scratch_dir("identity-agreement");
+    under_lab(40, move |cx| {
+        let capsules = three_commits();
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+
+        for capsule in &capsules {
+            assert_eq!(
+                coordinator.capsule_id(&capsule.bytes),
+                capsule.object_id,
+                "the store and the caller must derive the same identity"
+            );
+        }
+
+        // And the identity the commit path hands back is that same value.
+        let expected = capsules[0].object_id;
+        let mut observed = None;
+        coordinator
+            .commit(cx, &capsules[0].bytes, |seq, oid| {
+                observed = Some(oid);
+                fgdb_sim::marker_for_capsule(seq, oid, &capsules[0], vec![])
+            })
+            .expect("commit");
+        assert_eq!(observed, Some(expected));
+        assert!(coordinator.capsule_exists(expected));
+    });
+}
+
+/// A capsule now round-trips through erasure coding, not raw bytes: what comes
+/// back out of `read_capsule` is the decoded plaintext, byte-for-byte.
+#[test]
+fn a_committed_capsule_recovers_its_exact_plaintext_through_the_codec() {
+    let dir = scratch_dir("codec-round-trip");
+    under_lab(41, move |cx| {
+        let capsule = three_commits()[0].clone();
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        commit_capsule(&mut coordinator, cx, &capsule, vec![]).expect("commit");
+        drop(coordinator);
+
+        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+        let recovered = reopened
+            .read_capsule(capsule.object_id)
+            .expect("recovers through the codec");
+        assert_eq!(recovered, capsule.bytes);
+
+        // The file on disk is the CONTAINER, not the plaintext — otherwise
+        // "erasure coded" would be a claim with nothing behind it.
+        let path = dir
+            .join(fgdb_chronicle::commit::CAPSULE_DIR)
+            .join(format!("{}.capsule", hex(&capsule.object_id.0)));
+        let raw = std::fs::read(&path).expect("read the container");
+        assert_ne!(raw, capsule.bytes, "the stored bytes are not the plaintext");
+        assert!(
+            raw.len() > capsule.bytes.len(),
+            "coded bytes carry repair overhead"
+        );
+    });
 }
 
 /// The identity is over the bytes, so two templates with the same effects in

@@ -161,6 +161,7 @@ pub fn prepare_capsule(
 /// recovery-time cross-check are asking about the same object by construction.
 pub fn marker_for_capsule(
     commit_seq: u64,
+    capsule_oid: ObjectId,
     capsule: &PreparedCapsule,
     head_updates: Vec<fgdb_chronicle::marker::HeadUpdate>,
 ) -> CommitMarker {
@@ -168,7 +169,7 @@ pub fn marker_for_capsule(
         logical_command_seq: commit_seq,
         commit_seq,
         effect_source: EffectSource::Local {
-            capsule_ref: capsule.object_id,
+            capsule_ref: capsule_oid,
             logical_delta_template_digest: capsule.template_digest,
         },
         prev_global: None,
@@ -195,8 +196,13 @@ pub fn commit_capsule(
     capsule: &PreparedCapsule,
     head_updates: Vec<fgdb_chronicle::marker::HeadUpdate>,
 ) -> Result<MarkerRef, CommitError> {
-    coordinator.commit(cx, capsule.object_id, &capsule.bytes, |seq| {
-        marker_for_capsule(seq, capsule, head_updates)
+    // The coordinator DERIVES the identity from the bytes it seals, so the
+    // marker names whatever the store actually wrote rather than whatever the
+    // caller believed. `PreparedCapsule::object_id` is the same value computed
+    // independently, and the e2e suite asserts the two agree — a cross-check
+    // that would be lost if this simply trusted one of them.
+    coordinator.commit(cx, &capsule.bytes, |seq, oid| {
+        marker_for_capsule(seq, oid, capsule, head_updates)
     })
 }
 

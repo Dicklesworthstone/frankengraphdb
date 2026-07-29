@@ -27,6 +27,7 @@
 //! normal outcome of crashing, not corruption. A torn entry anywhere EARLIER
 //! is corruption, because entries before it were durable.
 
+use crate::capsule::{CapsuleError, CapsuleKeys, decode_container, encode_container};
 use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain, MarkerRef};
 use fgdb_crypto::Digest;
 use fgdb_types::context::CommitCx;
@@ -82,6 +83,10 @@ pub enum CommitError {
     ChainDiverged {
         commit_seq: u64,
     },
+    /// Sealing or recovering a capsule failed. A capsule that cannot be sealed
+    /// must not be committed, and one that cannot be recovered is not a commit
+    /// this database can honour.
+    Capsule(CapsuleError),
     /// A previous commit failed at or after the marker write, so this
     /// coordinator can no longer know whether the durable log contains that
     /// entry. Reopen the directory to find out.
@@ -114,6 +119,7 @@ impl core::fmt::Display for CommitError {
             Self::ChainDiverged { commit_seq } => {
                 write!(f, "commit chain diverges at seq {commit_seq}")
             }
+            Self::Capsule(error) => write!(f, "capsule: {error}"),
             Self::Poisoned => write!(
                 f,
                 "coordinator poisoned by an interrupted commit; reopen the database directory"
@@ -135,6 +141,12 @@ impl core::error::Error for CommitError {
 impl From<std::io::Error> for CommitError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<CapsuleError> for CommitError {
+    fn from(error: CapsuleError) -> Self {
+        Self::Capsule(error)
     }
 }
 
@@ -168,6 +180,7 @@ pub enum CrashPoint {
 #[derive(Debug)]
 pub struct CommitCoordinator {
     dir: PathBuf,
+    keys: CapsuleKeys,
     chain: MarkerChain,
     discarded_tail_bytes: usize,
     poisoned: bool,
@@ -187,12 +200,13 @@ enum EntryDefect {
 impl CommitCoordinator {
     /// Open a database directory's commit stream, recovering whatever is
     /// durable.
-    pub fn open(database_dir: impl AsRef<Path>) -> Result<Self, CommitError> {
+    pub fn open(database_dir: impl AsRef<Path>, keys: CapsuleKeys) -> Result<Self, CommitError> {
         let dir = database_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(dir.join(CAPSULE_DIR))?;
         let (chain, discarded_tail_bytes) = Self::recover_chain(&dir)?;
         Ok(Self {
             dir,
+            keys,
             chain,
             discarded_tail_bytes,
             poisoned: false,
@@ -247,9 +261,20 @@ impl CommitCoordinator {
     /// wrote them, and the marker already carries the digests that let a reader
     /// prove it got the object it asked for.
     pub fn read_capsule(&self, capsule_oid: ObjectId) -> Result<Vec<u8>, CommitError> {
-        let mut bytes = Vec::new();
-        File::open(Self::capsule_path(&self.dir, capsule_oid))?.read_to_end(&mut bytes)?;
-        Ok(bytes)
+        let mut container = Vec::new();
+        File::open(Self::capsule_path(&self.dir, capsule_oid))?.read_to_end(&mut container)?;
+        let (descriptor, symbols) = decode_container(&container)?;
+        Ok(self.keys.recover(&descriptor, &symbols, capsule_oid)?)
+    }
+
+    /// The identity `plaintext` will have as a capsule under this database's
+    /// keys, without sealing it.
+    pub fn capsule_id(&self, plaintext: &[u8]) -> ObjectId {
+        self.keys.identify(plaintext)
+    }
+
+    pub fn keys(&self) -> &CapsuleKeys {
+        &self.keys
     }
 
     /// Is this capsule durable? Used by recovery to identify orphans — bytes
@@ -300,11 +325,10 @@ impl CommitCoordinator {
     pub fn commit(
         &mut self,
         cx: &CommitCx,
-        capsule_oid: ObjectId,
-        capsule_bytes: &[u8],
-        marker_for: impl FnOnce(u64) -> CommitMarker,
+        plaintext: &[u8],
+        marker_for: impl FnOnce(u64, ObjectId) -> CommitMarker,
     ) -> Result<MarkerRef, CommitError> {
-        self.commit_with_crash(cx, capsule_oid, capsule_bytes, marker_for, None)
+        self.commit_with_crash(cx, plaintext, marker_for, None)
     }
 
     /// Commit, optionally stopping at a crash point. The crash path is the
@@ -313,9 +337,8 @@ impl CommitCoordinator {
     pub fn commit_with_crash(
         &mut self,
         cx: &CommitCx,
-        capsule_oid: ObjectId,
-        capsule_bytes: &[u8],
-        marker_for: impl FnOnce(u64) -> CommitMarker,
+        plaintext: &[u8],
+        marker_for: impl FnOnce(u64, ObjectId) -> CommitMarker,
         crash_at: Option<CrashPoint>,
     ) -> Result<MarkerRef, CommitError> {
         if self.poisoned {
@@ -333,7 +356,14 @@ impl CommitCoordinator {
         // that recovery must reject is data loss on the next restart. The
         // capsule reference is part of the marker's authenticated transcript,
         // so it must name the exact object this call is about.
-        let marker = marker_for(commit_seq);
+        // ---- Seal the capsule. The identity is DERIVED from the bytes, never
+        // accepted from the caller, so it is impossible to name one object and
+        // store another. `marker_for` is handed the derived id precisely so it
+        // can name the right one.
+        let sealed = self.keys.seal(plaintext)?;
+        let capsule_oid = sealed.object_id;
+
+        let marker = marker_for(commit_seq, capsule_oid);
         let marker_capsule_ref = match &marker.effect_source {
             EffectSource::Local { capsule_ref, .. } => *capsule_ref,
         };
@@ -361,7 +391,7 @@ impl CommitCoordinator {
             .create(true)
             .truncate(true)
             .open(&capsule_path)?;
-        capsule_file.write_all(capsule_bytes)?;
+        capsule_file.write_all(&encode_container(&sealed))?;
         if crash_at == Some(CrashPoint::AfterCapsuleBeforeD1) {
             return Err(CommitError::Io(std::io::Error::other("crash: before D1")));
         }

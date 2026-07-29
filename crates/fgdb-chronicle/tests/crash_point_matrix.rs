@@ -32,6 +32,7 @@
 //! two barriers are exactly the instants a lab wants to control.
 
 use asupersync::lab::run_async_under_lab;
+use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::{
     CAPSULE_DIR, COMMIT_LOG_NAME, CommitCoordinator, CommitError, CrashPoint, MAX_ENTRY_BODY,
 };
@@ -53,11 +54,23 @@ fn digest(seed: u8) -> Digest {
     Digest([seed; 32])
 }
 
+/// The keys every coordinator in this file opens under. Fixed so a capsule's
+/// identity is a function of its bytes alone across the whole suite.
+fn keys() -> CapsuleKeys {
+    CapsuleKeys {
+        k_oid: [0x5a; 32],
+        namespace: fgdb_types::ids::DatabaseSecurityNamespaceId([0x77; 32]),
+        dek: [0x3c; 32],
+        object_kind: 0x0274,
+        profile: CapsuleProfile::balanced(),
+    }
+}
+
+/// The identity capsule `seq`'s bytes will have. Derived, not invented: the
+/// coordinator computes the same value from the same bytes, so a test can no
+/// longer assert against an identity the store would never produce.
 fn capsule_oid(seq: u64) -> ObjectId {
-    let mut bytes = [0u8; 32];
-    bytes[..8].copy_from_slice(&seq.to_be_bytes());
-    bytes[8] = 0xca;
-    ObjectId(bytes)
+    keys().identify(&capsule_bytes(seq))
 }
 
 fn capsule_bytes(seq: u64) -> Vec<u8> {
@@ -65,12 +78,12 @@ fn capsule_bytes(seq: u64) -> Vec<u8> {
 }
 
 /// A marker for `commit_seq`, advancing one branch head against `previous`.
-fn marker_for(seq: u64, chain: &MarkerChain) -> CommitMarker {
+fn marker_for(seq: u64, capsule: ObjectId, chain: &MarkerChain) -> CommitMarker {
     CommitMarker {
         logical_command_seq: seq * 10,
         commit_seq: seq,
         effect_source: EffectSource::Local {
-            capsule_ref: capsule_oid(seq),
+            capsule_ref: capsule,
             logical_delta_template_digest: digest(seq as u8 + 1),
         },
         prev_global: None,
@@ -98,9 +111,14 @@ fn marker_for(seq: u64, chain: &MarkerChain) -> CommitMarker {
 fn commit_ok(coordinator: &mut CommitCoordinator, cx: &CommitCx, seq: u64) {
     let chain_snapshot = coordinator.chain().clone();
     coordinator
-        .commit(cx, capsule_oid(seq), &capsule_bytes(seq), |allocated| {
+        .commit(cx, &capsule_bytes(seq), |allocated, oid| {
             assert_eq!(allocated, seq, "the coordinator allocates the sequence");
-            marker_for(allocated, &chain_snapshot)
+            assert_eq!(
+                oid,
+                capsule_oid(seq),
+                "the derived identity is reproducible"
+            );
+            marker_for(allocated, oid, &chain_snapshot)
         })
         .expect("clean commit");
 }
@@ -237,14 +255,14 @@ fn trailing_bytes_after_a_marker_are_refused() {
 fn committed_markers_survive_a_restart() {
     let dir = scratch_dir("restart");
     under_lab(1, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         for seq in 1..=5 {
             commit_ok(&mut coordinator, cx, seq);
         }
         let head_before = coordinator.chain().head(1, 1).expect("branch head");
         drop(coordinator);
 
-        let reopened = CommitCoordinator::open(&dir).expect("reopen");
+        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
         assert_eq!(reopened.chain().len(), 5);
         assert_eq!(reopened.next_commit_seq(), 6);
         assert_eq!(reopened.discarded_tail_bytes(), 0);
@@ -268,7 +286,7 @@ fn committed_markers_survive_a_restart() {
 fn a_committed_capsule_is_never_an_orphan() {
     let dir = scratch_dir("no-orphans");
     under_lab(2, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         for seq in 1..=3 {
             commit_ok(&mut coordinator, cx, seq);
         }
@@ -300,23 +318,22 @@ fn a_crash_at_any_instant_recovers_the_committed_prefix() {
     for (index, point) in points.into_iter().enumerate() {
         let dir = scratch_dir(&format!("matrix-{index}"));
         under_lab(10 + index as u64, move |cx| {
-            let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+            let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
             commit_ok(&mut coordinator, cx, 1);
             commit_ok(&mut coordinator, cx, 2);
 
             let chain_snapshot = coordinator.chain().clone();
             let crashed = coordinator.commit_with_crash(
                 cx,
-                capsule_oid(3),
                 &capsule_bytes(3),
-                |seq| marker_for(seq, &chain_snapshot),
+                |seq, oid| marker_for(seq, oid, &chain_snapshot),
                 Some(point),
             );
             assert!(crashed.is_err(), "{point:?} must not report success");
 
             // The process is gone; only the files speak now.
             drop(coordinator);
-            let reopened = CommitCoordinator::open(&dir).expect("reopen after crash");
+            let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen after crash");
 
             assert_eq!(
                 reopened.chain().len(),
@@ -366,7 +383,7 @@ fn a_crash_at_any_instant_recovers_the_committed_prefix() {
 fn a_torn_tail_from_an_interrupted_d2_is_discarded() {
     let dir = scratch_dir("torn-tail");
     under_lab(20, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         commit_ok(&mut coordinator, cx, 1);
         commit_ok(&mut coordinator, cx, 2);
         let committed_len = log_bytes(&dir).len();
@@ -374,9 +391,8 @@ fn a_torn_tail_from_an_interrupted_d2_is_discarded() {
         let chain_snapshot = coordinator.chain().clone();
         let crashed = coordinator.commit_with_crash(
             cx,
-            capsule_oid(3),
             &capsule_bytes(3),
-            |seq| marker_for(seq, &chain_snapshot),
+            |seq, oid| marker_for(seq, oid, &chain_snapshot),
             Some(CrashPoint::AfterMarkerBeforeD2),
         );
         assert!(crashed.is_err());
@@ -390,9 +406,8 @@ fn a_torn_tail_from_an_interrupted_d2_is_discarded() {
         );
         let refused = coordinator.commit_with_crash(
             cx,
-            capsule_oid(4),
             &capsule_bytes(4),
-            |seq| marker_for(seq, &chain_snapshot),
+            |seq, oid| marker_for(seq, oid, &chain_snapshot),
             None,
         );
         assert!(
@@ -408,7 +423,7 @@ fn a_torn_tail_from_an_interrupted_d2_is_discarded() {
         CommitCoordinator::tear_log_tail_for_test(&dir, (written - committed_len) as u64 - 4)
             .expect("tear");
 
-        let reopened = CommitCoordinator::open(&dir).expect("a torn tail is not an error");
+        let reopened = CommitCoordinator::open(&dir, keys()).expect("a torn tail is not an error");
         assert_eq!(
             reopened.chain().len(),
             2,
@@ -437,7 +452,7 @@ fn a_torn_tail_from_an_interrupted_d2_is_discarded() {
 fn a_commit_after_torn_tail_recovery_survives_restart() {
     let dir = scratch_dir("torn-tail-then-append");
     under_lab(25, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         commit_ok(&mut coordinator, cx, 1);
         commit_ok(&mut coordinator, cx, 2);
         let committed_len = log_bytes(&dir).len();
@@ -445,9 +460,8 @@ fn a_commit_after_torn_tail_recovery_survives_restart() {
         let chain_snapshot = coordinator.chain().clone();
         let crashed = coordinator.commit_with_crash(
             cx,
-            capsule_oid(3),
             &capsule_bytes(3),
-            |seq| marker_for(seq, &chain_snapshot),
+            |seq, oid| marker_for(seq, oid, &chain_snapshot),
             Some(CrashPoint::AfterMarkerBeforeD2),
         );
         assert!(crashed.is_err());
@@ -461,12 +475,13 @@ fn a_commit_after_torn_tail_recovery_survives_restart() {
         CommitCoordinator::tear_log_tail_for_test(&dir, (written - committed_len) as u64 - 4)
             .expect("tear");
 
-        let mut recovered = CommitCoordinator::open(&dir).expect("recover torn tail");
+        let mut recovered = CommitCoordinator::open(&dir, keys()).expect("recover torn tail");
         assert_eq!(recovered.discarded_tail_bytes(), 4);
         commit_ok(&mut recovered, cx, 3);
         drop(recovered);
 
-        let reopened = CommitCoordinator::open(&dir).expect("reopen after replacement commit");
+        let reopened =
+            CommitCoordinator::open(&dir, keys()).expect("reopen after replacement commit");
         let sequences: Vec<u64> = reopened
             .chain()
             .entries()
@@ -491,20 +506,19 @@ fn a_commit_after_torn_tail_recovery_survives_restart() {
 fn an_intact_unsynced_entry_recovers_as_committed() {
     let dir = scratch_dir("intact-tail");
     under_lab(21, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         commit_ok(&mut coordinator, cx, 1);
 
         let chain_snapshot = coordinator.chain().clone();
         let _ = coordinator.commit_with_crash(
             cx,
-            capsule_oid(2),
             &capsule_bytes(2),
-            |seq| marker_for(seq, &chain_snapshot),
+            |seq, oid| marker_for(seq, oid, &chain_snapshot),
             Some(CrashPoint::AfterMarkerBeforeD2),
         );
         drop(coordinator);
 
-        let reopened = CommitCoordinator::open(&dir).expect("reopen");
+        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
         assert_eq!(reopened.chain().len(), 2);
         assert_eq!(reopened.chain().verify(), Ok(()));
         assert_eq!(reopened.discarded_tail_bytes(), 0);
@@ -521,20 +535,19 @@ fn an_intact_unsynced_entry_recovers_as_committed() {
 fn the_next_commit_after_a_crash_is_gap_free() {
     let dir = scratch_dir("gap-free");
     under_lab(22, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         commit_ok(&mut coordinator, cx, 1);
 
         let chain_snapshot = coordinator.chain().clone();
         let _ = coordinator.commit_with_crash(
             cx,
-            capsule_oid(2),
             &capsule_bytes(2),
-            |seq| marker_for(seq, &chain_snapshot),
+            |seq, oid| marker_for(seq, oid, &chain_snapshot),
             Some(CrashPoint::AfterD1),
         );
         drop(coordinator);
 
-        let mut reopened = CommitCoordinator::open(&dir).expect("reopen");
+        let mut reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
         assert_eq!(reopened.next_commit_seq(), 2);
         commit_ok(&mut reopened, cx, 2);
         commit_ok(&mut reopened, cx, 3);
@@ -560,11 +573,11 @@ fn the_next_commit_after_a_crash_is_gap_free() {
 fn a_marker_that_names_another_capsule_is_rejected_before_any_write() {
     let dir = scratch_dir("capsule-ref-mismatch");
     under_lab(26, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         let chain_snapshot = coordinator.chain().clone();
         let marker_capsule_ref = capsule_oid(99);
-        let result = coordinator.commit(cx, capsule_oid(1), &capsule_bytes(1), |seq| {
-            let mut marker = marker_for(seq, &chain_snapshot);
+        let result = coordinator.commit(cx, &capsule_bytes(1), |seq, oid| {
+            let mut marker = marker_for(seq, oid, &chain_snapshot);
             marker.effect_source = EffectSource::Local {
                 capsule_ref: marker_capsule_ref,
                 logical_delta_template_digest: digest(2),
@@ -600,10 +613,10 @@ fn a_marker_that_names_another_capsule_is_rejected_before_any_write() {
 fn a_marker_above_the_recovery_bound_is_rejected_before_any_write() {
     let dir = scratch_dir("marker-too-large");
     under_lab(27, move |cx| {
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         let chain_snapshot = coordinator.chain().clone();
-        let result = coordinator.commit(cx, capsule_oid(1), &capsule_bytes(1), |seq| {
-            let mut marker = marker_for(seq, &chain_snapshot);
+        let result = coordinator.commit(cx, &capsule_bytes(1), |seq, oid| {
+            let mut marker = marker_for(seq, oid, &chain_snapshot);
             marker.head_updates = (0..4_000)
                 .map(|branch| HeadUpdate {
                     graph: 7,
@@ -630,7 +643,7 @@ fn a_marker_above_the_recovery_bound_is_rejected_before_any_write() {
 
         commit_ok(&mut coordinator, cx, 1);
         drop(coordinator);
-        let reopened = CommitCoordinator::open(&dir).expect("reopen after valid commit");
+        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen after valid commit");
         assert_eq!(reopened.chain().len(), 1);
         assert_eq!(reopened.chain().verify(), Ok(()));
     });
@@ -652,7 +665,7 @@ fn repeated_crashes_leave_a_verifiable_chain() {
         // actual schedule keeps the expectation honest if the schedule changes.
         let mut expected_orphans = 0usize;
         for round in 0..10u64 {
-            let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+            let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
             let expected_seq = round + 1;
             assert_eq!(coordinator.next_commit_seq(), expected_seq);
 
@@ -661,30 +674,24 @@ fn repeated_crashes_leave_a_verifiable_chain() {
                 expected_orphans += 1;
             }
             let chain_snapshot = coordinator.chain().clone();
-            let interrupted_capsule_oid = capsule_oid(1_000 + round);
+            // The marker names whatever the store derived, which is now the
+            // only identity available — the override this used to carry became
+            // a no-op once the coordinator started deriving the id itself.
             let _ = coordinator.commit_with_crash(
                 cx,
-                interrupted_capsule_oid,
                 &capsule_bytes(1_000 + round),
-                |seq| {
-                    let mut marker = marker_for(seq, &chain_snapshot);
-                    marker.effect_source = EffectSource::Local {
-                        capsule_ref: interrupted_capsule_oid,
-                        logical_delta_template_digest: digest(seq as u8 + 1),
-                    };
-                    marker
-                },
+                |seq, oid| marker_for(seq, oid, &chain_snapshot),
                 Some(point),
             );
             drop(coordinator);
 
-            let mut reopened = CommitCoordinator::open(&dir).expect("reopen");
+            let mut reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
             assert_eq!(reopened.next_commit_seq(), expected_seq);
             commit_ok(&mut reopened, cx, expected_seq);
             assert_eq!(reopened.chain().verify(), Ok(()));
         }
 
-        let final_state = CommitCoordinator::open(&dir).expect("final open");
+        let final_state = CommitCoordinator::open(&dir, keys()).expect("final open");
         assert_eq!(final_state.chain().len(), 10);
         assert_eq!(final_state.chain().verify(), Ok(()));
         assert_eq!(
@@ -708,7 +715,7 @@ fn repeated_crashes_leave_a_verifiable_chain() {
 // ---------------------------------------------------------------------------
 
 fn three_commit_log(dir: &Path, cx: &CommitCx) -> (Vec<u8>, usize) {
-    let mut coordinator = CommitCoordinator::open(dir).expect("open");
+    let mut coordinator = CommitCoordinator::open(dir, keys()).expect("open");
     commit_ok(&mut coordinator, cx, 1);
     let first_len = log_bytes(dir).len();
     commit_ok(&mut coordinator, cx, 2);
@@ -725,7 +732,7 @@ fn a_corrupt_middle_entry_fails_closed_instead_of_truncating_history() {
         bytes[first_len] ^= 0xff;
         write_log(&dir, &bytes);
 
-        let result = CommitCoordinator::open(&dir);
+        let result = CommitCoordinator::open(&dir, keys());
         assert!(
             matches!(result, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
             "damage to a durable entry must fail closed and name the position, \
@@ -745,7 +752,7 @@ fn a_middle_entry_with_an_oversized_length_is_corruption_not_a_tail() {
         bytes[first_len + 4..first_len + 8].copy_from_slice(&0xffff_ffffu32.to_be_bytes());
         write_log(&dir, &bytes);
 
-        let result = CommitCoordinator::open(&dir);
+        let result = CommitCoordinator::open(&dir, keys());
         assert!(
             matches!(result, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
             "an over-large length must not be mistaken for a torn tail; got {result:?}"
@@ -763,7 +770,7 @@ fn a_corrupt_marker_body_fails_closed() {
         bytes[first_len + 8 + 16] = 0x7f;
         write_log(&dir, &bytes);
 
-        let result = CommitCoordinator::open(&dir);
+        let result = CommitCoordinator::open(&dir, keys());
         assert!(
             matches!(result, Err(CommitError::CorruptLogEntry { commit_seq: 2 })),
             "an unknown arm tag must be rejected, never skipped; got {result:?}"
@@ -785,7 +792,7 @@ fn a_tampered_middle_entry_is_caught_by_the_chain_hash() {
         bytes[hlc_offset] ^= 0x01;
         write_log(&dir, &bytes);
 
-        let result = CommitCoordinator::open(&dir);
+        let result = CommitCoordinator::open(&dir, keys());
         assert!(
             matches!(result, Err(CommitError::ChainDiverged { commit_seq: 2 })),
             "a well-formed but tampered entry must be caught by the chain hash \
@@ -802,13 +809,12 @@ fn truncation_anywhere_in_the_final_entry_recovers_the_prefix() {
     let dir = scratch_dir("truncation-sweep");
     under_lab(34, move |cx| {
         let (bytes, _) = three_commit_log(&dir, cx);
-        let mut coordinator = CommitCoordinator::open(&dir).expect("open");
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
         let chain_snapshot = coordinator.chain().clone();
         let _ = coordinator.commit_with_crash(
             cx,
-            capsule_oid(4),
             &capsule_bytes(4),
-            |seq| marker_for(seq, &chain_snapshot),
+            |seq, oid| marker_for(seq, oid, &chain_snapshot),
             Some(CrashPoint::AfterMarkerBeforeD2),
         );
         drop(coordinator);
@@ -822,7 +828,7 @@ fn truncation_anywhere_in_the_final_entry_recovers_the_prefix() {
         let mut failures: Vec<String> = Vec::new();
         for cut in committed_len..full.len() {
             write_log(&dir, &full[..cut]);
-            match CommitCoordinator::open(&dir) {
+            match CommitCoordinator::open(&dir, keys()) {
                 Ok(reopened) => {
                     if reopened.chain().len() != 3 {
                         failures.push(format!(
