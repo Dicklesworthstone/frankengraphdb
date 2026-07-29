@@ -1,0 +1,248 @@
+//! `fgdb-sim` — the database under asupersync's lab runtime (plan §15).
+//!
+//! This is where the two halves of the system are made to meet. Chronicle can
+//! make a mutation durable and recover it across a crash at any instant of the
+//! two-fsync protocol. `fgdb-reference` can turn delta rows into a graph. Until
+//! they are joined, each is only *plausible*: Chronicle's tests prove bytes
+//! survive without asking what they mean, and the oracle's tests prove rows
+//! materialize without asking whether those rows were ever durable.
+//!
+//! THE LAW THIS CRATE EXISTS FOR: **the graph you get after a crash is exactly
+//! the graph implied by the commits that reached D2.** Not a superset (an
+//! orphan capsule must contribute nothing, even though its bytes are on disk
+//! and readable), and not a subset (a commit that was acknowledged must be
+//! there). That single sentence is B1's "one version universe" and B5's
+//! determinism made checkable, and neither half can state it alone.
+//!
+//! WHY THIS CRATE AND NOT ONE OF THE OTHER TWO. `fgdb-reference` carries a
+//! registered dependency allowlist (§15.2) that names `fgdb-chronicle` as a
+//! CI-rejected import, precisely so the differential cannot be gutted by code
+//! sharing; and Chronicle's layer may not depend on verification. The
+//! verification layer is the only place both are visible, which is not an
+//! accident of the map — it is the map enforcing that the oracle and the engine
+//! stay independent implementations that can disagree.
+
+#![forbid(unsafe_code)]
+
+use fgdb_chronicle::commit::{CommitCoordinator, CommitError};
+use fgdb_chronicle::identity::IdentifiedObject;
+use fgdb_chronicle::marker::{CommitMarker, EffectSource, MarkerRef};
+use fgdb_crypto::Digest;
+use fgdb_delta_types::{CanonicalError, LogicalDeltaTemplate};
+use fgdb_reference::{ApplyError, ReferenceDatabase};
+use fgdb_types::context::CommitCx;
+use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
+
+/// Object kind for a committed effect capsule. `0x0274` is the Appendix A
+/// reservation for `CommittedEffectCapsule`; it is spelled here as a constant
+/// rather than a typed kind because that kind is `reserved`, not `active`, so
+/// naming it in the type system would not compile (see the subset note on
+/// `CoordinateEntry`).
+pub const CAPSULE_OBJECT_KIND: u16 = 0x0274;
+
+/// A template prepared for commit: its canonical bytes, the identity those
+/// bytes have, and the digest the marker will declare.
+///
+/// Built in one place so the three can never disagree. A caller that computed
+/// the oid from one byte string and the digest from another would produce a
+/// commit that passes every check at write time and fails to recover.
+#[derive(Debug, Clone)]
+pub struct PreparedCapsule {
+    pub bytes: Vec<u8>,
+    pub object_id: ObjectId,
+    pub template_digest: Digest,
+}
+
+/// Why replaying a durable commit stream into graph state failed.
+#[derive(Debug)]
+pub enum ReplayError {
+    Commit(CommitError),
+    /// A committed marker names a capsule whose bytes are not on disk. This is
+    /// unrecoverable rather than an orphan: the marker IS the commit, so its
+    /// capsule was durable before the marker was written, and its absence means
+    /// something deleted bytes the commit stream still references.
+    MissingCapsule {
+        commit_seq: u64,
+        capsule_oid: ObjectId,
+    },
+    /// The capsule's bytes do not hash to the digest its marker declared.
+    ///
+    /// FG-INV-09's shape: identities recompute from their registered bytes. A
+    /// reader that skipped this would materialize whatever it found, so silent
+    /// corruption would become silently different graph state — the failure a
+    /// content-addressed store exists to make impossible.
+    TemplateDigestMismatch {
+        commit_seq: u64,
+        declared: Digest,
+        recomputed: Digest,
+    },
+    /// The capsule's bytes are not a decodable template.
+    Decode {
+        commit_seq: u64,
+        error: CanonicalError,
+    },
+    /// The template decoded but does not apply to the state the prior commits
+    /// produced.
+    Apply {
+        commit_seq: u64,
+        error: ApplyError,
+    },
+}
+
+impl core::fmt::Display for ReplayError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Commit(error) => write!(f, "commit stream: {error}"),
+            Self::MissingCapsule {
+                commit_seq,
+                capsule_oid,
+            } => write!(
+                f,
+                "commit {commit_seq} names capsule {capsule_oid:?}, which is not on disk"
+            ),
+            Self::TemplateDigestMismatch { commit_seq, .. } => write!(
+                f,
+                "commit {commit_seq}: capsule bytes do not hash to the declared template digest"
+            ),
+            Self::Decode { commit_seq, error } => {
+                write!(f, "commit {commit_seq}: capsule does not decode: {error}")
+            }
+            Self::Apply { commit_seq, error } => {
+                write!(f, "commit {commit_seq}: template does not apply: {error}")
+            }
+        }
+    }
+}
+
+impl core::error::Error for ReplayError {}
+
+impl From<CommitError> for ReplayError {
+    fn from(error: CommitError) -> Self {
+        Self::Commit(error)
+    }
+}
+
+/// The digest a marker declares for its template — a plain hash of the exact
+/// canonical bytes the capsule holds.
+pub fn template_digest(bytes: &[u8]) -> Digest {
+    let mut hasher = fgdb_crypto::Hasher::new();
+    hasher.update(TEMPLATE_DIGEST_DOMAIN);
+    hasher.update(bytes);
+    hasher.finalize()
+}
+
+/// Domain separator, so a template digest can never collide with any other
+/// digest in the system by hashing the same bytes under a different meaning.
+pub const TEMPLATE_DIGEST_DOMAIN: &[u8] = b"fgdb:logical-delta-template:v1";
+
+/// Prepare a template for commit: encode it, identify it, digest it.
+pub fn prepare_capsule(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    template: &LogicalDeltaTemplate,
+) -> Result<PreparedCapsule, CanonicalError> {
+    let bytes = template.canonical_bytes()?;
+    // The §5.1 keyed identity over the same bytes the capsule will hold. The
+    // header is empty because the canonical bytes ARE the whole object — the
+    // transcript concatenates header and payload, so passing the bytes as the
+    // payload reproduces exactly the intended stream.
+    let identified = IdentifiedObject::new(k_oid, namespace, CAPSULE_OBJECT_KIND, &[], &bytes);
+    Ok(PreparedCapsule {
+        object_id: identified.object_id(),
+        template_digest: template_digest(&bytes),
+        bytes,
+    })
+}
+
+/// Build the marker for a prepared capsule at an allocated sequence.
+///
+/// The marker's `capsule_ref` and `logical_delta_template_digest` both come
+/// from the same `PreparedCapsule`, so the write-time cross-check and the
+/// recovery-time cross-check are asking about the same object by construction.
+pub fn marker_for_capsule(
+    commit_seq: u64,
+    capsule: &PreparedCapsule,
+    head_updates: Vec<fgdb_chronicle::marker::HeadUpdate>,
+) -> CommitMarker {
+    CommitMarker {
+        logical_command_seq: commit_seq,
+        commit_seq,
+        effect_source: EffectSource::Local {
+            capsule_ref: capsule.object_id,
+            logical_delta_template_digest: capsule.template_digest,
+        },
+        prev_global: None,
+        head_updates,
+        merge_record_oid: None,
+        coordinate_schema_transition_digest: Digest([0u8; 32]),
+        topology_epoch: 1,
+        policy_epoch: 1,
+        revocation_index: 0,
+        txn_token: [0u8; 16],
+        commit_hlc: commit_seq,
+        final_effect_digest: capsule.template_digest,
+        authorization_decision_digest: Digest([0u8; 32]),
+        resource_effect_digest: Digest([0u8; 32]),
+        payload_availability_certificate_oid: None,
+        flags: 0,
+    }
+}
+
+/// Commit a prepared capsule.
+pub fn commit_capsule(
+    coordinator: &mut CommitCoordinator,
+    cx: &CommitCx,
+    capsule: &PreparedCapsule,
+    head_updates: Vec<fgdb_chronicle::marker::HeadUpdate>,
+) -> Result<MarkerRef, CommitError> {
+    coordinator.commit(cx, capsule.object_id, &capsule.bytes, |seq| {
+        marker_for_capsule(seq, capsule, head_updates)
+    })
+}
+
+/// **Materialize the durable commit stream into graph state.**
+///
+/// Walks the recovered marker chain in commit order and, for each marker,
+/// reads its capsule, proves the bytes are the ones the marker committed to,
+/// decodes the template, and applies it. Every step fails closed and names the
+/// sequence, because "the database will not open" is only actionable if it also
+/// says which commit is the problem.
+///
+/// Only markers reach this loop, so an orphan capsule — bytes on disk that no
+/// marker names — contributes nothing without needing to be excluded: it was
+/// never in the stream to begin with. That is the marker-is-the-commit rule
+/// paying off at the semantic layer rather than being restated there.
+pub fn materialize(coordinator: &CommitCoordinator) -> Result<ReferenceDatabase, ReplayError> {
+    let mut database = ReferenceDatabase::new();
+    for entry in coordinator.chain().entries() {
+        let commit_seq = entry.marker.commit_seq;
+        let EffectSource::Local {
+            capsule_ref,
+            logical_delta_template_digest,
+        } = &entry.marker.effect_source;
+
+        if !coordinator.capsule_exists(*capsule_ref) {
+            return Err(ReplayError::MissingCapsule {
+                commit_seq,
+                capsule_oid: *capsule_ref,
+            });
+        }
+        let bytes = coordinator.read_capsule(*capsule_ref)?;
+
+        let recomputed = template_digest(&bytes);
+        if recomputed != *logical_delta_template_digest {
+            return Err(ReplayError::TemplateDigestMismatch {
+                commit_seq,
+                declared: *logical_delta_template_digest,
+                recomputed,
+            });
+        }
+
+        let template = LogicalDeltaTemplate::decode_canonical(&bytes)
+            .map_err(|error| ReplayError::Decode { commit_seq, error })?;
+        database
+            .apply_template(&template)
+            .map_err(|error| ReplayError::Apply { commit_seq, error })?;
+    }
+    Ok(database)
+}

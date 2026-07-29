@@ -1,0 +1,17 @@
+[package]
+name = "fgdb-sim"
+version = "0.0.1"
+edition = "2024"
+description = "The database under asupersync's lab runtime (plan §15): virtual time, seeded deterministic scheduling, and crash injection. This increment lands the durability-versus-semantics differential — a commit stream crashed at every protocol instant, recovered, and materialized through the reference oracle; bead fgdb-verif-sim-q97e."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "e464a484cb65c1a55be0d9c925e6e9c20318edcb", default-features = false }
+fgdb-chronicle = { path = "../fgdb-chronicle" }
+fgdb-crypto = { path = "../fgdb-crypto" }
+fgdb-delta-types = { path = "../fgdb-delta-types" }
+fgdb-reference = { path = "../fgdb-reference" }
+fgdb-types = { path = "../fgdb-types" }

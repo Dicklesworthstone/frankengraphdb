@@ -235,6 +235,23 @@ impl CommitCoordinator {
         dir.join(CAPSULE_DIR).join(format!("{name}.capsule"))
     }
 
+    /// Read a durable capsule's bytes back.
+    ///
+    /// Recovery needs this and nothing else could provide it: the capsule file
+    /// name is derived from the object id by a private rule, so a caller that
+    /// had to rebuild the path would be duplicating that rule and would drift
+    /// from it the first time it changed.
+    ///
+    /// The bytes are returned UNINTERPRETED. This layer knows a capsule is
+    /// content addressed and durable; what the bytes *mean* belongs to whoever
+    /// wrote them, and the marker already carries the digests that let a reader
+    /// prove it got the object it asked for.
+    pub fn read_capsule(&self, capsule_oid: ObjectId) -> Result<Vec<u8>, CommitError> {
+        let mut bytes = Vec::new();
+        File::open(Self::capsule_path(&self.dir, capsule_oid))?.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
     /// Is this capsule durable? Used by recovery to identify orphans — bytes
     /// written by a commit that never reached D2.
     pub fn capsule_exists(&self, capsule_oid: ObjectId) -> bool {

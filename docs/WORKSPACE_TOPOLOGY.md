@@ -8,7 +8,7 @@
 This document is generated from `registries/workspace_topology.toml` and checked byte-exact in CI. The registry is the master; this file is its rendering. Every plan excerpt below is embedded verbatim under an `fnv1a64` pin, so plan drift turns the gate red rather than silently invalidating the map.
 
 * **Layers:** 14
-* **Crates:** 70 (16 active, 53 planned, 1 reserved)
+* **Crates:** 70 (17 active, 52 planned, 1 reserved)
 * **Inventory rows:** 51 (23 build-here, 19 consume-from, 9 design-only)
 * **Replay:** `cargo run -p registry-check --bin topology-check -- --root .`
 * **Constraints bound:** FG-CON-01, FG-CON-02
@@ -175,7 +175,7 @@ Exactly three crates may carry `deny_ledgered`; every other row carries `forbid`
 
 | # | Crate | Status | Unsafe | Posture | Owner | Bead | Role |
 |---|---|---|---|---|---|---|---|
-| 1 | `fgdb-sim` | planned | `forbid` | test_only | W1 | fgdb-verif-sim-q97e | The whole database under the lab runtime: virtual time, DPOR, chaos, crashpacks. |
+| 1 | `fgdb-sim` | active | `forbid` | test_only | W1 | fgdb-verif-sim-q97e | The whole database under the lab runtime: virtual time, DPOR, chaos, crashpacks. |
 | 2 | `fgdb-reference` | active | `forbid` | test_only | W1 | fgdb-verif-reference-3kkp | executable semantics oracle |
 | 3 | `fgdb-oracles` | planned | `forbid` | test_only | verification_ladder | fgdb-verif-oracles-fqie | SI/SSI, obligation-leak, quiescence, and Elle-class history oracles. |
 | 4 | `fgdb-bench` | planned | `forbid` | test_only | verification_ladder | — | The §17 bench harness: one binary per gate with committed baselines. |
@@ -383,4 +383,4 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 ## Pins
 
 * `id_table_hash` = `fnv1a64:b422bc59c3da23ca` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:348414046a3639d2` — every normative decision, prose excluded.
+* `semantic_contract_hash` = `fnv1a64:cfe33cea8d7dbd6c` — every normative decision, prose excluded.

@@ -108,8 +108,8 @@ embedded_source_blocks = [
 # without moving these is schema drift, not an edit.
 layer_count = 14
 crate_count = 70
-active_crate_count = 16
-planned_crate_count = 53
+active_crate_count = 17
+planned_crate_count = 52
 reserved_crate_count = 1
 owner_scope_count = 14
 foundation_project_count = 3
@@ -129,7 +129,7 @@ dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
 id_table_hash = "fnv1a64:b422bc59c3da23ca"
-semantic_contract_hash = "fnv1a64:348414046a3639d2"
+semantic_contract_hash = "fnv1a64:cfe33cea8d7dbd6c"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -1623,12 +1623,12 @@ layer_position = 1
 role = "The whole database under the lab runtime: virtual time, DPOR, chaos, crashpacks."
 role_basis = "layer_charter"
 unsafe_policy = "forbid"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "test_only"
 posture_basis = "verification_layer"
 owner = "W1"
 owner_bead = "fgdb-verif-sim-q97e"
-manifest_dir = ""
+manifest_dir = "crates/fgdb-sim"
 
 [[crate]]
 name = "fgdb-reference"

@@ -24,6 +24,7 @@ members = [
     "crates/fgdb-evidence",
     "crates/fgdb-reference",
     "crates/fgdb-resource",
+    "crates/fgdb-sim",
     "crates/fgdb-sketch",
     "crates/fgdb-types",
     "crates/fgdb-unsafe-arena",

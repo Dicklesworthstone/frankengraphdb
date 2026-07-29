@@ -835,8 +835,21 @@ run_ubs() {
 # (aead.rs tag compare, symbol.rs MAC compare).
 # ATTRIBUTED BY DIFFERENTIAL: the new crate's two files scanned alone report
 # exactly 1 critical, this one, with panic and JWT both clean.
+# MOVED 2026-07-29 (fgdb-verif-sim-q97e): timing-safe 809 -> 810, +1, in
+# `crates/fgdb-sim/src/lib.rs`. The one finding is the FG-INV-09 cross-check
+# that stands between a rewritten capsule and silently different graph state:
+#     if recomputed != *logical_delta_template_digest
+# It compares a digest recomputed from durable bytes against the one the commit
+# marker declared. Both sides are content digests of a local file; there is no
+# secret, no remote caller, and an attacker who can rewrite the capsule can
+# rewrite the marker beside it, so a timing channel buys nothing that direct
+# access does not already give. Doctrine #1 forbids the `subtle`/`ring` helpers
+# the scanner recommends, and this workspace's genuine constant-time compares
+# are explicit XOR-accumulate loops (aead.rs tag, symbol.rs MAC).
+# ATTRIBUTED BY DIFFERENTIAL: the new crate's two files scanned alone report
+# exactly this one critical, with panic and JWT both clean.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=809"
+  "Secret/token comparisons without timing-safe equality=810"
   "panic!/unreachable!/todo!/unimplemented!=137"
   "JWT decode, validation bypass, or missing claim binding=124"
 )
