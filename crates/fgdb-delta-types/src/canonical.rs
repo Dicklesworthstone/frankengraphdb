@@ -18,10 +18,11 @@
 //! identities and every digest cross-check downstream would be comparing
 //! coincidences. So ordering is part of the format and [`validate`] enforces
 //! it: coordinate entries strictly ascending by `(graph, branch, relation)`,
-//! rows strictly ascending by their own encoded bytes. *Strictly*, because a
-//! repeat is the plan's "duplicate coordinates/relations" invalidity — a
-//! normal form has already grouped by coordinate and logical identity, so a
-//! second occurrence means the input never went through one.
+//! rows strictly ascending by their own encoded bytes, and embedded set/map
+//! fields strictly ascending by their durable identity key. *Strictly*, because
+//! a repeat is the plan's duplicate invalidity — a normal form has already
+//! grouped by coordinate and logical identity, so a second occurrence means
+//! the input never went through one.
 //!
 //! Sorting rows by their encoded bytes rather than a hand-written key is
 //! deliberate. A per-arm comparison key is a second definition of row identity
@@ -94,6 +95,15 @@ pub enum CanonicalError {
     /// Rows within a coordinate entry are not strictly ascending by their
     /// canonical bytes, or a row repeats.
     NonCanonicalRowOrder { entry: usize, index: usize },
+    /// A `CreateVertex.labels` set is not strictly ascending, or repeats a
+    /// label.
+    NonCanonicalLabelOrder { index: usize },
+    /// A create row's property map is not strictly ascending by property key,
+    /// or repeats a key.
+    NonCanonicalPropertyOrder { index: usize },
+    /// A delete-vertex cascade image is not strictly ascending by edge id, or
+    /// repeats an edge.
+    NonCanonicalRetiredEdgeOrder { index: usize },
 }
 
 impl core::fmt::Display for CanonicalError {
@@ -125,6 +135,18 @@ impl core::fmt::Display for CanonicalError {
             Self::NonCanonicalRowOrder { entry, index } => write!(
                 f,
                 "row {index} of coordinate entry {entry} is not strictly after its predecessor"
+            ),
+            Self::NonCanonicalLabelOrder { index } => write!(
+                f,
+                "embedded label {index} is not strictly after its predecessor"
+            ),
+            Self::NonCanonicalPropertyOrder { index } => write!(
+                f,
+                "embedded property {index} is not strictly after its predecessor key"
+            ),
+            Self::NonCanonicalRetiredEdgeOrder { index } => write!(
+                f,
+                "retired incident edge {index} is not strictly after its predecessor"
             ),
         }
     }
@@ -424,6 +446,7 @@ impl<'a> Reader<'a> {
     fn scalar(&mut self) -> Result<CanonicalScalar, CanonicalError> {
         let len = self.count(1)?;
         let encoded = self.take(len)?;
+        // ubs:ignore -- canonical graph scalar decoding, not a JWT or authentication bypass.
         CanonicalScalar::decode(encoded).map_err(|_| CanonicalError::Scalar)
     }
 
@@ -451,12 +474,78 @@ impl<'a> Reader<'a> {
 // Rows
 // ---------------------------------------------------------------------------
 
+fn first_non_strict_index<T: Ord>(values: &[T]) -> Option<usize> {
+    values
+        .windows(2)
+        .position(|pair| pair[0] >= pair[1])
+        .map(|index| index + 1)
+}
+
 impl DeltaRow {
+    /// Normalize set/map fields produced by a builder.
+    ///
+    /// Duplicates deliberately remain adjacent for validation to reject; this
+    /// method never invents the semantic policy of collapsing two effects.
+    fn canonicalize_embedded_collections(&mut self) {
+        match self {
+            DeltaRow::CreateVertex { labels, props, .. } => {
+                labels.sort_unstable();
+                props.sort_by_key(|(key, _)| *key);
+            }
+            DeltaRow::CreateEdge { props, .. } => {
+                props.sort_by_key(|(key, _)| *key);
+            }
+            DeltaRow::DeleteVertex {
+                sorted_retired_incident_edges,
+                ..
+            } => sorted_retired_incident_edges.sort_unstable(),
+            _ => {}
+        }
+    }
+
+    /// Enforce the one-encoding law for every embedded set/map.
+    fn validate_embedded_collections(&self) -> Result<(), CanonicalError> {
+        match self {
+            DeltaRow::CreateVertex { labels, props, .. } => {
+                if let Some(index) = first_non_strict_index(labels) {
+                    return Err(CanonicalError::NonCanonicalLabelOrder { index });
+                }
+                if let Some(index) = props
+                    .windows(2)
+                    .position(|pair| pair[0].0 >= pair[1].0)
+                    .map(|index| index + 1)
+                {
+                    return Err(CanonicalError::NonCanonicalPropertyOrder { index });
+                }
+            }
+            DeltaRow::CreateEdge { props, .. } => {
+                if let Some(index) = props
+                    .windows(2)
+                    .position(|pair| pair[0].0 >= pair[1].0)
+                    .map(|index| index + 1)
+                {
+                    return Err(CanonicalError::NonCanonicalPropertyOrder { index });
+                }
+            }
+            DeltaRow::DeleteVertex {
+                sorted_retired_incident_edges,
+                ..
+            } => {
+                if let Some(index) = first_non_strict_index(sorted_retired_incident_edges) {
+                    return Err(CanonicalError::NonCanonicalRetiredEdgeOrder { index });
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// This row's canonical bytes.
     ///
     /// Also its sort key: [`validate`] orders rows by these bytes, so the
     /// encoding and the ordering can never disagree about row identity.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, CanonicalError> {
+        self.validate_embedded_collections()?;
         let mut w = Writer::new();
         match self {
             DeltaRow::CreateVertex {
@@ -644,6 +733,7 @@ impl DeltaRow {
                 remaining: r.remaining(),
             });
         }
+        row.validate_embedded_collections()?;
         Ok(row)
     }
 
@@ -916,6 +1006,9 @@ impl LogicalDeltaTemplate {
 /// the encoding.
 pub fn canonicalize(entries: &mut [CoordinateEntry]) -> Result<(), CanonicalError> {
     for entry in entries.iter_mut() {
+        for row in &mut entry.rows {
+            row.canonicalize_embedded_collections();
+        }
         // Encode once, sort the pairs: re-encoding inside a comparator would
         // make sorting quadratic in encoding cost for no benefit.
         let mut encoded: Vec<(Vec<u8>, DeltaRow)> = core::mem::take(&mut entry.rows)

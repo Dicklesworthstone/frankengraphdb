@@ -141,6 +141,82 @@ fn bytes_of(row: &DeltaRow) -> Vec<u8> {
     row.canonical_bytes().expect("row encodes")
 }
 
+fn embedded_collection_rows(first: u64, second: u64) -> [(&'static str, DeltaRow); 4] {
+    [
+        (
+            "CreateVertex.labels",
+            DeltaRow::CreateVertex {
+                vid: VId(1),
+                birth_ordinal: 1,
+                labels: vec![LabelId(first), LabelId(second)],
+                props: vec![],
+                valid_time: None,
+            },
+        ),
+        (
+            "CreateVertex.props",
+            DeltaRow::CreateVertex {
+                vid: VId(2),
+                birth_ordinal: 2,
+                labels: vec![],
+                props: vec![
+                    (PropertyKeyId(first), CanonicalScalar::Null),
+                    (PropertyKeyId(second), CanonicalScalar::Null),
+                ],
+                valid_time: None,
+            },
+        ),
+        (
+            "CreateEdge.props",
+            DeltaRow::CreateEdge {
+                eid: EId(3),
+                birth_ordinal: 3,
+                src: VId(1),
+                relation: RelationId(1),
+                dst: VId(2),
+                canonical_key: None,
+                props: vec![
+                    (PropertyKeyId(first), CanonicalScalar::Null),
+                    (PropertyKeyId(second), CanonicalScalar::Null),
+                ],
+                valid_time: None,
+            },
+        ),
+        (
+            "DeleteVertex.sorted_retired_incident_edges",
+            DeltaRow::DeleteVertex {
+                vid: VId(4),
+                before_version: oid(0x41),
+                sorted_retired_incident_edges: vec![
+                    EId(u128::from(first)),
+                    EId(u128::from(second)),
+                ],
+            },
+        ),
+    ]
+}
+
+fn embedded_order_errors() -> Vec<(&'static str, CanonicalError)> {
+    vec![
+        (
+            "CreateVertex.labels",
+            CanonicalError::NonCanonicalLabelOrder { index: 1 },
+        ),
+        (
+            "CreateVertex.props",
+            CanonicalError::NonCanonicalPropertyOrder { index: 1 },
+        ),
+        (
+            "CreateEdge.props",
+            CanonicalError::NonCanonicalPropertyOrder { index: 1 },
+        ),
+        (
+            "DeleteVertex.sorted_retired_incident_edges",
+            CanonicalError::NonCanonicalRetiredEdgeOrder { index: 1 },
+        ),
+    ]
+}
+
 /// A named single-field edit, used to sweep a row's transcript field by field.
 type FieldEdit = (&'static str, fn(&mut DeltaRow));
 
@@ -450,6 +526,38 @@ fn input_order_does_not_change_the_canonical_bytes() {
 }
 
 #[test]
+fn embedded_collection_order_does_not_change_a_built_template() {
+    let canonical_rows: Vec<DeltaRow> = embedded_collection_rows(2, 7)
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect();
+    let reversed_embedded: Vec<DeltaRow> = embedded_collection_rows(7, 2)
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect();
+
+    let canonical =
+        LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], vec![entry(1, 1, 3, canonical_rows)])
+            .expect("canonical input builds");
+    let permuted = LogicalDeltaTemplate::build(
+        oid(0x11),
+        [0x22; 32],
+        vec![entry(1, 1, 3, reversed_embedded)],
+    )
+    .expect("permuted input builds");
+
+    assert_eq!(
+        canonical, permuted,
+        "builder canonicalization must normalize every embedded set and map"
+    );
+    assert_eq!(
+        canonical.canonical_bytes().expect("canonical bytes"),
+        permuted.canonical_bytes().expect("permuted bytes"),
+        "equivalent embedded effects must have one durable identity"
+    );
+}
+
+#[test]
 fn canonicalize_is_idempotent() {
     let mut entries = vec![
         entry(2, 1, 3, every_family_populated()),
@@ -497,6 +605,88 @@ fn a_duplicate_row_within_a_coordinate_is_refused() {
             Err(CanonicalError::NonCanonicalRowOrder { entry: 0, index: 1 })
         ),
         "got {result:?}"
+    );
+}
+
+#[test]
+fn direct_row_encoding_refuses_noncanonical_embedded_collections() {
+    let rows = embedded_collection_rows(2, 1);
+    let errors: Vec<(&str, CanonicalError)> = rows
+        .iter()
+        .map(|(name, row)| {
+            (
+                *name,
+                row.canonical_bytes()
+                    .expect_err("noncanonical direct row must fail"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        embedded_order_errors(),
+        "each embedded collection must fail at its first non-strict member"
+    );
+}
+
+#[test]
+fn row_decoder_refuses_noncanonical_embedded_collections() {
+    let canonical = embedded_collection_rows(1, 2);
+    let mut labels = bytes_of(&canonical[0].1);
+    // tag + vid + birth + count = 29, followed by two adjacent u64 labels.
+    labels[29..45].rotate_left(8);
+
+    let mut props = bytes_of(&canonical[1].1);
+    // Empty-label count ends at 29; property count ends at 33. Each Null
+    // property is key(8) + scalar length(4) + scalar tag(1).
+    props[33..59].rotate_left(13);
+
+    let mut edge_props = bytes_of(&canonical[2].1);
+    // Fixed edge fields plus absent canonical key and property count end at 70.
+    edge_props[70..96].rotate_left(13);
+
+    let mut retired_edges = bytes_of(&canonical[3].1);
+    // tag + vid + before-version + count = 53, followed by two u128 edge ids.
+    retired_edges[53..85].rotate_left(16);
+
+    let errors: Vec<(&str, CanonicalError)> = [
+        ("CreateVertex.labels", labels),
+        ("CreateVertex.props", props),
+        ("CreateEdge.props", edge_props),
+        ("DeleteVertex.sorted_retired_incident_edges", retired_edges),
+    ]
+    .into_iter()
+    .map(|(name, encoded)| {
+        (
+            name,
+            DeltaRow::decode_canonical(&encoded)
+                .expect_err("noncanonical embedded bytes must fail"),
+        )
+    })
+    .collect();
+    assert_eq!(
+        errors,
+        embedded_order_errors(),
+        "decoder must report the exact embedded ordering law, never repair it"
+    );
+}
+
+#[test]
+fn duplicate_embedded_set_and_map_members_are_refused() {
+    let rows = embedded_collection_rows(2, 2);
+    let errors: Vec<(&str, CanonicalError)> = rows
+        .into_iter()
+        .map(|(name, row)| {
+            (
+                name,
+                LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], vec![entry(1, 1, 3, vec![row])])
+                    .expect_err("duplicate embedded member must fail"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        embedded_order_errors(),
+        "sorting may expose a duplicate but must never collapse it"
     );
 }
 
