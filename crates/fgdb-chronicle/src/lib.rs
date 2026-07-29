@@ -21,12 +21,17 @@
 #![forbid(unsafe_code)]
 
 pub mod identity;
+pub mod pack;
 pub mod symbol;
 pub mod symbolize;
 
 pub use identity::{
     CipherDescriptor, EncodedObject, EncodingDescriptor, IdentifiedObject, LocationForm,
     PlacedObject, PlacementDescriptor, ProtectedObject,
+};
+pub use pack::{
+    DomainAxis, PackBuilder, PackDomain, PackError, PackedObjectGroup, SubobjectLocator,
+    WriteKeyDomain,
 };
 pub use symbol::{SymbolError, SymbolRecord};
 pub use symbolize::{RecoveryTarget, SymbolizeError, decode_object, encode_object};
