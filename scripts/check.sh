@@ -773,9 +773,46 @@ run_ubs() {
 # ATTRIBUTED BY DIFFERENTIAL: `ubs crates/fgdb-chronicle/` before this
 # increment reported 3 criticals and after reports 4, with the single new site
 # in root.rs and 0 elsewhere.
+# MOVED 2026-07-29 (fgdb-w2-commit-protocol-9w3u, carrying fgdb-2a50's work):
+# panic 135 -> 137 (+2) AND timing-safe 800 -> 808 (+8), all of both in
+# `tools/registry-check/tests/identity.rs`.
+#
+# WHOSE CHANGE, AND WHY IT IS ACCOUNTED HERE. a9db867 is a chronicle commit, but
+# the shared git index handed it another pane's staged MetaRestorePhase work as
+# well — registries/appendix_a_catalog.toml (+381) and three registry-check
+# sources. The findings are that pane's; the commit that carried them past the
+# ratchet is mine, so the accounting is mine. This is the failure mode the
+# ratchet exists to expose: without it the two panes' work would have merged
+# into one unattributed number.
+#
+# The two panics are the projection lookups the MetaRestorePhase twin adds:
+#     .unwrap_or_else(|| panic!("MetaRestorePhase arm {tag:#06x} exists"))
+#     .unwrap_or_else(|| panic!("{variant_name} wire variant exists"))
+# Both are test-only "the fixture must contain this row" assertions. A missing
+# row has to abort the test, and `expect` cannot carry the formatted tag, so the
+# alternative is a worse message rather than fewer panics.
+#
+# The eight timing-safe hits are the same false-positive class this one file
+# already contributes 341 of — `==` beside an identifier named `key` or `code`,
+# comparing SCHEMA KEYS and VIOLATION CODES to literals:
+#     .filter(|schema| schema.key.source_key() == "top|RegisteredStrongRef")
+#     .any(|violation| violation.code == "catalog_annotation_reference_target_mismatch")
+# No secret, signature or token is involved, and Doctrine #1 forbids the
+# `subtle`/`ring` helpers the scanner recommends.
+#
+# ATTRIBUTED BY DIFFERENTIAL against a detached worktree at cf75e59 — the commit
+# that last set this baseline — rather than by arithmetic on the total. Over the
+# IDENTICAL 123-file non-chronicle non-crypto domain (verified set-equal, not
+# merely same-sized): panic 135 -> 137, timing-safe 799 -> 807, JWT 120 -> 120.
+# Per file: tests/identity.rs 42 -> 44 and 341 -> 349, the whole delta, with
+# appendix_a.rs and src/identity.rs unchanged. crates/fgdb-chronicle plus
+# crates/fgdb-crypto contribute 0 / 1 / 3 and have not moved since cf75e59, so
+# this increment's own new files (commit.rs, crash_point_matrix.rs) contribute
+# zero — confirmed separately by scanning the 150-file domain with and without
+# them, which left both counts identical.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=800"
-  "panic!/unreachable!/todo!/unimplemented!=135"
+  "Secret/token comparisons without timing-safe equality=808"
+  "panic!/unreachable!/todo!/unimplemented!=137"
   "JWT decode, validation bypass, or missing claim binding=123"
 )
 
