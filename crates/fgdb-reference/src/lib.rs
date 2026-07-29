@@ -349,6 +349,101 @@ impl ReferenceGraph {
             .collect()
     }
 
+    // ---- temporal selectors (§15: the oracle implements temporal selectors) --
+
+    /// Is this period live at `micros`?
+    ///
+    /// **Half-open, `[start, end)`.** Stated because the choice is observable
+    /// and the alternative is worse: with a closed upper bound, two adjacent
+    /// periods `[0,10]` and `[10,20]` would BOTH be live at 10, so a value
+    /// replaced at an instant would have two simultaneous versions. Half-open
+    /// makes replacement seamless — the old period ends exactly where the new
+    /// one begins and no instant is covered twice.
+    ///
+    /// `None` means unbounded, not absent: a period with no end is live
+    /// forever after its start.
+    pub fn period_covers(period: ValidTimePeriod, micros: i64) -> bool {
+        micros >= period.start_micros && period.end_micros.is_none_or(|end| micros < end)
+    }
+
+    /// Is `elem`'s own period live at `micros`?
+    ///
+    /// An element with NO period is live at every instant. That is the right
+    /// reading of absence here: valid time is an optional assertion about when a
+    /// fact holds, and a fact with no such assertion is not thereby time-limited
+    /// to nothing.
+    fn own_period_live_at(&self, elem: ElementId, micros: i64) -> bool {
+        let period = match elem {
+            ElementId::Vertex(vid) => self.vertices.get(&vid).map(|v| v.valid_time),
+            ElementId::Edge(eid) => self.edges.get(&eid).map(|e| e.valid_time),
+        };
+        match period {
+            None => false, // the element does not exist at all
+            Some(None) => true,
+            Some(Some(period)) => Self::period_covers(period, micros),
+        }
+    }
+
+    /// Is this vertex visible at `micros`?
+    pub fn vertex_live_at(&self, vid: VId, micros: i64) -> bool {
+        self.own_period_live_at(ElementId::Vertex(vid), micros)
+    }
+
+    /// Is this edge visible at `micros`?
+    ///
+    /// **TEMPORAL REFERENTIAL INTEGRITY.** An edge is visible only when its own
+    /// period is live AND both endpoints are live. Filtering edges by their own
+    /// period alone is the obvious implementation and it is wrong: it produces a
+    /// historical view containing an edge to a vertex that does not exist at
+    /// that instant — precisely the dangling edge the non-temporal view refuses
+    /// to accept at apply time. A time-travel query that can return a graph the
+    /// database would never have accepted is not answering "what did this look
+    /// like then".
+    pub fn edge_live_at(&self, eid: EId, micros: i64) -> bool {
+        let Some(edge) = self.edges.get(&eid) else {
+            return false;
+        };
+        self.own_period_live_at(ElementId::Edge(eid), micros)
+            && self.vertex_live_at(edge.src, micros)
+            && self.vertex_live_at(edge.dst, micros)
+    }
+
+    /// Vertices visible at `micros`, in canonical order.
+    pub fn vertices_as_of(&self, micros: i64) -> Vec<VId> {
+        self.vertices
+            .keys()
+            .copied()
+            .filter(|vid| self.vertex_live_at(*vid, micros))
+            .collect()
+    }
+
+    /// Edges visible at `micros`, in canonical order.
+    pub fn edges_as_of(&self, micros: i64) -> Vec<EId> {
+        self.edges
+            .keys()
+            .copied()
+            .filter(|eid| self.edge_live_at(*eid, micros))
+            .collect()
+    }
+
+    /// Neighbours over one relation as of `micros`.
+    ///
+    /// A neighbour requires a live edge, which by the rule above already
+    /// requires both endpoints live — so this cannot report a neighbour that
+    /// does not exist at that instant.
+    pub fn neighbours_as_of(&self, vid: VId, relation: RelationId, micros: i64) -> Vec<VId> {
+        if !self.vertex_live_at(vid, micros) {
+            return Vec::new();
+        }
+        let mut out: BTreeSet<VId> = BTreeSet::new();
+        for (eid, edge) in &self.edges {
+            if edge.relation == relation && edge.src == vid && self.edge_live_at(*eid, micros) {
+                out.insert(edge.dst);
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// Neighbours reachable over one relation, deduplicated and canonically
     /// ordered — the smallest query that is recognisably a graph query.
     pub fn neighbours(&self, vid: VId, relation: RelationId) -> Vec<VId> {
