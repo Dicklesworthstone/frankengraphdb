@@ -28,7 +28,10 @@ use fgdb_chronicle::commit::{CommitCoordinator, CommitError};
 use fgdb_chronicle::identity::IdentifiedObject;
 use fgdb_chronicle::marker::{CommitMarker, EffectSource, MarkerRef};
 use fgdb_crypto::Digest;
-use fgdb_delta_types::{CanonicalError, LogicalDeltaTemplate};
+use fgdb_delta_types::{
+    CanonicalError, CommittedMarker, IndexError, LocalDeltaBatchIndex, LogicalDeltaBatch,
+    LogicalDeltaTemplate,
+};
 use fgdb_reference::{ApplyError, ReferenceDatabase};
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
@@ -87,6 +90,13 @@ pub enum ReplayError {
         commit_seq: u64,
         error: ApplyError,
     },
+    /// The batch derived from a committed template was refused by the delta
+    /// index. plan:397 names the modes: "a missing, duplicate, gapped,
+    /// wrong-marker, or wrong-frontier insertion fails apply."
+    Index {
+        commit_seq: u64,
+        error: IndexError,
+    },
 }
 
 impl core::fmt::Display for ReplayError {
@@ -109,6 +119,12 @@ impl core::fmt::Display for ReplayError {
             }
             Self::Apply { commit_seq, error } => {
                 write!(f, "commit {commit_seq}: template does not apply: {error}")
+            }
+            Self::Index { commit_seq, error } => {
+                write!(
+                    f,
+                    "commit {commit_seq}: delta index refused the batch: {error}"
+                )
             }
         }
     }
@@ -218,8 +234,38 @@ pub fn commit_capsule(
 /// marker names — contributes nothing without needing to be excluded: it was
 /// never in the stream to begin with. That is the marker-is-the-commit rule
 /// paying off at the semantic layer rather than being restated there.
-pub fn materialize(coordinator: &CommitCoordinator) -> Result<ReferenceDatabase, ReplayError> {
+/// What a replay produces: the materialized graph AND the delta index that
+/// tracks it.
+///
+/// Returned together because plan:397 requires apply to insert the batch and
+/// advance the frontier in the SAME transition as the commit. A replay that
+/// produced one without the other would model a state the plan forbids.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Replayed {
+    pub database: ReferenceDatabase,
+    pub index: LocalDeltaBatchIndex,
+}
+
+/// Materialize the durable commit stream into graph state, discarding the
+/// index. Kept for callers that only want the graph.
+pub fn materialize(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator,
+) -> Result<ReferenceDatabase, ReplayError> {
+    replay(cx, coordinator).map(|replayed| replayed.database)
+}
+
+/// Replay the durable stream into graph state and the delta window.
+///
+/// Takes `&CommitCx` because attesting a marker as committed is a
+/// capability-gated act: `CommittedMarker::attest` demands commit authority
+/// precisely so a bare marker identity cannot be promoted outside the commit
+/// lane. Recovery is inside that lane — every marker it walks came out of the
+/// recovered chain, which holds only entries that reached D2 — so it can make
+/// the attestation honestly rather than needing a back door.
+pub fn replay(cx: &CommitCx, coordinator: &CommitCoordinator) -> Result<Replayed, ReplayError> {
     let mut database = ReferenceDatabase::new();
+    let mut index = LocalDeltaBatchIndex::new();
     for entry in coordinator.chain().entries() {
         let commit_seq = entry.marker.commit_seq;
         let EffectSource::Local {
@@ -249,6 +295,27 @@ pub fn materialize(coordinator: &CommitCoordinator) -> Result<ReferenceDatabase,
         database
             .apply_template(&template)
             .map_err(|error| ReplayError::Apply { commit_seq, error })?;
+
+        // The batch enters the index in the SAME step that applied it — the
+        // structural point of plan:397. `insert` advances the frontier as part
+        // of the same call, so there is no instant at which this commit's
+        // effects are in the graph and its batch is not in the window.
+        let batch = LogicalDeltaBatch::order(
+            &template,
+            logical_delta_template_digest.0,
+            // The marker is committed by construction here: it came out of the
+            // recovered chain, which only holds entries that reached D2.
+            CommittedMarker::attest(
+                fgdb_types::MarkerRef {
+                    marker_oid: entry.marker_oid,
+                    commit_seq: fgdb_types::CommitSeq(commit_seq),
+                },
+                cx,
+            ),
+        );
+        index
+            .insert(batch)
+            .map_err(|error| ReplayError::Index { commit_seq, error })?;
     }
-    Ok(database)
+    Ok(Replayed { database, index })
 }

@@ -24,7 +24,9 @@ use fgdb_delta_types::{
     SchemaEpoch,
 };
 use fgdb_reference::ReferenceDatabase;
-use fgdb_sim::{PreparedCapsule, ReplayError, commit_capsule, materialize, prepare_capsule};
+use fgdb_sim::{
+    PreparedCapsule, ReplayError, commit_capsule, materialize, prepare_capsule, replay,
+};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId, VId};
@@ -189,7 +191,7 @@ fn a_graph_committed_to_disk_is_rebuilt_after_a_restart() {
 
         let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
         assert_eq!(reopened.chain().len(), 3);
-        let database = materialize(&reopened).expect("materializes");
+        let database = materialize(cx, &reopened).expect("materializes");
         expect_graph_after(&database, 3);
 
         // The property survived the whole round trip: encode, seal into a
@@ -217,8 +219,8 @@ fn materializing_twice_yields_identical_state() {
             commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
         }
         assert_eq!(
-            materialize(&coordinator).expect("first"),
-            materialize(&coordinator).expect("second")
+            materialize(cx, &coordinator).expect("first"),
+            materialize(cx, &coordinator).expect("second")
         );
     });
 }
@@ -263,7 +265,7 @@ fn a_crash_at_any_instant_materializes_exactly_the_committed_prefix() {
             drop(coordinator);
 
             let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen after crash");
-            let database = materialize(&reopened).expect("materializes");
+            let database = materialize(cx, &reopened).expect("materializes");
 
             expect_graph_after(&database, 2);
 
@@ -320,13 +322,13 @@ fn a_torn_tail_removes_its_effects_and_the_sequence_is_reused() {
 
         let mut reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
         assert_eq!(reopened.chain().len(), 2);
-        expect_graph_after(&materialize(&reopened).expect("materializes"), 2);
+        expect_graph_after(&materialize(cx, &reopened).expect("materializes"), 2);
 
         // And the database is still writable: committing the third template
         // again lands at the sequence the torn one abandoned.
         assert_eq!(reopened.next_commit_seq(), 3);
         commit_capsule(&mut reopened, cx, &capsules[2], vec![]).expect("recommit");
-        expect_graph_after(&materialize(&reopened).expect("materializes"), 3);
+        expect_graph_after(&materialize(cx, &reopened).expect("materializes"), 3);
     });
 }
 
@@ -371,7 +373,7 @@ fn a_rewritten_capsule_is_refused_rather_than_materialized() {
             .expect("rewrite capsule");
 
         let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
-        let result = materialize(&reopened);
+        let result = materialize(cx, &reopened);
         assert!(
             result.is_err(),
             "a substituted capsule must never materialize; got {result:?}"
@@ -413,7 +415,7 @@ fn a_marker_declaring_the_wrong_template_digest_is_refused() {
         drop(coordinator);
 
         let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
-        let result = materialize(&reopened);
+        let result = materialize(cx, &reopened);
         assert!(
             matches!(
                 result,
@@ -444,7 +446,7 @@ fn a_missing_capsule_under_a_committed_marker_fails_closed() {
         std::fs::remove_file(&path).expect("remove the second capsule");
 
         let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
-        let result = materialize(&reopened);
+        let result = materialize(cx, &reopened);
         assert!(
             matches!(
                 result,
@@ -527,6 +529,102 @@ fn a_committed_capsule_recovers_its_exact_plaintext_through_the_codec() {
             raw.len() > capsule.bytes.len(),
             "coded bytes carry repair overhead"
         );
+    });
+}
+
+/// THE DELTA WINDOW TRACKS THE COMMITTED PREFIX, and does so across a crash.
+///
+/// plan:397 requires apply to insert the batch and advance the frontier in the
+/// SAME transition as the commit, so after recovery the two must agree exactly:
+/// the frontier is the last committed sequence, the window is gap-free, and
+/// every retained batch names the marker it came from. A frontier that ran
+/// ahead would claim deltas nobody committed; one that lagged would hide
+/// committed effects from every downstream consumer of the stream.
+#[test]
+fn the_delta_frontier_equals_the_committed_prefix_after_a_crash() {
+    for (index_case, point) in [
+        CrashPoint::BeforeCapsule,
+        CrashPoint::AfterCapsuleBeforeD1,
+        CrashPoint::AfterD1,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = scratch_dir(&format!("frontier-{index_case}"));
+        under_lab(50 + index_case as u64, move |cx| {
+            let capsules = three_commits();
+            let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+            commit_capsule(&mut coordinator, cx, &capsules[0], vec![]).expect("commit 1");
+            commit_capsule(&mut coordinator, cx, &capsules[1], vec![]).expect("commit 2");
+
+            let third = capsules[2].clone();
+            let _ = coordinator.commit_with_crash(
+                cx,
+                &third.bytes,
+                |seq, oid| fgdb_sim::marker_for_capsule(seq, oid, &third, vec![]),
+                Some(point),
+            );
+            drop(coordinator);
+
+            let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+            let replayed = replay(cx, &reopened).expect("replays");
+
+            // The graph and the window agree about how far history got.
+            expect_graph_after(&replayed.database, 2);
+            assert_eq!(
+                replayed.index.frontier(),
+                fgdb_types::CommitSeq(2),
+                "{point:?}: the frontier is the last COMMITTED sequence"
+            );
+            assert_eq!(replayed.index.len(), 2);
+            assert_eq!(
+                replayed.index.verify(),
+                Ok(()),
+                "{point:?}: the window is gap-free and exact"
+            );
+
+            // Every retained batch names the marker it came from, at its own
+            // sequence — the wrong-marker mode plan:397 names.
+            for seq in 1..=2u64 {
+                let batch = replayed
+                    .index
+                    .get(fgdb_types::CommitSeq(seq))
+                    .expect("retained");
+                assert_eq!(batch.commit_seq(), fgdb_types::CommitSeq(seq));
+                assert_eq!(
+                    batch.commit_marker_identity().commit_seq,
+                    fgdb_types::CommitSeq(seq)
+                );
+                assert_eq!(batch.frontier(), fgdb_types::CommitSeq(seq));
+            }
+
+            // The crashed commit contributed no batch, exactly as it
+            // contributed no graph state.
+            assert!(replayed.index.get(fgdb_types::CommitSeq(3)).is_none());
+        });
+    }
+}
+
+/// The window and the graph are built from the same walk, so they cannot
+/// disagree about which commits exist.
+#[test]
+fn the_window_and_the_graph_cover_the_same_commits() {
+    let dir = scratch_dir("window-graph-agree");
+    under_lab(60, move |cx| {
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        for capsule in &three_commits() {
+            commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
+        }
+        let replayed = replay(cx, &coordinator).expect("replays");
+
+        assert_eq!(replayed.index.frontier(), fgdb_types::CommitSeq(3));
+        assert_eq!(replayed.index.len(), 3);
+        assert_eq!(
+            replayed.index.frontier().0 as usize,
+            coordinator.chain().len(),
+            "the frontier and the marker chain describe the same history length"
+        );
+        expect_graph_after(&replayed.database, 3);
     });
 }
 
