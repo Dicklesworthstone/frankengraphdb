@@ -237,7 +237,9 @@ impl SymbolRecord {
         let symbol_mac_len = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]);
         cursor += 2;
 
+        // ubs:ignore — public wire-profile discriminator, not secret material.
         if symbol_mac_profile != SYMBOL_MAC_PROFILE_BLAKE3_128
+            // ubs:ignore — public framing length, not secret material.
             || symbol_mac_len != SYMBOL_MAC_LEN_V1
         {
             return Err(SymbolError::UnsupportedFraming);
@@ -298,7 +300,9 @@ impl SymbolRecord {
         // record from a foreign encoding must be rejected as foreign, not as
         // an authentication failure, and symbols from different EncodingIds
         // must never mix in a decode.
+        // ubs:ignore — public encoding identity, not authentication material.
         if record.encoding_id != encoding.encoding_id()
+            // ubs:ignore — public ciphertext identity, not authentication material.
             || record.ciphertext_id != encoding.ciphertext_id()
             || record.logical_oid != encoding.object_id()
         {
@@ -308,6 +312,7 @@ impl SymbolRecord {
         if record.transfer_length != descriptor.transfer_length
             || record.oti_common != descriptor.oti_common
             || record.oti_scheme != descriptor.oti_scheme
+            // ubs:ignore — public descriptor profile, not a MAC or authentication tag.
             || record.symbol_mac_profile != descriptor.symbol_auth_profile
         {
             return Err(SymbolError::ForeignEncoding);
