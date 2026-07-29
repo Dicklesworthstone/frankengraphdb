@@ -6427,7 +6427,10 @@ mod tests {
             let mut arms = census
                 .arms
                 .iter()
-                .filter(|arm| arm.key.schema_owner == TOP && arm.key.union_path == union_path)
+                .filter(|arm| {
+                    arm.key.schema_owner.as_str().eq(TOP)
+                        && arm.key.union_path.as_str().eq(union_path)
+                })
                 .collect::<Vec<_>>();
             arms.sort_by_key(|arm| {
                 arm.locations
@@ -6449,9 +6452,9 @@ mod tests {
                 .arms
                 .iter()
                 .find(|arm| {
-                    arm.key.schema_owner == TOP
-                        && arm.key.union_path == union_path
-                        && arm.key.arm_name == arm_name
+                    arm.key.schema_owner.as_str().eq(TOP)
+                        && arm.key.union_path.as_str().eq(union_path)
+                        && arm.key.arm_name.as_str().eq(arm_name)
                 })
                 .expect("the source-backed MetaRestorePhase arm exists");
             assert!(!arm.payload_conflict, "{union_path}.{arm_name}");
@@ -6487,7 +6490,7 @@ mod tests {
         let schema = census
             .schemas
             .iter()
-            .find(|schema| schema.key.family == TOP)
+            .find(|schema| schema.key.family.as_str().eq(TOP))
             .expect("MetaRestorePhase is a top-level source candidate");
         assert_eq!(
             schema.owner_statuses,
@@ -6502,11 +6505,13 @@ mod tests {
         let unions = census
             .unions
             .iter()
-            .filter(|union| union.key.schema_owner == TOP)
+            .filter(|union| union.key.schema_owner.as_str().eq(TOP))
             .collect::<Vec<_>>();
         assert_eq!(unions.len(), 2, "MetaRestorePhase owns only its two unions");
         assert!(unions.iter().all(|union| {
-            union.unparsed_arm_count == 0 && !union.arm_set_conflict && union.occurrence_count == 1
+            union.unparsed_arm_count.eq(&0)
+                && !union.arm_set_conflict
+                && union.occurrence_count.eq(&1)
         }));
 
         let top_order = [
@@ -6573,17 +6578,17 @@ mod tests {
         let meta_fields = census
             .fields
             .iter()
-            .filter(|field| field.key.schema_owner == TOP)
+            .filter(|field| field.key.schema_owner.as_str().eq(TOP))
             .collect::<Vec<_>>();
         assert_eq!(meta_fields.len(), 34);
         assert!(meta_fields.iter().all(|field| {
             !field.ambiguous
                 && !field.type_conflict
-                && field.exact_types.len() == 1
+                && field.exact_types.len().eq(&1)
                 && !field.exact_types[0].is_empty()
         }));
         assert!(census.ambiguities.iter().all(|ambiguity| {
-            ambiguity.key.schema_family.as_deref() != Some(TOP)
+            ambiguity.key.schema_family.as_deref().ne(&Some(TOP))
                 && !ambiguity
                     .key
                     .path
