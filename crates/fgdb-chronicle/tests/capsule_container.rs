@@ -206,6 +206,45 @@ fn a_rewritten_symbol_size_is_refused() {
     ));
 }
 
+/// The DECODE SIZE must be authenticated. `transfer_length` fixes K, and it
+/// lives in the EncodingId transcript, so tampering with it is refused before
+/// any decoder is constructed.
+///
+/// This law exists because the container used to carry a SECOND copy of this
+/// length, `protected_len`, that the transcript did not cover — so a container
+/// claiming `u64::MAX` reached `k = len.div_ceil(symbol_size)` unchecked. The
+/// existing encoding_id and symbol_size laws both passed throughout, because
+/// those fields were in the transcript; this is the field that was not.
+#[test]
+fn a_rewritten_transfer_length_is_refused() {
+    let capsule = sealed();
+    let mut descriptor = capsule.descriptor.clone();
+    assert_eq!(
+        descriptor.protected_len(),
+        descriptor.transfer_length,
+        "the decode length IS the authenticated transfer length"
+    );
+
+    descriptor.transfer_length = u64::MAX;
+    assert!(
+        matches!(
+            recover_from(&capsule.symbols, &descriptor, capsule.object_id),
+            Err(CapsuleError::DescriptorMismatch(_))
+        ),
+        "an unauthenticated decode size would let a container name its own \
+         allocation"
+    );
+
+    // A smaller lie is refused by the same check — the guard is the transcript,
+    // not a magnitude heuristic.
+    let mut smaller = capsule.descriptor.clone();
+    smaller.transfer_length = smaller.transfer_length.saturating_sub(1);
+    assert!(matches!(
+        recover_from(&capsule.symbols, &smaller, capsule.object_id),
+        Err(CapsuleError::DescriptorMismatch(_))
+    ));
+}
+
 /// Recovery proves it produced the object that was ASKED for, not merely some
 /// object. The expected id comes from the commit marker, so a capsule that is
 /// internally perfect but belongs to a different commit is still refused.

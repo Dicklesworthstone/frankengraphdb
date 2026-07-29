@@ -72,11 +72,6 @@ pub struct CapsuleDescriptor {
     pub source_block_count: u16,
     pub symbol_auth_profile: u16,
     pub encoding_id: [u8; 32],
-    /// Length of the sealed (ciphertext + tag) bytes. Fixes K and trims the
-    /// final symbol's padding, and comes from the authenticated descriptor
-    /// rather than from any individual symbol — a symbol never authorizes
-    /// itself.
-    pub protected_len: u64,
     pub repair_symbols: u32,
 }
 
@@ -92,6 +87,23 @@ impl CapsuleDescriptor {
             object_nonce: self.object_nonce,
             object_tag_len: self.object_tag_len,
         }
+    }
+
+    /// Length of the sealed (ciphertext + tag) bytes: it fixes K and trims the
+    /// final symbol's padding.
+    ///
+    /// This reads `transfer_length` rather than carrying its own copy, and the
+    /// difference is load-bearing. `transfer_length` is inside the
+    /// `EncodingId` transcript, so a tampered value fails
+    /// `EncodedObject::reconstruct` before any decode is sized. A separate
+    /// `protected_len` field was NOT in that transcript, which made it an
+    /// unauthenticated number read from an untrusted container and handed
+    /// straight to the decoder as `k = len.div_ceil(symbol_size)` — a container
+    /// claiming `u64::MAX` sized an astronomical allocation. Two fields holding
+    /// one value need a rule that keeps them equal; one field cannot disagree
+    /// with itself.
+    pub fn protected_len(&self) -> u64 {
+        self.transfer_length
     }
 
     pub fn encoding_descriptor(&self) -> EncodingDescriptor {
@@ -318,7 +330,6 @@ pub fn seal(
             source_block_count: encoding_descriptor.source_block_count,
             symbol_auth_profile: encoding_descriptor.symbol_auth_profile,
             encoding_id: encoded.encoding_id().0,
-            protected_len: protected_len as u64,
             repair_symbols: profile.repair_symbols,
         },
         symbols,
@@ -365,7 +376,6 @@ pub fn encode_container(sealed: &SealedCapsule) -> Vec<u8> {
     out.extend_from_slice(&d.source_block_count.to_be_bytes());
     out.extend_from_slice(&d.symbol_auth_profile.to_be_bytes());
     out.extend_from_slice(&d.encoding_id);
-    out.extend_from_slice(&d.protected_len.to_be_bytes());
     out.extend_from_slice(&d.repair_symbols.to_be_bytes());
     out.extend_from_slice(&(sealed.symbols.len() as u32).to_be_bytes());
     for symbol in &sealed.symbols {
@@ -409,7 +419,6 @@ pub fn decode_container(bytes: &[u8]) -> Result<(CapsuleDescriptor, Vec<Vec<u8>>
         source_block_count: r.u16()?,
         symbol_auth_profile: r.u16()?,
         encoding_id: r.array32()?,
-        protected_len: r.u64()?,
         repair_symbols: r.u32()?,
     };
     let declared = r.u32()? as usize;
@@ -486,7 +495,10 @@ pub fn recover(
             // so the header is not a separate recomputation input; passing it
             // again would hash it twice and nothing would ever recover.
             canonical_header: &[],
-            protected_len: descriptor.protected_len as usize,
+            // The AUTHENTICATED length: `protected_len()` reads
+            // `transfer_length`, which `reconstruct` above has already proved
+            // recomputes into the declared EncodingId.
+            protected_len: descriptor.protected_len() as usize,
         },
         dek,
     )
