@@ -7320,9 +7320,13 @@ fn idr_role_transition_activation_state_is_a_logical_backed_whole_schema_union()
             sealed.arm_tag == 0x0002
                 && sealed.stable_name == "sealed"
                 && sealed.payload_kind == "inline-record"
-                && sealed.payload_sha256.as_deref() == Some(sealed_payload_sha256)
                 && sealed.max_size_bytes == 16_777_216,
             "{name} must retain the role-specific Sealed payload"
+        );
+        assert_eq!(
+            sealed.payload_sha256.as_deref(),
+            Some(sealed_payload_sha256),
+            "{name} must retain the role-specific Sealed payload digest"
         );
     }
     let logical_parent = identity
