@@ -118,8 +118,28 @@ impl CapsuleDescriptor {
         }
     }
 
-    /// How many symbols may be lost or corrupt and still recover.
-    pub fn erasure_budget(&self) -> usize {
+    /// How many symbols may be lost or corrupt and still recover, **as the
+    /// container claims**.
+    ///
+    /// UNAUTHENTICATED — do not make a durability decision on this. Every other
+    /// field of this descriptor is covered by an integrity transcript: the
+    /// cipher fields ride the AEAD's AAD, and the encoding fields plus
+    /// `ciphertext_id` ride the `EncodingId` that
+    /// [`recover`](super::capsule::recover) recomputes. `repair_symbols` rides
+    /// neither, so a rewritten container can name any budget it likes.
+    ///
+    /// It is not removable the way the duplicated length was (fgdb-a6cv): the
+    /// original repair count is genuinely NOT derivable from a damaged
+    /// container, because the surviving symbol count cannot distinguish "eight
+    /// repair symbols, all lost" from "no repair symbols". A scrub needs the
+    /// declared figure to say how many symbols are *missing* at all. So the fix
+    /// is to authenticate it, which means putting it inside a transcript —
+    /// tracked as fgdb-km17.
+    ///
+    /// Until then this is advisory: safe for a test that sealed the capsule
+    /// itself and knows the profile, not safe for a recovery path deciding
+    /// Degraded versus Lost.
+    pub fn claimed_erasure_budget(&self) -> usize {
         self.repair_symbols as usize
     }
 }

@@ -99,7 +99,7 @@ fn different_plaintext_is_a_different_object() {
 #[test]
 fn losing_up_to_the_budget_still_recovers() {
     let capsule = sealed();
-    let budget = capsule.descriptor.erasure_budget();
+    let budget = capsule.descriptor.claimed_erasure_budget();
     assert!(budget > 0, "a zero budget would make this test vacuous");
 
     // Failures are collected so the sweep reports EVERY loss count that
@@ -127,7 +127,7 @@ fn losing_up_to_the_budget_still_recovers() {
 #[test]
 fn losing_one_more_than_the_budget_fails_closed() {
     let capsule = sealed();
-    let budget = capsule.descriptor.erasure_budget();
+    let budget = capsule.descriptor.claimed_erasure_budget();
     let surviving: Vec<Vec<u8>> = capsule.symbols[budget + 1..].to_vec();
     let result = recover_from(&surviving, &capsule.descriptor, capsule.object_id);
     assert!(
@@ -146,7 +146,7 @@ fn losing_one_more_than_the_budget_fails_closed() {
 #[test]
 fn corrupt_symbols_cost_the_same_as_lost_ones() {
     let capsule = sealed();
-    let budget = capsule.descriptor.erasure_budget();
+    let budget = capsule.descriptor.claimed_erasure_budget();
 
     let mut damaged = capsule.symbols.clone();
     for symbol in damaged.iter_mut().take(budget) {
@@ -305,7 +305,7 @@ fn an_unsupported_container_version_is_refused() {
 fn a_container_truncated_in_its_symbols_still_recovers_within_budget() {
     let capsule = sealed();
     let bytes = encode_container(&capsule);
-    let budget = capsule.descriptor.erasure_budget();
+    let budget = capsule.descriptor.claimed_erasure_budget();
 
     // Cut one symbol's worth of bytes off the end, well within the budget.
     let symbol_frame = 4 + capsule.symbols[0].len();
