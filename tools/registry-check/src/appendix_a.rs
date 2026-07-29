@@ -33,9 +33,9 @@ pub const HASH_ALGORITHM: &str = "sha256";
 pub const APPENDIX_START_LINE: i64 = 1388;
 pub const APPENDIX_END_LINE: i64 = 2728;
 pub const APPENDIX_LINE_COUNT: i64 = 1341;
-pub const APPENDIX_BYTE_COUNT: i64 = 1_025_644;
+pub const APPENDIX_BYTE_COUNT: i64 = 1_025_645;
 pub const APPENDIX_SHA256: &str =
-    "9fd40acad843c7395e98971ef48b53cd5a1c1a1950b060d1f9c5d4a64c096d92";
+    "74369512ac477bc7ec913b67c06612d516f495841f83737913859c1307ba5719";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
 pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 3665;
@@ -5420,8 +5420,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 2349,
         end_line: 2458,
         line_count: 110,
-        byte_count: 97_541,
-        sha256: "76908642d120d573816116f5535631492a4b13bbf61af9fe3e17e0522d2d6fc9",
+        byte_count: 97_542,
+        sha256: "13426a61fb328d31b0fac83459032d7b9d82a7aef34b05452640bf2c45a55fe3",
     },
     SlicePin {
         ordinal: 19,
