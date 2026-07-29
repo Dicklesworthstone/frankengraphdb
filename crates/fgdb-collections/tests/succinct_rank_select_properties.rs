@@ -26,7 +26,15 @@
 //! all-zero and all-one runs, single set bits at each word boundary, and a seeded
 //! SplitMix64 sweep. No clock, no entropy, no dependencies.
 
+#[cfg(miri)]
+use asupersync::Cx;
+#[cfg(miri)]
+use asupersync::cx::cap;
+#[cfg(not(miri))]
+use asupersync::lab::run_async_under_lab;
 use fgdb_collections::succinct::{SuccinctBitVector, SuccinctBitVectorBuilder};
+use fgdb_types::{PurposeContexts, QueryCx};
+use fgdb_unsafe_arena::RegionScope;
 
 /// Deterministic, dependency-free generator. Seeded, never clocked.
 struct Sweep(u64);
@@ -41,10 +49,36 @@ impl Sweep {
     }
 }
 
-fn build(bits: &[bool]) -> SuccinctBitVector {
-    let mut b = SuccinctBitVectorBuilder::new(bits.len().max(1));
-    b.extend(bits).expect("builder accepts the bit run");
-    b.finish().expect("builder finishes")
+#[cfg(not(miri))]
+fn query_cx() -> QueryCx {
+    let (query, report) = run_async_under_lab(0x5acc_7e57, |root| async move {
+        PurposeContexts::narrow_runtime_root(&root).query()
+    });
+    assert!(
+        report.invariant_violations.is_empty(),
+        "lab invariant violation: {report:?}"
+    );
+    query
+}
+
+#[cfg(miri)]
+fn query_cx() -> QueryCx {
+    let root = Cx::<cap::All>::for_testing();
+    PurposeContexts::narrow_runtime_root(&root).query()
+}
+
+fn test_scope() -> RegionScope {
+    RegionScope::with_capacity(1 << 20, 1 << 28)
+}
+
+fn build<'region>(
+    scope: &'region RegionScope,
+    cx: &QueryCx,
+    bits: &[bool],
+) -> SuccinctBitVector<'region> {
+    let mut b = SuccinctBitVectorBuilder::new_in(scope, bits.len().max(1)).expect("builder opens");
+    b.extend(cx, bits).expect("builder accepts the bit run");
+    b.finish(cx).expect("builder finishes")
 }
 
 /// Bit patterns a rank/select kernel is most likely to get wrong: every word
@@ -87,8 +121,10 @@ fn corpus() -> Vec<Vec<bool>> {
 /// counts inclusively, or a select off by one, breaks this immediately.
 #[test]
 fn rank_select_are_mutual_inverses() {
+    let cx = query_cx();
     for bits in corpus() {
-        let bv = build(&bits);
+        let scope = test_scope();
+        let bv = build(&scope, &cx, &bits);
         let ones = bits.iter().filter(|b| **b).count();
         for i in 0..ones {
             let p = bv
@@ -120,8 +156,10 @@ fn rank_select_are_mutual_inverses() {
 /// The other direction, at set positions only: select(rank(p)) == p.
 #[test]
 fn select_recovers_every_set_position() {
+    let cx = query_cx();
     for bits in corpus() {
-        let bv = build(&bits);
+        let scope = test_scope();
+        let bv = build(&scope, &cx, &bits);
         for (p, set) in bits.iter().enumerate() {
             if !*set {
                 continue;
@@ -141,8 +179,10 @@ fn select_recovers_every_set_position() {
 /// including the `end == len` boundary the fast path special-cases.
 #[test]
 fn rank_matches_the_linear_reference() {
+    let cx = query_cx();
     for bits in corpus() {
-        let bv = build(&bits);
+        let scope = test_scope();
+        let bv = build(&scope, &cx, &bits);
         let mut running = 0usize;
         for end in 0..=bits.len() {
             assert_eq!(
@@ -172,8 +212,10 @@ fn rank_matches_the_linear_reference() {
 /// select must land on a set bit and be strictly increasing in the ordinal.
 #[test]
 fn select_lands_on_a_set_bit() {
+    let cx = query_cx();
     for bits in corpus() {
-        let bv = build(&bits);
+        let scope = test_scope();
+        let bv = build(&scope, &cx, &bits);
         let ones = bits.iter().filter(|b| **b).count();
         let mut prev: Option<usize> = None;
         for i in 0..ones {
@@ -191,8 +233,10 @@ fn select_lands_on_a_set_bit() {
 /// broken block summary between the two fails here as well.
 #[test]
 fn select0_and_rank0_are_mutual_inverses() {
+    let cx = query_cx();
     for bits in corpus() {
-        let bv = build(&bits);
+        let scope = test_scope();
+        let bv = build(&scope, &cx, &bits);
         let zeros = bits.iter().filter(|b| !**b).count();
         for i in 0..zeros {
             let p = bv.select0(i).expect("ordinal below the zero-count");
@@ -207,8 +251,10 @@ fn select0_and_rank0_are_mutual_inverses() {
 /// construction paths agree. Separates the packing from a lossy one.
 #[test]
 fn builder_round_trip_preserves_every_bit() {
+    let cx = query_cx();
     for bits in corpus() {
-        let bv = build(&bits);
+        let scope = test_scope();
+        let bv = build(&scope, &cx, &bits);
         for (i, b) in bits.iter().enumerate() {
             assert_eq!(bv.get(i), Some(*b), "bit {i} changed through the builder");
         }
@@ -217,7 +263,7 @@ fn builder_round_trip_preserves_every_bit() {
             None,
             "reading past the length must be None"
         );
-        let via_bits = SuccinctBitVector::try_from_bits(&bits).expect("try_from_bits");
+        let via_bits = SuccinctBitVector::try_from_bits(&scope, &cx, &bits).expect("try_from_bits");
         for i in 0..bits.len() {
             assert_eq!(
                 via_bits.get(i),

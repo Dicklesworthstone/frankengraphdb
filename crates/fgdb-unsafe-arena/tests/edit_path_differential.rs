@@ -301,10 +301,9 @@ fn digests_are_licensed_by_a_one_bit_perturbation() {
     );
 }
 
-/// The seam is a trait, and a consumer generic over it must compile. This is
-/// the whole of what the island claims about `RegionAlloc` today: no ART,
-/// succinct, or hash storage is parameterized over it yet, and the ledger row
-/// says so rather than letting a trait's existence imply an integration.
+/// The raw byte seam is a trait, and a raw consumer generic over it must
+/// compile. Typed ART, succinct, and hash storage intentionally use
+/// `RegionVec` instead; this test makes no typed-consumer claim.
 #[test]
 fn the_seam_is_usable_through_the_trait_alone() {
     fn fill<A: RegionAlloc>(alloc: &mut A, len: usize, byte: u8) -> Handle {

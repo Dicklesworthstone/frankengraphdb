@@ -12,6 +12,9 @@ use core::hash::{Hash, Hasher};
 use core::mem;
 use core::slice;
 
+use fgdb_types::QueryCx;
+use fgdb_unsafe_arena::{RegionScope, RegionVec, RegionVecError};
+
 pub use crate::probe::CONTROL_GROUP_WIDTH;
 use crate::probe::{
     ControlGroup, ControlGroupDispatch, ControlTag, DELETED_CONTROL as DELETED,
@@ -119,8 +122,10 @@ const fn mix64(mut value: u64) -> u64 {
 pub enum HashTableError {
     /// The requested logical capacity cannot be represented.
     CapacityOverflow,
-    /// The allocator rejected a checked reservation.
+    /// Temporary rebuild planning storage could not be reserved.
     AllocationFailed,
+    /// Task-local region storage refused a resident table buffer.
+    Region(RegionVecError),
     /// Private control metadata and entry storage disagreed.
     InvariantViolation,
 }
@@ -132,7 +137,13 @@ impl fmt::Display for HashTableError {
                 formatter.write_str("deterministic hash-table capacity overflow")
             }
             Self::AllocationFailed => {
-                formatter.write_str("deterministic hash-table allocation failed")
+                formatter.write_str("deterministic hash-table rebuild planning allocation failed")
+            }
+            Self::Region(source) => {
+                write!(
+                    formatter,
+                    "deterministic hash-table region storage refused: {source}"
+                )
             }
             Self::InvariantViolation => {
                 formatter.write_str("deterministic hash-table internal invariant violation")
@@ -141,7 +152,14 @@ impl fmt::Display for HashTableError {
     }
 }
 
-impl std::error::Error for HashTableError {}
+impl std::error::Error for HashTableError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Region(source) => Some(source),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 struct Entry<K, V> {
@@ -155,21 +173,21 @@ struct Entry<K, V> {
 /// For an identical seed and operation sequence, physical iteration order is
 /// identical.  The table never relies on process entropy or randomized global
 /// state.
-#[derive(Clone, Debug)]
-pub struct DeterministicHashTable<K, V> {
+#[derive(Debug)]
+pub struct DeterministicHashTable<'region, K, V> {
+    scope: &'region RegionScope,
     seed: u64,
     control_group_dispatch: ControlGroupDispatch,
-    controls: Vec<u8>,
-    entries: Vec<Option<Entry<K, V>>>,
+    controls: RegionVec<'region, u8>,
+    entries: RegionVec<'region, Option<Entry<K, V>>>,
     len: usize,
     deleted: usize,
 }
 
-impl<K, V> DeterministicHashTable<K, V> {
+impl<'region, K, V> DeterministicHashTable<'region, K, V> {
     /// Creates an empty, allocation-free table with an explicit seed.
-    #[must_use]
-    pub const fn new(seed: u64) -> Self {
-        Self::with_control_group_dispatch(seed, SCALAR_CONTROL_GROUP_DISPATCH)
+    pub fn new_in(scope: &'region RegionScope, seed: u64) -> Result<Self, HashTableError> {
+        Self::with_control_group_dispatch_in(scope, seed, SCALAR_CONTROL_GROUP_DISPATCH)
     }
 
     /// Creates an empty table with an explicit answer-equivalent probe
@@ -179,47 +197,60 @@ impl<K, V> DeterministicHashTable<K, V> {
     /// contract exactly. Keeping selection explicit makes kernel choice
     /// replayable and lets callers prove physical-order equivalence before a
     /// target-specific backend becomes the default.
-    #[must_use]
-    pub const fn with_control_group_dispatch(
+    pub fn with_control_group_dispatch_in(
+        scope: &'region RegionScope,
         seed: u64,
         control_group_dispatch: ControlGroupDispatch,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, HashTableError> {
+        Ok(Self {
+            scope,
             seed,
             control_group_dispatch,
-            controls: Vec::new(),
-            entries: Vec::new(),
+            controls: RegionVec::new_in(scope).map_err(HashTableError::Region)?,
+            entries: RegionVec::new_in(scope).map_err(HashTableError::Region)?,
             len: 0,
             deleted: 0,
-        }
+        })
     }
 
     /// Creates a table that can hold at least `min_entries` without growth.
-    pub fn try_with_capacity(seed: u64, min_entries: usize) -> Result<Self, HashTableError> {
-        Self::try_with_capacity_and_dispatch(seed, min_entries, SCALAR_CONTROL_GROUP_DISPATCH)
+    pub fn try_with_capacity_in(
+        scope: &'region RegionScope,
+        cx: &QueryCx,
+        seed: u64,
+        min_entries: usize,
+    ) -> Result<Self, HashTableError> {
+        Self::try_with_capacity_and_dispatch_in(
+            scope,
+            cx,
+            seed,
+            min_entries,
+            SCALAR_CONTROL_GROUP_DISPATCH,
+        )
     }
 
     /// Creates a preallocated table with an explicit answer-equivalent probe
     /// classifier.
-    pub fn try_with_capacity_and_dispatch(
+    pub fn try_with_capacity_and_dispatch_in(
+        scope: &'region RegionScope,
+        cx: &QueryCx,
         seed: u64,
         min_entries: usize,
         control_group_dispatch: ControlGroupDispatch,
     ) -> Result<Self, HashTableError> {
         let buckets = required_bucket_count(min_entries)?;
-        Self::allocate(seed, buckets, control_group_dispatch)
+        Self::allocate(scope, cx, seed, buckets, control_group_dispatch)
     }
 
     fn allocate(
+        scope: &'region RegionScope,
+        cx: &QueryCx,
         seed: u64,
         buckets: usize,
         control_group_dispatch: ControlGroupDispatch,
     ) -> Result<Self, HashTableError> {
         if buckets == 0 {
-            return Ok(Self::with_control_group_dispatch(
-                seed,
-                control_group_dispatch,
-            ));
+            return Self::with_control_group_dispatch_in(scope, seed, control_group_dispatch);
         }
         if buckets < MIN_BUCKETS
             || !buckets.is_power_of_two()
@@ -228,19 +259,20 @@ impl<K, V> DeterministicHashTable<K, V> {
             return Err(HashTableError::CapacityOverflow);
         }
 
-        let mut controls = Vec::new();
+        let mut controls =
+            RegionVec::with_capacity_in(scope, cx, buckets).map_err(HashTableError::Region)?;
         controls
-            .try_reserve_exact(buckets)
-            .map_err(|_| HashTableError::AllocationFailed)?;
-        controls.resize(buckets, EMPTY);
+            .try_resize(cx, buckets, EMPTY)
+            .map_err(HashTableError::Region)?;
 
-        let mut entries = Vec::new();
+        let mut entries =
+            RegionVec::with_capacity_in(scope, cx, buckets).map_err(HashTableError::Region)?;
         entries
-            .try_reserve_exact(buckets)
-            .map_err(|_| HashTableError::AllocationFailed)?;
-        entries.resize_with(buckets, || None);
+            .try_resize_with(cx, buckets, || None)
+            .map_err(HashTableError::Region)?;
 
         Ok(Self {
+            scope,
             seed,
             control_group_dispatch,
             controls,
@@ -281,32 +313,34 @@ impl<K, V> DeterministicHashTable<K, V> {
     }
 
     /// Reserves room for at least `additional` more live entries.
-    pub fn try_reserve(&mut self, additional: usize) -> Result<(), HashTableError> {
+    pub fn try_reserve(&mut self, cx: &QueryCx, additional: usize) -> Result<(), HashTableError> {
         let required_entries = self
             .len
             .checked_add(additional)
             .ok_or(HashTableError::CapacityOverflow)?;
         let required_buckets = required_bucket_count(required_entries)?;
         if required_buckets > self.bucket_count() {
-            self.rebuild(required_buckets)?;
+            consumer_checkpoint(cx)?;
+            self.rebuild(cx, required_buckets)?;
         }
         Ok(())
     }
 
     /// Rebuilds into the smallest table that can hold both the current entries
     /// and `min_entries`, removing all tombstones.
-    pub fn try_rehash(&mut self, min_entries: usize) -> Result<(), HashTableError> {
+    pub fn try_rehash(&mut self, cx: &QueryCx, min_entries: usize) -> Result<(), HashTableError> {
         let required_entries = self.len.max(min_entries);
         let required_buckets = required_bucket_count(required_entries)?;
-        self.rebuild(required_buckets)
+        consumer_checkpoint(cx)?;
+        self.rebuild(cx, required_buckets)
     }
 
     /// Removes every entry while retaining the allocation and seed.
     pub fn clear(&mut self) {
-        for slot in &mut self.entries {
+        for slot in self.entries.iter_mut() {
             *slot = None;
         }
-        self.controls.fill(EMPTY);
+        self.controls.as_mut_slice().fill(EMPTY);
         self.len = 0;
         self.deleted = 0;
     }
@@ -326,7 +360,7 @@ impl<K, V> DeterministicHashTable<K, V> {
         hasher.finish()
     }
 
-    fn rebuild(&mut self, buckets: usize) -> Result<(), HashTableError> {
+    fn rebuild(&mut self, cx: &QueryCx, buckets: usize) -> Result<(), HashTableError> {
         if !self.storage_is_consistent() {
             return Err(HashTableError::InvariantViolation);
         }
@@ -337,29 +371,52 @@ impl<K, V> DeterministicHashTable<K, V> {
             return Err(HashTableError::CapacityOverflow);
         }
 
-        let mut replacement = Self::allocate(self.seed, buckets, self.control_group_dispatch)?;
+        let mut replacement = Self::allocate(
+            self.scope,
+            cx,
+            self.seed,
+            buckets,
+            self.control_group_dispatch,
+        )?;
         let mut planned_indexes = Vec::new();
         planned_indexes
             .try_reserve_exact(self.len)
             .map_err(|_| HashTableError::AllocationFailed)?;
         for entry in self.entries.iter().flatten() {
             let index = first_empty_bucket(
-                &replacement.controls,
+                replacement.controls.as_slice(),
                 entry.hash,
                 replacement.control_group_dispatch,
             )
             .ok_or(HashTableError::InvariantViolation)?;
-            replacement.controls[index] = ControlTag::from_hash(entry.hash).get();
+            *replacement
+                .controls
+                .get_mut(index)
+                .ok_or(HashTableError::InvariantViolation)? =
+                ControlTag::from_hash(entry.hash).get();
             planned_indexes.push(index);
         }
         if planned_indexes.len() != self.len {
             return Err(HashTableError::InvariantViolation);
         }
 
-        let old = mem::replace(self, replacement);
-        for (entry, index) in old.entries.into_iter().flatten().zip(planned_indexes) {
-            self.entries[index] = Some(entry);
+        let mut old = mem::replace(self, replacement);
+        let mut planned_indexes = planned_indexes.into_iter();
+        for slot in old.entries.iter_mut() {
+            let Some(entry) = slot.take() else {
+                continue;
+            };
+            let index = planned_indexes
+                .next()
+                .ok_or(HashTableError::InvariantViolation)?;
+            *self
+                .entries
+                .get_mut(index)
+                .ok_or(HashTableError::InvariantViolation)? = Some(entry);
             self.len += 1;
+        }
+        if planned_indexes.next().is_some() {
+            return Err(HashTableError::InvariantViolation);
         }
         Ok(())
     }
@@ -370,7 +427,7 @@ impl<K, V> DeterministicHashTable<K, V> {
         }
         let mut live = 0_usize;
         let mut deleted = 0_usize;
-        for (&control, slot) in self.controls.iter().zip(&self.entries) {
+        for (&control, slot) in self.controls.iter().zip(self.entries.iter()) {
             match (control, slot) {
                 (EMPTY, None) => {}
                 (DELETED, None) => deleted += 1,
@@ -386,21 +443,22 @@ impl<K, V> DeterministicHashTable<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> DeterministicHashTable<K, V> {
+impl<'region, K: Hash + Eq, V> DeterministicHashTable<'region, K, V> {
     /// Inserts `key` and `value`, returning the replaced value when present.
     ///
     /// Growth and tombstone-cleanup allocation are checked and reported rather
-    /// than delegated to an infallible `Vec` growth operation.
-    pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>, HashTableError> {
+    /// than delegated to an infallible global-heap growth operation.
+    pub fn insert(&mut self, cx: &QueryCx, key: K, value: V) -> Result<Option<V>, HashTableError> {
+        consumer_checkpoint(cx)?;
         if self.bucket_count() == 0 {
-            self.rebuild(MIN_BUCKETS)?;
+            self.rebuild(cx, MIN_BUCKETS)?;
         }
 
         let hash = self.hash(&key);
         let mut location = self.locate_for_insert(&key, hash)?;
         match location {
             InsertLocation::Existing(index) => {
-                let Some(entry) = self.entries[index].as_mut() else {
+                let Some(entry) = self.entries.get_mut(index).and_then(Option::as_mut) else {
                     return Err(HashTableError::InvariantViolation);
                 };
                 return Ok(Some(mem::replace(&mut entry.value, value)));
@@ -409,7 +467,11 @@ impl<K: Hash + Eq, V> DeterministicHashTable<K, V> {
         }
 
         let additional_control = match location {
-            InsertLocation::Vacant(index) => usize::from(self.controls[index] == EMPTY),
+            InsertLocation::Vacant(index) => usize::from(
+                self.controls
+                    .get(index)
+                    .is_some_and(|control| *control == EMPTY),
+            ),
             InsertLocation::Saturated => 1,
             InsertLocation::Existing(_) => 0,
         };
@@ -433,13 +495,13 @@ impl<K: Hash + Eq, V> DeterministicHashTable<K, V> {
             } else {
                 self.bucket_count()
             };
-            self.rebuild(target)?;
+            self.rebuild(cx, target)?;
             location = self.locate_for_insert(&key, hash)?;
         }
 
         let index = match location {
             InsertLocation::Existing(index) => {
-                let Some(entry) = self.entries[index].as_mut() else {
+                let Some(entry) = self.entries.get_mut(index).and_then(Option::as_mut) else {
                     return Err(HashTableError::InvariantViolation);
                 };
                 return Ok(Some(mem::replace(&mut entry.value, value)));
@@ -450,11 +512,12 @@ impl<K: Hash + Eq, V> DeterministicHashTable<K, V> {
                     .bucket_count()
                     .checked_mul(2)
                     .ok_or(HashTableError::CapacityOverflow)?;
-                self.rebuild(target)?;
+                self.rebuild(cx, target)?;
                 match self.locate_for_insert(&key, hash)? {
                     InsertLocation::Vacant(index) => index,
                     InsertLocation::Existing(index) => {
-                        let Some(entry) = self.entries[index].as_mut() else {
+                        let Some(entry) = self.entries.get_mut(index).and_then(Option::as_mut)
+                        else {
                             return Err(HashTableError::InvariantViolation);
                         };
                         return Ok(Some(mem::replace(&mut entry.value, value)));
@@ -464,11 +527,21 @@ impl<K: Hash + Eq, V> DeterministicHashTable<K, V> {
             }
         };
 
-        if self.controls[index] == DELETED {
+        if self
+            .controls
+            .get(index)
+            .is_some_and(|control| *control == DELETED)
+        {
             self.deleted -= 1;
         }
-        self.controls[index] = ControlTag::from_hash(hash).get();
-        self.entries[index] = Some(Entry { hash, key, value });
+        *self
+            .controls
+            .get_mut(index)
+            .ok_or(HashTableError::InvariantViolation)? = ControlTag::from_hash(hash).get();
+        *self
+            .entries
+            .get_mut(index)
+            .ok_or(HashTableError::InvariantViolation)? = Some(Entry { hash, key, value });
         self.len += 1;
         Ok(None)
     }
@@ -478,33 +551,33 @@ impl<K: Hash + Eq, V> DeterministicHashTable<K, V> {
         let mut first_deleted = None;
         let mut probe = GroupProbe::new(hash, self.bucket_count());
         while let Some(group_start) = probe.next_group() {
-            let group = ControlGroup::gather_wrapping(&self.controls, group_start)
+            let group = ControlGroup::gather_wrapping(self.controls.as_slice(), group_start)
                 .ok_or(HashTableError::InvariantViolation)?;
             let masks = self.control_group_dispatch.classify(&group, tag);
             let lanes_before_empty = masks.empty.first().unwrap_or(CONTROL_GROUP_WIDTH);
             for lane in 0..lanes_before_empty {
                 let index = (group_start + lane) & (self.bucket_count() - 1);
                 if masks.deleted.contains(lane) {
-                    if self.entries[index].is_some() {
+                    if self.entries.get(index).is_some_and(Option::is_some) {
                         return Err(HashTableError::InvariantViolation);
                     }
                     if first_deleted.is_none() {
                         first_deleted = Some(index);
                     }
                 } else if masks.matching.contains(lane) {
-                    let Some(entry) = self.entries[index].as_ref() else {
+                    let Some(entry) = self.entries.get(index).and_then(Option::as_ref) else {
                         return Err(HashTableError::InvariantViolation);
                     };
                     if entry.hash == hash && entry.key == *key {
                         return Ok(InsertLocation::Existing(index));
                     }
-                } else if self.entries[index].is_none() {
+                } else if self.entries.get(index).is_none_or(Option::is_none) {
                     return Err(HashTableError::InvariantViolation);
                 }
             }
             if let Some(empty_lane) = masks.empty.first() {
                 let index = (group_start + empty_lane) & (self.bucket_count() - 1);
-                if self.entries[index].is_some() {
+                if self.entries.get(index).is_some_and(Option::is_some) {
                     return Err(HashTableError::InvariantViolation);
                 }
                 return Ok(InsertLocation::Vacant(first_deleted.unwrap_or(index)));
@@ -514,7 +587,7 @@ impl<K: Hash + Eq, V> DeterministicHashTable<K, V> {
     }
 }
 
-impl<K, V> DeterministicHashTable<K, V> {
+impl<'region, K, V> DeterministicHashTable<'region, K, V> {
     /// Returns a shared value reference for a borrowed form of the key.
     #[must_use]
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
@@ -523,7 +596,9 @@ impl<K, V> DeterministicHashTable<K, V> {
         Q: Hash + Eq + ?Sized,
     {
         self.find_index(key)
-            .and_then(|index| self.entries[index].as_ref().map(|entry| &entry.value))
+            .and_then(|index| self.entries.get(index))
+            .and_then(Option::as_ref)
+            .map(|entry| &entry.value)
     }
 
     /// Returns a mutable value reference for a borrowed form of the key.
@@ -534,7 +609,10 @@ impl<K, V> DeterministicHashTable<K, V> {
         Q: Hash + Eq + ?Sized,
     {
         let index = self.find_index(key)?;
-        self.entries[index].as_mut().map(|entry| &mut entry.value)
+        self.entries
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .map(|entry| &mut entry.value)
     }
 
     /// Whether the table contains a borrowed form of the key.
@@ -554,12 +632,12 @@ impl<K, V> DeterministicHashTable<K, V> {
         Q: Hash + Eq + ?Sized,
     {
         let index = self.find_index(key)?;
-        let entry = self.entries[index].take()?;
-        self.controls[index] = DELETED;
+        let entry = self.entries.get_mut(index)?.take()?;
+        *self.controls.get_mut(index)? = DELETED;
         self.len -= 1;
         self.deleted += 1;
         if self.len == 0 {
-            self.controls.fill(EMPTY);
+            self.controls.as_mut_slice().fill(EMPTY);
             self.deleted = 0;
         }
         Some(entry.value)
@@ -577,22 +655,22 @@ impl<K, V> DeterministicHashTable<K, V> {
         let tag = ControlTag::from_hash(hash);
         let mut probe = GroupProbe::new(hash, self.bucket_count());
         while let Some(group_start) = probe.next_group() {
-            let group = ControlGroup::gather_wrapping(&self.controls, group_start)?;
+            let group = ControlGroup::gather_wrapping(self.controls.as_slice(), group_start)?;
             let masks = self.control_group_dispatch.classify(&group, tag);
             let lanes_before_empty = masks.empty.first().unwrap_or(CONTROL_GROUP_WIDTH);
             for lane in 0..lanes_before_empty {
                 let index = (group_start + lane) & (self.bucket_count() - 1);
                 if masks.deleted.contains(lane) {
-                    if self.entries[index].is_some() {
+                    if self.entries.get(index).is_some_and(Option::is_some) {
                         return None;
                     }
                 } else if masks.matching.contains(lane) {
-                    let entry = self.entries[index].as_ref()?;
+                    let entry = self.entries.get(index)?.as_ref()?;
                     if entry.hash == hash && entry.key.borrow() == key {
                         return Some(index);
                     }
                 } else {
-                    self.entries[index].as_ref()?;
+                    self.entries.get(index)?.as_ref()?;
                 }
             }
             if masks.empty.first().is_some() {
@@ -675,6 +753,11 @@ fn required_bucket_count(entries: usize) -> Result<usize, HashTableError> {
     Ok(buckets)
 }
 
+fn consumer_checkpoint(cx: &QueryCx) -> Result<(), HashTableError> {
+    cx.checkpoint()
+        .map_err(|_| HashTableError::Region(RegionVecError::CheckpointRefused))
+}
+
 /// Iterator over live entries in physical-bucket order.
 #[derive(Clone, Debug)]
 pub struct Iter<'a, K, V> {
@@ -704,7 +787,7 @@ impl<K, V> ExactSizeIterator for Iter<'_, K, V> {
     }
 }
 
-impl<'a, K, V> IntoIterator for &'a DeterministicHashTable<K, V> {
+impl<'a, 'region, K, V> IntoIterator for &'a DeterministicHashTable<'region, K, V> {
     type Item = (&'a K, &'a V);
     type IntoIter = Iter<'a, K, V>;
 
@@ -722,8 +805,38 @@ mod tests {
     use crate::probe::{
         ControlGroupDispatch, SCALAR_CONTROL_GROUP_DISPATCH, SWAR_CONTROL_GROUP_DISPATCH,
     };
+    #[cfg(miri)]
+    use asupersync::Cx;
+    #[cfg(miri)]
+    use asupersync::cx::cap;
+    #[cfg(not(miri))]
+    use asupersync::lab::run_async_under_lab;
     use core::hash::{Hash, Hasher};
+    use fgdb_types::{PurposeContexts, QueryCx};
+    use fgdb_unsafe_arena::RegionScope;
     use std::collections::{BTreeMap, HashMap};
+
+    #[cfg(not(miri))]
+    fn query_cx() -> QueryCx {
+        let (query, report) = run_async_under_lab(0x4a55_7ab1, |root| async move {
+            PurposeContexts::narrow_runtime_root(&root).query()
+        });
+        assert!(
+            report.invariant_violations.is_empty(),
+            "lab invariant violation: {report:?}"
+        );
+        query
+    }
+
+    #[cfg(miri)]
+    fn query_cx() -> QueryCx {
+        let root = Cx::<cap::All>::for_testing();
+        PurposeContexts::narrow_runtime_root(&root).query()
+    }
+
+    fn test_scope() -> RegionScope {
+        RegionScope::with_capacity(1 << 20, 1 << 28)
+    }
 
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     struct CollisionKey(u32);
@@ -734,14 +847,17 @@ mod tests {
         }
     }
 
-    fn physical_index<K: Eq, V>(table: &DeterministicHashTable<K, V>, key: &K) -> Option<usize> {
+    fn physical_index<K: Eq, V>(
+        table: &DeterministicHashTable<'_, K, V>,
+        key: &K,
+    ) -> Option<usize> {
         table
             .entries
             .iter()
             .position(|slot| slot.as_ref().is_some_and(|entry| entry.key == *key))
     }
 
-    fn sorted_table(table: &DeterministicHashTable<u64, i64>) -> Vec<(u64, i64)> {
+    fn sorted_table(table: &DeterministicHashTable<'_, u64, i64>) -> Vec<(u64, i64)> {
         let mut rows: Vec<_> = table.iter().map(|(&key, &value)| (key, value)).collect();
         rows.sort_unstable();
         rows
@@ -793,10 +909,12 @@ mod tests {
 
     #[test]
     fn insert_replace_lookup_mutate_and_remove() {
-        let mut table = DeterministicHashTable::new(17);
-        assert_eq!(table.insert("alpha".to_owned(), 10), Ok(None));
-        assert_eq!(table.insert("beta".to_owned(), 20), Ok(None));
-        assert_eq!(table.insert("alpha".to_owned(), 11), Ok(Some(10)));
+        let scope = test_scope();
+        let cx = query_cx();
+        let mut table = DeterministicHashTable::new_in(&scope, 17).expect("table opens");
+        assert_eq!(table.insert(&cx, "alpha".to_owned(), 10), Ok(None));
+        assert_eq!(table.insert(&cx, "beta".to_owned(), 20), Ok(None));
+        assert_eq!(table.insert(&cx, "alpha".to_owned(), 11), Ok(Some(10)));
         assert_eq!(table.len(), 2);
         assert_eq!(table.get("alpha"), Some(&11));
         assert_eq!(table.get("missing"), None);
@@ -818,9 +936,11 @@ mod tests {
 
     #[test]
     fn collision_chain_survives_tombstones_and_reuses_the_first_one() {
-        let mut table = DeterministicHashTable::new(7);
+        let scope = test_scope();
+        let cx = query_cx();
+        let mut table = DeterministicHashTable::new_in(&scope, 7).expect("table opens");
         for key in 0..14 {
-            assert_eq!(table.insert(CollisionKey(key), key * 10), Ok(None));
+            assert_eq!(table.insert(&cx, CollisionKey(key), key * 10), Ok(None));
         }
         assert_eq!(table.bucket_count(), 16);
 
@@ -839,11 +959,11 @@ mod tests {
         }
         assert_eq!(table.get(&CollisionKey(1)), None);
 
-        assert_eq!(table.insert(CollisionKey(100), 1000), Ok(None));
+        assert_eq!(table.insert(&cx, CollisionKey(100), 1000), Ok(None));
         assert_eq!(table.bucket_count(), 16);
         assert_eq!(physical_index(&table, &CollisionKey(100)), first_hole);
         assert_eq!(table.deleted, 1);
-        assert_eq!(table.insert(CollisionKey(101), 1010), Ok(None));
+        assert_eq!(table.insert(&cx, CollisionKey(101), 1010), Ok(None));
         assert_eq!(table.bucket_count(), 16);
         assert_eq!(physical_index(&table, &CollisionKey(101)), second_hole);
         assert_eq!(table.deleted, 0);
@@ -851,7 +971,9 @@ mod tests {
 
     #[test]
     fn probing_wraps_across_the_last_bucket() {
-        let mut table = DeterministicHashTable::new(91);
+        let scope = test_scope();
+        let cx = query_cx();
+        let mut table = DeterministicHashTable::new_in(&scope, 91).expect("table opens");
 
         let mut keys = Vec::new();
         let mut candidate = 0_u64;
@@ -863,7 +985,7 @@ mod tests {
         }
 
         for (ordinal, &key) in keys.iter().enumerate() {
-            assert_eq!(table.insert(key, ordinal), Ok(None));
+            assert_eq!(table.insert(&cx, key, ordinal), Ok(None));
         }
         assert_eq!(table.bucket_count(), 16);
         let positions: Vec<_> = keys.iter().map(|key| physical_index(&table, key)).collect();
@@ -887,39 +1009,43 @@ mod tests {
 
     #[test]
     fn growth_is_checked_and_replacement_does_not_grow() {
-        let mut table = DeterministicHashTable::new(23);
+        let scope = test_scope();
+        let cx = query_cx();
+        let mut table = DeterministicHashTable::new_in(&scope, 23).expect("table opens");
         for key in 0_u64..14 {
-            assert_eq!(table.insert(key, key), Ok(None));
+            assert_eq!(table.insert(&cx, key, key), Ok(None));
         }
         assert_eq!(table.bucket_count(), 16);
         assert_eq!(table.capacity(), 14);
 
-        assert_eq!(table.insert(3, 300), Ok(Some(3)));
+        assert_eq!(table.insert(&cx, 3, 300), Ok(Some(3)));
         assert_eq!(table.bucket_count(), 16);
-        assert_eq!(table.insert(14, 14), Ok(None));
+        assert_eq!(table.insert(&cx, 14, 14), Ok(None));
         assert_eq!(table.bucket_count(), 32);
 
-        assert_eq!(table.try_reserve(1_000), Ok(()));
+        assert_eq!(table.try_reserve(&cx, 1_000), Ok(()));
         assert!(table.capacity() >= table.len() + 1_000);
         for key in 0_u64..15 {
             assert_eq!(table.get(&key), Some(&(if key == 3 { 300 } else { key })));
         }
 
         assert_eq!(
-            table.try_reserve(usize::MAX),
+            table.try_reserve(&cx, usize::MAX),
             Err(HashTableError::CapacityOverflow)
         );
         assert!(matches!(
-            DeterministicHashTable::<u8, u8>::try_with_capacity(0, usize::MAX),
+            DeterministicHashTable::<u8, u8>::try_with_capacity_in(&scope, &cx, 0, usize::MAX),
             Err(HashTableError::CapacityOverflow)
         ));
     }
 
     #[test]
     fn rehash_clears_tombstones_without_semantic_drift() {
-        let mut table = DeterministicHashTable::<u64, i64>::new(5);
+        let scope = test_scope();
+        let cx = query_cx();
+        let mut table = DeterministicHashTable::<u64, i64>::new_in(&scope, 5).expect("table opens");
         for key in 0_u64..100 {
-            assert_eq!(table.insert(key, key as i64 * 3), Ok(None));
+            assert_eq!(table.insert(&cx, key, key as i64 * 3), Ok(None));
         }
         for key in (0_u64..100).step_by(2) {
             assert_eq!(table.remove(&key), Some(key as i64 * 3));
@@ -927,16 +1053,18 @@ mod tests {
         assert!(table.deleted > 0);
 
         let before = sorted_table(&table);
-        assert_eq!(table.try_rehash(table.len()), Ok(()));
+        assert_eq!(table.try_rehash(&cx, table.len()), Ok(()));
         assert_eq!(table.deleted, 0);
         assert_eq!(sorted_table(&table), before);
     }
 
     #[test]
     fn full_hash_collisions_survive_growth_and_deletion_churn() {
-        let mut table = DeterministicHashTable::new(0x77);
+        let scope = test_scope();
+        let cx = query_cx();
+        let mut table = DeterministicHashTable::new_in(&scope, 0x77).expect("table opens");
         for key in 0..300 {
-            assert_eq!(table.insert(CollisionKey(key), key), Ok(None));
+            assert_eq!(table.insert(&cx, CollisionKey(key), key), Ok(None));
         }
         assert!(table.bucket_count() > MIN_BUCKETS);
 
@@ -944,7 +1072,7 @@ mod tests {
             assert_eq!(table.remove(&CollisionKey(key)), Some(key));
         }
         for key in 300..450 {
-            assert_eq!(table.insert(CollisionKey(key), key), Ok(None));
+            assert_eq!(table.insert(&cx, CollisionKey(key), key), Ok(None));
         }
 
         for key in 0..450 {
@@ -959,7 +1087,10 @@ mod tests {
 
     #[test]
     fn differential_operation_stream_matches_standard_maps() {
-        let mut table = DeterministicHashTable::new(0xd1ff_e2e3_1234_5678);
+        let scope = test_scope();
+        let cx = query_cx();
+        let mut table =
+            DeterministicHashTable::new_in(&scope, 0xd1ff_e2e3_1234_5678).expect("table opens");
         let mut hash_map = HashMap::new();
         let mut tree_map = BTreeMap::new();
         let mut state = 0x243f_6a88_85a3_08d3_u64;
@@ -974,7 +1105,7 @@ mod tests {
                 0..=3 => {
                     let expected = tree_map.insert(key, value);
                     assert_eq!(hash_map.insert(key, value), expected);
-                    assert_eq!(table.insert(key, value), Ok(expected));
+                    assert_eq!(table.insert(&cx, key, value), Ok(expected));
                 }
                 4 => {
                     let expected = tree_map.remove(&key);
@@ -1019,16 +1150,23 @@ mod tests {
 
     #[test]
     fn identical_seed_and_operations_have_identical_physical_iteration_across_dispatches() {
-        fn exercise(seed: u64, dispatch: ControlGroupDispatch) -> DeterministicHashTable<u64, u64> {
-            let mut table = DeterministicHashTable::with_control_group_dispatch(seed, dispatch);
+        fn exercise<'region>(
+            scope: &'region RegionScope,
+            cx: &QueryCx,
+            seed: u64,
+            dispatch: ControlGroupDispatch,
+        ) -> DeterministicHashTable<'region, u64, u64> {
+            let mut table =
+                DeterministicHashTable::with_control_group_dispatch_in(scope, seed, dispatch)
+                    .expect("table opens");
             for key in 0_u64..300 {
-                assert_eq!(table.insert(key, key.rotate_left(7)), Ok(None));
+                assert_eq!(table.insert(cx, key, key.rotate_left(7)), Ok(None));
             }
             for key in (0_u64..300).step_by(3) {
                 assert_eq!(table.remove(&key), Some(key.rotate_left(7)));
             }
             for key in 500_u64..650 {
-                assert_eq!(table.insert(key, key.rotate_right(5)), Ok(None));
+                assert_eq!(table.insert(cx, key, key.rotate_right(5)), Ok(None));
             }
             for key in (1_u64..250).step_by(11) {
                 if let Some(value) = table.get_mut(&key) {
@@ -1038,9 +1176,29 @@ mod tests {
             table
         }
 
-        let first = exercise(0x0123_4567_89ab_cdef, SCALAR_CONTROL_GROUP_DISPATCH);
-        let second = exercise(0x0123_4567_89ab_cdef, SCALAR_CONTROL_GROUP_DISPATCH);
-        let swar = exercise(0x0123_4567_89ab_cdef, SWAR_CONTROL_GROUP_DISPATCH);
+        let cx = query_cx();
+        let first_scope = test_scope();
+        let second_scope = test_scope();
+        let swar_scope = test_scope();
+        let different_scope = test_scope();
+        let first = exercise(
+            &first_scope,
+            &cx,
+            0x0123_4567_89ab_cdef,
+            SCALAR_CONTROL_GROUP_DISPATCH,
+        );
+        let second = exercise(
+            &second_scope,
+            &cx,
+            0x0123_4567_89ab_cdef,
+            SCALAR_CONTROL_GROUP_DISPATCH,
+        );
+        let swar = exercise(
+            &swar_scope,
+            &cx,
+            0x0123_4567_89ab_cdef,
+            SWAR_CONTROL_GROUP_DISPATCH,
+        );
         assert_eq!(first.bucket_count(), second.bucket_count());
         assert_eq!(
             first
@@ -1065,7 +1223,12 @@ mod tests {
         );
         assert_eq!(first.controls, swar.controls);
 
-        let different_seed = exercise(0xfedc_ba98_7654_3210, SWAR_CONTROL_GROUP_DISPATCH);
+        let different_seed = exercise(
+            &different_scope,
+            &cx,
+            0xfedc_ba98_7654_3210,
+            SWAR_CONTROL_GROUP_DISPATCH,
+        );
         assert_ne!(
             first.iter().map(|(&key, _)| key).collect::<Vec<_>>(),
             different_seed
@@ -1077,9 +1240,11 @@ mod tests {
 
     #[test]
     fn iterator_reports_exact_remaining_length() {
-        let mut table = DeterministicHashTable::new(1);
+        let scope = test_scope();
+        let cx = query_cx();
+        let mut table = DeterministicHashTable::new_in(&scope, 1).expect("table opens");
         for key in 0..20 {
-            assert_eq!(table.insert(key, key + 1), Ok(None));
+            assert_eq!(table.insert(&cx, key, key + 1), Ok(None));
         }
         let mut iter = table.iter();
         for remaining in (1..=20).rev() {

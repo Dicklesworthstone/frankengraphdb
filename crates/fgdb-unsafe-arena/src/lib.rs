@@ -51,24 +51,20 @@
 //!
 //! # The seam
 //!
-//! [`RegionAlloc`] is the trait ART, succinct, and hash storage are meant to be
-//! parameterized over, so that "which allocator" becomes a type parameter
-//! rather than a rewrite. It is deliberately byte-oriented: blocks are
-//! `[u8]`, because the durable node encodings (Appendix A) are byte images
-//! already, and a `T`-placement arena would need drop glue, `MaybeUninit`, and
-//! several more unsafe sites to buy something no consumer has asked for.
-//!
-//! **No consumer is wired to it yet.** That is remainder item 9 on
-//! `fgdb-w1-unsafe-islands-eqrq` (consumer integration), and the ledger row for
-//! this island says so in its `no_claim_boundary` rather than letting the
-//! existence of a trait imply an integration.
+//! [`RegionAlloc`] remains the byte-oriented trait for raw arena consumers and
+//! differential verification. Blocks are `[u8]` because durable node encodings
+//! (Appendix A) are byte images already. It is not the typed collection seam:
+//! exposing it to ART, succinct, or hash storage would export byte handles
+//! instead of preserving generic value ownership and drop glue.
 //!
 //! The second operation is the sealed allocator adapter behind [`RegionVec`].
 //! Rust's allocator API makes the trait and its deallocation callback unsafe;
 //! the adapter therefore lives entirely inside this island. Its type, pointer
 //! vocabulary, allocator-parameterized `Vec`, and unsafe callbacks never cross
 //! the public surface. Safe consumers see a typed container whose allocating
-//! methods require a [`fgdb_types::QueryCx`].
+//! methods require a [`fgdb_types::QueryCx`]. ART, succinct, and deterministic
+//! hash storage consume that surface directly; the safe collection integration
+//! never names the private allocator or raw pointer vocabulary.
 //!
 //! # Reclamation is an audited claim, not a hope
 //!

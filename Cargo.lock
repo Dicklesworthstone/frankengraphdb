@@ -532,6 +532,11 @@ dependencies = [
 [[package]]
 name = "fgdb-collections"
 version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "fgdb-types",
+ "fgdb-unsafe-arena",
+]
 
 [[package]]
 name = "fgdb-crypto"

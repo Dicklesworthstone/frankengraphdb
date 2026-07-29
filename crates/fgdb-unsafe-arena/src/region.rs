@@ -250,12 +250,11 @@ impl RegionAudit {
 
 /// The allocator seam.
 ///
-/// ART, succinct, and hash storage are meant to be generic over this rather
-/// than over a concrete region, so "which allocator" is a type parameter. It is
-/// byte-oriented because the durable node encodings are byte images already.
-///
-/// No consumer is wired to it yet; that is consumer integration on
-/// `fgdb-w1-unsafe-islands-eqrq`, and the ledger row says so.
+/// This remains the byte-oriented interface for raw arena consumers and
+/// differential verification. Typed collection storage does not implement or
+/// receive this trait: ART, succinct, and hash buffers use the safe
+/// [`RegionVec`] surface so allocator vocabulary cannot cross the unsafe-island
+/// boundary.
 pub trait RegionAlloc {
     /// Hand out a block of `len` bytes aligned to `align`.
     fn alloc_block(&mut self, len: usize, align: usize) -> Result<Handle, ArenaError>;
