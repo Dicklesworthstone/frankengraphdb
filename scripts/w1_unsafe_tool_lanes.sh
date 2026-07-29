@@ -4,12 +4,13 @@
 # =============================================================================
 # Owner: fgdb-4s28
 #
-# The complete 6-site x 3-tool posture lives in
+# The complete 7-site x 3-tool posture lives in
 # registries/unsafe_verification_lanes.toml.  This gate asks the authoritative
-# Rust checker for the checked plan and executes every returned workload.  It
-# does not infer work from prose and does not treat a declared candidate as a
-# pass.  Adding a checked cell without teaching this runner its exact command
-# produces UNRUN + FAIL rather than silently skipping it.
+# Rust checker for the checked plan and executes every distinct returned
+# workload, attributing its exit status to every cell that names it. It does not
+# infer work from prose and does not treat a declared candidate as a pass.
+# Adding a checked cell without teaching this runner its exact command produces
+# UNRUN + FAIL rather than silently skipping it.
 #
 # Evidence directories are retained. Repository policy forbids automated
 # deletion, and Miri transcripts are useful for replay.
@@ -49,10 +50,13 @@ fi
 gate_pass "checked plan contains $PLAN_COUNT workload(s)"
 
 EXECUTED=0
+MIRI_ARENA_STATUS="unrun"
+MIRI_ARENA_LOG="$EVIDENCE_DIR/miri-arena-edit-path.log"
 while IFS=$'\t' read -r tool site workload; do
   [ -n "$tool" ] || continue
   case "$tool|$site|$workload" in
-    "miri|arena-region-blocks-mut|cargo miri test --locked -p fgdb-unsafe-arena --test edit_path_differential")
+    "miri|arena-region-blocks-mut|cargo miri test --locked -p fgdb-unsafe-arena --test edit_path_differential" | \
+    "miri|arena-region-vec-allocator|cargo miri test --locked -p fgdb-unsafe-arena --test edit_path_differential")
       if ! rustup component list --installed | grep -q '^miri-'; then
         gate_unrun "$tool $site: pinned Miri component is not installed"
         continue
@@ -61,14 +65,20 @@ while IFS=$'\t' read -r tool site workload; do
         gate_unrun "$tool $site: pinned rust-src component is not installed"
         continue
       fi
-      MIRI_LOG="$EVIDENCE_DIR/miri-arena-edit-path.log"
-      if cargo miri test --locked -p fgdb-unsafe-arena \
-        --test edit_path_differential >"$MIRI_LOG" 2>&1; then
+      if [ "$MIRI_ARENA_STATUS" = "unrun" ]; then
+        if cargo miri test --locked -p fgdb-unsafe-arena \
+          --test edit_path_differential >"$MIRI_ARENA_LOG" 2>&1; then
+          MIRI_ARENA_STATUS="passed"
+        else
+          MIRI_ARENA_STATUS="failed"
+        fi
+      fi
+      if [ "$MIRI_ARENA_STATUS" = "passed" ]; then
         EXECUTED=$((EXECUTED + 1))
-        gate_pass "$tool $site: 192-case edit-path differential passed"
+        gate_pass "$tool $site: arena edit-path and typed-region differential passed"
       else
         gate_fail "$tool $site: edit-path differential failed"
-        gate_diag "  Miri transcript: $MIRI_LOG"
+        gate_diag "  Miri transcript: $MIRI_ARENA_LOG"
       fi
       ;;
     *)

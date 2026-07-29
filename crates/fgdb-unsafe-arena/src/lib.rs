@@ -11,7 +11,7 @@
 //! whose root uses [`deny`] instead, with narrowly scoped `allow(unsafe_code)`
 //! sites each enumerated in `registries/unsafe_boundary_ledger.toml`.
 //!
-//! # The one thing this island exists for
+//! # The two things this island exists for
 //!
 //! An arena is *not* automatically an unsafe crate, and it would have been
 //! dishonest to open an island and then fill it with unsafe that safe Rust
@@ -22,13 +22,14 @@
 //! base address with `as_ptr()`, which is safe, and picks the offset that makes
 //! `base + offset` aligned, so an aligned block needs no unsafe to hand out.
 //!
-//! Exactly one operation cannot be written safely, and it is the one ART needs
+//! One operation cannot be written safely, and it is the one ART needs
 //! most: **N simultaneous exclusive views into disjoint blocks of the same
 //! region**. Splitting a node means holding `&mut` to a parent and a child at
 //! once; the borrow checker cannot see that two byte ranges carved from one
 //! chunk do not overlap, so [`Region::blocks_mut`] proves it at runtime and
-//! forms the views in a single ledgered block. That is the whole unsafe surface
-//! of this crate: one site, one invariant, one row.
+//! forms the views in a single ledgered block. Together with the sealed
+//! allocator adapter below, that makes the whole unsafe surface of this crate:
+//! two sites with separate invariants and ledger rows.
 //!
 //! # What a site must carry
 //!
@@ -62,6 +63,13 @@
 //! this island says so in its `no_claim_boundary` rather than letting the
 //! existence of a trait imply an integration.
 //!
+//! The second operation is the sealed allocator adapter behind [`RegionVec`].
+//! Rust's allocator API makes the trait and its deallocation callback unsafe;
+//! the adapter therefore lives entirely inside this island. Its type, pointer
+//! vocabulary, allocator-parameterized `Vec`, and unsafe callbacks never cross
+//! the public surface. Safe consumers see a typed container whose allocating
+//! methods require a [`fgdb_types::QueryCx`].
+//!
 //! # Reclamation is an audited claim, not a hope
 //!
 //! [`Region::close`] and [`Region::cancel`] both return a [`RegionAudit`], and
@@ -73,15 +81,18 @@
 //! # What is deliberately NOT here
 //!
 //! No public raw pointers and no public `unsafe fn`: every export is safe to
-//! call from a `forbid(unsafe_code)` crate. No `T`-placement, no drop glue, no
-//! `Send`/`Sync` claim beyond what the compiler derives, and no concurrency of
-//! any kind — a [`Region`] is owned by one holder and every mutating method
-//! takes `&mut self`.
+//! call from a `forbid(unsafe_code)` crate. Typed placement is available only
+//! through [`RegionVec`], which delegates initialization, moves, and drop glue
+//! to the standard library's `Vec<T, A>` implementation. No `Send`/`Sync`
+//! claim beyond what the compiler derives, and no concurrent allocation claim
+//! is made: [`RegionScope`] is task-local and its vectors borrow it.
 
 #![deny(unsafe_code)]
+#![feature(allocator_api)]
 
 pub mod region;
 
 pub use region::{
-    ArenaError, Edit, EditPath, Handle, Region, RegionAlloc, RegionAudit, RegionOutcome,
+    ArenaError, Edit, EditPath, Handle, Region, RegionAlloc, RegionAudit, RegionFinishError,
+    RegionOutcome, RegionScope, RegionVec, RegionVecError,
 };

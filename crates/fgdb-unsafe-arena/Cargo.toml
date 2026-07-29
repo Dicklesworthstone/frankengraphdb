@@ -2,7 +2,7 @@
 name = "fgdb-unsafe-arena"
 version = "0.0.1"
 edition = "2024"
-description = "Region arena with generational handles: safe bump allocation, one ledgered site for simultaneous exclusive views."
+description = "Region arena with generational handles, disjoint byte views, and a sealed typed-vector allocator."
 publish = false
 
 # NO `[lints] workspace = true`, and the omission is the whole point.
@@ -19,6 +19,8 @@ publish = false
 # `member_does_not_inherit_forbid`, and an island that grows one fails
 # `island_inherits_forbid` in `topology-check`.
 
-# Runtime dependency set is empty, and the test set too: the differential
-# harness compares this crate against itself along two paths, so it needs no
-# oracle from elsewhere.
+[dependencies]
+fgdb-types = { path = "../fgdb-types" }
+
+[dev-dependencies]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "e464a484cb65c1a55be0d9c925e6e9c20318edcb", default-features = false, features = ["test-internals"] }

@@ -14,7 +14,8 @@
 
 use registry_check::unsafe_ledger::{
     self, SAFE_FACING_FIXTURE_FINDINGS, SAFE_FACING_FIXTURE_PUB_TOKENS, SCANNER_FIXTURE_SITES,
-    check_workspace, public_api, safe_facing_fixture, scan_sites, scanner_fixture,
+    check_workspace, public_api, region_vec_contract_violations, safe_facing_fixture, scan_sites,
+    scanner_fixture,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -809,11 +810,11 @@ fn the_real_workspace_passes_its_own_boundary_check() {
     );
     assert_eq!(report.verification_lanes, 3);
     assert_eq!(
-        report.verification_cells, 18,
-        "six ledger sites x three tools must be a complete matrix"
+        report.verification_cells, 21,
+        "seven ledger sites x three tools must be a complete matrix"
     );
-    assert_eq!(report.checked_cells, 1);
-    assert_eq!(report.candidate_cells, 12);
+    assert_eq!(report.checked_cells, 2);
+    assert_eq!(report.candidate_cells, 14);
     assert_eq!(report.excluded_cells, 5);
 }
 
@@ -1027,6 +1028,46 @@ fn a_public_static_raw_pointer_fails() {
     );
 }
 
+#[test]
+fn public_non_null_and_allocator_vocabulary_fail() {
+    for (tag, source) in [
+        (
+            "api-non-null",
+            "pub fn expose() -> NonNull<u8> { todo!() }\n",
+        ),
+        (
+            "api-allocator",
+            "pub fn expose<A: Allocator>(value: A) { let _ = value; }\n",
+        ),
+        (
+            "api-allocator-vec",
+            "pub type Exposed = Vec<u8, PrivateRegionAllocator<'static>>;\n",
+        ),
+        (
+            "api-adapter-reexport",
+            "pub use hidden::PrivateRegionAllocator;\n",
+        ),
+    ] {
+        let found = island_codes(tag, source);
+        assert!(
+            found.contains(&"island_public_allocator_boundary_type".to_owned()),
+            "{tag} did not turn the sealed-boundary gate red: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unrelated_unsafe_trait_impl_fails_even_without_methods() {
+    let found = island_codes(
+        "api-unsafe-impl",
+        "unsafe impl Marker for PublicIslandType {}\n",
+    );
+    assert!(
+        found.contains(&"island_public_unsafe_impl".to_owned()),
+        "an unsafe marker impl adds no unsafe fn for the old reader to find: {found:?}"
+    );
+}
+
 // --- what must NOT fire. A reader that rejected every asterisk would have
 // --- passed every test above and still be worthless.
 
@@ -1138,6 +1179,8 @@ fn the_api_reader_reproduces_its_own_fixture() {
         "the fixture must exercise both halves of the rule"
     );
     assert!(api.findings.iter().any(|f| f.raw_pointer));
+    assert!(api.findings.iter().any(|f| f.boundary_type));
+    assert!(api.findings.iter().any(|f| f.unsafe_impl));
     // And the control is wired into the run, not merely available to a test.
     let clean = check_workspace(&clean_workspace("api-licensed")).0;
     assert_eq!(
@@ -1205,6 +1248,182 @@ fn an_empty_roster_fails_before_any_safe_facing_conclusion() {
         "got {found:?}"
     );
     assert_eq!(report.islands_api_scanned, 0);
+}
+
+// ---------------------------------------------------------------------------
+// The sealed RegionVec allocator exception (`fgdb-w1-region-vec-guf9`).
+//
+// The exception is deliberately exact: one private self type, one pinned
+// foreign trait, one method set, and one context-bearing safe facade. Each
+// mutation below defeats a different broadening that would otherwise leave the
+// allow-site/ledger-row bijection green.
+// ---------------------------------------------------------------------------
+
+const REGION_VEC_SOURCE: &str = include_str!("../../../crates/fgdb-unsafe-arena/src/region.rs");
+
+#[test]
+fn the_live_region_vec_boundary_is_exact_and_safe_facing() {
+    assert!(
+        region_vec_contract_violations(REGION_VEC_SOURCE).is_empty(),
+        "{:?}",
+        region_vec_contract_violations(REGION_VEC_SOURCE)
+    );
+    let api = public_api(REGION_VEC_SOURCE);
+    assert!(
+        api.findings.is_empty(),
+        "the private allocator must not leak through the safe facade: {:?}",
+        api.findings
+    );
+    assert_eq!(
+        api.pub_tokens_claimed, api.pub_tokens,
+        "the zero finding must cover every public token"
+    );
+    assert!(api.parse_failures.is_empty(), "{:?}", api.parse_failures);
+}
+
+#[test]
+fn publicizing_or_reexporting_the_private_adapter_turns_the_api_red() {
+    let publicized = REGION_VEC_SOURCE.replacen(
+        "struct PrivateRegionAllocator<'region>",
+        "pub struct PrivateRegionAllocator<'region>",
+        1,
+    );
+    assert_ne!(publicized, REGION_VEC_SOURCE);
+    assert!(
+        public_api(&publicized)
+            .findings
+            .iter()
+            .any(|finding| finding.boundary_type),
+        "publicizing the adapter escaped the reader"
+    );
+
+    let reexported = format!("{REGION_VEC_SOURCE}\npub use self::PrivateRegionAllocator;\n");
+    assert!(
+        public_api(&reexported)
+            .findings
+            .iter()
+            .any(|finding| finding.boundary_type),
+        "re-exporting the adapter escaped the reader"
+    );
+}
+
+#[test]
+fn allocator_pointer_and_parameterized_vec_exports_turn_the_api_red() {
+    for declaration in [
+        "pub fn leak_non_null() -> NonNull<u8> { todo!() }",
+        "pub fn leak_allocator<A: core::alloc::Allocator>(value: A) { let _ = value; }",
+        "pub type LeakVec = Vec<u8, PrivateRegionAllocator<'static>>;",
+        "pub fn leak_raw(pointer: *mut u8) { let _ = pointer; }",
+        "pub unsafe fn leak_unsafe() {}",
+        "unsafe impl Marker for RegionScope {}",
+    ] {
+        let mutated = format!("{REGION_VEC_SOURCE}\n{declaration}\n");
+        let findings = public_api(&mutated).findings;
+        assert!(
+            !findings.is_empty(),
+            "boundary mutant escaped: {declaration}"
+        );
+    }
+}
+
+#[test]
+fn broadening_the_allocator_self_type_or_method_set_turns_the_contract_red() {
+    let broadened = REGION_VEC_SOURCE.replacen("PrivateRegionAllocator<'_> {", "RegionScope {", 1);
+    assert_ne!(broadened, REGION_VEC_SOURCE);
+    assert!(
+        region_vec_contract_violations(&broadened).contains(&"allocator_impl_contract_changed"),
+        "{:?}",
+        region_vec_contract_violations(&broadened)
+    );
+
+    let widened_methods = REGION_VEC_SOURCE.replacen(
+        "    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {",
+        "    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {\n\
+             self.allocate(layout)\n\
+         }\n\n\
+         unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {",
+        1,
+    );
+    assert_ne!(widened_methods, REGION_VEC_SOURCE);
+    assert!(
+        region_vec_contract_violations(&widened_methods)
+            .contains(&"allocator_impl_method_set_changed"),
+        "{:?}",
+        region_vec_contract_violations(&widened_methods)
+    );
+}
+
+#[test]
+fn allocator_pointer_provenance_regressions_turn_the_contract_red() {
+    let whole_chunk_retag = REGION_VEC_SOURCE.replacen(
+        "            .as_mut_ptr()\n            .wrapping_add(slot.start);",
+        "            .as_mut_slice()\n            .as_mut_ptr()\n            .wrapping_add(slot.start);",
+        1,
+    );
+    assert_ne!(whole_chunk_retag, REGION_VEC_SOURCE);
+    assert!(
+        region_vec_contract_violations(&whole_chunk_retag)
+            .contains(&"allocator_pointer_provenance_changed"),
+        "{:?}",
+        region_vec_contract_violations(&whole_chunk_retag)
+    );
+
+    let one_byte_retag = REGION_VEC_SOURCE.replacen(
+        "let Some(pointer) = NonNull::new(pointer) else {",
+        "let Some(pointer) = Some(NonNull::from(\n\
+             &mut region.chunks[slot.chunk][slot.start],\n\
+         )) else {",
+        1,
+    );
+    assert_ne!(one_byte_retag, REGION_VEC_SOURCE);
+    assert!(
+        region_vec_contract_violations(&one_byte_retag)
+            .contains(&"allocator_pointer_provenance_changed"),
+        "{:?}",
+        region_vec_contract_violations(&one_byte_retag)
+    );
+}
+
+#[test]
+fn a_context_free_allocating_method_or_trait_path_turns_the_contract_red() {
+    let context_free = REGION_VEC_SOURCE.replacen(
+        "pub fn try_push(&mut self, cx: &QueryCx, value: T)",
+        "pub fn try_push(&mut self, value: T)",
+        1,
+    );
+    assert_ne!(context_free, REGION_VEC_SOURCE);
+    assert!(
+        region_vec_contract_violations(&context_free)
+            .contains(&"region_vec_allocation_context_missing"),
+        "{:?}",
+        region_vec_contract_violations(&context_free)
+    );
+
+    let escape_hatch = REGION_VEC_SOURCE.replacen(
+        "    pub fn pop(&mut self) -> Option<T> {",
+        "    pub fn push(&mut self, value: T) { self.inner_mut().push(value); }\n\n\
+             pub fn pop(&mut self) -> Option<T> {",
+        1,
+    );
+    assert_ne!(escape_hatch, REGION_VEC_SOURCE);
+    assert!(
+        region_vec_contract_violations(&escape_hatch)
+            .contains(&"region_vec_public_method_set_changed"),
+        "{:?}",
+        region_vec_contract_violations(&escape_hatch)
+    );
+
+    let allocating_trait = format!(
+        "{REGION_VEC_SOURCE}\n\
+         impl<T: Clone> Clone for RegionVec<'_, T> {{\n\
+             fn clone(&self) -> Self {{ todo!() }}\n\
+         }}\n"
+    );
+    assert!(
+        region_vec_contract_violations(&allocating_trait).contains(&"region_vec_trait_set_changed"),
+        "{:?}",
+        region_vec_contract_violations(&allocating_trait)
+    );
 }
 
 // ---------------------------------------------------------------------------

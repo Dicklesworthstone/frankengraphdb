@@ -13,7 +13,7 @@
 //! # Why this checker fails instead of skipping
 //!
 //! The workspace began with zero islands and zero unsafe sites; it now carries
-//! three islands with six ledgered sites, and every crate outside them still
+//! three islands with seven ledgered sites, and every crate outside them still
 //! scans to zero. A checker written the obvious way would report "0 sites, 0
 //! orphans, pass" — and would report exactly the same thing if its scanner were
 //! broken, if the ledger file had been deleted, or if it could not read a
@@ -1979,6 +1979,50 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
                 report.scanned_sites.push(site);
             }
 
+            if rel == REGION_VEC_BOUNDARY_PATH {
+                for code in region_vec_contract_violations(&text) {
+                    let message = match code {
+                        "allocator_impl_contract_changed" => {
+                            "the sole unsafe trait impl must be exactly \
+                             `core::alloc::Allocator for PrivateRegionAllocator<'_>`; adding, \
+                             removing, or broadening an unsafe impl moves the boundary"
+                        }
+                        "allocator_impl_method_set_changed" => {
+                            "the pinned allocator override set must remain exactly safe \
+                             `allocate` plus unsafe `deallocate`, matching the pinned nightly"
+                        }
+                        "allocator_adapter_declaration_changed" => {
+                            "the Allocator self type must remain the one private, lifetime-bound \
+                             `PrivateRegionAllocator<'region>` adapter"
+                        }
+                        "allocator_pointer_provenance_changed" => {
+                            "allocator pointers must come directly from `Vec::as_mut_ptr` plus the \
+                             checked slot offset; forming a backing-slice or one-byte reference \
+                             invalidates live RegionVec provenance"
+                        }
+                        "region_vec_allocation_context_missing" => {
+                            "every allocation-capable RegionVec method must carry `&QueryCx` in \
+                             its public signature"
+                        }
+                        "region_vec_public_method_set_changed" => {
+                            "the RegionVec public method set changed without updating the \
+                             allocation-context audit; new escape hatches fail closed"
+                        }
+                        "region_vec_trait_set_changed" => {
+                            "the RegionVec trait surface changed; allocating Clone, Extend, \
+                             FromIterator, Deref, or any unreviewed trait path is forbidden"
+                        }
+                        _ => "unknown RegionVec boundary-contract finding",
+                    };
+                    v.push(Violation::new(
+                        code,
+                        "fgdb-unsafe-arena",
+                        rel.clone(),
+                        message,
+                    ));
+                }
+            }
+
             // --- the safe-facing API of an island (bead fgdb-n7mb)
             //
             // The site scan above answers "where is unsafe WRITTEN". This
@@ -2008,15 +2052,41 @@ pub fn check_workspace(root: &Path) -> (Report, Vec<Violation>) {
                         ),
                     ));
                 }
+                if finding.unsafe_impl {
+                    v.push(Violation::new(
+                        "island_public_unsafe_impl",
+                        &name,
+                        anchor.clone(),
+                        format!(
+                            "`{}` is an unsafe foreign-trait impl outside the one pinned private \
+                             allocator adapter. A marker impl can export a proof obligation even \
+                             when it adds no unsafe fn for the site scanner to count",
+                            finding.name
+                        ),
+                    ));
+                }
                 if finding.raw_pointer {
                     v.push(Violation::new(
                         "island_public_raw_pointer",
                         &name,
-                        anchor,
+                        anchor.clone(),
                         format!(
                             "the public {} `{}` carries a raw pointer in its exported type. A \
                              raw pointer in the safe-facing API hands the crate's unsafe \
                              obligations to callers who never signed for them",
+                            finding.kind, finding.name
+                        ),
+                    ));
+                }
+                if finding.boundary_type {
+                    v.push(Violation::new(
+                        "island_public_allocator_boundary_type",
+                        &name,
+                        anchor,
+                        format!(
+                            "the public {} `{}` carries sealed allocator vocabulary (`NonNull`, \
+                             `Allocator`, `PrivateRegionAllocator`, or `Vec<T, A>`). The typed \
+                             arena boundary must remain the safe RegionVec facade",
                             finding.kind, finding.name
                         ),
                     ));
@@ -2161,17 +2231,19 @@ fn resolve_members(root: &Path, workspace: &crate::toml::Table) -> Result<Vec<Pa
 //   `unsafe fn` is reachable through the island's type even though the impl
 //   cannot write `pub`.
 //
-// NO-CLAIM BOUNDARY. This says nothing about pointer-like types that are not
-// spelled `*const`/`*mut` (`NonNull`, an address passed as `usize`), nothing
-// about items generated by a macro expansion, and nothing about whether a
-// public item is *sound* — only about whether the safe-facing surface is spelled
-// safely. `macro_rules!` bodies are not parsed at all, and the unclaimed-`pub`
-// control below turns that into a violation rather than a silent gap.
+// NO-CLAIM BOUNDARY. This says nothing about an address deliberately erased to
+// `usize`, nothing about items generated by a macro expansion, and nothing
+// about whether a public item is *sound* — only about whether the safe-facing
+// surface is spelled safely. It DOES reject the pointer/allocator vocabulary
+// relevant to the sealed RegionVec boundary: `NonNull`, `Allocator`,
+// `PrivateRegionAllocator`, and allocator-parameterized `Vec<T, A>`.
+// `macro_rules!` bodies are not parsed at all, and the unclaimed-`pub` control
+// below turns that into a violation rather than a silent gap.
 
 /// One public item that violates the safe-facing rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicApiFinding {
-    /// `fn`, `field`, `type`, `const` or `static`.
+    /// `fn`, `field`, `type`, `const`, `static`, `use` or `impl`.
     pub kind: &'static str,
     /// The item's or field's name, as written.
     pub name: String,
@@ -2179,8 +2251,21 @@ pub struct PublicApiFinding {
     pub line: usize,
     /// A publicly reachable `unsafe fn`.
     pub unsafe_fn: bool,
+    /// An unsafe foreign-trait impl other than the single pinned private
+    /// allocator adapter.
+    pub unsafe_impl: bool,
     /// `*const` or `*mut` inside the item's exported type region.
     pub raw_pointer: bool,
+    /// Sealed pointer/allocator vocabulary inside the exported type region.
+    pub boundary_type: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PublicApiHazards {
+    unsafe_fn: bool,
+    unsafe_impl: bool,
+    raw_pointer: bool,
+    boundary_type: bool,
 }
 
 /// What the API reader concluded about one source file.
@@ -2223,12 +2308,12 @@ pub fn safe_facing_fixture() -> &'static str {
 }
 
 /// The exact number of findings in [`safe_facing_fixture`].
-pub const SAFE_FACING_FIXTURE_FINDINGS: usize = 13;
+pub const SAFE_FACING_FIXTURE_FINDINGS: usize = 18;
 
 /// The exact number of live `pub` tokens in [`safe_facing_fixture`]. Pinning it
 /// keeps the claim control itself honest: a parser that claimed nothing and a
 /// fixture that contained nothing look identical without this.
-pub const SAFE_FACING_FIXTURE_PUB_TOKENS: usize = 21;
+pub const SAFE_FACING_FIXTURE_PUB_TOKENS: usize = 25;
 
 const SAFE_FACING_FIXTURE: &str = r#"
 //! A fixture island source. The *mut u8 in this module doc must not count.
@@ -2286,6 +2371,26 @@ pub trait Boundary {
 
 /// COUNTED: a public static.
 pub static ORIGIN: *const u8 = ptr::null();
+
+/// COUNTED: pointer-like boundary vocabulary without a raw-pointer spelling.
+pub fn gives_non_null() -> NonNull<u8> {
+    todo!()
+}
+
+/// COUNTED: the allocator trait in a public bound.
+pub fn takes_allocator<A: Allocator>(allocator: A) {
+    let _ = allocator;
+}
+
+/// COUNTED: an allocator-parameterized standard vector.
+pub type AllocatedVec = Vec<u8, LocalAllocator>;
+
+/// COUNTED: re-exporting the private adapter makes it reachable by name.
+pub use hidden::PrivateRegionAllocator;
+
+/// COUNTED: an unsafe trait impl moves a foreign proof obligation onto the
+/// island's type even when the marker trait has no methods.
+unsafe impl Marker for HiddenAdapter {}
 
 /// IGNORED: restricted visibility is not the safe-facing API.
 pub(crate) fn restricted(p: *mut u8) -> usize {
@@ -2432,6 +2537,386 @@ fn tokenize(masked: &str) -> Vec<Token<'_>> {
         i += 1;
     }
     out
+}
+
+/// The source file carrying the one pinned allocator implementation and the
+/// safe RegionVec surface governed with it.
+pub const REGION_VEC_BOUNDARY_PATH: &str = "crates/fgdb-unsafe-arena/src/region.rs";
+
+const PINNED_ALLOCATOR_HEADER: [&str; 14] = [
+    "unsafe",
+    "impl",
+    "core",
+    "::",
+    "alloc",
+    "::",
+    "Allocator",
+    "for",
+    "PrivateRegionAllocator",
+    "<",
+    "'",
+    "_",
+    ">",
+    "{",
+];
+
+const PINNED_REGION_VEC_METHODS: [&str; 26] = [
+    "as_mut_slice",
+    "as_slice",
+    "capacity",
+    "clear",
+    "get",
+    "get_mut",
+    "is_empty",
+    "iter",
+    "iter_mut",
+    "len",
+    "new_in",
+    "pop",
+    "remove",
+    "replace",
+    "swap_remove",
+    "truncate",
+    "try_clone",
+    "try_extend",
+    "try_extend_from_slice",
+    "try_insert",
+    "try_push",
+    "try_reserve",
+    "try_reserve_exact",
+    "try_resize",
+    "try_resize_with",
+    "with_capacity_in",
+];
+
+const QUERY_GATED_REGION_VEC_METHODS: [&str; 10] = [
+    "try_clone",
+    "try_extend",
+    "try_extend_from_slice",
+    "try_insert",
+    "try_push",
+    "try_reserve",
+    "try_reserve_exact",
+    "try_resize",
+    "try_resize_with",
+    "with_capacity_in",
+];
+
+const ALLOWED_REGION_VEC_TRAITS: [&str; 6] = ["AsMut", "AsRef", "Debug", "Drop", "Eq", "PartialEq"];
+
+fn lexeme_sequence_at(tokens: &[Token<'_>], at: usize, expected: &[&str]) -> bool {
+    tokens
+        .get(at..at.saturating_add(expected.len()))
+        .is_some_and(|actual| {
+            actual
+                .iter()
+                .map(|lexeme| lexeme.text)
+                .eq(expected.iter().copied())
+        })
+}
+
+fn lexeme_sequence_count(tokens: &[Token<'_>], expected: &[&str]) -> usize {
+    (0..tokens.len())
+        .filter(|&index| lexeme_sequence_at(tokens, index, expected))
+        .count()
+}
+
+fn matching_delimiter(tokens: &[Token<'_>], open: usize, end: usize) -> usize {
+    let (opener, closer) = match tokens.get(open).map(|lexeme| lexeme.text) {
+        Some("(") => ("(", ")"),
+        Some("[") => ("[", "]"),
+        Some("{") => ("{", "}"),
+        _ => return open,
+    };
+    let mut depth = 0_usize;
+    for (index, lexeme) in tokens.iter().enumerate().take(end).skip(open) {
+        if lexeme.text == opener {
+            depth += 1;
+        } else if lexeme.text == closer {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return index;
+            }
+        }
+    }
+    end
+}
+
+fn matching_angle(tokens: &[Token<'_>], open: usize, end: usize) -> usize {
+    let mut depth = 0_usize;
+    for (index, lexeme) in tokens.iter().enumerate().take(end).skip(open) {
+        match lexeme.text {
+            "<" => depth += 1,
+            ">" => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => {}
+        }
+    }
+    end
+}
+
+fn impl_body_open(tokens: &[Token<'_>], start: usize) -> Option<usize> {
+    let mut paren = 0_usize;
+    let mut bracket = 0_usize;
+    for (index, lexeme) in tokens.iter().enumerate().skip(start) {
+        match lexeme.text {
+            "(" => paren += 1,
+            ")" => paren = paren.saturating_sub(1),
+            "[" => bracket += 1,
+            "]" => bracket = bracket.saturating_sub(1),
+            "{" if paren == 0 && bracket == 0 => return Some(index),
+            ";" if paren == 0 && bracket == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn top_level_methods<'a>(
+    tokens: &'a [Token<'a>],
+    open: usize,
+    close: usize,
+    public_only: bool,
+) -> Vec<(&'a str, bool, usize, usize)> {
+    let mut out = Vec::new();
+    let mut index = open + 1;
+    while index < close {
+        if tokens[index].text == "#"
+            && tokens
+                .get(index + 1)
+                .is_some_and(|lexeme| lexeme.text == "[")
+        {
+            index = matching_delimiter(tokens, index + 1, close).saturating_add(1);
+            continue;
+        }
+        let start = index;
+        let public = tokens[index].ident && tokens[index].text == "pub";
+        if public {
+            index += 1;
+            if tokens.get(index).is_some_and(|lexeme| lexeme.text == "(") {
+                index = matching_delimiter(tokens, index, close).saturating_add(1);
+            }
+        }
+        let unsafe_method = tokens
+            .get(index)
+            .is_some_and(|lexeme| lexeme.text == "unsafe");
+        if unsafe_method {
+            index += 1;
+        }
+        while tokens.get(index).is_some_and(|lexeme| {
+            lexeme.ident && matches!(lexeme.text, "async" | "const" | "default")
+        }) {
+            index += 1;
+        }
+        if tokens.get(index).is_none_or(|lexeme| lexeme.text != "fn") {
+            index = start + 1;
+            continue;
+        }
+        let Some(name) = tokens.get(index + 1).filter(|lexeme| lexeme.ident) else {
+            index = start + 1;
+            continue;
+        };
+        let signature_start = start;
+        let mut body_open = index + 2;
+        let mut paren = 0_usize;
+        let mut bracket = 0_usize;
+        while body_open < close {
+            match tokens[body_open].text {
+                "(" => paren += 1,
+                ")" => paren = paren.saturating_sub(1),
+                "[" => bracket += 1,
+                "]" => bracket = bracket.saturating_sub(1),
+                "{" if paren == 0 && bracket == 0 => break,
+                ";" if paren == 0 && bracket == 0 => break,
+                _ => {}
+            }
+            body_open += 1;
+        }
+        if !public_only || public {
+            out.push((name.text, unsafe_method, signature_start, body_open));
+        }
+        if tokens
+            .get(body_open)
+            .is_some_and(|lexeme| lexeme.text == "{")
+        {
+            index = matching_delimiter(tokens, body_open, close).saturating_add(1);
+        } else {
+            index = body_open.saturating_add(1);
+        }
+    }
+    out
+}
+
+/// Mechanically pin the sole private Allocator impl and the context-bearing
+/// RegionVec surface. These codes are mapped into ordinary checker violations
+/// by [`check_workspace`] and are exposed so mutation tests can exercise the
+/// contract without creating a second parser.
+pub fn region_vec_contract_violations(text: &str) -> Vec<&'static str> {
+    let masked = mask_source(text);
+    let tokens = tokenize(masked.text());
+    let mut findings = Vec::new();
+
+    let unsafe_impls: Vec<usize> = (0..tokens.len())
+        .filter(|&index| {
+            tokens[index].ident
+                && tokens[index].text == "unsafe"
+                && tokens
+                    .get(index + 1)
+                    .is_some_and(|lexeme| lexeme.text == "impl")
+        })
+        .collect();
+    let pinned: Vec<usize> = unsafe_impls
+        .iter()
+        .copied()
+        .filter(|&index| lexeme_sequence_at(&tokens, index, &PINNED_ALLOCATOR_HEADER))
+        .collect();
+    if unsafe_impls.len() != 1 || pinned.len() != 1 {
+        findings.push("allocator_impl_contract_changed");
+    }
+    if let Some(&start) = pinned.first() {
+        let open = start + PINNED_ALLOCATOR_HEADER.len() - 1;
+        let close = matching_delimiter(&tokens, open, tokens.len());
+        let allocator_methods = top_level_methods(&tokens, open, close, false);
+        let methods: Vec<(&str, bool)> = allocator_methods
+            .iter()
+            .map(|(name, unsafe_method, _, _)| (*name, *unsafe_method))
+            .collect();
+        if methods.as_slice() != [("allocate", false), ("deallocate", true)] {
+            findings.push("allocator_impl_method_set_changed");
+        }
+        match allocator_methods
+            .iter()
+            .find(|(name, _, _, _)| matches!(*name, "allocate"))
+        {
+            Some((_, _, _, body_open)) => {
+                let body_close = matching_delimiter(&tokens, *body_open, close);
+                let body = tokens.get(*body_open..=body_close).unwrap_or_default();
+                let direct_pointer_path = [
+                    "region",
+                    ".",
+                    "chunks",
+                    "[",
+                    "slot",
+                    ".",
+                    "chunk",
+                    "]",
+                    ".",
+                    "as_mut_ptr",
+                    "(",
+                    ")",
+                    ".",
+                    "wrapping_add",
+                    "(",
+                    "slot",
+                    ".",
+                    "start",
+                    ")",
+                ];
+                let forms_backing_reference = body
+                    .iter()
+                    .any(|lexeme| matches!(lexeme.text, "as_mut_slice" | "block_mut"));
+                if lexeme_sequence_count(body, &direct_pointer_path) != 1
+                    || lexeme_sequence_count(body, &["NonNull", "::", "new"]) != 1
+                    || lexeme_sequence_count(body, &["NonNull", "::", "from"]) != 1
+                    || forms_backing_reference
+                {
+                    findings.push("allocator_pointer_provenance_changed");
+                }
+            }
+            None => findings.push("allocator_pointer_provenance_changed"),
+        }
+    }
+
+    let private_adapter_declarations = (0..tokens.len())
+        .filter(|&index| {
+            lexeme_sequence_at(
+                &tokens,
+                index,
+                &[
+                    "struct",
+                    "PrivateRegionAllocator",
+                    "<",
+                    "'",
+                    "region",
+                    ">",
+                    "{",
+                ],
+            )
+        })
+        .count();
+    if private_adapter_declarations != 1 {
+        findings.push("allocator_adapter_declaration_changed");
+    }
+
+    let expected_methods: BTreeSet<&str> = PINNED_REGION_VEC_METHODS.into_iter().collect();
+    let expected_traits: BTreeSet<&str> = ALLOWED_REGION_VEC_TRAITS.into_iter().collect();
+    let gated: BTreeSet<&str> = QUERY_GATED_REGION_VEC_METHODS.into_iter().collect();
+    let mut actual_methods = BTreeSet::new();
+    let mut actual_traits = BTreeSet::new();
+
+    for index in 0..tokens.len() {
+        if !tokens[index].ident || tokens[index].text != "impl" {
+            continue;
+        }
+        let Some(open) = impl_body_open(&tokens, index) else {
+            continue;
+        };
+        let close = matching_delimiter(&tokens, open, tokens.len());
+        if !tokens[index..open]
+            .iter()
+            .any(|lexeme| lexeme.ident && lexeme.text == "RegionVec")
+        {
+            continue;
+        }
+        let for_at = (index..open).find(|&at| tokens[at].ident && tokens[at].text == "for");
+        if let Some(for_at) = for_at {
+            let mut trait_start = index + 1;
+            if tokens
+                .get(trait_start)
+                .is_some_and(|lexeme| lexeme.text == "<")
+            {
+                trait_start = matching_angle(&tokens, trait_start, for_at).saturating_add(1);
+            }
+            let trait_end = (trait_start..for_at)
+                .find(|&at| tokens[at].text == "<")
+                .unwrap_or(for_at);
+            if let Some(name) = tokens[trait_start..trait_end]
+                .iter()
+                .rev()
+                .find(|lexeme| lexeme.ident)
+                .map(|lexeme| lexeme.text)
+            {
+                actual_traits.insert(name);
+            }
+            continue;
+        }
+        for (name, _, signature_start, signature_end) in
+            top_level_methods(&tokens, open, close, true)
+        {
+            actual_methods.insert(name);
+            if gated.contains(name)
+                && !tokens[signature_start..signature_end]
+                    .iter()
+                    .any(|lexeme| lexeme.ident && lexeme.text == "QueryCx")
+            {
+                findings.push("region_vec_allocation_context_missing");
+            }
+        }
+    }
+    if actual_methods != expected_methods {
+        findings.push("region_vec_public_method_set_changed");
+    }
+    if actual_traits != expected_traits {
+        findings.push("region_vec_trait_set_changed");
+    }
+
+    findings.sort_unstable();
+    findings.dedup();
+    findings
 }
 
 /// What kind of item a unit's header declares.
@@ -2742,6 +3227,33 @@ impl ApiParser<'_> {
         false
     }
 
+    /// The only foreign-trait impl whose methods are intentionally private to
+    /// an island. The separate pinned-contract checker verifies its complete
+    /// method set; this predicate only prevents those private callbacks from
+    /// being mislabeled as public API.
+    fn is_pinned_allocator_impl(&self, from: usize, end: usize, unsafe_mod: bool) -> bool {
+        const HEADER: [&str; 12] = [
+            "impl",
+            "core",
+            "::",
+            "alloc",
+            "::",
+            "Allocator",
+            "for",
+            "PrivateRegionAllocator",
+            "<",
+            "'",
+            "_",
+            ">",
+        ];
+        unsafe_mod
+            && end.saturating_sub(from) == HEADER.len()
+            && self.toks[from..end]
+                .iter()
+                .map(|lexeme| lexeme.text)
+                .eq(HEADER)
+    }
+
     /// Where the type beginning at `from` ends: the first `,`, `;` or `=`
     /// outside every bracket, INCLUDING angle brackets.
     ///
@@ -2823,14 +3335,49 @@ impl ApiParser<'_> {
         })
     }
 
-    fn record(&mut self, kind: &'static str, name: String, line: usize, uf: bool, raw: bool) {
-        if uf || raw {
+    /// Pointer/allocator vocabulary that must stay sealed behind RegionVec.
+    fn boundary_type_in(&self, from: usize, end: usize) -> bool {
+        for i in from..end {
+            if self.toks[i].ident
+                && matches!(
+                    self.toks[i].text,
+                    "NonNull" | "Allocator" | "PrivateRegionAllocator"
+                )
+            {
+                return true;
+            }
+            if !(self.is_kw(i, "Vec") && matches!(self.tt(i + 1), "<")) {
+                continue;
+            }
+            let mut depth = 0_usize;
+            for j in i + 1..end {
+                match self.tt(j) {
+                    "<" => depth += 1,
+                    ">" => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    "," if matches!(depth, 1) => return true,
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
+
+    fn record(&mut self, kind: &'static str, name: String, line: usize, hazards: PublicApiHazards) {
+        if hazards.unsafe_fn || hazards.unsafe_impl || hazards.raw_pointer || hazards.boundary_type
+        {
             self.out.findings.push(PublicApiFinding {
                 kind,
                 name,
                 line,
-                unsafe_fn: uf,
-                raw_pointer: raw,
+                unsafe_fn: hazards.unsafe_fn,
+                unsafe_impl: hazards.unsafe_impl,
+                raw_pointer: hazards.raw_pointer,
+                boundary_type: hazards.boundary_type,
             });
         }
     }
@@ -2869,9 +3416,20 @@ impl ApiParser<'_> {
                     if public && scope.report {
                         let uf = head.unsafe_mod || (scope.extern_block && !head.safe_mod);
                         let raw = self.raw_pointer_in(head.kw, sig_end);
+                        let boundary = self.boundary_type_in(head.kw, sig_end);
                         let name = self.name_after(head.kw);
                         let line = self.line(head.kw);
-                        self.record("fn", name, line, uf, raw);
+                        self.record(
+                            "fn",
+                            name,
+                            line,
+                            PublicApiHazards {
+                                unsafe_fn: uf,
+                                unsafe_impl: false,
+                                raw_pointer: raw,
+                                boundary_type: boundary,
+                            },
+                        );
                     }
                     if let Some((open, close)) = body {
                         self.items(open + 1, close, scope.body());
@@ -2881,6 +3439,19 @@ impl ApiParser<'_> {
                 Kind::Struct => {
                     let (unit_end, body) = self.unit_extent(head.kw, end);
                     let report = scope.report && public;
+                    if report && self.name_after(head.kw) == "PrivateRegionAllocator" {
+                        self.record(
+                            "type",
+                            "PrivateRegionAllocator".to_owned(),
+                            self.line(head.kw),
+                            PublicApiHazards {
+                                unsafe_fn: false,
+                                unsafe_impl: false,
+                                raw_pointer: false,
+                                boundary_type: true,
+                            },
+                        );
+                    }
                     match body {
                         Some((open, close)) => self.named_fields(open + 1, close, false, report),
                         None => {
@@ -2909,7 +3480,26 @@ impl ApiParser<'_> {
                     let (unit_end, body) = self.unit_extent(head.kw, end);
                     if let Some((open, close)) = body {
                         let trait_impl = self.is_trait_impl(head.kw, open);
-                        self.items(open + 1, close, scope.inner(trait_impl));
+                        let pinned_allocator = trait_impl
+                            && self.is_pinned_allocator_impl(head.kw, open, head.unsafe_mod);
+                        if trait_impl && head.unsafe_mod && !pinned_allocator && scope.report {
+                            self.record(
+                                "impl",
+                                self.name_after(head.kw),
+                                self.line(head.kw),
+                                PublicApiHazards {
+                                    unsafe_fn: false,
+                                    unsafe_impl: true,
+                                    raw_pointer: false,
+                                    boundary_type: false,
+                                },
+                            );
+                        }
+                        self.items(
+                            open + 1,
+                            close,
+                            scope.inner(trait_impl && !pinned_allocator),
+                        );
                     }
                     unit_end
                 }
@@ -2935,10 +3525,24 @@ impl ApiParser<'_> {
                 }
                 Kind::TypeAlias => {
                     let unit_end = self.unit_end_semi(head.kw, end);
-                    if public && scope.report && self.raw_pointer_in(head.kw, unit_end) {
+                    if public
+                        && scope.report
+                        && (self.raw_pointer_in(head.kw, unit_end)
+                            || self.boundary_type_in(head.kw, unit_end))
+                    {
                         let name = self.name_after(head.kw);
                         let line = self.line(head.kw);
-                        self.record("type", name, line, false, true);
+                        self.record(
+                            "type",
+                            name,
+                            line,
+                            PublicApiHazards {
+                                unsafe_fn: false,
+                                unsafe_impl: false,
+                                raw_pointer: self.raw_pointer_in(head.kw, unit_end),
+                                boundary_type: self.boundary_type_in(head.kw, unit_end),
+                            },
+                        );
                     }
                     unit_end
                 }
@@ -2951,7 +3555,9 @@ impl ApiParser<'_> {
                         let colon = (head.kw..unit_end).find(|i| self.tt(*i) == ":");
                         if let Some(colon) = colon {
                             let ty_end = self.skip_type(colon + 1, unit_end);
-                            if self.raw_pointer_in(colon + 1, ty_end) {
+                            if self.raw_pointer_in(colon + 1, ty_end)
+                                || self.boundary_type_in(colon + 1, ty_end)
+                            {
                                 let kind = if head.kind == Kind::Const {
                                     "const"
                                 } else {
@@ -2959,13 +3565,49 @@ impl ApiParser<'_> {
                                 };
                                 let name = self.name_after(head.kw);
                                 let line = self.line(head.kw);
-                                self.record(kind, name, line, false, true);
+                                self.record(
+                                    kind,
+                                    name,
+                                    line,
+                                    PublicApiHazards {
+                                        unsafe_fn: false,
+                                        unsafe_impl: false,
+                                        raw_pointer: self.raw_pointer_in(colon + 1, ty_end),
+                                        boundary_type: self.boundary_type_in(colon + 1, ty_end),
+                                    },
+                                );
                             }
                         }
                     }
                     unit_end
                 }
-                Kind::Use => self.unit_end_semi(head.kw, end),
+                Kind::Use => {
+                    let unit_end = self.unit_end_semi(head.kw, end);
+                    if public && scope.report && self.boundary_type_in(head.kw, unit_end) {
+                        self.record(
+                            "use",
+                            self.toks[head.kw..unit_end]
+                                .iter()
+                                .find(|lexeme| {
+                                    lexeme.ident
+                                        && matches!(
+                                            lexeme.text,
+                                            "NonNull" | "Allocator" | "PrivateRegionAllocator"
+                                        )
+                                })
+                                .map_or("<allocator-boundary>", |lexeme| lexeme.text)
+                                .to_owned(),
+                            self.line(head.kw),
+                            PublicApiHazards {
+                                unsafe_fn: false,
+                                unsafe_impl: false,
+                                raw_pointer: false,
+                                boundary_type: true,
+                            },
+                        );
+                    }
+                    unit_end
+                }
                 // A macro body is token soup this reader does not expand. It is
                 // skipped WITHOUT claiming the `pub` tokens inside it, so an
                 // island that grows one fails the claim control rather than
@@ -3015,8 +3657,18 @@ impl ApiParser<'_> {
                 let ty_end = self.skip_type(ty, end);
                 if report && public {
                     self.out.public_items += 1;
-                    if self.raw_pointer_in(ty, ty_end) {
-                        self.record("field", name, line, false, true);
+                    if self.raw_pointer_in(ty, ty_end) || self.boundary_type_in(ty, ty_end) {
+                        self.record(
+                            "field",
+                            name,
+                            line,
+                            PublicApiHazards {
+                                unsafe_fn: false,
+                                unsafe_impl: false,
+                                raw_pointer: self.raw_pointer_in(ty, ty_end),
+                                boundary_type: self.boundary_type_in(ty, ty_end),
+                            },
+                        );
                     }
                 }
                 i = ty_end;
@@ -3054,8 +3706,18 @@ impl ApiParser<'_> {
             let ty_end = self.skip_type(i, end);
             if report && public {
                 self.out.public_items += 1;
-                if self.raw_pointer_in(i, ty_end) {
-                    self.record("field", ordinal.to_string(), line, false, true);
+                if self.raw_pointer_in(i, ty_end) || self.boundary_type_in(i, ty_end) {
+                    self.record(
+                        "field",
+                        ordinal.to_string(),
+                        line,
+                        PublicApiHazards {
+                            unsafe_fn: false,
+                            unsafe_impl: false,
+                            raw_pointer: self.raw_pointer_in(i, ty_end),
+                            boundary_type: self.boundary_type_in(i, ty_end),
+                        },
+                    );
                 }
             }
             ordinal += 1;

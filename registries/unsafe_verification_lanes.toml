@@ -3,7 +3,7 @@
 # =============================================================================
 # Bead: fgdb-4s28
 #
-# This is the executable lane manifest for the six sites enumerated by
+# This is the executable lane manifest for the seven sites enumerated by
 # unsafe_boundary_ledger.toml.  It is deliberately a full site x tool matrix:
 # Miri, AddressSanitizer, and ThreadSanitizer each own exactly one cell for
 # every ledger row.  Silence is not an exclusion and is not evidence.
@@ -72,6 +72,13 @@ rationale = "Miri executes this Vec-backed pointer-arithmetic and slice-construc
 workload = "cargo miri test --locked -p fgdb-unsafe-arena --test edit_path_differential"
 
 [[cell]]
+site_row_id = "arena-region-vec-allocator"
+tool = "miri"
+disposition = "checked"
+rationale = "Miri executes the private Allocator callbacks, default Vec grow/copy/deallocate path, typed drop glue, ZST/alignment cases, refusal atomicity, and close/cancel audits in the fixed-seed RegionVec workload; the native forgotten-owner case is excluded because its asserted fail-closed outcome intentionally leaks retained storage."
+workload = "cargo miri test --locked -p fgdb-unsafe-arena --test edit_path_differential"
+
+[[cell]]
 site_row_id = "vfs-mmap-readonly"
 tool = "miri"
 disposition = "excluded"
@@ -114,6 +121,13 @@ rationale = "Native AddressSanitizer instrumentation can execute this pointer-ar
 workload = ""
 
 [[cell]]
+site_row_id = "arena-region-vec-allocator"
+tool = "asan"
+disposition = "candidate"
+rationale = "Native AddressSanitizer can execute the private allocator and typed Vec workload, but no checked ASAN run is claimed for this site today."
+workload = ""
+
+[[cell]]
 site_row_id = "vfs-mmap-readonly"
 tool = "asan"
 disposition = "candidate"
@@ -153,6 +167,13 @@ site_row_id = "arena-region-blocks-mut"
 tool = "tsan"
 disposition = "candidate"
 rationale = "Native ThreadSanitizer instrumentation can execute this pointer-arithmetic site, but no checked TSAN workload is claimed for it today."
+workload = ""
+
+[[cell]]
+site_row_id = "arena-region-vec-allocator"
+tool = "tsan"
+disposition = "candidate"
+rationale = "Native ThreadSanitizer can execute this task-local allocator workload, but no checked TSAN run is claimed and no concurrency claim is made for this site today."
 workload = ""
 
 [[cell]]

@@ -1,13 +1,18 @@
 //! A chunked region allocator with generational handles.
 //!
-//! Everything here is safe Rust except [`Region::blocks_mut`], which is the
-//! single ledgered site in this island (`arena-region-blocks-mut`). The
-//! disjointness proof that site relies on is *not* written inside the unsafe
-//! block: it lives in [`Region::plan_batch`], which is safe, path-independent,
-//! and used by the safe fallback as well — so the check that licenses the
-//! unsafe view is exercised by every test that touches either path.
+//! Everything here is safe Rust except two ledgered boundary sites:
+//! [`Region::blocks_mut`] (`arena-region-blocks-mut`) and the sealed
+//! [`core::alloc::Allocator`] implementation behind [`RegionVec`]
+//! (`arena-region-vec-allocator`). Neither site exports its proof obligations:
+//! ordinary crates consume only safe byte handles or the safe typed container.
 
+use core::alloc::{AllocError, Layout};
+use core::ptr::NonNull;
+use std::cell::{Cell, RefCell};
+use std::mem;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use fgdb_types::QueryCx;
 
 /// Region identities are minted from a process-wide counter so a handle from
 /// one region cannot resolve against another. Without this a foreign handle
@@ -85,6 +90,22 @@ pub enum ArenaError {
     BlockLargerThanChunk { len: usize, chunk_bytes: usize },
     /// The region's byte budget is exhausted.
     RegionFull { requested: usize, remaining: usize },
+    /// The process allocator refused backing storage or region metadata.
+    BackingAllocationFailed { requested: usize },
+    /// The slot table can no longer mint a representable handle.
+    SlotSpaceExhausted,
+    /// An allocator callback named no live block at the supplied address.
+    UnknownAllocation { address: usize },
+    /// A private allocator callback re-entered the task-local region.
+    AllocatorReentered,
+    /// An allocator callback supplied a layout different from the allocation's
+    /// exact layout. The callback contract requires an exact match.
+    AllocationLayoutMismatch {
+        expected_size: usize,
+        actual_size: usize,
+        expected_align: usize,
+        actual_align: usize,
+    },
     /// An edit reaches past the end of its block.
     EditOutOfBounds {
         at: usize,
@@ -129,6 +150,24 @@ impl std::fmt::Display for ArenaError {
                 requested,
                 remaining,
             } => write!(f, "region full: wanted {requested}, {remaining} remain"),
+            Self::BackingAllocationFailed { requested } => {
+                write!(f, "backing allocation of {requested} bytes failed")
+            }
+            Self::SlotSpaceExhausted => write!(f, "region slot space is exhausted"),
+            Self::UnknownAllocation { address } => {
+                write!(f, "no live allocation starts at address {address:#x}")
+            }
+            Self::AllocatorReentered => write!(f, "private region allocator was re-entered"),
+            Self::AllocationLayoutMismatch {
+                expected_size,
+                actual_size,
+                expected_align,
+                actual_align,
+            } => write!(
+                f,
+                "allocation layout mismatch: expected size/alignment \
+                 {expected_size}/{expected_align}, got {actual_size}/{actual_align}"
+            ),
             Self::EditOutOfBounds { at, len, block_len } => write!(
                 f,
                 "edit [{at}, {at}+{len}) reaches past a {block_len}-byte block"
@@ -233,6 +272,7 @@ struct Slot {
     chunk: usize,
     start: usize,
     len: usize,
+    align: usize,
     generation: u32,
     live: bool,
 }
@@ -370,6 +410,45 @@ impl Region {
         }
     }
 
+    /// Resolve the exact live block named by an allocator callback.
+    ///
+    /// This is private because addresses and layouts are boundary vocabulary;
+    /// safe consumers use handles or [`RegionVec`]. No pointer is dereferenced
+    /// here. The address is compared with the stable base-plus-offset geometry
+    /// that allocation recorded in safe code.
+    fn handle_for_allocation(&self, address: usize, layout: Layout) -> Result<Handle, ArenaError> {
+        let found = self.slots.iter().enumerate().find(|(_, slot)| {
+            slot.live
+                && self.chunks[slot.chunk]
+                    .as_ptr()
+                    .addr()
+                    .checked_add(slot.start)
+                    == Some(address)
+        });
+        let Some((index, slot)) = found else {
+            return Err(ArenaError::UnknownAllocation { address });
+        };
+        if slot.len != layout.size() || slot.align != layout.align() {
+            return Err(ArenaError::AllocationLayoutMismatch {
+                expected_size: slot.len,
+                actual_size: layout.size(),
+                expected_align: slot.align,
+                actual_align: layout.align(),
+            });
+        }
+        let slot = u32::try_from(index).map_err(|_| ArenaError::SlotSpaceExhausted)?;
+        Ok(Handle {
+            region: self.id,
+            slot,
+            generation: self.slots[index].generation,
+        })
+    }
+
+    fn release_allocation(&mut self, address: usize, layout: Layout) -> Result<usize, ArenaError> {
+        let handle = self.handle_for_allocation(address, layout)?;
+        self.release(handle)
+    }
+
     /// Resolve a handle to its slot index, refusing every way it can be wrong.
     fn resolve(&self, handle: Handle) -> Result<usize, ArenaError> {
         if !self.open {
@@ -454,8 +533,8 @@ impl Region {
 
     /// Borrow several disjoint blocks mutably at once.
     ///
-    /// LEDGER ROW `arena-region-blocks-mut`. This is the only unsafe site in
-    /// the island, and the only operation here that safe Rust cannot express:
+    /// LEDGER ROW `arena-region-blocks-mut`. This is one of two unsafe sites in
+    /// the island, and the byte-view operation safe Rust cannot express:
     /// the borrow checker cannot see that two byte ranges carved from one chunk
     /// do not overlap, so [`Region::plan_batch`] proves it at runtime first.
     ///
@@ -579,13 +658,11 @@ impl RegionAlloc for Region {
             });
         }
 
-        // Alignment in safe code. The chunk's base address is read with
-        // `as_ptr().addr()`, which is a plain integer question about a pointer
-        // we already hold; the chunk was created at full length and is never
-        // resized, so that address is stable for the region's life and the
-        // padded offset stays aligned. No unsafe is needed to hand out an
-        // aligned block, and pretending otherwise would have been the easiest
-        // way to make this island look busier than it is.
+        // Plan every fallible growth before mutating region-visible state.
+        // In particular, the backing chunk is built as a local value and the
+        // slot/chunk metadata reserves are completed before either vector is
+        // changed. A refused allocation therefore cannot leave an empty chunk
+        // or a half-created slot behind.
         let mut placed = None;
         if let Some(chunk) = self.chunks.last() {
             let base = chunk.as_ptr().addr();
@@ -599,43 +676,94 @@ impl RegionAlloc for Region {
                 placed = Some((self.chunks.len() - 1, self.used_in_last + pad));
             }
         }
-        let (chunk_index, start) = match placed {
-            Some(place) => place,
+        let new_chunk = match placed {
+            Some(_) => None,
             None => {
-                self.chunks.push(vec![0_u8; self.chunk_bytes]);
-                let chunk = self.chunks.last().expect("just pushed");
+                let mut chunk = Vec::new();
+                chunk.try_reserve_exact(self.chunk_bytes).map_err(|_| {
+                    ArenaError::BackingAllocationFailed {
+                        requested: self.chunk_bytes,
+                    }
+                })?;
+                chunk.resize(self.chunk_bytes, 0_u8);
                 let base = chunk.as_ptr().addr();
                 let pad = (align - (base % align)) % align;
                 if pad + len > self.chunk_bytes {
-                    // A fresh chunk cannot even hold this block once aligned.
-                    // Report it as too large rather than looping forever on new
-                    // chunks that will fail the same way.
                     return Err(ArenaError::BlockLargerThanChunk {
                         len: pad + len,
                         chunk_bytes: self.chunk_bytes,
                     });
                 }
-                (self.chunks.len() - 1, pad)
+                self.chunks
+                    .try_reserve(1)
+                    .map_err(|_| ArenaError::BackingAllocationFailed {
+                        requested: mem::size_of::<Vec<u8>>(),
+                    })?;
+                Some((chunk, pad))
             }
+        };
+
+        // A generation at u32::MAX is retired rather than wrapped: wrapping
+        // would eventually make a stale handle current again. Retired slots
+        // are small metadata tombstones and never name live storage.
+        let reusable = loop {
+            match self.free_slots.pop() {
+                Some(index) if self.slots[index as usize].generation == u32::MAX => continue,
+                other => break other,
+            }
+        };
+        if reusable.is_none() {
+            if self.slots.len() >= u32::MAX as usize {
+                return Err(ArenaError::SlotSpaceExhausted);
+            }
+            self.slots
+                .try_reserve(1)
+                .map_err(|_| ArenaError::BackingAllocationFailed {
+                    requested: mem::size_of::<Slot>(),
+                })?;
+            let release_capacity = self
+                .slots
+                .len()
+                .checked_add(1)
+                .and_then(|needed| needed.checked_sub(self.free_slots.len()))
+                .ok_or(ArenaError::SlotSpaceExhausted)?;
+            self.free_slots.try_reserve(release_capacity).map_err(|_| {
+                ArenaError::BackingAllocationFailed {
+                    requested: release_capacity.saturating_mul(mem::size_of::<u32>()),
+                }
+            })?;
+        }
+
+        let (chunk_index, start) = match (placed, new_chunk) {
+            (Some(place), None) => place,
+            (None, Some((chunk, pad))) => {
+                let index = self.chunks.len();
+                self.chunks.push(chunk);
+                (index, pad)
+            }
+            _ => unreachable!("placement planning must choose exactly one chunk"),
         };
         self.used_in_last = start + len;
 
-        let slot_index = match self.free_slots.pop() {
+        let slot_index = match reusable {
             Some(index) => {
                 let slot = &mut self.slots[index as usize];
                 slot.chunk = chunk_index;
                 slot.start = start;
                 slot.len = len;
-                slot.generation = slot.generation.wrapping_add(1);
+                slot.align = align;
+                slot.generation += 1;
                 slot.live = true;
                 index
             }
             None => {
-                let index = u32::try_from(self.slots.len()).expect("slot count fits u32");
+                let index =
+                    u32::try_from(self.slots.len()).map_err(|_| ArenaError::SlotSpaceExhausted)?;
                 self.slots.push(Slot {
                     chunk: chunk_index,
                     start,
                     len,
+                    align,
                     generation: 1,
                     live: true,
                 });
@@ -668,12 +796,684 @@ impl RegionAlloc for Region {
     fn release(&mut self, handle: Handle) -> Result<usize, ArenaError> {
         let index = self.resolve(handle)?;
         let len = self.slots[index].len;
+        debug_assert!(
+            self.free_slots.len() < self.free_slots.capacity(),
+            "slot creation reserves one release entry per slot"
+        );
         self.slots[index].live = false;
         self.free_slots.push(handle.slot);
         self.bytes_reclaimed += len as u64;
         self.blocks_released += 1;
         self.live_bytes -= len;
         Ok(len)
+    }
+}
+
+/// Why a safe typed-region operation was refused.
+///
+/// Allocation refusals never mutate the vector's element sequence. Capacity
+/// may grow before a later, impossible-under-the-contract allocator callback
+/// fault is detected, but initialized values remain owned and accessible.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RegionVecError {
+    /// The query context refused work at its cancellation/budget checkpoint.
+    CheckpointRefused,
+    /// `T` asks for an alignment the region kernel does not support.
+    UnsupportedAlignment { align: usize, maximum: usize },
+    /// `len + additional`, or the corresponding byte layout, overflowed.
+    CapacityOverflow,
+    /// An insertion index exceeded the current length.
+    IndexOutOfBounds { index: usize, len: usize },
+    /// The task-local owner counter cannot represent another typed container.
+    OwnerCounterExhausted,
+    /// The byte-region kernel refused the allocation.
+    Arena(ArenaError),
+    /// A private allocator callback violated its exact address/layout contract.
+    AllocatorFault(ArenaError),
+}
+
+impl std::fmt::Display for RegionVecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CheckpointRefused => write!(f, "query checkpoint refused the allocation"),
+            Self::UnsupportedAlignment { align, maximum } => {
+                write!(f, "alignment {align} exceeds region maximum {maximum}")
+            }
+            Self::CapacityOverflow => write!(f, "region vector capacity overflow"),
+            Self::IndexOutOfBounds { index, len } => {
+                write!(f, "insert index {index} exceeds vector length {len}")
+            }
+            Self::OwnerCounterExhausted => write!(f, "typed region owner counter exhausted"),
+            Self::Arena(source) => write!(f, "region allocation refused: {source}"),
+            Self::AllocatorFault(source) => {
+                write!(f, "private allocator callback fault: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegionVecError {}
+
+#[derive(Debug)]
+struct RegionScopeState {
+    region: RefCell<Option<Region>>,
+    owners: Cell<usize>,
+    last_allocation_error: Cell<Option<ArenaError>>,
+    allocator_fault: Cell<Option<ArenaError>>,
+}
+
+impl RegionScopeState {
+    fn claim_owner(&self) -> Result<(), RegionVecError> {
+        let owners = self
+            .owners
+            .get()
+            .checked_add(1)
+            .ok_or(RegionVecError::OwnerCounterExhausted)?;
+        self.owners.set(owners);
+        Ok(())
+    }
+
+    fn release_owner(&self) {
+        let owners = self.owners.get();
+        debug_assert!(owners > 0, "RegionVec owner counter underflow");
+        self.owners.set(owners.saturating_sub(1));
+    }
+
+    fn record_allocator_fault(&self, fault: ArenaError) {
+        if self.allocator_fault.get().is_none() {
+            self.allocator_fault.set(Some(fault));
+        }
+    }
+}
+
+/// A task-local owner for typed region storage.
+///
+/// Vectors borrow this value, so ordinary Rust code cannot close or cancel the
+/// region while a [`RegionVec`] is still accessible. A dynamic owner count
+/// closes the `mem::forget` escape: finalization returns
+/// [`RegionFinishError`] and retains the storage rather than reporting a
+/// balanced audit over live typed owners.
+#[derive(Debug)]
+pub struct RegionScope {
+    state: RegionScopeState,
+}
+
+impl RegionScope {
+    /// Create a typed region over the W1 byte-allocation kernel.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `chunk_bytes` is zero, matching [`Region::with_capacity`].
+    #[must_use]
+    pub fn with_capacity(chunk_bytes: usize, max_bytes: usize) -> Self {
+        Self {
+            state: RegionScopeState {
+                region: RefCell::new(Some(Region::with_capacity(chunk_bytes, max_bytes))),
+                owners: Cell::new(0),
+                last_allocation_error: Cell::new(None),
+                allocator_fault: Cell::new(None),
+            },
+        }
+    }
+
+    /// Number of live typed containers.
+    #[must_use]
+    pub fn owners(&self) -> usize {
+        self.state.owners.get()
+    }
+
+    /// Bytes handed out by the underlying region over its lifetime.
+    #[must_use]
+    pub fn bytes_allocated(&self) -> u64 {
+        self.state
+            .region
+            .borrow()
+            .as_ref()
+            .map_or(0, Region::bytes_allocated)
+    }
+
+    /// Bytes already returned by typed-container reallocation or drop.
+    #[must_use]
+    pub fn bytes_reclaimed(&self) -> u64 {
+        self.state
+            .region
+            .borrow()
+            .as_ref()
+            .map_or(0, Region::bytes_reclaimed)
+    }
+
+    /// Bytes held by currently live backing allocations.
+    #[must_use]
+    pub fn live_bytes(&self) -> usize {
+        self.state
+            .region
+            .borrow()
+            .as_ref()
+            .map_or(0, Region::live_bytes)
+    }
+
+    /// End the region normally after every typed container has dropped.
+    pub fn close(self) -> Result<RegionAudit, RegionFinishError> {
+        self.finish(RegionOutcome::Closed)
+    }
+
+    /// End the region on cancellation after every typed container has dropped.
+    pub fn cancel(self) -> Result<RegionAudit, RegionFinishError> {
+        self.finish(RegionOutcome::Cancelled)
+    }
+
+    fn finish(mut self, outcome: RegionOutcome) -> Result<RegionAudit, RegionFinishError> {
+        let owners = self.state.owners.get();
+        let allocator_fault = self.state.allocator_fault.get();
+        if owners != 0 || allocator_fault.is_some() {
+            return Err(RegionFinishError {
+                scope: Box::new(self),
+                owners,
+                allocator_fault,
+            });
+        }
+        let region = self
+            .state
+            .region
+            .get_mut()
+            .take()
+            .expect("a RegionScope is finalized at most once");
+        Ok(match outcome {
+            RegionOutcome::Closed => region.close(),
+            RegionOutcome::Cancelled => region.cancel(),
+        })
+    }
+}
+
+impl Drop for RegionScope {
+    fn drop(&mut self) {
+        let Some(region) = self.state.region.get_mut().take() else {
+            return;
+        };
+        if self.state.owners.get() != 0 || self.state.allocator_fault.get().is_some() {
+            // A forgotten owner or allocator-contract fault means typed storage
+            // might still be logically live. Freeing it would turn a detected
+            // lifecycle violation into a dangling allocation, so retain it.
+            mem::forget(region);
+        } else {
+            let _ = region.cancel();
+        }
+    }
+}
+
+/// A fail-closed typed-region finalization refusal.
+#[derive(Debug)]
+pub struct RegionFinishError {
+    scope: Box<RegionScope>,
+    owners: usize,
+    allocator_fault: Option<ArenaError>,
+}
+
+impl RegionFinishError {
+    /// Typed owners that prevented finalization.
+    #[must_use]
+    pub fn owners_remaining(&self) -> usize {
+        self.owners
+    }
+
+    /// Allocator callback fault that prevented a trustworthy balanced audit.
+    #[must_use]
+    pub fn allocator_fault(&self) -> Option<ArenaError> {
+        self.allocator_fault
+    }
+
+    /// Recover the retained scope for inspection or a later retry.
+    #[must_use]
+    pub fn into_scope(self) -> RegionScope {
+        *self.scope
+    }
+}
+
+impl std::fmt::Display for RegionFinishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.owners, self.allocator_fault) {
+            (owners, Some(fault)) => write!(
+                f,
+                "region finalization refused with {owners} typed owner(s) and allocator fault: \
+                 {fault}"
+            ),
+            (owners, None) => {
+                write!(
+                    f,
+                    "region finalization refused with {owners} typed owner(s)"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegionFinishError {}
+
+#[repr(align(64))]
+struct MaximumAlignedZero;
+
+static MAXIMUM_ALIGNED_ZERO: MaximumAlignedZero = MaximumAlignedZero;
+
+/// The allocator boundary is deliberately unnameable outside this module.
+///
+/// Moving or copying this adapter preserves every allocation because it holds
+/// a borrow of the immovable-for-that-borrow [`RegionScopeState`]. The region's
+/// chunk buffers never resize, released ranges are never reused, and newly
+/// allocated ranges are pairwise disjoint.
+#[derive(Clone, Copy)]
+struct PrivateRegionAllocator<'region> {
+    state: &'region RegionScopeState,
+}
+
+#[allow(unsafe_code)]
+// SAFETY: the allocator borrow keeps `RegionScopeState` alive, chunks never
+// resize, released ranges are never reused, every nonzero allocation is
+// aligned and disjoint, pointers come from `Vec::as_mut_ptr` without forming a
+// backing-slice reference, deallocation validates exact pointer/layout
+// identity, and a live or unwinding owner makes finalization retain the region.
+unsafe impl core::alloc::Allocator for PrivateRegionAllocator<'_> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        if layout.align() > MAX_BLOCK_ALIGN {
+            let error = ArenaError::BadAlignment {
+                align: layout.align(),
+            };
+            self.state.last_allocation_error.set(Some(error));
+            return Err(AllocError);
+        }
+        if layout.size() == 0 {
+            let pointer = NonNull::from(&MAXIMUM_ALIGNED_ZERO).cast::<u8>();
+            return Ok(NonNull::slice_from_raw_parts(pointer, 0));
+        }
+        let mut region_slot = match self.state.region.try_borrow_mut() {
+            Ok(region) => region,
+            Err(_) => {
+                self.state
+                    .last_allocation_error
+                    .set(Some(ArenaError::AllocatorReentered));
+                return Err(AllocError);
+            }
+        };
+        let Some(region) = region_slot.as_mut() else {
+            self.state
+                .last_allocation_error
+                .set(Some(ArenaError::RegionNotOpen));
+            return Err(AllocError);
+        };
+        let handle = match region.alloc_block(layout.size(), layout.align()) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.state.last_allocation_error.set(Some(error));
+                return Err(AllocError);
+            }
+        };
+        let index = match region.resolve(handle) {
+            Ok(index) => index,
+            Err(error) => {
+                self.state.record_allocator_fault(error);
+                self.state.last_allocation_error.set(Some(error));
+                return Err(AllocError);
+            }
+        };
+        let slot = region.slots[index];
+        // `Vec::as_mut_ptr` is specifically guaranteed not to materialize a
+        // reference to the backing slice. That matters here: forming
+        // `&mut chunk[start..end]` would uniquely retag the whole byte chunk
+        // and invalidate pointers previously handed to other RegionVecs.
+        let pointer = region.chunks[slot.chunk]
+            .as_mut_ptr()
+            .wrapping_add(slot.start);
+        let Some(pointer) = NonNull::new(pointer) else {
+            let error = ArenaError::BackingAllocationFailed {
+                requested: layout.size(),
+            };
+            self.state.record_allocator_fault(error);
+            self.state.last_allocation_error.set(Some(error));
+            return Err(AllocError);
+        };
+        Ok(NonNull::slice_from_raw_parts(pointer, layout.size()))
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        if layout.size() == 0 {
+            return;
+        }
+        let mut region_slot = match self.state.region.try_borrow_mut() {
+            Ok(region) => region,
+            Err(_) => {
+                self.state
+                    .record_allocator_fault(ArenaError::AllocatorReentered);
+                return;
+            }
+        };
+        let Some(region) = region_slot.as_mut() else {
+            self.state.record_allocator_fault(ArenaError::RegionNotOpen);
+            return;
+        };
+        if let Err(error) = region.release_allocation(ptr.as_ptr().addr(), layout) {
+            self.state.record_allocator_fault(error);
+        }
+    }
+}
+
+/// A typed vector whose actual element buffer is allocated from a
+/// [`RegionScope`].
+///
+/// The private allocator and `Vec<T, A>` type never appear in this public
+/// surface. Methods that can allocate require [`QueryCx`], checkpoint before
+/// touching the element sequence, and reserve before mutation. This type does
+/// not implement `Deref`, `Clone`, `Extend`, or `FromIterator`, because those
+/// routes would expose allocating operations without the purpose context.
+pub struct RegionVec<'region, T> {
+    inner: Option<Vec<T, PrivateRegionAllocator<'region>>>,
+    state: &'region RegionScopeState,
+}
+
+impl<'region, T> RegionVec<'region, T> {
+    /// Open an empty typed container in `scope`.
+    pub fn new_in(scope: &'region RegionScope) -> Result<Self, RegionVecError> {
+        let align = mem::align_of::<T>();
+        if align > MAX_BLOCK_ALIGN {
+            return Err(RegionVecError::UnsupportedAlignment {
+                align,
+                maximum: MAX_BLOCK_ALIGN,
+            });
+        }
+        scope.state.claim_owner()?;
+        Ok(Self {
+            inner: Some(Vec::new_in(PrivateRegionAllocator {
+                state: &scope.state,
+            })),
+            state: &scope.state,
+        })
+    }
+
+    /// Open a container and reserve at least `capacity` elements.
+    pub fn with_capacity_in(
+        scope: &'region RegionScope,
+        cx: &QueryCx,
+        capacity: usize,
+    ) -> Result<Self, RegionVecError> {
+        let mut vector = Self::new_in(scope)?;
+        if let Err(error) = vector.try_reserve_exact(cx, capacity) {
+            drop(vector);
+            return Err(error);
+        }
+        Ok(vector)
+    }
+
+    fn inner(&self) -> &Vec<T, PrivateRegionAllocator<'region>> {
+        let Some(inner) = self.inner.as_ref() else {
+            unreachable!("RegionVec inner storage exists until Drop")
+        };
+        inner
+    }
+
+    fn inner_mut(&mut self) -> &mut Vec<T, PrivateRegionAllocator<'region>> {
+        let Some(inner) = self.inner.as_mut() else {
+            unreachable!("RegionVec inner storage exists until Drop")
+        };
+        inner
+    }
+
+    fn checkpoint(cx: &QueryCx) -> Result<(), RegionVecError> {
+        cx.checkpoint()
+            .map_err(|_| RegionVecError::CheckpointRefused)
+    }
+
+    fn reserve_with(
+        &mut self,
+        cx: &QueryCx,
+        additional: usize,
+        exact: bool,
+    ) -> Result<(), RegionVecError> {
+        Self::checkpoint(cx)?;
+        self.state.last_allocation_error.set(None);
+        let result = if exact {
+            self.inner_mut().try_reserve_exact(additional)
+        } else {
+            self.inner_mut().try_reserve(additional)
+        };
+        match result {
+            Ok(()) => match self.state.allocator_fault.get() {
+                Some(error) => Err(RegionVecError::AllocatorFault(error)),
+                None => Ok(()),
+            },
+            Err(_) => match self.state.last_allocation_error.take() {
+                Some(error) => Err(RegionVecError::Arena(error)),
+                None => Err(RegionVecError::CapacityOverflow),
+            },
+        }
+    }
+
+    /// Number of initialized elements.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner().len()
+    }
+
+    /// Whether there are no initialized elements.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner().is_empty()
+    }
+
+    /// Number of elements the current region allocation can hold.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.inner().capacity()
+    }
+
+    /// Borrow the initialized element sequence.
+    #[must_use]
+    pub fn as_slice(&self) -> &[T] {
+        self.inner().as_slice()
+    }
+
+    /// Borrow the initialized element sequence exclusively.
+    #[must_use]
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        self.inner_mut().as_mut_slice()
+    }
+
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.inner().get(index)
+    }
+
+    #[must_use]
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.inner_mut().get_mut(index)
+    }
+
+    pub fn try_reserve(&mut self, cx: &QueryCx, additional: usize) -> Result<(), RegionVecError> {
+        self.reserve_with(cx, additional, false)
+    }
+
+    pub fn try_reserve_exact(
+        &mut self,
+        cx: &QueryCx,
+        additional: usize,
+    ) -> Result<(), RegionVecError> {
+        self.reserve_with(cx, additional, true)
+    }
+
+    pub fn try_push(&mut self, cx: &QueryCx, value: T) -> Result<(), RegionVecError> {
+        self.reserve_with(cx, 1, false)?;
+        self.inner_mut().push(value);
+        Ok(())
+    }
+
+    pub fn try_insert(
+        &mut self,
+        cx: &QueryCx,
+        index: usize,
+        value: T,
+    ) -> Result<(), RegionVecError> {
+        let len = self.len();
+        if index > len {
+            return Err(RegionVecError::IndexOutOfBounds { index, len });
+        }
+        self.reserve_with(cx, 1, false)?;
+        self.inner_mut().insert(index, value);
+        Ok(())
+    }
+
+    /// Extend atomically with respect to structured allocation refusal.
+    ///
+    /// Items are first staged in the same region. If staging or final reserve
+    /// fails, `self` is unchanged; on success, `Vec::append` only moves already
+    /// initialized `T` values into capacity reserved under `cx`.
+    pub fn try_extend<I>(&mut self, cx: &QueryCx, values: I) -> Result<(), RegionVecError>
+    where
+        I: IntoIterator<Item = T>,
+    {
+        Self::checkpoint(cx)?;
+        self.state.claim_owner()?;
+        let mut staged = Self {
+            inner: Some(Vec::new_in(PrivateRegionAllocator { state: self.state })),
+            state: self.state,
+        };
+        for value in values {
+            staged.try_push(cx, value)?;
+        }
+        self.reserve_with(cx, staged.len(), false)?;
+        self.inner_mut().append(staged.inner_mut());
+        Ok(())
+    }
+
+    pub fn try_extend_from_slice(
+        &mut self,
+        cx: &QueryCx,
+        values: &[T],
+    ) -> Result<(), RegionVecError>
+    where
+        T: Clone,
+    {
+        self.try_extend(cx, values.iter().cloned())
+    }
+
+    pub fn try_resize(
+        &mut self,
+        cx: &QueryCx,
+        new_len: usize,
+        value: T,
+    ) -> Result<(), RegionVecError>
+    where
+        T: Clone,
+    {
+        Self::checkpoint(cx)?;
+        if new_len <= self.len() {
+            self.truncate(new_len);
+            return Ok(());
+        }
+        self.try_extend(cx, std::iter::repeat_n(value, new_len - self.len()))
+    }
+
+    pub fn try_resize_with(
+        &mut self,
+        cx: &QueryCx,
+        new_len: usize,
+        mut value: impl FnMut() -> T,
+    ) -> Result<(), RegionVecError> {
+        Self::checkpoint(cx)?;
+        if new_len <= self.len() {
+            self.truncate(new_len);
+            return Ok(());
+        }
+        let additional = new_len - self.len();
+        self.try_extend(cx, (0..additional).map(|_| value()))
+    }
+
+    pub fn try_clone(&self, cx: &QueryCx) -> Result<Self, RegionVecError>
+    where
+        T: Clone,
+    {
+        Self::checkpoint(cx)?;
+        self.state.claim_owner()?;
+        let mut cloned = Self {
+            inner: Some(Vec::new_in(PrivateRegionAllocator { state: self.state })),
+            state: self.state,
+        };
+        if let Err(error) = cloned.try_extend(cx, self.as_slice().iter().cloned()) {
+            drop(cloned);
+            return Err(error);
+        }
+        Ok(cloned)
+    }
+
+    pub fn pop(&mut self) -> Option<T> {
+        self.inner_mut().pop()
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        self.inner_mut().truncate(len);
+    }
+
+    pub fn clear(&mut self) {
+        self.inner_mut().clear();
+    }
+
+    pub fn remove(&mut self, index: usize) -> T {
+        self.inner_mut().remove(index)
+    }
+
+    pub fn swap_remove(&mut self, index: usize) -> T {
+        self.inner_mut().swap_remove(index)
+    }
+
+    pub fn replace(&mut self, index: usize, value: T) -> Result<T, RegionVecError> {
+        let len = self.len();
+        let Some(slot) = self.get_mut(index) else {
+            return Err(RegionVecError::IndexOutOfBounds { index, len });
+        };
+        Ok(mem::replace(slot, value))
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.as_slice().iter()
+    }
+
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.as_mut_slice().iter_mut()
+    }
+}
+
+impl<T> Drop for RegionVec<'_, T> {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.take() else {
+            return;
+        };
+        // Drop glue and the allocator deallocation callback both complete
+        // before the owner lease is released. If T::drop panics, the lease
+        // deliberately remains live and RegionScope will retain the storage.
+        drop(inner);
+        self.state.release_owner();
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for RegionVec<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl<T: PartialEq> PartialEq for RegionVec<'_, T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl<T: Eq> Eq for RegionVec<'_, T> {}
+
+impl<T> AsRef<[T]> for RegionVec<'_, T> {
+    fn as_ref(&self) -> &[T] {
+        self.as_slice()
+    }
+}
+
+impl<T> AsMut<[T]> for RegionVec<'_, T> {
+    fn as_mut(&mut self) -> &mut [T] {
+        self.as_mut_slice()
     }
 }
 
