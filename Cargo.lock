@@ -508,6 +508,7 @@ dependencies = [
 name = "fgdb-chronicle"
 version = "0.0.1"
 dependencies = [
+ "asupersync",
  "fgdb-crypto",
  "fgdb-types",
 ]

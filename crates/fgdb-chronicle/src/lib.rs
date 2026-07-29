@@ -22,9 +22,11 @@
 
 pub mod identity;
 pub mod symbol;
+pub mod symbolize;
 
 pub use identity::{
     CipherDescriptor, EncodedObject, EncodingDescriptor, IdentifiedObject, LocationForm,
     PlacedObject, PlacementDescriptor, ProtectedObject,
 };
 pub use symbol::{SymbolError, SymbolRecord};
+pub use symbolize::{RecoveryTarget, SymbolizeError, decode_object, encode_object};

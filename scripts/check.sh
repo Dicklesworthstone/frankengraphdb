@@ -746,10 +746,23 @@ run_ubs() {
 # ATTRIBUTED BY DIFFERENTIAL per the standing recipe: per-file count against the
 # settled pre-change copy, tests/identity.rs 340 -> 341, every other changed
 # file unchanged.
+# MOVED 2026-07-29 (fgdb-w2-object-identity-t0f): JWT 120 -> 123, +3, all of it
+# in `crates/fgdb-chronicle/tests/erasure_recovery.rs`. The scanner matches the
+# substring "decode" in TEST FUNCTION NAMES:
+#     a_corrupted_symbol_is_rejected_before_it_can_perturb_a_decode
+#     a_symbol_from_another_encoding_cannot_join_a_decode
+#     ...and the module's third decode-named test
+# No JWT, no token, and no signature validation exists anywhere in this
+# workspace — the closed dependency universe forbids `jsonwebtoken` outright.
+# Renaming the tests would buy a smaller number at the cost of names that no
+# longer say what they prove, which is the wrong trade.
+# ATTRIBUTED BY DIFFERENTIAL: fgdb-chronicle is a new crate, so `ubs
+# crates/fgdb-chronicle/` reports the whole delta; measured 3 in that one file
+# and 0 elsewhere in the crate.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=799"
   "panic!/unreachable!/todo!/unimplemented!=135"
-  "JWT decode, validation bypass, or missing claim binding=120"
+  "JWT decode, validation bypass, or missing claim binding=123"
 )
 
 # ubs_critical_ratchet <log> -> 0 when the critical partition equals the baseline

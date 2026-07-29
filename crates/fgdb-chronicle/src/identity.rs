@@ -226,6 +226,7 @@ impl ProtectedObject {
         EncodedObject {
             object_id: self.object_id,
             ciphertext_id: self.ciphertext_id,
+            cipher_descriptor: self.descriptor.clone(),
             descriptor,
             encoding_id,
         }
@@ -262,8 +263,15 @@ impl EncodingDescriptor {
 }
 
 /// Stage 3 — *how it is coded*.
+///
+/// Carries the cipher descriptor forward as well as the encoding descriptor:
+/// the plan requires a decoder to obtain the *complete* descriptor set from an
+/// authenticated encoding before accepting any symbol, so the authenticated
+/// chain — not a side channel and never an individual symbol — is what supplies
+/// the AAD and nonce needed to open recovered bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedObject {
+    cipher_descriptor: CipherDescriptor,
     object_id: ObjectId,
     ciphertext_id: Digest,
     descriptor: EncodingDescriptor,
@@ -290,6 +298,33 @@ impl EncodedObject {
     /// The per-encoding symbol-authentication key (plan L280):
     /// `K_symbol = KDF(DEK, "fgdb:symbol-auth:v1" ‖ EncodingId)`. Symbols from
     /// different encodings therefore never share a MAC key.
+    /// The cipher descriptor carried forward from stage 2 — the authenticated
+    /// source of the AAD and nonce a decoder needs.
+    pub fn cipher_descriptor(&self) -> &CipherDescriptor {
+        &self.cipher_descriptor
+    }
+
+    /// Open protected bytes recovered from symbols. Used by the symbolization
+    /// decode path, where the ciphertext is reassembled rather than held: the
+    /// AAD comes from this authenticated encoding, so recovered bytes that are
+    /// not the sealed bytes cannot open.
+    pub fn open_recovered(
+        &self,
+        protected_bytes: &[u8],
+        dek: &[u8; 32],
+    ) -> Result<Vec<u8>, aead::AeadError> {
+        let aad = aead::object_aead_aad(
+            &Digest(self.object_id.0),
+            &self.cipher_descriptor.canonical_bytes(),
+        );
+        aead::xchacha20poly1305_open(
+            dek,
+            &self.cipher_descriptor.object_nonce,
+            &aad,
+            protected_bytes,
+        )
+    }
+
     pub fn symbol_auth_key(&self, dek: &[u8; 32]) -> [u8; 32] {
         fgdb_crypto::symbol_auth_key(dek, &self.encoding_id)
     }
