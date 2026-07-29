@@ -24,6 +24,7 @@ pub mod identity;
 pub mod pack;
 pub mod root;
 pub mod scrub;
+pub mod store;
 pub mod symbol;
 pub mod symbolize;
 
@@ -40,5 +41,6 @@ pub use root::{
     recover_root_object, select_root,
 };
 pub use scrub::{LostReason, ScrubReport, ScrubVerdict, scrub_object};
+pub use store::{RootStore, StoreError};
 pub use symbol::{SymbolError, SymbolRecord};
 pub use symbolize::{RecoveryTarget, SymbolizeError, decode_object, encode_object};
