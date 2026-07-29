@@ -20,6 +20,7 @@
 //! two-fsync protocol, the `WriteCoordinator`, retention tiers, and branches.
 #![forbid(unsafe_code)]
 
+pub mod capsule;
 pub mod commit;
 pub mod identity;
 pub mod marker;
