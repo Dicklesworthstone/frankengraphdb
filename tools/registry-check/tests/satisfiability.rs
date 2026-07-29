@@ -241,6 +241,55 @@ const REGISTRY: &[(&str, Coverage)] = &[
             trigger_tests: &["idr_refinement_claims_resolve_to_a_registered_arm"],
         },
     ),
+    // ---- payload-value family (fgdb-payload-bearing-arm-values-5u56) -------------------
+    // All seven land witnessed rather than on the backlog:
+    // `idr_payload_bearing_arm_values_preserve_the_complete_payload` strips the
+    // accounting clause from both LANDED tag-only discriminants on the real
+    // corpus, and synthesizes the conformant arm value against the registered
+    // AuditTicketOwner.Operation digest before mutating the pin, the class,
+    // the claim shape, and the kind.
+    (
+        "refinement_tag_only_payload_unaccounted",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_payload_bearing_arm_values_preserve_the_complete_payload"],
+        },
+    ),
+    (
+        "arm_value_claim_missing",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_payload_bearing_arm_values_preserve_the_complete_payload"],
+        },
+    ),
+    (
+        "arm_value_conjunction_invalid",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_payload_bearing_arm_values_preserve_the_complete_payload"],
+        },
+    ),
+    (
+        "arm_value_on_unit_payload",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_payload_bearing_arm_values_preserve_the_complete_payload"],
+        },
+    ),
+    (
+        "arm_value_payload_pin_missing",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_payload_bearing_arm_values_preserve_the_complete_payload"],
+        },
+    ),
+    (
+        "arm_value_payload_pin_malformed",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_payload_bearing_arm_values_preserve_the_complete_payload"],
+        },
+    ),
+    (
+        "arm_value_payload_pin_mismatch",
+        Coverage::WitnessedElsewhere {
+            trigger_tests: &["idr_payload_bearing_arm_values_preserve_the_complete_payload"],
+        },
+    ),
     // ---- manifest cross-field family (fgdb-xkg9) -------------------------------------
     (
         "restore_service_promotion_manifest_coherence",

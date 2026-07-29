@@ -52,6 +52,22 @@
 //!   refinement_union_unresolved   refined union is not a registered union
 //!   refinement_arm_unresolved     refined arm name is not an arm of that union
 //!   refinement_arm_tag_mismatch   arm resolves but under a different arm_tag
+//!   refinement_tag_only_payload_unaccounted  a tag-only discriminant refines
+//!                           a payload-bearing arm without accounting for the
+//!                           payload in its claim
+//!   arm_value_claim_missing  a payload-preserving arm value carries no
+//!                           refinement claim at all
+//!   arm_value_conjunction_invalid  an arm value claims a two-location
+//!                           conjunction, which is a precondition shape
+//!   arm_value_on_unit_payload  an arm value refines a unit-payload arm,
+//!                           where the tag-only discriminant is the complete
+//!                           and smaller instrument
+//!   arm_value_payload_pin_missing  an arm value carries no parseable
+//!                           complete-payload pin
+//!   arm_value_payload_pin_malformed  an arm value advertises the pin but
+//!                           breaks its closed spelling
+//!   arm_value_payload_pin_mismatch  the pinned arm name or payload digest
+//!                           disagrees with the resolved registered arm
 //!   restore_service_promotion_manifest_coherence  manifest posture, BODY, and
 //!                           authority-profile tag domains are not bound to
 //!                           their one legal cross-field truth table
@@ -254,6 +270,98 @@ fn refinement_union_base(name: &str) -> &str {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Value-position refinement classes (fgdb-payload-bearing-arm-values-5u56).
+//
+// The fgdb-gpms ruling minted the tag-refined discriminant for PRECONDITION
+// fields: the field gates on which arm the state is in, so it carries the
+// refined union's tag and never the arm payload. That instrument is complete
+// only while the payload is accounted for. Every value-position refinement
+// therefore lands in exactly one of two classes:
+//
+//   TAG-ONLY PRECONDITION (`kind = "discriminant"`). The field is a gate,
+//   not a carrier. Its claim must contain the accounting clause
+//   `carries the refined union's u8 tag and never the arm payload` whenever
+//   the refined arm is payload-bearing (`payload_kind != "unit"`): either
+//   the full stop (the precondition's semantics are tag-level, as on the
+//   PromotedAwaitingReopen landing) or a `, while ... bind ...` continuation
+//   naming the sibling fields that carry the payload independently (the
+//   LocalAbort landing). A payload-bearing arm refined by a discriminant
+//   whose claim is silent about the payload is an erasure, not a refinement.
+//
+//   PAYLOAD-BEARING ARM VALUE (`kind = "arm_value"`). The field IS the arm
+//   value — `AuditTicketClaimRecord.owner : AuditTicketOwner::Operation`,
+//   where the Operation payload {global_txn_id, registration_generation,
+//   operation_request_basis_commitment} is the record's owner identity and
+//   no sibling field carries it. The representation carries the refined
+//   union's tag AND the complete selected-arm payload, and the claim pins
+//   that payload by the digest the census registered for the arm:
+//
+//     carries the refined union's u8 tag and the complete <SourceArmName>
+//     arm payload (payload_sha256 <64 lowercase hex>)
+//
+//   The pin makes "complete" mechanical: dropping it, corrupting the digest,
+//   or naming a different arm all fail closed. An `arm_value` on a
+//   unit-payload arm is an obfuscated discriminant; an `arm_value` with a
+//   two-location conjunction is a precondition shape wearing the wrong kind.
+//
+// ---------------------------------------------------------------------------
+
+/// The accounting clause a tag-only discriminant must carry when it refines a
+/// payload-bearing arm. Both spellings in the landed corpus contain it
+/// verbatim: the full-stop form and the `, while ... bind ...` form.
+pub const TAG_ONLY_PAYLOAD_ACCOUNTING_MARKER: &str =
+    "carries the refined union's u8 tag and never the arm payload";
+
+/// The prefix of the complete-payload pin an `arm_value` claim must carry.
+pub const ARM_VALUE_PAYLOAD_PIN_PREFIX: &str =
+    "carries the refined union's u8 tag and the complete ";
+
+/// The infix separating the pinned arm name from its registered digest.
+pub const ARM_VALUE_PAYLOAD_PIN_INFIX: &str = " arm payload (payload_sha256 ";
+
+/// One parsed complete-payload pin: the named arm and its claimed digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArmValuePayloadPin<'a> {
+    arm: &'a str,
+    sha256: &'a str,
+}
+
+/// Parse the complete-payload pin out of an `arm_value` `encoding_context`.
+///
+/// `None` means no pin prefix is present at all (the
+/// `arm_value_payload_pin_missing` case). `Some(Err(()))` means the row
+/// advertises the pin but breaks its closed spelling — truncated name,
+/// missing infix, wrong digest length, non-hex, an unterminated `)`, or a
+/// repeated pin marker — which must fail closed rather than be skipped the way
+/// a prose claim would be. `Some(Ok(pin))` is one well-formed pin; agreement
+/// with the resolved registered arm is the caller's check.
+fn parse_arm_value_payload_pin(
+    encoding_context: &str,
+) -> Option<Result<ArmValuePayloadPin<'_>, ()>> {
+    let pin_count = encoding_context
+        .matches(ARM_VALUE_PAYLOAD_PIN_PREFIX)
+        .count();
+    match pin_count {
+        0 => return None,
+        1 => {}
+        _ => return Some(Err(())),
+    }
+    let (_, rest) = encoding_context.split_once(ARM_VALUE_PAYLOAD_PIN_PREFIX)?;
+    Some((|| {
+        let (arm, rest) = rest.split_once(ARM_VALUE_PAYLOAD_PIN_INFIX).ok_or(())?;
+        if arm.is_empty() || arm.contains(' ') {
+            return Err(());
+        }
+        let (sha256, tail) = rest.split_once(')').ok_or(())?;
+        if !is_lowercase_sha256(sha256) {
+            return Err(());
+        }
+        let _ = tail;
+        Ok(ArmValuePayloadPin { arm, sha256 })
+    })())
+}
+
 /// Resolve one parsed refinement clause through the ordinary-union catalog.
 ///
 /// Keeping this outside the caller's bounded one-or-two-clause loop also keeps
@@ -309,6 +417,36 @@ fn validate_refinement_clause(
                 ));
             }
         }
+    }
+}
+
+/// Resolve one parsed refinement clause to the registered arm rows it names.
+///
+/// Returns `None` on any resolution failure — unknown union, unknown arm, or
+/// tag mismatch — because `validate_refinement_clause` has already emitted
+/// the precise violation for that failure, and a payload law must never
+/// double-report on an unresolved claim. The `any`-on-tag rule matches the
+/// validator: several role instantiations of one generic union may register
+/// the arm under different tags, and the claim names the union, not the
+/// instantiation, so every instantiation whose arm matches the claimed tag is
+/// a resolution.
+fn resolve_refinement_clause<'a>(
+    ordinary_unions_by_base: &BTreeMap<&str, Vec<&'a OrdinaryUnion>>,
+    (arm, tag, union): RefinementClause<'_>,
+) -> Option<Vec<&'a OrdinaryUnionArm>> {
+    let unions = ordinary_unions_by_base.get(refinement_union_base(union))?;
+    let resolved: Vec<&OrdinaryUnionArm> = unions
+        .iter()
+        .flat_map(|u| u.arms.iter())
+        .filter(|a| a.source_arm_name == arm && a.arm_tag == tag)
+        .collect();
+    if resolved.is_empty() {
+        // Either the arm name is unregistered (refinement_arm_unresolved) or
+        // every registered instance carries a different tag
+        // (refinement_arm_tag_mismatch); both are already reported.
+        None
+    } else {
+        Some(resolved)
     }
 }
 
@@ -1968,7 +2106,13 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
     for w in &r.wire {
         if !matches!(
             w.kind.as_str(),
-            "record" | "union" | "union_variant" | "reference_wrapper" | "discriminant" | "framing"
+            "record"
+                | "union"
+                | "union_variant"
+                | "reference_wrapper"
+                | "discriminant"
+                | "arm_value"
+                | "framing"
         ) {
             out.push(v(
                 "bad_field",
@@ -2031,7 +2175,8 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         // one alone would overstate coverage. The conjunction grammar is
         // therefore closed at exactly two distinct clauses, and this loop
         // resolves every returned clause through the same laws as a singleton.
-        match parse_refinement_claim(&w.encoding_context) {
+        let refinement_claim = parse_refinement_claim(&w.encoding_context);
+        match refinement_claim.as_ref() {
             None => {}
             Some(Err(RefinementClaimParseError::Single)) => out.push(v(
                 "refinement_claim_unparseable",
@@ -2059,7 +2204,151 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             )),
             Some(Ok(clauses)) => {
                 for clause in clauses {
-                    validate_refinement_clause(&ordinary_unions_by_base, &w.name, clause, &mut out);
+                    validate_refinement_clause(
+                        &ordinary_unions_by_base,
+                        &w.name,
+                        *clause,
+                        &mut out,
+                    );
+                }
+            }
+        }
+        // LAW: the two value-position refinement classes are disjoint and
+        // each carries its own payload contract
+        // (fgdb-payload-bearing-arm-values-5u56). The fgdb-gpms discriminant
+        // is the tag-only PRECONDITION instrument; it is sound on a
+        // payload-bearing arm only while the claim accounts for the payload
+        // (`never the arm payload`, optionally with a `, while ... bind ...`
+        // continuation naming the siblings that carry it). A value field —
+        // `AuditTicketClaimRecord.owner : AuditTicketOwner::Operation`, whose
+        // payload IS the owner identity and has no sibling carrier — takes
+        // the `arm_value` instrument instead: the refined tag PLUS the
+        // complete selected-arm payload, pinned by the arm's
+        // census-registered digest so "complete" is a comparison, not an
+        // adjective. The laws run only over claims that resolved; an
+        // unresolved claim is already reported by the refinement law above
+        // and must not double-report.
+        if w.kind == "arm_value" && refinement_claim.is_none() {
+            out.push(v(
+                "arm_value_claim_missing",
+                "wire_types",
+                &w.name,
+                "a kind=\"arm_value\" wire tag is defined by its arm refinement but its \
+                 encoding_context carries no refinement claim; the value it preserves is \
+                 unknowable and the row is unenforced",
+            ));
+        }
+        if let Some(Ok(clauses)) = refinement_claim.as_ref() {
+            let resolutions: Vec<Option<Vec<&OrdinaryUnionArm>>> = clauses
+                .iter()
+                .map(|clause| resolve_refinement_clause(&ordinary_unions_by_base, *clause))
+                .collect();
+            if resolutions.iter().all(Option::is_some) {
+                let resolved: Vec<&OrdinaryUnionArm> = resolutions
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .flatten()
+                    .copied()
+                    .collect();
+                match w.kind.as_str() {
+                    "discriminant" => {
+                        if resolved.iter().any(|arm| arm.payload_kind != "unit")
+                            && !w
+                                .encoding_context
+                                .contains(TAG_ONLY_PAYLOAD_ACCOUNTING_MARKER)
+                        {
+                            out.push(v(
+                                "refinement_tag_only_payload_unaccounted",
+                                "wire_types",
+                                &w.name,
+                                format!(
+                                    "a tag-only discriminant refines a payload-bearing arm but \
+                                     its claim never accounts for the payload; it must carry \
+                                     \"{TAG_ONLY_PAYLOAD_ACCOUNTING_MARKER}\" (optionally with \
+                                     a `, while ... bind ...` continuation naming the sibling \
+                                     fields that carry the payload), or the field erases the \
+                                     selected arm's payload"
+                                ),
+                            ));
+                        }
+                    }
+                    "arm_value" => {
+                        if clauses.len() != 1 {
+                            out.push(v(
+                                "arm_value_conjunction_invalid",
+                                "wire_types",
+                                &w.name,
+                                "an arm value preserves exactly one selected arm's payload; a \
+                                 two-location conjunction is a precondition shape and belongs \
+                                 to kind=\"discriminant\"",
+                            ));
+                        } else {
+                            if resolved.iter().all(|arm| arm.payload_kind == "unit") {
+                                out.push(v(
+                                    "arm_value_on_unit_payload",
+                                    "wire_types",
+                                    &w.name,
+                                    "every resolved arm has a unit payload; the tag-only \
+                                     discriminant is the complete and smaller instrument for \
+                                     a payload-free refinement",
+                                ));
+                            }
+                            match parse_arm_value_payload_pin(&w.encoding_context) {
+                                None => out.push(v(
+                                    "arm_value_payload_pin_missing",
+                                    "wire_types",
+                                    &w.name,
+                                    format!(
+                                        "an arm value must pin its complete payload as \
+                                         \"{ARM_VALUE_PAYLOAD_PIN_PREFIX}<SourceArmName>\
+                                         {ARM_VALUE_PAYLOAD_PIN_INFIX}<64 lowercase hex>)\"; \
+                                         without the pin there is no evidence the complete \
+                                         payload is carried"
+                                    ),
+                                )),
+                                Some(Err(())) => out.push(v(
+                                    "arm_value_payload_pin_malformed",
+                                    "wire_types",
+                                    &w.name,
+                                    "the complete-payload pin is advertised but breaks its \
+                                     closed spelling (empty or multi-word arm name, missing \
+                                     infix, non-64-lowercase-hex digest, unterminated `)`, or \
+                                     repeated pin marker)",
+                                )),
+                                Some(Ok(pin)) => {
+                                    let agrees = resolved.iter().any(|arm| {
+                                        arm.source_arm_name == pin.arm
+                                            && arm.payload_sha256.as_deref() == Some(pin.sha256)
+                                    });
+                                    if !agrees {
+                                        let registered: Vec<String> = resolved
+                                            .iter()
+                                            .map(|arm| {
+                                                format!(
+                                                    "{} (payload_sha256 {})",
+                                                    arm.source_arm_name,
+                                                    arm.payload_sha256.as_deref().unwrap_or("none")
+                                                )
+                                            })
+                                            .collect();
+                                        out.push(v(
+                                            "arm_value_payload_pin_mismatch",
+                                            "wire_types",
+                                            &w.name,
+                                            format!(
+                                                "the pin names {} with digest {}, but the \
+                                                 resolved claim registers {}",
+                                                pin.arm,
+                                                pin.sha256,
+                                                registered.join(", ")
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2492,6 +2781,7 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                     | "union_variant"
                     | "reference_wrapper"
                     | "discriminant"
+                    | "arm_value"
                     | "framing"
             )
         {

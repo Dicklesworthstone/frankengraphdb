@@ -16128,6 +16128,327 @@ fn idr_refinement_conjunction_is_atomic_and_total() {
     );
 }
 
+/// Value-position refinements are classified into tag-only preconditions and
+/// payload-bearing arm values, and each class carries its payload contract
+/// (fgdb-payload-bearing-arm-values-5u56).
+///
+/// The fgdb-gpms ruling minted the tag-only discriminant for PRECONDITION
+/// fields: the field gates on which arm the state is in, so it carries the
+/// refined union's tag and never the arm payload. That instrument is complete
+/// only while the payload is accounted for. `AuditTicketClaimRecord.owner :
+/// AuditTicketOwner::Operation` is the counterexample that forced the
+/// classification: the Operation arm payload {global_txn_id,
+/// registration_generation, operation_request_basis_commitment} IS the
+/// record's owner identity, no sibling field carries it, and a one-byte
+/// discriminant would erase it. A payload-bearing arm value therefore takes
+/// the `arm_value` instrument — the refined tag PLUS the complete selected
+/// arm payload, pinned by the arm's census-registered digest so "complete" is
+/// a comparison, not an adjective.
+#[test]
+fn idr_payload_bearing_arm_values_preserve_the_complete_payload() {
+    const PAYLOAD_CODES: [&str; 7] = [
+        "refinement_tag_only_payload_unaccounted",
+        "arm_value_claim_missing",
+        "arm_value_conjunction_invalid",
+        "arm_value_on_unit_payload",
+        "arm_value_payload_pin_missing",
+        "arm_value_payload_pin_malformed",
+        "arm_value_payload_pin_mismatch",
+    ];
+    let base = real_identity();
+    let base_codes = codes_without_assignment_drift(&base);
+    for code in PAYLOAD_CODES {
+        assert!(
+            !base_codes.contains(&code.to_string()),
+            "the landed corpus must already satisfy the payload-value law, but {code} fires: \
+             {base_codes:?}"
+        );
+    }
+
+    // NON-VACUITY, discriminant side. The law's discriminant domain is the
+    // landed tag-only rows that refine a payload-bearing arm; both must carry
+    // the accounting clause, and the population is pinned so a third
+    // discriminant refining a payload-bearing arm is added deliberately, not
+    // discovered by a green run.
+    let tag_only_subjects: BTreeSet<&str> = base
+        .wire
+        .iter()
+        .filter(|w| {
+            w.kind == "discriminant"
+                && w.encoding_context
+                    .contains(identity::REFINEMENT_CLAIM_MARKER)
+        })
+        .map(|w| w.name.as_str())
+        .collect();
+    assert_eq!(
+        tag_only_subjects,
+        BTreeSet::from([
+            "LocalAbortFinalCertificationSelection",
+            "PromotedAwaitingReopenLocalRestorePhase"
+        ]),
+        "the tag-only discriminant population moved"
+    );
+    for name in &tag_only_subjects {
+        let row = base
+            .wire
+            .iter()
+            .find(|w| w.name == *name) // ubs:ignore -- public registry-row name equality in a test census; no secret or token is compared here.
+            .expect("tag-only subject is landed");
+        assert!(
+            row.encoding_context
+                .contains(identity::TAG_ONLY_PAYLOAD_ACCOUNTING_MARKER),
+            "{name} refines a payload-bearing arm and must account for the payload"
+        );
+    }
+    // NON-VACUITY, arm-value side. No arm_value row is landed yet — the first
+    // (AuditTicketClaimRecord.owner) applies in fgdb-5uj5 — so the population
+    // is pinned empty and the first mint must extend this assertion
+    // deliberately, exactly like the conjunction-claimant pin.
+    let arm_values: BTreeSet<&str> = base
+        .wire
+        .iter()
+        .filter(|w| w.kind == "arm_value")
+        .map(|w| w.name.as_str())
+        .collect();
+    assert_eq!(
+        arm_values,
+        BTreeSet::new(), // ubs:ignore -- test census intentionally panics.
+        "an arm_value row landed without extending this census"
+    );
+
+    // (a) THE BEAD'S MUTATION, on both landed subjects: a payload-bearing arm
+    // refined by a tag-only discriminant whose claim drops the payload
+    // accounting erases the payload and must fail.
+    for name in &tag_only_subjects {
+        let mut dropped = real_identity();
+        let i = dropped
+            .wire
+            .iter()
+            .position(|w| w.name == *name) // ubs:ignore -- public registry-row name equality in a test census; no secret or token is compared here.
+            .expect("tag-only subject is landed");
+        assert!(
+            dropped.wire[i]
+                .encoding_context
+                .contains(identity::TAG_ONLY_PAYLOAD_ACCOUNTING_MARKER),
+            "fixture did not apply"
+        );
+        dropped.wire[i].encoding_context = dropped.wire[i].encoding_context.replace(
+            identity::TAG_ONLY_PAYLOAD_ACCOUNTING_MARKER,
+            "carries the refined union's u8 tag",
+        );
+        assert!(
+            codes_without_assignment_drift(&dropped)
+                .contains(&"refinement_tag_only_payload_unaccounted".to_string()),
+            "dropping the payload accounting on {name} must fail"
+        );
+    }
+
+    // (b) The payload-preserving instrument, synthesized against the real
+    // corpus: `AuditTicketOwner::Operation` is the arm whose erasure the bead
+    // filed, so the conformant row pins its census-registered digest
+    // verbatim.
+    let operation_payload_sha = base
+        .ordinary_unions
+        .iter()
+        .filter(|u| u.union_name == "AuditTicketOwner")
+        .flat_map(|u| u.arms.iter())
+        .find(|a| a.source_arm_name == "Operation" && a.arm_tag == 0x0001)
+        .and_then(|a| a.payload_sha256.as_deref())
+        .expect("the registered Operation arm carries a payload digest");
+    let canonical_arm_value = |context: String| {
+        let mut identity = real_identity();
+        let mut row = identity
+            .wire
+            .iter()
+            .find(|w| w.name == "PromotedAwaitingReopenLocalRestorePhase") // ubs:ignore -- public registry-row name equality in a test census; no secret or token is compared here.
+            .expect("a landed discriminant to clone")
+            .clone();
+        row.wire_type_id = 0x7ff2;
+        row.name = "OperationAuditTicketOwner".into();
+        row.kind = "arm_value".into();
+        row.encoding_context = context;
+        row.allowed_containing_schemas = vec!["AuditTicketClaimRecord".into()];
+        row.max_size_bytes = 16777216;
+        identity.wire.push(row);
+        identity
+    };
+    let canonical_context = format!(
+        "generated payload-preserving arm value whose validator admits only the Operation arm \
+         (arm_tag 0x0001) of the AuditTicketOwner union; the field carries the refined union's \
+         u8 tag and the complete Operation arm payload (payload_sha256 {operation_payload_sha}) \
+         (a07:1702, a07:1706)"
+    );
+    let arm_value_codes = |identity: &IdentityRegistries| -> Vec<String> {
+        codes_without_assignment_drift(identity)
+            .into_iter()
+            .filter(|code| PAYLOAD_CODES.contains(&code.as_str()))
+            .collect()
+    };
+    // CONFORMANT CONTROL: the complete row stays green. Without it, every
+    // mutation below is consistent with a law that rejects the instrument
+    // itself.
+    assert!(
+        arm_value_codes(&canonical_arm_value(canonical_context.clone())).is_empty(),
+        "the conformant arm value must stay green"
+    );
+
+    // (c) Dropping the pin fails: the claim then asserts completeness with no
+    // evidence.
+    let no_pin = canonical_context
+        .split_once("; the field carries")
+        .expect("pin clause")
+        .0;
+    assert_eq!(
+        arm_value_codes(&canonical_arm_value(no_pin.to_owned())),
+        ["arm_value_payload_pin_missing".to_owned()],
+        "an arm value without its payload pin must fail"
+    );
+
+    // (d) Corrupting the pinned digest fails: the row would claim one payload
+    // shape while the census registers another.
+    let mut corrupted_sha = operation_payload_sha.to_owned();
+    corrupted_sha.replace_range(
+        ..1,
+        if corrupted_sha.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        },
+    );
+    assert_eq!(
+        arm_value_codes(&canonical_arm_value(
+            canonical_context.replace(operation_payload_sha, &corrupted_sha)
+        )),
+        ["arm_value_payload_pin_mismatch".to_owned()],
+        "an arm value pinning the wrong digest must fail"
+    );
+
+    // (e) A malformed pin fails closed rather than being skipped: advertised
+    // but unparseable is worse than absent, never better.
+    let malformed = canonical_context.replace(
+        &format!("(payload_sha256 {operation_payload_sha})"),
+        "(payload_sha256 d7a91b14)",
+    );
+    assert_eq!(
+        arm_value_codes(&canonical_arm_value(malformed)),
+        ["arm_value_payload_pin_malformed".to_owned()],
+        "an arm value with a malformed pin must fail closed"
+    );
+
+    // (e2) An UPPERCASE digest breaks the closed spelling exactly like any
+    // other malformation: it must fail as `arm_value_payload_pin_malformed`,
+    // not slip through a case-tolerant parser into the wrong
+    // `arm_value_payload_pin_mismatch` code.
+    let uppercase_sha = operation_payload_sha.to_uppercase();
+    assert_ne!(
+        uppercase_sha, operation_payload_sha,
+        "the registered digest must contain letters for this mutation to mean anything"
+    );
+    let uppercase = canonical_context.replace(
+        &format!("(payload_sha256 {operation_payload_sha})"),
+        &format!("(payload_sha256 {uppercase_sha})"),
+    );
+    assert_eq!(
+        arm_value_codes(&canonical_arm_value(uppercase)),
+        ["arm_value_payload_pin_malformed".to_owned()],
+        "an uppercase digest must fail as malformed, not as a digest mismatch"
+    );
+
+    // (e3) The closed spelling carries exactly one pin. Without this mutation
+    // a correct first pin masks any contradictory second pin because
+    // `split_once` never examines the suffix.
+    let repeated = format!(
+        "{canonical_context}; contradictory {prefix}Statement{infix}{operation_payload_sha})",
+        prefix = identity::ARM_VALUE_PAYLOAD_PIN_PREFIX,
+        infix = identity::ARM_VALUE_PAYLOAD_PIN_INFIX,
+    );
+    assert_eq!(
+        arm_value_codes(&canonical_arm_value(repeated)),
+        ["arm_value_payload_pin_malformed".to_owned()],
+        "a second complete-payload pin must fail as noncanonical, even when the first is correct"
+    );
+
+    // (f) Naming a different arm in the pin fails: the pin must agree with
+    // the resolved claim, not merely with itself.
+    assert_eq!(
+        arm_value_codes(&canonical_arm_value(canonical_context.replace(
+            "the complete Operation arm payload",
+            "the complete Statement arm payload",
+        ))),
+        ["arm_value_payload_pin_mismatch".to_owned()],
+        "an arm value pinning a sibling arm must fail"
+    );
+
+    // (g) The instrument is not a disguise for the smaller one: a unit
+    // payload takes the tag-only discriminant.
+    let mut unit_arm = canonical_arm_value(canonical_context.clone());
+    let i = unit_arm
+        .wire
+        .iter()
+        .position(|w| w.name == "OperationAuditTicketOwner") // ubs:ignore -- public registry-row name equality in a test census; no secret or token is compared here.
+        .expect("synthetic row present");
+    unit_arm.wire[i].encoding_context =
+        "generated payload-preserving arm value whose validator admits only the \
+         FreshShardedGenesis arm (arm_tag 0x0001) of the RootAuthorityTrustArtifactKind union; \
+         the field carries the refined union's u8 tag and the complete FreshShardedGenesis arm \
+         payload (payload_sha256 d7a91b14b59a6d4d8e6eb976a7046e665b1eb9f71b281677cec34b8964572f88)"
+            .into();
+    let unit_codes = arm_value_codes(&unit_arm);
+    assert!(
+        unit_codes.contains(&"arm_value_on_unit_payload".to_owned()),
+        "an arm value on a unit-payload arm must fail: {unit_codes:?}"
+    );
+
+    // (h) A two-location conjunction is a precondition shape; an arm value
+    // preserves exactly one arm's payload.
+    let mut conjunctive = canonical_arm_value(canonical_context.clone());
+    let i = conjunctive
+        .wire
+        .iter()
+        .position(|w| w.name == "OperationAuditTicketOwner") // ubs:ignore -- public registry-row name equality in a test census; no secret or token is compared here.
+        .expect("synthetic row present");
+    conjunctive.wire[i].encoding_context =
+        "generated payload-preserving arm value whose validator admits only when both the \
+         Operation arm (arm_tag 0x0001) of the AuditTicketOwner union and the Sharded arm \
+         (arm_tag 0x0002) of the RestoreServicePromotionManifestTargetPosture union"
+            .into();
+    let conjunctive_codes = arm_value_codes(&conjunctive);
+    assert!(
+        conjunctive_codes.contains(&"arm_value_conjunction_invalid".to_owned()),
+        "an arm value may not claim a conjunction: {conjunctive_codes:?}"
+    );
+
+    // (i) An arm value without a refinement claim preserves nothing.
+    let mut claimless = canonical_arm_value(canonical_context.clone());
+    let i = claimless
+        .wire
+        .iter()
+        .position(|w| w.name == "OperationAuditTicketOwner") // ubs:ignore -- public registry-row name equality in a test census; no secret or token is compared here.
+        .expect("synthetic row present");
+    claimless.wire[i].encoding_context =
+        "generated payload-preserving arm value (a07:1702, a07:1706)".into();
+    let claimless_codes = arm_value_codes(&claimless);
+    assert!(
+        claimless_codes.contains(&"arm_value_claim_missing".to_owned()),
+        "an arm value without a refinement claim must fail: {claimless_codes:?}"
+    );
+
+    // (j) The cross-kind mutation: a tag-only discriminant re-dressed as an
+    // arm value cannot pass without the complete-payload pin.
+    let mut redressed = real_identity();
+    let i = redressed
+        .wire
+        .iter()
+        .position(|w| w.name == "PromotedAwaitingReopenLocalRestorePhase") // ubs:ignore -- public registry-row name equality in a test census; no secret or token is compared here.
+        .expect("tag-only subject is landed");
+    redressed.wire[i].kind = "arm_value".into();
+    let redressed_codes = arm_value_codes(&redressed);
+    assert!(
+        redressed_codes.contains(&"arm_value_payload_pin_missing".to_owned()),
+        "a tag-only claim re-dressed as arm_value must fail: {redressed_codes:?}"
+    );
+}
+
 #[test]
 fn idr_wire_tag_declares_reference_semantics() {
     let base = real_identity();
