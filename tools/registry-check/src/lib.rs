@@ -15,6 +15,8 @@ pub mod appendix_reference;
 pub mod appendix_source;
 pub mod architecture;
 pub mod closure;
+pub mod command_contracts;
+pub mod command_type_classification;
 pub mod hash;
 pub mod identity;
 pub mod jsonl;

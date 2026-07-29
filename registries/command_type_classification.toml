@@ -1,0 +1,77 @@
+# =============================================================================
+# command_type_classification.toml — input-looking type classification (G0)
+# =============================================================================
+# Bead: fgdb-5uw2
+# Provenance: plan §5.1 (COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
+# line 294), verbatim: "The paired `command_type_classification.toml` assigns
+# every independently addressable normative input-looking type—including every
+# type whose stable name ends in `Spec`—exactly one class:
+# `RegisteredCommandInput{command_contract_id}`, `PreOrderArtifact`,
+# `CertificateInput`, `ResultOnly`, `ProjectionInput`, or `RuntimeOnly`.
+# A suffix conveys no semantics."
+#
+# WHY THE POPULATION BELOW IS THREE ROWS, NOT ~40+. MEASURED 2026-07-28 at HEAD
+# 5d42e28: registries/appendix_a_catalog.toml carries 39 logical kinds whose
+# stable name ends in Spec, plus further Spec-named top-level candidates. Nearly
+# all of them are semantic or maintenance COMMAND INPUTS (plan lines 1916, 1918,
+# 1770 enumerate the families), so their class is
+# RegisteredCommandInput{command_contract_id} — which requires their
+# command_contracts.toml row to exist first, and those rows are gated on the
+# full family expansion (see command_contracts.toml's header and the
+# tag-permanence rationale there; fgdb-5uw2 Phase B). A classification row
+# minted before its contract row would either invent a contract id or carry a
+# dangling one; both are the fail-open this registry exists to prevent. The
+# three rows below are exactly the population whose class is FORCED by the
+# source without a contract id.
+#
+# ADJUDICATED NON-MEMBERS, recorded here so nobody re-derives them (the
+# laws.toml pattern: record, never strike):
+#   CatalogMutationSpec, SchemaMutationSpec, IndexDefinitionSpec,
+#   IndexActivationSpec — plan lines 1770 and 1916 state outright that these
+#   "are not command types" and line 1918 that "the synthetic
+#   catalog/schema/index control types are forbidden"; no schema of these names
+#   exists in any registry (MEASURED, 0 rows repo-wide). They are prose
+#   prohibitions, not types, so they take NO classification row: a row would
+#   itself mint the forbidden name into a registry. Ordinary DDL is a
+#   transaction-carried `SchemaOp` (plan line 1918).
+#   AuditVisibilityAdvanceSpec — named at plan line 1770 as "a Protocol-plane
+#   maintenance input, never a `GlobalSequenceNeutralSpec`", and plan line 974
+#   registers maintenance batch specs as command_contracts.toml Maintenance
+#   rows; its class is therefore RegisteredCommandInput with a Maintenance
+#   contract row — Phase B, not omittable and not landable yet.
+#
+# Row schema (closed; the loader rejects unknown keys before reading fields):
+#   [[classification]]
+#   type_name            = "..."      # stable type name, permanent, never reused
+#   class                = "RegisteredCommandInput" | "PreOrderArtifact" |
+#                          "CertificateInput" | "ResultOnly" |
+#                          "ProjectionInput" | "RuntimeOnly"
+#   command_contract_id  = "..."      # REQUIRED iff class = "RegisteredCommandInput";
+#                                     # forbidden otherwise
+#   source_location      = "aNN:LINE" # REQUIRED — the plan line that forces the class
+#   statement            = "..."      # the forcing quote, verbatim or tightly excerpted
+#   status               = "registered"
+#
+# registry_epoch changes only when rows are added or retired (plan line 290).
+registry_epoch = 1
+
+[[classification]]
+type_name = "TxnSubmissionSpec"
+class = "PreOrderArtifact"
+source_location = "a10:1918"
+statement = "TxnSubmissionSpec is not an ordered input: transaction submission is the pre-order construction pipeline that yields CommitCommand."
+status = "registered"
+
+[[classification]]
+type_name = "AuditExternalResolutionBatch"
+class = "PreOrderArtifact"
+source_location = "a07:1770"
+statement = "AuditExternalResolutionBatch/receipt are pre-order evidence and AuditVisibilityAdvanceSpec is a Protocol-plane maintenance input, never a GlobalSequenceNeutralSpec."
+status = "registered"
+
+[[classification]]
+type_name = "AuditExternalResolutionReceipt"
+class = "PreOrderArtifact"
+source_location = "a07:1770"
+statement = "AuditExternalResolutionBatch/receipt are pre-order evidence and AuditVisibilityAdvanceSpec is a Protocol-plane maintenance input, never a GlobalSequenceNeutralSpec."
+status = "registered"

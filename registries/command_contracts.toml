@@ -1,0 +1,79 @@
+# =============================================================================
+# command_contracts.toml — the role-valid command-arm contract registry (G0)
+# =============================================================================
+# Bead: fgdb-5uw2
+# Provenance: plan §5.1 (COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
+# line 294), verbatim: "Ordered transitions have one further normative registry,
+# `command_contracts.toml`; hand-written lists in this document are generated
+# readability projections and are never a second source of truth. One row exists
+# for every role-valid command arm."
+#
+# WHY THIS FILE EXISTS NOW WITH ZERO ROWS. Plan line 296 makes this registry
+# half of a G0-enforced two-way total bijection — but the bijection quantifies
+# over LIVE rows and INHABITABLE command-union arms: "Every inhabitable Local,
+# Meta, or Shard command-union arm resolves to exactly one live command-contract
+# row; every live row resolves to exactly one union arm, one registered
+# canonical input, one exact body/result/applied-record triple, and one
+# exhaustive Rust apply handler." MEASURED 2026-07-28 at HEAD 5d42e28: the
+# SequenceNeutralSpec and GlobalSequenceNeutralSpec family unions carry zero
+# landed arms (registries/appendix_a_catalog.toml; see fgdb-5ekk), and no Rust
+# apply handler exists. Zero rows is therefore the only population this file
+# can honestly carry today, and it is bijection-consistent: both quantification
+# domains are empty.
+#
+# WHY THE FIRST ROW IS NOT LANDED HERE (the tag-permanence law). Plan line 288
+# makes this registry the generation source for the SequenceNeutralSpec /
+# role-command wire inventories, so `outer_wire_tag` values minted here are the
+# authority, and plan line 290 makes released tags permanent. Assigning tags to
+# a PARTIAL row population risks colliding with the canonical order of the full
+# family expansion (plan lines 1916, 1918, 1770 name the families; each family's
+# exact inner tags are spelled at its own section of the plan). Rows therefore
+# land only once the complete expansion is derived, all with status "reserved"
+# until their arm, input, triple, and handler exist. That derivation is tracked
+# on fgdb-5uw2 (Phase B in its notes).
+#
+# SCOPE BOUNDARY. invariants.toml line 312 names this registry AND
+# `state_payload_fields.toml` ("roots every written state class"). That third
+# registry is NOT created by this increment; its absence is unchanged and its
+# construction needs its own bead.
+#
+# Row schema — verbatim from plan §5.1 line 294; a key marked `?` is optional,
+# every other key is required on every row. No row may carry a key outside this
+# set (the loader rejects unknown keys before reading any field).
+#
+#   [[contract]]
+#   command_contract_id                  = "..."   # stable, permanent, never reused
+#   role                                 = "Local" | "Meta" | "Shard"
+#   outer_command_union                  = "..."
+#   outer_wire_tag                       = 0x....  # u16; permanent once released
+#   input_schema_id                      = "..."
+#   input_wire_tag                       = 0x....  # u16
+#   inner_wire_tag                       = 0x....  # u16, optional
+#   body_schema_id                       = "..."
+#   result_schema_id                     = "..."
+#   applied_record_schema_id             = "..."
+#   handler_symbol                       = "..."
+#   transition_class                     = "Semantic" | "Maintenance" | "Scaffolding"
+#   sequence_effects                     = "..."
+#   expected_state_schema_id             = "..."
+#   authority_arm                        = "..."
+#   authority_evidence_target_schema_id  = "..."   # optional
+#   terminal_audit_freeze_arm            = "..."
+#   terminal_audit_gate_arm              = "..."
+#   payload_availability_rule            = "..."
+#   publication_mode                     = "SinglePlane" | "AtomicProtocolDetach{cross_plane_conservation_recipe_id}"
+#   construction_dag_recipe_id           = "..."
+#   consumed_state_slots                 = [ "plane|role|slot_tag", ... ]  # DurableStateSlotRef; plane in
+#   written_state_slots                  = [ "plane|role|slot_tag", ... ]  # SemanticPayload|Protocol|PreparedOwnership|Consensus|Bootstrap
+#   checkpoint_floor_classes             = [ "...", ... ]
+#   backup_restore_gc_classes            = [ "...", ... ]
+#   posture_feature_predicate            = "..."
+#   format_epoch_range                   = "..."
+#   status                               = "reserved" | "live" | "retired"
+#
+# "Rows are per concrete inner tag: an outer DpTransition, RemoteRetention,
+# configuration, delivery, GC, backup, restore, format, bulk, derived-build, or
+# audit-lifecycle family never hides an open subcommand." (plan line 294)
+#
+# registry_epoch changes only when rows are added or retired (plan line 290).
+registry_epoch = 1

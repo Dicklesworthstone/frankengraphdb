@@ -264,6 +264,11 @@ coverage_of() {
     # a cargo test, not by `registry-check all`, so the glob would claim a gate
     # that never opens the file -- the fail-open this row's own comment names.
     registries/laws.toml)                echo "cargo test --workspace (tools/registry-check/tests/laws.rs: schema, plan-anchor resolution, the law-citation guard over registries/appendix_a_catalog.toml, 27 mutation fixtures)" ;;
+    # EXACT for the same reason as laws.toml: both §5.1 command registries are
+    # validated by cargo tests, not by `registry-check all`, so the glob below
+    # would claim a gate that never opens either file.
+    registries/command_contracts.toml)   echo "cargo test --workspace (tools/registry-check/tests/command_contracts.rs: schema, closed vocabularies, tag space, arm-slot uniqueness, live-row refusal, deliberate-empty pin)" ;;
+    registries/command_type_classification.toml) echo "cargo test --workspace (tools/registry-check/tests/command_type_classification.rs: schema, six-class vocabulary, contract-id coupling, plan-anchor naming, seed-population floor)" ;;
     registries/*.toml)                   echo "registry-check all" ;;
     .beads/issues.jsonl)                 echo "architecture-check (parses every record; malformed line fails file:line)" ;;
     docs/ARCHITECTURE_DECISION_RECORD.md) echo "architecture-check (generated document)" ;;
