@@ -446,7 +446,8 @@ impl<'a> Reader<'a> {
     fn scalar(&mut self) -> Result<CanonicalScalar, CanonicalError> {
         let len = self.count(1)?;
         let encoded = self.take(len)?;
-        // ubs:ignore -- canonical graph scalar decoding, not a JWT or authentication bypass.
+        // This is the closed graph-value decoder; no JWT or signature state exists here.
+        // ubs:ignore -- exact false match is `CanonicalScalar::decode`, not a JWT decoder.
         CanonicalScalar::decode(encoded).map_err(|_| CanonicalError::Scalar)
     }
 

@@ -848,10 +848,19 @@ run_ubs() {
 # are explicit XOR-accumulate loops (aead.rs tag, symbol.rs MAC).
 # ATTRIBUTED BY DIFFERENTIAL: the new crate's two files scanned alone report
 # exactly this one critical, with panic and JWT both clean.
+# MOVED 2026-07-29 (fgdb-rbab): JWT 124 -> 123, -1, by suppressing the exact
+# false match on `CanonicalScalar::decode(encoded)` in
+# crates/fgdb-delta-types/src/canonical.rs. This is the closed durable graph
+# scalar decoder, not a JWT decoder; the crate has no JWT, signature-bypass, or
+# authentication-validation state. The suppression is pinned at the call with
+# that rationale rather than teaching the scanner to ignore arbitrary `decode`.
+# ATTRIBUTED BY DIFFERENTIAL: the two changed delta files scanned alone moved
+# from 1 critical in this class to 0, while the full tracked-source scan moved
+# from 1071 total to 1070 and reported only this class changing, 124 -> 123.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=810"
   "panic!/unreachable!/todo!/unimplemented!=137"
-  "JWT decode, validation bypass, or missing claim binding=124"
+  "JWT decode, validation bypass, or missing claim binding=123"
 )
 
 # ubs_critical_ratchet <log> -> 0 when the critical partition equals the baseline
