@@ -7252,6 +7252,79 @@ fn idr_role_transition_activation_state_is_a_logical_backed_whole_schema_union()
         vec!["RoleTransitionActivationState".to_owned()],
         "a whole-schema role union admits only its own object as container"
     );
+    let seal_unions = identity
+        .ordinary_unions
+        .iter()
+        .filter(|row| {
+            row.containing_schema == "RoleTransitionActivationState"
+                && row.union_path.ends_with(".seal_state")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        seal_unions.len(),
+        2,
+        "the source declares one independent seal_state union for each role"
+    );
+    for (name, path, sealed_payload_sha256) in [
+        (
+            "RoleTransitionActivationStateMetaPhaseFinalizedPendingIndependentReopenSealState",
+            "RoleTransitionActivationState.Meta.phase.FinalizedPendingIndependentReopen.seal_state",
+            "486f0e397350e357edbac6bae6068fe67532f782c568ce950525e4697a7d6a7c",
+        ),
+        (
+            "RoleTransitionActivationStateShardPhaseOpenedPendingIndependentReopenSealState",
+            "RoleTransitionActivationState.Shard.phase.OpenedPendingIndependentReopen.seal_state",
+            "d20c14068fad852ea0242a232314fbf7f7e186190026e7d504ac18ddbe65dfb7",
+        ),
+    ] {
+        let seal_union = seal_unions
+            .iter()
+            .find(|row| row.union_name == name)
+            .expect("source-censused seal_state union exists");
+        assert!(
+            seal_union.field_tag.is_none()
+                && seal_union.union_path == path
+                && seal_union.tag_wire_type == "u8"
+                && seal_union.encoding_context == "closed-tagged"
+                && seal_union.allowed_containing_schemas
+                    == ["RoleTransitionActivationState".to_owned()]
+                && seal_union.role_predicate == "true"
+                && seal_union.version_status == "reserved"
+                && seal_union.max_size_bytes == 16_777_216,
+            "{name} drifted from the ordinary nested-union contract"
+        );
+        assert_eq!(
+            seal_union.arms.len(),
+            2,
+            "{name} must admit exactly Unsealed and Sealed"
+        );
+        let unsealed = seal_union
+            .arms
+            .iter()
+            .find(|arm| arm.source_arm_name == "Unsealed")
+            .expect("Unsealed source arm exists");
+        assert!(
+            unsealed.arm_tag == 0x0001
+                && unsealed.stable_name == "unsealed"
+                && unsealed.payload_kind == "unit"
+                && unsealed.payload_sha256.is_none()
+                && unsealed.max_size_bytes == 1,
+            "{name} must retain source-first Unsealed as the unit tag"
+        );
+        let sealed = seal_union
+            .arms
+            .iter()
+            .find(|arm| arm.source_arm_name == "Sealed")
+            .expect("Sealed source arm exists");
+        assert!(
+            sealed.arm_tag == 0x0002
+                && sealed.stable_name == "sealed"
+                && sealed.payload_kind == "inline-record"
+                && sealed.payload_sha256.as_deref() == Some(sealed_payload_sha256)
+                && sealed.max_size_bytes == 16_777_216,
+            "{name} must retain the role-specific Sealed payload"
+        );
+    }
     let logical_parent = identity
         .logical
         .iter()
@@ -8133,7 +8206,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     let post_erratum_union = |name: &str| {
         matches!(
             name,
-            "KeyDestroyExternalAckRef"
+            // fgdb-6v86 registers the two independently source-censused
+            // seal_state locations under RoleTransitionActivationState. They
+            // are new format rows, not members of the frozen A10 witness.
+            "RoleTransitionActivationStateMetaPhaseFinalizedPendingIndependentReopenSealState"
+                | "RoleTransitionActivationStateShardPhaseOpenedPendingIndependentReopenSealState"
+                | "KeyDestroyExternalAckRef"
                 | "AuditReceiptValidationResolution"
                 | "ThroughCapabilityMigrationIndexTerminal"
                 | "ThroughInstalledSuccessorAcknowledgedOrSubjectTerminal"
@@ -10128,7 +10206,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // 379 -> 380 (fgdb-a10-active-spec-gap-nowp): the AuditFreezeField<Tag>
         // whole-schema union of the SequenceNeutralSpec wrapper is younger
         // than the witness.
-        pre_erratum.ordinary_unions.len() + 380,
+        // 380 -> 382 (fgdb-6v86): the Meta and Shard seal_state locations are
+        // distinct source unions and both are younger than the witness.
+        pre_erratum.ordinary_unions.len() + 382,
         current_union_count,
         "historical witness ordinary-union cohort drift: the post-erratum filters \
          removed a number of unions other than 378. This assert compares a \
@@ -10225,7 +10305,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             // payload-carrying BODY arms of RestoreServicePromotionManifest.
             // 1_110 -> 1_112 (fgdb-a10-active-spec-gap-nowp): Required and
             // Forbidden are the two source-spelled arms of AuditFreezeField<Tag>.
-            + 1_112,
+            // 1_112 -> 1_116 (fgdb-6v86): Unsealed and Sealed on each of the
+            // two role-specific seal_state unions.
+            + 1_116,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );

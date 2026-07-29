@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 77
+registry_epoch = 78
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -18169,6 +18169,28 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "RoleTransitionActivationStateMetaPhaseFinalizedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Meta.phase.FinalizedPendingIndependentReopen.seal_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RoleTransitionActivationState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "RoleTransitionActivationStateShardPhaseOpenedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Shard.phase.OpenedPendingIndependentReopen.seal_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RoleTransitionActivationState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "RootAuthorityTrustArtifactKind"
 containing_schema = "RootAuthorityTrustBody"
 union_path = "RootAuthorityTrustBody.artifact_kind"
@@ -30920,6 +30942,56 @@ source_arm_name = "Shard"
 stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "2644e1bb6d88382296b949089f6f4ba83801ce6c264b74bfda919899cb9e0f0b"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RoleTransitionActivationStateMetaPhaseFinalizedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Meta.phase.FinalizedPendingIndependentReopen.seal_state"
+arm_tag = 0x0001
+source_arm_name = "Unsealed"
+stable_name = "unsealed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RoleTransitionActivationStateMetaPhaseFinalizedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Meta.phase.FinalizedPendingIndependentReopen.seal_state"
+arm_tag = 0x0002
+source_arm_name = "Sealed"
+stable_name = "sealed"
+payload_kind = "inline-record"
+payload_sha256 = "486f0e397350e357edbac6bae6068fe67532f782c568ce950525e4697a7d6a7c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "RoleTransitionActivationStateShardPhaseOpenedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Shard.phase.OpenedPendingIndependentReopen.seal_state"
+arm_tag = 0x0001
+source_arm_name = "Unsealed"
+stable_name = "unsealed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+union_name = "RoleTransitionActivationStateShardPhaseOpenedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Shard.phase.OpenedPendingIndependentReopen.seal_state"
+arm_tag = 0x0002
+source_arm_name = "Sealed"
+stable_name = "sealed"
+payload_kind = "inline-record"
+payload_sha256 = "d20c14068fad852ea0242a232314fbf7f7e186190026e7d504ac18ddbe65dfb7"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

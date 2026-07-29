@@ -39,9 +39,9 @@ occurrence_count = 2442
 occurrence_transcript_sha256 = "ea5ea31e762b8487723eab0144e650f087275288d2a67d51659d1218a10375e9"
 
 [target_manifest]
-target_count = 3659
+target_count = 3665
 projection_fallback_count = 134
-target_source_assignment_sha256 = "ca4c5aad09c4b29130cd9b961c7ecea7c5657591f17c823989bbfd9a86fcd201"
+target_source_assignment_sha256 = "1136c6b6739e518d46daf52e35b4ea7e5d65f641d2f483aa054ea7c266899ea1"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -645,7 +645,7 @@ registry_epoch = 42
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 77
+registry_epoch = 78
 
 [[logical_kind]]
 slice_id = "a03"
@@ -20158,6 +20158,32 @@ role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
+[[union]]
+slice_id = "a01"
+row_id = "a01:union:role-transition-activation-state-meta-phase-finalized-pending-independent-reopen-seal-state-950912a7d061b4f2"
+union_name = "RoleTransitionActivationStateMetaPhaseFinalizedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Meta.phase.FinalizedPendingIndependentReopen.seal_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RoleTransitionActivationState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a01"
+row_id = "a01:union:role-transition-activation-state-shard-phase-opened-pending-independent-reopen-seal-state-98560f49cc1b3189"
+union_name = "RoleTransitionActivationStateShardPhaseOpenedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Shard.phase.OpenedPendingIndependentReopen.seal_state"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RoleTransitionActivationState"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[union_arm]]
 slice_id = "a01"
 row_id = "a01:union-arm:trust-transition-genesis-7d05462fa7162820"
@@ -20260,6 +20286,65 @@ payload_sha256 = "2644e1bb6d88382296b949089f6f4ba83801ce6c264b74bfda919899cb9e0f
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a01"
+row_id = "a01:union-arm:role-transition-activation-state-meta-phase-finalized-pending-independent-reopen-seal-state-unsealed-90b54be7fcc1b42e"
+union_name = "RoleTransitionActivationStateMetaPhaseFinalizedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Meta.phase.FinalizedPendingIndependentReopen.seal_state"
+arm_tag = 0x0001
+source_arm_name = "Unsealed"
+stable_name = "unsealed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a01"
+row_id = "a01:union-arm:role-transition-activation-state-meta-phase-finalized-pending-independent-reopen-seal-state-sealed-72d7e18dfa4ef3eb"
+union_name = "RoleTransitionActivationStateMetaPhaseFinalizedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Meta.phase.FinalizedPendingIndependentReopen.seal_state"
+arm_tag = 0x0002
+source_arm_name = "Sealed"
+stable_name = "sealed"
+payload_kind = "inline-record"
+payload_sha256 = "486f0e397350e357edbac6bae6068fe67532f782c568ce950525e4697a7d6a7c"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a01"
+row_id = "a01:union-arm:role-transition-activation-state-shard-phase-opened-pending-independent-reopen-seal-state-unsealed-4a02fb43b87e4ee8"
+union_name = "RoleTransitionActivationStateShardPhaseOpenedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Shard.phase.OpenedPendingIndependentReopen.seal_state"
+arm_tag = 0x0001
+source_arm_name = "Unsealed"
+stable_name = "unsealed"
+payload_kind = "unit"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a01"
+row_id = "a01:union-arm:role-transition-activation-state-shard-phase-opened-pending-independent-reopen-seal-state-sealed-943d50959736ba60"
+union_name = "RoleTransitionActivationStateShardPhaseOpenedPendingIndependentReopenSealState"
+containing_schema = "RoleTransitionActivationState"
+union_path = "RoleTransitionActivationState.Shard.phase.OpenedPendingIndependentReopen.seal_state"
+arm_tag = 0x0002
+source_arm_name = "Sealed"
+stable_name = "sealed"
+payload_kind = "inline-record"
+payload_sha256 = "d20c14068fad852ea0242a232314fbf7f7e186190026e7d504ac18ddbe65dfb7"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
 [[reference_union]]
 slice_id = "a10"
 row_id = "a10:reference-union:logical-command-record-logical-command-input-ref"
@@ -65901,6 +65986,54 @@ row_id = "a01:target:union-arm-role-transition-activation-state-shard-bf70654ace
 target_row_id = "a01:union-arm:role-transition-activation-state-shard-bf70654ace79406b"
 slice_id = "a01"
 source_key = "arm|RoleTransitionActivationState|RoleTransitionActivationState|Shard"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:union-role-transition-activation-state-meta-phase-finalized-pending-independent-reopen-seal-state-950912a7d061b4f2"
+target_row_id = "a01:union:role-transition-activation-state-meta-phase-finalized-pending-independent-reopen-seal-state-950912a7d061b4f2"
+slice_id = "a01"
+source_key = "union|RoleTransitionActivationState|RoleTransitionActivationState.Meta.phase.FinalizedPendingIndependentReopen.seal_state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:union-arm-role-transition-activation-state-meta-phase-finalized-pending-independent-reopen-seal-state-unsealed-90b54be7fcc1b42e"
+target_row_id = "a01:union-arm:role-transition-activation-state-meta-phase-finalized-pending-independent-reopen-seal-state-unsealed-90b54be7fcc1b42e"
+slice_id = "a01"
+source_key = "arm|RoleTransitionActivationState|RoleTransitionActivationState.Meta.phase.FinalizedPendingIndependentReopen.seal_state|Unsealed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:union-arm-role-transition-activation-state-meta-phase-finalized-pending-independent-reopen-seal-state-sealed-72d7e18dfa4ef3eb"
+target_row_id = "a01:union-arm:role-transition-activation-state-meta-phase-finalized-pending-independent-reopen-seal-state-sealed-72d7e18dfa4ef3eb"
+slice_id = "a01"
+source_key = "arm|RoleTransitionActivationState|RoleTransitionActivationState.Meta.phase.FinalizedPendingIndependentReopen.seal_state|Sealed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:union-role-transition-activation-state-shard-phase-opened-pending-independent-reopen-seal-state-98560f49cc1b3189"
+target_row_id = "a01:union:role-transition-activation-state-shard-phase-opened-pending-independent-reopen-seal-state-98560f49cc1b3189"
+slice_id = "a01"
+source_key = "union|RoleTransitionActivationState|RoleTransitionActivationState.Shard.phase.OpenedPendingIndependentReopen.seal_state"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:union-arm-role-transition-activation-state-shard-phase-opened-pending-independent-reopen-seal-state-unsealed-4a02fb43b87e4ee8"
+target_row_id = "a01:union-arm:role-transition-activation-state-shard-phase-opened-pending-independent-reopen-seal-state-unsealed-4a02fb43b87e4ee8"
+slice_id = "a01"
+source_key = "arm|RoleTransitionActivationState|RoleTransitionActivationState.Shard.phase.OpenedPendingIndependentReopen.seal_state|Unsealed"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a01:target:union-arm-role-transition-activation-state-shard-phase-opened-pending-independent-reopen-seal-state-sealed-943d50959736ba60"
+target_row_id = "a01:union-arm:role-transition-activation-state-shard-phase-opened-pending-independent-reopen-seal-state-sealed-943d50959736ba60"
+slice_id = "a01"
+source_key = "arm|RoleTransitionActivationState|RoleTransitionActivationState.Shard.phase.OpenedPendingIndependentReopen.seal_state|Sealed"
 target_kind = "union-arm"
 definition_status = "declared"
 
