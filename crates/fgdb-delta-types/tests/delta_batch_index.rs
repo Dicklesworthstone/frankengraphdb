@@ -368,3 +368,74 @@ fn verify_catches_a_window_whose_frontier_outruns_its_entries() {
         );
     });
 }
+
+/// An empty interval is coherent only when its two endpoints are equal.
+/// `saturating_sub` would turn an inverted `(4, 3]` window into length zero
+/// and let this decoder-facing corruption pass as a valid empty index.
+#[test]
+fn verify_refuses_an_inverted_empty_window() {
+    let broken = LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(4), CommitSeq(3), Vec::new());
+    assert_eq!(
+        broken.verify(),
+        Err(IndexError::UnretirableInterval {
+            retained_after: CommitSeq(4),
+            frontier: CommitSeq(3),
+            requested: CommitSeq(4),
+        })
+    );
+}
+
+/// Exact key coverage is not enough: durable decoding bypasses `insert`, so
+/// `verify` must re-check that the retained batch's marker names its own
+/// sequence even when the window has the expected key and cardinality.
+#[test]
+fn verify_refuses_a_same_cardinality_batch_with_the_wrong_marker() {
+    with_commit_cx(0x1DEB, |cx| {
+        let well_formed = batch_at(1, &cx);
+        let malformed = LogicalDeltaBatch::from_parts_for_test(
+            well_formed.coordinate_entries().to_vec(),
+            *well_formed.source_template_digest(),
+            MarkerRef {
+                marker_oid: ObjectId([0xEE; 32]),
+                commit_seq: CommitSeq(77),
+            },
+            CommitSeq(1),
+            CommitSeq(1),
+        );
+        let broken =
+            LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(0), CommitSeq(1), vec![malformed]);
+        assert_eq!(
+            broken.verify(),
+            Err(IndexError::WrongMarker {
+                batch_commit_seq: CommitSeq(1),
+                marker_commit_seq: CommitSeq(77),
+            })
+        );
+    });
+}
+
+/// The same decoder-facing control for a batch whose own frontier disagrees
+/// with its sequence. The index key/count still exactly cover `(0, 1]`, so
+/// only intrinsic batch validation can catch it.
+#[test]
+fn verify_refuses_a_same_cardinality_batch_with_the_wrong_frontier() {
+    with_commit_cx(0x1DEC, |cx| {
+        let well_formed = batch_at(1, &cx);
+        let malformed = LogicalDeltaBatch::from_parts_for_test(
+            well_formed.coordinate_entries().to_vec(),
+            *well_formed.source_template_digest(),
+            well_formed.commit_marker_identity(),
+            CommitSeq(1),
+            CommitSeq(9),
+        );
+        let broken =
+            LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(0), CommitSeq(1), vec![malformed]);
+        assert_eq!(
+            broken.verify(),
+            Err(IndexError::WrongFrontier {
+                commit_seq: CommitSeq(1),
+                frontier: CommitSeq(9),
+            })
+        );
+    });
+}

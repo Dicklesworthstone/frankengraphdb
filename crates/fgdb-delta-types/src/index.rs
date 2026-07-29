@@ -216,6 +216,30 @@ impl LocalDeltaBatchIndex {
         CommitSeq(self.frontier.0 + 1)
     }
 
+    /// Validate the laws intrinsic to one local batch, independently of where
+    /// an index stores it.
+    ///
+    /// Both insertion and durable-state verification use this one predicate.
+    /// Otherwise `insert` can be fail-closed while a decoder constructs the
+    /// same malformed batch through `from_parts` and `verify` blesses it.
+    fn validate_batch(batch: &LogicalDeltaBatch) -> Result<(), IndexError> {
+        let commit_seq = batch.commit_seq();
+        let marker_commit_seq = batch.commit_marker_identity().commit_seq;
+        if marker_commit_seq != commit_seq {
+            return Err(IndexError::WrongMarker {
+                batch_commit_seq: commit_seq,
+                marker_commit_seq,
+            });
+        }
+        if batch.frontier() != commit_seq {
+            return Err(IndexError::WrongFrontier {
+                commit_seq,
+                frontier: batch.frontier(),
+            });
+        }
+        Ok(())
+    }
+
     /// Insert a batch AND advance the frontier — one transition, or neither.
     ///
     /// This is the only way to add anything, deliberately. Separate
@@ -230,19 +254,7 @@ impl LocalDeltaBatchIndex {
         // A local batch must agree with itself before the index will agree with
         // it: its marker must name its own sequence, and its frontier must be
         // that sequence. Both are cheap here and impossible to check later.
-        let marker_commit_seq = batch.commit_marker_identity().commit_seq;
-        if marker_commit_seq != commit_seq {
-            return Err(IndexError::WrongMarker {
-                batch_commit_seq: commit_seq,
-                marker_commit_seq,
-            });
-        }
-        if batch.frontier() != commit_seq {
-            return Err(IndexError::WrongFrontier {
-                commit_seq,
-                frontier: batch.frontier(),
-            });
-        }
+        Self::validate_batch(&batch)?;
 
         // Duplicate is checked before gap so the diagnostic names the right
         // problem: a sequence at or below the frontier is not "a gap of
@@ -306,27 +318,56 @@ impl LocalDeltaBatchIndex {
     /// for a value that arrived some other way — decoded from durable bytes, or
     /// built by a future apply path — where "maintained by construction" is a
     /// claim about code that did not run here.
+    ///
+    /// The walk is proportional to retained entries, not to the numeric width
+    /// of the claimed interval. A corrupt frontier near `u64::MAX` therefore
+    /// cannot turn verification of a small decoded value into a vast loop.
     pub fn verify(&self) -> Result<(), IndexError> {
-        let expected_len = self
-            .frontier
-            .0
-            .saturating_sub(self.retained_after_commit_seq.0);
-        for offset in 0..expected_len {
-            let seq = CommitSeq(self.retained_after_commit_seq.0 + offset + 1);
-            if !self.entries.contains_key(&seq.0) {
-                return Err(IndexError::Gapped {
-                    expected: seq,
-                    found: self.frontier,
-                });
-            }
-        }
-        if self.entries.len() as u64 != expected_len {
-            // More entries than the interval holds means something outside the
-            // window survived a retirement.
+        if self.retained_after_commit_seq.0 > self.frontier.0 {
             return Err(IndexError::UnretirableInterval {
                 retained_after: self.retained_after_commit_seq,
                 frontier: self.frontier,
                 requested: self.retained_after_commit_seq,
+            });
+        }
+
+        let mut previous = self.retained_after_commit_seq.0;
+        for (stored_seq, batch) in &self.entries {
+            if *stored_seq <= self.retained_after_commit_seq.0 || *stored_seq > self.frontier.0 {
+                return Err(IndexError::UnretirableInterval {
+                    retained_after: self.retained_after_commit_seq,
+                    frontier: self.frontier,
+                    requested: CommitSeq(*stored_seq),
+                });
+            }
+            let expected = previous
+                .checked_add(1)
+                .ok_or(IndexError::UnretirableInterval {
+                    retained_after: self.retained_after_commit_seq,
+                    frontier: self.frontier,
+                    requested: CommitSeq(previous),
+                })?;
+            if *stored_seq != expected {
+                return Err(IndexError::Gapped {
+                    expected: CommitSeq(expected),
+                    found: CommitSeq(*stored_seq),
+                });
+            }
+            Self::validate_batch(batch)?;
+            previous = *stored_seq;
+        }
+
+        if previous != self.frontier.0 {
+            let expected = previous
+                .checked_add(1)
+                .ok_or(IndexError::UnretirableInterval {
+                    retained_after: self.retained_after_commit_seq,
+                    frontier: self.frontier,
+                    requested: CommitSeq(previous),
+                })?;
+            return Err(IndexError::Gapped {
+                expected: CommitSeq(expected),
+                found: self.frontier,
             });
         }
         Ok(())
