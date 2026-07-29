@@ -156,8 +156,8 @@ fn every_rotted_symbol_is_located_individually() {
     let f = fixture(12);
     for corrupt_count in 1..=6usize {
         let mut symbols = f.symbols.clone();
-        for nth in 0..corrupt_count {
-            rot(&mut symbols[nth], nth);
+        for (nth, symbol) in symbols.iter_mut().take(corrupt_count).enumerate() {
+            rot(symbol, nth);
         }
         let report = scrub_object(&f.encoding, &symbols, target(&f), &dek());
         assert_eq!(
@@ -176,8 +176,8 @@ fn corruption_beyond_the_budget_reports_lost_with_a_reason() {
     let f = fixture(2);
     let mut symbols = f.symbols.clone();
     // Rot far more symbols than two repair symbols can cover.
-    for nth in 0..8usize {
-        rot(&mut symbols[nth], nth);
+    for (nth, symbol) in symbols.iter_mut().take(8).enumerate() {
+        rot(symbol, nth);
     }
 
     let report = scrub_object(&f.encoding, &symbols, target(&f), &dek());
