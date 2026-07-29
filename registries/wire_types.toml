@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "wire_types"
-registry_epoch = 42
+registry_epoch = 43
 
 [[type]]
 wire_type_id = 0x0001
@@ -5812,4 +5812,79 @@ kind = "record"
 status = "reserved"
 encoding_context = "generic portable certificate projection family embedding the target RemoteObjectIdentity, complete export projection bytes, canonical configuration/trust evidence bytes, and signatures; contains no StrongRef, CertifiedRemoteStrongRef, or consumer-local locator (a20:2575)"
 allowed_containing_schemas = ["RestoreServicePromotionManifest", "RoleTransitionServicePromotionManifest"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x055b
+name = "MetaRestorePhase"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union MetaRestorePhase (a18)"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x055c
+name = "MetaRestorePhase.active_hidden"
+kind = "union_variant"
+status = "reserved"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0001
+encoding_context = "arm ActiveHidden of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x055d
+name = "MetaRestorePhase.abandon_authorized_hidden"
+kind = "union_variant"
+status = "reserved"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0002
+encoding_context = "arm AbandonAuthorizedHidden of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x055e
+name = "MetaRestorePhase.promoted_awaiting_reopen"
+kind = "union_variant"
+status = "reserved"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0003
+encoding_context = "arm PromotedAwaitingReopen of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x055f
+name = "MetaRestorePhase.abandoned_awaiting_terminal_pin"
+kind = "union_variant"
+status = "reserved"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0004
+encoding_context = "arm AbandonedAwaitingTerminalPin of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0560
+name = "MetaRestorePhase.awaiting_source_access_cleanup"
+kind = "union_variant"
+status = "reserved"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0005
+encoding_context = "arm AwaitingSourceAccessCleanup of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[type]]
+wire_type_id = 0x0561
+name = "MetaRestorePhase.awaiting_source_release"
+kind = "union_variant"
+status = "reserved"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0006
+encoding_context = "arm AwaitingSourceRelease of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
 max_size_bytes = 16777216

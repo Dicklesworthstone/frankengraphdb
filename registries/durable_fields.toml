@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 78
+registry_epoch = 79
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -16599,6 +16599,28 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaRestorePhase"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+union_name = "MetaRestorePhaseAwaitingSourceAccessCleanupTerminal"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase.AwaitingSourceAccessCleanup.terminal"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaRestorePhase"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "MetaRestoreRegistryValue"
 containing_schema = "MetaRestoreRegistryValue"
 union_path = "MetaRestoreRegistryValue"
@@ -25728,6 +25750,110 @@ stable_name = "abandoned"
 payload_kind = "inline-record"
 payload_sha256 = "bdb8401c3c662a350537b2443d814a963f922a8b84e372113ba0c4d82e72f013"
 role_predicate = "role-meta"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0001
+source_arm_name = "ActiveHidden"
+stable_name = "active_hidden"
+payload_kind = "inline-record"
+payload_sha256 = "7ca0fce9d492be43bba310839ac59e473fa8734cc92fc5df7361c55c2bd3fe2e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0002
+source_arm_name = "AbandonAuthorizedHidden"
+stable_name = "abandon_authorized_hidden"
+payload_kind = "inline-record"
+payload_sha256 = "6e30b8c7b5a280500987616ce55de2e3ddc7da84bf66a0a0572d26745984225d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0003
+source_arm_name = "PromotedAwaitingReopen"
+stable_name = "promoted_awaiting_reopen"
+payload_kind = "inline-record"
+payload_sha256 = "34df00498bbc6513828eba98c738e6b845093a0b51b94f0183e93ffb4df80546"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0004
+source_arm_name = "AbandonedAwaitingTerminalPin"
+stable_name = "abandoned_awaiting_terminal_pin"
+payload_kind = "inline-record"
+payload_sha256 = "d99107150d7a963ce2a6abdcfcf1f4b74b6a3be5071c7bea92874020f45cb1ee"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0005
+source_arm_name = "AwaitingSourceAccessCleanup"
+stable_name = "awaiting_source_access_cleanup"
+payload_kind = "inline-record"
+payload_sha256 = "ec6139a595acbedfd12c1dfdefc6ce63f81f66ddd9c4bbd50c8e819cdb0e7301"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0006
+source_arm_name = "AwaitingSourceRelease"
+stable_name = "awaiting_source_release"
+payload_kind = "inline-record"
+payload_sha256 = "9d9f52e7fb85b05bb70ec609d517f7a768d7cb1e5c45d4fcccff2c473c81f5e5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaRestorePhaseAwaitingSourceAccessCleanupTerminal"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase.AwaitingSourceAccessCleanup.terminal"
+arm_tag = 0x0001
+source_arm_name = "Operational"
+stable_name = "operational"
+payload_kind = "inline-record"
+payload_sha256 = "a4a2ce8151ad7e073843bd1ddc4c3068bdfa13b5678947179c9721895616ecd4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MetaRestorePhaseAwaitingSourceAccessCleanupTerminal"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase.AwaitingSourceAccessCleanup.terminal"
+arm_tag = 0x0002
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "inline-record"
+payload_sha256 = "86c9aed8b7f831b123423f1d1908a8447df54cd30f7801b52205c854fe6e5d63"
+role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
 
