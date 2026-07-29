@@ -1149,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn identical_seed_and_operations_have_identical_physical_iteration_across_dispatches() {
+    fn two_seeds_have_identical_physical_iteration_across_dispatches() {
         fn exercise<'region>(
             scope: &'region RegionScope,
             cx: &QueryCx,
@@ -1177,64 +1177,51 @@ mod tests {
         }
 
         let cx = query_cx();
-        let first_scope = test_scope();
-        let second_scope = test_scope();
-        let swar_scope = test_scope();
-        let different_scope = test_scope();
-        let first = exercise(
-            &first_scope,
-            &cx,
-            0x0123_4567_89ab_cdef,
-            SCALAR_CONTROL_GROUP_DISPATCH,
-        );
-        let second = exercise(
-            &second_scope,
-            &cx,
-            0x0123_4567_89ab_cdef,
-            SCALAR_CONTROL_GROUP_DISPATCH,
-        );
-        let swar = exercise(
-            &swar_scope,
-            &cx,
-            0x0123_4567_89ab_cdef,
-            SWAR_CONTROL_GROUP_DISPATCH,
-        );
-        assert_eq!(first.bucket_count(), second.bucket_count());
-        assert_eq!(
-            first
+        let mut physical_orders = Vec::with_capacity(2);
+        for seed in [0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210] {
+            let first_scope = test_scope();
+            let second_scope = test_scope();
+            let swar_scope = test_scope();
+            let first = exercise(&first_scope, &cx, seed, SCALAR_CONTROL_GROUP_DISPATCH);
+            let second = exercise(&second_scope, &cx, seed, SCALAR_CONTROL_GROUP_DISPATCH);
+            let swar = exercise(&swar_scope, &cx, seed, SWAR_CONTROL_GROUP_DISPATCH);
+            let first_entries = first
                 .iter()
                 .map(|(&key, &value)| (key, value))
-                .collect::<Vec<_>>(),
-            second
+                .collect::<Vec<_>>();
+            let second_entries = second
                 .iter()
                 .map(|(&key, &value)| (key, value))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(first.controls, second.controls);
-        assert_eq!(first.bucket_count(), swar.bucket_count());
-        assert_eq!(
-            first
+                .collect::<Vec<_>>();
+            let swar_entries = swar
                 .iter()
                 .map(|(&key, &value)| (key, value))
-                .collect::<Vec<_>>(),
-            swar.iter()
-                .map(|(&key, &value)| (key, value))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(first.controls, swar.controls);
+                .collect::<Vec<_>>();
 
-        let different_seed = exercise(
-            &different_scope,
-            &cx,
-            0xfedc_ba98_7654_3210,
-            SWAR_CONTROL_GROUP_DISPATCH,
-        );
+            assert_eq!(
+                first.bucket_count(),
+                second.bucket_count(),
+                "seed={seed:#018x}"
+            );
+            assert_eq!(first_entries, second_entries, "seed={seed:#018x}");
+            assert_eq!(first.controls, second.controls, "seed={seed:#018x}");
+            assert_eq!(
+                first.bucket_count(),
+                swar.bucket_count(),
+                "seed={seed:#018x}"
+            );
+            assert_eq!(first_entries, swar_entries, "seed={seed:#018x}");
+            assert_eq!(first.controls, swar.controls, "seed={seed:#018x}");
+            physical_orders.push(
+                first_entries
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect::<Vec<_>>(),
+            );
+        }
         assert_ne!(
-            first.iter().map(|(&key, _)| key).collect::<Vec<_>>(),
-            different_seed
-                .iter()
-                .map(|(&key, _)| key)
-                .collect::<Vec<_>>()
+            physical_orders[0], physical_orders[1],
+            "the two parity seeds must exercise distinct physical layouts"
         );
     }
 

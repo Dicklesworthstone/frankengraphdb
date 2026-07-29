@@ -530,6 +530,15 @@ artifact = "scripts/w1_cross_crate_determinism_e2e.sh"
 status = "live"
 unit = "artifact"
 
+# --- W1 region-backed collections semantic matrix. Owner: fgdb-5mqr. ---
+
+[[checker]]
+symbol = "w1_collections_e2e"
+kind = "script"
+artifact = "scripts/w1_collections_e2e.sh"
+status = "live"
+unit = "artifact"
+
 # --- G0 threat/trust model, authority lattice, and authority footprint. ---
 # Owner: fgdb-g0-threat-model-nqd.
 
