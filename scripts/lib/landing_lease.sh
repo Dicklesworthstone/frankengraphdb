@@ -74,13 +74,16 @@
 #   UNREADABLE  the lease cannot be read at all.        -> allow, LOUD
 #
 # =============================================================================
-# ON-DISK FORMAT, and why it needs no change to token.sh
+# ON-DISK FORMAT — the holder file is FIVE lines, written by token.sh
 # =============================================================================
 # The mutual-exclusion primitive stays `token.sh` (atomic `mkdir`), as directed.
-# Its holder file is three lines: who / epoch / ttl, read with `sed -n 1p|2p|3p`.
-# This lease APPENDS two more — pid and pid start time — which token.sh never
-# reads, so `status`, `renew`, `release` and `steal` keep working untouched.
-# Release stays token.sh's own `rm -f holder; rmdir lock`; nothing here deletes.
+# Since fgdb-5j16 the holder file is five lines — who / epoch / ttl / pid /
+# pid start time — written by `token.sh acquire` itself: this library passes
+# the gate's own `$$` as the holder-pid argument, so the recorded process is
+# the gate run, exactly what the pre-commit hook tests. Bare three-line holds
+# still parse (pid reads empty) and are reported INDETERMINATE, never
+# reclaimed. Release stays token.sh's own `rm -f holder; rmdir lock`; nothing
+# here deletes.
 #
 # The start-time cross-check is what makes liveness EXACT. A bare `kill -0`
 # would be fooled by PID REUSE — an unrelated process inheriting the number
@@ -92,7 +95,7 @@
 # line tonight — the defect this design removes rather than documents around.
 # =============================================================================
 
-FGDB_TOKEN_SH="${FGDB_TOKEN_SH:-/data/tmp/fgdb_swarm/token.sh}"
+FGDB_TOKEN_SH="${FGDB_TOKEN_SH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/token.sh}"
 FGDB_TOKEN_DIR="${FGDB_TOKEN_DIR:-/data/tmp/fgdb_swarm/tokens}"
 
 LANDING_LOCK="$FGDB_TOKEN_DIR/landing.lock"
@@ -197,13 +200,13 @@ landing_lease_state() {
 
 # landing_lease_acquire <holder> [ttl_label] — take the lease for a gate run.
 # The ttl is recorded as a LABEL for a human reading `token.sh status`. Nothing
-# in this file acts on it (ruling ONE).
+# in this file acts on it (ruling ONE). The gate's own `$$` is passed as the
+# holder pid, so the recorded process is the run the hook must test — never
+# token.sh's own transient pid or its caller's parent.
 landing_lease_acquire() {
-  local who="$1" ttl="${2:-45}" start
+  local who="$1" ttl="${2:-45}"
   [ -x "$FGDB_TOKEN_SH" ] || return 1
-  "$FGDB_TOKEN_SH" acquire landing "$who" "$ttl" >/dev/null 2>&1 || return 1
-  start="$(_ll_starttime "$$" 2>/dev/null)"
-  printf '%s\n%s\n' "$$" "${start:-}" >> "$LANDING_META" 2>/dev/null || true
+  "$FGDB_TOKEN_SH" acquire landing "$who" "$ttl" "$$" >/dev/null 2>&1 || return 1
   export FGDB_LANDING_HOLDER="$who"
   return 0
 }

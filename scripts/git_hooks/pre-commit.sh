@@ -93,7 +93,7 @@ case "$state" in
       printf 'an age threshold cannot tell a dead holder from a slow one. The stale\n'
       printf 'lock is left in place for the operator; reclaiming it quietly is how a\n'
       printf 'team ends up trusting a guarantee that stopped holding.\n\n'
-      printf '  clear it: /data/tmp/fgdb_swarm/token.sh steal landing <your-name>\n\n'
+      printf '  clear it: %s/scripts/token.sh steal landing <your-name>\n\n' "$top"
     } >&2
     exit 0
     ;;
@@ -128,7 +128,7 @@ fi
     printf 'test that FAILED, and no other ground -- an age threshold cannot tell a\n'
     printf 'dead holder from a slow one. If you know the holder is gone, say so\n'
     printf 'explicitly:\n\n'
-    printf '  /data/tmp/fgdb_swarm/token.sh steal landing <your-name>\n\n'
+    printf '  %s/scripts/token.sh steal landing <your-name>\n\n' "$top"
   else
     printf 'It frees itself the moment that run exits. It will not expire on a timer,\n'
     printf 'and it will not be reclaimed while its process is alive.\n\n'
@@ -145,7 +145,7 @@ fi
   printf 'all unaffected. Only a commit on main is refused, and only while a run is\n'
   printf 'actually in flight.\n\n'
   printf 'WHAT TO DO\n'
-  printf '  * Retry shortly, or watch it:  /data/tmp/fgdb_swarm/token.sh status landing\n'
+  printf '  * Retry shortly, or watch it:  %s/scripts/token.sh status landing\n' "$top"
   printf '  * Land anyway:                 git commit --no-verify\n'
   printf '    Legitimate and always available -- but it VOIDS the in-flight run\n'
   printf '    (~35 min if that is check.sh). Say so in the commit message so the\n'
