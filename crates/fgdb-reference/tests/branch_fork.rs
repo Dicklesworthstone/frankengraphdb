@@ -18,7 +18,7 @@ use fgdb_delta_types::{
     SchemaEpoch,
 };
 use fgdb_reference::{BranchError, BranchOrigin, ReferenceDatabase};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId, VId};
 
 const GRAPH: GraphId = GraphId(1);
 const MAIN: BranchId = BranchId(1);
@@ -109,17 +109,16 @@ fn an_unforked_branch_is_genesis_and_has_no_parent() {
     );
 }
 
-/// A fork records all the origin fields the plan requires of the Fork arm.
+/// This sequence-neutral slice records the parent but does not counterfeit a
+/// historical boundary that the reference database cannot select or verify.
 #[test]
-fn a_fork_records_its_parent_and_boundary() {
+fn a_fork_records_its_parent() {
     let mut db = seeded();
-    db.fork_branch(GRAPH, MAIN, FEATURE, CommitSeq(7))
-        .expect("forks");
+    db.fork_branch(GRAPH, MAIN, FEATURE).expect("forks");
     assert_eq!(
         db.branch_origin(GRAPH, FEATURE),
         Some(BranchOrigin::Fork {
             parent_branch: MAIN,
-            fork_boundary_commit_seq: CommitSeq(7),
         })
     );
     assert_eq!(
@@ -133,13 +132,12 @@ fn a_fork_records_its_parent_and_boundary() {
 // Inheritance
 // ---------------------------------------------------------------------------
 
-/// The child begins as exactly the parent's state at the fork point — every
-/// vertex, edge and property, not merely the right counts.
+/// The child begins as exactly the parent's state when `fork_branch` is called
+/// — every vertex, edge and property, not merely the right counts.
 #[test]
 fn a_fork_inherits_the_parents_state_exactly() {
     let mut db = seeded();
-    db.fork_branch(GRAPH, MAIN, FEATURE, CommitSeq(1))
-        .expect("forks");
+    db.fork_branch(GRAPH, MAIN, FEATURE).expect("forks");
 
     let main = db.graph(GRAPH, MAIN).expect("main");
     let feature = db.graph(GRAPH, FEATURE).expect("feature");
@@ -165,8 +163,7 @@ fn a_fork_inherits_the_parents_state_exactly() {
 #[test]
 fn the_child_does_not_see_the_parents_later_writes() {
     let mut db = seeded();
-    db.fork_branch(GRAPH, MAIN, FEATURE, CommitSeq(1))
-        .expect("forks");
+    db.fork_branch(GRAPH, MAIN, FEATURE).expect("forks");
 
     apply(&mut db, MAIN, vec![vertex(3, "alan")]);
 
@@ -191,8 +188,7 @@ fn the_child_does_not_see_the_parents_later_writes() {
 #[test]
 fn the_parent_does_not_see_the_childs_writes() {
     let mut db = seeded();
-    db.fork_branch(GRAPH, MAIN, FEATURE, CommitSeq(1))
-        .expect("forks");
+    db.fork_branch(GRAPH, MAIN, FEATURE).expect("forks");
 
     apply(&mut db, FEATURE, vec![vertex(4, "hopper")]);
 
@@ -216,8 +212,7 @@ fn the_parent_does_not_see_the_childs_writes() {
 #[test]
 fn both_branches_may_diverge_on_the_same_identity() {
     let mut db = seeded();
-    db.fork_branch(GRAPH, MAIN, FEATURE, CommitSeq(1))
-        .expect("forks");
+    db.fork_branch(GRAPH, MAIN, FEATURE).expect("forks");
 
     apply(
         &mut db,
@@ -250,8 +245,7 @@ fn both_branches_may_diverge_on_the_same_identity() {
 #[test]
 fn before_images_are_checked_per_branch() {
     let mut db = seeded();
-    db.fork_branch(GRAPH, MAIN, FEATURE, CommitSeq(1))
-        .expect("forks");
+    db.fork_branch(GRAPH, MAIN, FEATURE).expect("forks");
     apply(
         &mut db,
         MAIN,
@@ -302,7 +296,7 @@ fn before_images_are_checked_per_branch() {
 fn forking_from_a_nonexistent_branch_is_refused() {
     let mut db = seeded();
     assert_eq!(
-        db.fork_branch(GRAPH, BranchId(99), FEATURE, CommitSeq(1)),
+        db.fork_branch(GRAPH, BranchId(99), FEATURE),
         Err(BranchError::NoSuchParent {
             graph: GRAPH,
             parent: BranchId(99),
@@ -321,13 +315,12 @@ fn forking_from_a_nonexistent_branch_is_refused() {
 #[test]
 fn forking_onto_an_existing_branch_is_refused() {
     let mut db = seeded();
-    db.fork_branch(GRAPH, MAIN, FEATURE, CommitSeq(1))
-        .expect("first fork");
+    db.fork_branch(GRAPH, MAIN, FEATURE).expect("first fork");
     apply(&mut db, FEATURE, vec![vertex(4, "hopper")]);
     let settled = db.clone();
 
     assert_eq!(
-        db.fork_branch(GRAPH, MAIN, FEATURE, CommitSeq(2)),
+        db.fork_branch(GRAPH, MAIN, FEATURE),
         Err(BranchError::BranchExists {
             graph: GRAPH,
             branch: FEATURE,
@@ -340,7 +333,7 @@ fn forking_onto_an_existing_branch_is_refused() {
     apply(&mut written, MAIN, vec![vertex(1, "ada")]);
     apply(&mut written, FEATURE, vec![vertex(9, "independent")]);
     assert_eq!(
-        written.fork_branch(GRAPH, MAIN, FEATURE, CommitSeq(1)),
+        written.fork_branch(GRAPH, MAIN, FEATURE),
         Err(BranchError::BranchExists {
             graph: GRAPH,
             branch: FEATURE,
@@ -353,7 +346,7 @@ fn forking_onto_an_existing_branch_is_refused() {
 fn a_branch_cannot_fork_from_itself() {
     let mut db = seeded();
     assert_eq!(
-        db.fork_branch(GRAPH, MAIN, MAIN, CommitSeq(1)),
+        db.fork_branch(GRAPH, MAIN, MAIN),
         Err(BranchError::SelfFork { branch: MAIN })
     );
 }
@@ -364,11 +357,9 @@ fn a_branch_cannot_fork_from_itself() {
 fn forks_chain_and_all_levels_stay_isolated() {
     const RELEASE: BranchId = BranchId(3);
     let mut db = seeded();
-    db.fork_branch(GRAPH, MAIN, FEATURE, CommitSeq(1))
-        .expect("fork 1");
+    db.fork_branch(GRAPH, MAIN, FEATURE).expect("fork 1");
     apply(&mut db, FEATURE, vec![vertex(4, "hopper")]);
-    db.fork_branch(GRAPH, FEATURE, RELEASE, CommitSeq(2))
-        .expect("fork 2");
+    db.fork_branch(GRAPH, FEATURE, RELEASE).expect("fork 2");
 
     assert_eq!(
         db.graph(GRAPH, RELEASE).expect("release").vertex_count(),
@@ -379,7 +370,6 @@ fn forks_chain_and_all_levels_stay_isolated() {
         db.branch_origin(GRAPH, RELEASE),
         Some(BranchOrigin::Fork {
             parent_branch: FEATURE,
-            fork_boundary_commit_seq: CommitSeq(2),
         })
     );
 

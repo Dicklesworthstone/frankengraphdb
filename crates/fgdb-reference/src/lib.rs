@@ -36,7 +36,7 @@ use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId, LogicalDeltaTemplate,
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A materialized vertex.
@@ -843,24 +843,24 @@ impl ReferenceGraph {
 
 /// How a branch came to exist (plan:2000).
 ///
-/// A CLOSED union whose shape enforces the plan's rule: "The Genesis tag
-/// forbids parent/head/boundary fields; Fork requires all four." `Genesis`
-/// carries no fields at all, so a genesis branch cannot name a parent even by
-/// mistake — the prohibition is structural rather than a validation someone
-/// must remember to run.
+/// A CLOSED union whose `Genesis` arm carries no parent, so a genesis branch
+/// cannot name one even by mistake. That part of the plan's Genesis/Fork
+/// distinction is structural rather than a validation someone must remember
+/// to run.
 ///
 /// SUBSET NOTE (doctrine 7): the plan's `Fork` arm additionally carries
-/// `parent_head: StrongMarkerRef` and `boundary_reservation_identity`. Neither
-/// is spellable here — `StrongMarkerRef` needs an active object kind, and the
-/// reservation belongs to W4's certification machinery. The boundary sequence
-/// is the load-bearing part for semantics and it is present.
+/// `parent_head: StrongMarkerRef`, `fork_boundary_logical_command_seq`, and
+/// `boundary_reservation_identity`. None is spellable honestly in this
+/// sequence-neutral materializer: it tracks neither committed parent heads nor
+/// logical-command history, and the reservation belongs to W4's certification
+/// machinery. This slice therefore models only a fork of the parent's current
+/// materialized state. Historical-boundary selection must land with the
+/// missing history/head model; a caller-supplied sequence would be an
+/// unauthenticated label, not oracle evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchOrigin {
     Genesis,
-    Fork {
-        parent_branch: BranchId,
-        fork_boundary_commit_seq: CommitSeq,
-    },
+    Fork { parent_branch: BranchId },
 }
 
 /// Why a branch operation was refused.
@@ -922,13 +922,16 @@ impl ReferenceDatabase {
         self.origins.get(&(graph, branch)).copied()
     }
 
-    /// Fork `child` from `parent` at `boundary`.
+    /// Fork `child` from `parent` at its current materialized state.
     ///
     /// **THE SEMANTICS, which is what the real engine must match:** the child
-    /// begins as exactly the parent's state at the fork point, and from then on
-    /// the two diverge with no leakage in either direction. That is B1's
-    /// git-style branching and B6's branch-per-agent isolation, and it is what
-    /// the laws in `tests/branch_fork.rs` pin.
+    /// begins as exactly the parent's state when this method is called, and
+    /// from then on the two diverge with no leakage in either direction. That
+    /// is the current-state subset of B1's git-style branching and B6's
+    /// branch-per-agent isolation, and it is what the laws in
+    /// `tests/branch_fork.rs` pin. This method deliberately accepts no commit
+    /// sequence: the reference database cannot yet select or verify a
+    /// historical boundary.
     ///
     /// **THE COMPLEXITY, which the real engine must NOT match.** This copies the
     /// parent's state, which is O(n). plan:451 is explicit that branch creation
@@ -947,7 +950,6 @@ impl ReferenceDatabase {
         graph: GraphId,
         parent: BranchId,
         child: BranchId,
-        boundary: CommitSeq,
     ) -> Result<(), BranchError> {
         if parent == child {
             return Err(BranchError::SelfFork { branch: child });
@@ -971,7 +973,6 @@ impl ReferenceDatabase {
             (graph, child),
             BranchOrigin::Fork {
                 parent_branch: parent,
-                fork_boundary_commit_seq: boundary,
             },
         );
         Ok(())
