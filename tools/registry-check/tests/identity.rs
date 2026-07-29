@@ -3372,6 +3372,227 @@ fn idr_a18_wire_consumer_allowlists_are_exact() {
 }
 
 #[test]
+fn idr_a18_meta_restore_phase_twin_is_exact_and_role_isolated() {
+    const TOP: &str = "MetaRestorePhase";
+    const TERMINAL: &str = "MetaRestorePhaseAwaitingSourceAccessCleanupTerminal";
+
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let top_arms = [
+        (
+            0x0001,
+            "ActiveHidden",
+            "active_hidden",
+            0x055c,
+            "7ca0fce9d492be43bba310839ac59e473fa8734cc92fc5df7361c55c2bd3fe2e",
+        ),
+        (
+            0x0002,
+            "AbandonAuthorizedHidden",
+            "abandon_authorized_hidden",
+            0x055d,
+            "6e30b8c7b5a280500987616ce55de2e3ddc7da84bf66a0a0572d26745984225d",
+        ),
+        (
+            0x0003,
+            "PromotedAwaitingReopen",
+            "promoted_awaiting_reopen",
+            0x055e,
+            "34df00498bbc6513828eba98c738e6b845093a0b51b94f0183e93ffb4df80546",
+        ),
+        (
+            0x0004,
+            "AbandonedAwaitingTerminalPin",
+            "abandoned_awaiting_terminal_pin",
+            0x055f,
+            "d99107150d7a963ce2a6abdcfcf1f4b74b6a3be5071c7bea92874020f45cb1ee",
+        ),
+        (
+            0x0005,
+            "AwaitingSourceAccessCleanup",
+            "awaiting_source_access_cleanup",
+            0x0560,
+            "ec6139a595acbedfd12c1dfdefc6ce63f81f66ddd9c4bbd50c8e819cdb0e7301",
+        ),
+        (
+            0x0006,
+            "AwaitingSourceRelease",
+            "awaiting_source_release",
+            0x0561,
+            "9d9f52e7fb85b05bb70ec609d517f7a768d7cb1e5c45d4fcccff2c473c81f5e5",
+        ),
+    ];
+
+    let parent = identity
+        .wire
+        .iter()
+        .find(|row| row.name == TOP)
+        .expect("MetaRestorePhase wire parent exists");
+    assert_eq!(parent.wire_type_id, 0x055b);
+    assert_eq!(parent.kind, "union");
+    assert_eq!(parent.status, "reserved");
+    assert_eq!(parent.containing_union, None);
+    assert_eq!(parent.wire_tag, None);
+    assert_eq!(parent.allowed_containing_schemas, [TOP]);
+    assert_eq!(parent.max_size_bytes, 16_777_216);
+    assert!(
+        identity.logical.iter().all(|row| row.name != TOP),
+        "the source-forced wire twin must not spend a logical object-kind code"
+    );
+
+    let top = identity
+        .ordinary_unions
+        .iter()
+        .find(|row| row.union_name == TOP)
+        .expect("MetaRestorePhase ordinary union exists");
+    assert_eq!(top.containing_schema, TOP);
+    assert_eq!(top.union_path, TOP);
+    assert_eq!(top.field_tag, None);
+    assert_eq!(top.tag_wire_type, "u8");
+    assert_eq!(top.allowed_containing_schemas, [TOP]);
+    assert_eq!(top.arms.len(), top_arms.len());
+    for &(tag, source_name, stable_name, code, payload_sha256) in &top_arms {
+        let arm = top
+            .arms
+            .iter()
+            .find(|row| row.arm_tag == tag)
+            .unwrap_or_else(|| panic!("MetaRestorePhase arm {tag:#06x} exists"));
+        assert_eq!(arm.source_arm_name, source_name);
+        assert_eq!(arm.stable_name, stable_name);
+        assert_eq!(arm.payload_kind, "inline-record");
+        assert_eq!(arm.payload_sha256.as_deref(), Some(payload_sha256));
+
+        let variant_name = format!("{TOP}.{stable_name}");
+        let variant = identity
+            .wire
+            .iter()
+            .find(|row| row.name == variant_name)
+            .unwrap_or_else(|| panic!("{variant_name} wire variant exists"));
+        assert_eq!(variant.wire_type_id, code);
+        assert_eq!(variant.kind, "union_variant");
+        assert_eq!(variant.containing_union.as_deref(), Some(TOP));
+        assert_eq!(variant.wire_tag, Some(tag));
+        assert_eq!(variant.allowed_containing_schemas, [TOP]);
+
+        let source_key = format!("arm|{TOP}|{TOP}|{source_name}");
+        let target_kinds = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key == source_key)
+            .map(|row| row.target_kind.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            target_kinds,
+            BTreeSet::from(["union-arm", "wire-type"]),
+            "{source_name} must back exactly its arm and wire-variant projections"
+        );
+    }
+
+    let terminal = identity
+        .ordinary_unions
+        .iter()
+        .find(|row| row.union_name == TERMINAL)
+        .expect("MetaRestorePhase nested terminal union exists");
+    assert_eq!(terminal.containing_schema, TOP);
+    assert_eq!(
+        terminal.union_path,
+        "MetaRestorePhase.AwaitingSourceAccessCleanup.terminal"
+    );
+    assert_eq!(terminal.field_tag, None);
+    assert_eq!(terminal.tag_wire_type, "u8");
+    assert_eq!(terminal.allowed_containing_schemas, [TOP]);
+    assert_eq!(
+        terminal
+            .arms
+            .iter()
+            .map(|arm| {
+                (
+                    arm.arm_tag,
+                    arm.source_arm_name.as_str(),
+                    arm.payload_sha256.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        [
+            (
+                0x0001,
+                "Operational",
+                Some("a4a2ce8151ad7e073843bd1ddc4c3068bdfa13b5678947179c9721895616ecd4"),
+            ),
+            (
+                0x0002,
+                "Abandoned",
+                Some("86c9aed8b7f831b123423f1d1908a8447df54cd30f7801b52205c854fe6e5d63"),
+            ),
+        ]
+    );
+    assert!(
+        identity
+            .wire
+            .iter()
+            .all(|row| row.containing_union.as_deref() != Some(TERMINAL)),
+        "the nested terminal union owns no independent wire-variant family"
+    );
+
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|row| row.source_key == "top|MetaRestorePhase")
+        .expect("MetaRestorePhase source candidate exists");
+    assert_eq!(candidate.source_kind, "confirmed");
+    assert_eq!(candidate.identity_class, "wire");
+    assert!(
+        catalog.reservations.iter().all(|row| row.symbol != TOP)
+            && catalog
+                .source_symbol_dispositions
+                .iter()
+                .all(|row| row.symbol != TOP),
+        "a source-spelled by-value union needs neither a reference reservation nor a disposition"
+    );
+    assert_eq!(
+        catalog
+            .targets
+            .iter()
+            .filter(|row| {
+                row.target_row_id
+                    .starts_with("a18:wire-type:meta-restore-phase")
+                    || row
+                        .target_row_id
+                        .starts_with("a18:union:meta-restore-phase")
+                    || row
+                        .target_row_id
+                        .starts_with("a18:union-arm:meta-restore-phase")
+            })
+            .count(),
+        17,
+        "the twin requires seven wire, two union, and eight arm targets"
+    );
+    assert!(
+        identity
+            .fields
+            .iter()
+            .all(|row| row.containing_schema != TOP),
+        "wire-union payload members remain source-owned rather than becoming durable field rows"
+    );
+
+    let local = identity
+        .ordinary_unions
+        .iter()
+        .find(|row| row.union_name == "LocalRestorePhase")
+        .expect("role-parallel LocalRestorePhase control exists");
+    assert_eq!(local.arms.len(), 7);
+    assert!(local.arms.iter().any(|row| {
+        row.source_arm_name == "AbandonedAuthorityAppliedAwaitingReceipt" && row.arm_tag == 0x0004
+    }));
+    assert!(
+        top.arms
+            .iter()
+            .all(|row| row.source_arm_name != "AbandonedAuthorityAppliedAwaitingReceipt"),
+        "the source expressly makes AbandonedAuthorityAppliedAwaitingReceipt Local-only"
+    );
+}
+
+#[test]
 fn idr_a03_wire_consumer_repairs_are_exact_and_non_vacuous() {
     let identity = real_identity();
     let expected = [
@@ -8491,6 +8712,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "CatalogAbandonPredecessor"
                 | "LocalRestorePhase"
                 | "LocalRestorePhaseAwaitingSourceAccessCleanupTerminal"
+                // fgdb-2a50 lands the source-spelled six-arm Meta phase plus
+                // its nested operational/abandoned terminal; both are younger
+                // than the frozen A10 witness.
+                | "MetaRestorePhase"
+                | "MetaRestorePhaseAwaitingSourceAccessCleanupTerminal"
                 | "LocalRestoreRegistryValue"
                 | "MetaRestoreRegistryValue"
                 | "RecoveryTransformSourceBasis<Role>"
@@ -10212,7 +10438,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // than the witness.
         // 380 -> 382 (fgdb-6v86): the Meta and Shard seal_state locations are
         // distinct source unions and both are younger than the witness.
-        pre_erratum.ordinary_unions.len() + 382,
+        // 382 -> 384 (fgdb-2a50): MetaRestorePhase and its nested terminal are
+        // the two source-spelled unions released by the Meta twin.
+        pre_erratum.ordinary_unions.len() + 384,
         current_union_count,
         "historical witness ordinary-union cohort drift: the post-erratum filters \
          removed a number of unions other than 378. This assert compares a \
@@ -10311,7 +10539,9 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             // Forbidden are the two source-spelled arms of AuditFreezeField<Tag>.
             // 1_112 -> 1_116 (fgdb-6v86): Unsealed and Sealed on each of the
             // two role-specific seal_state unions.
-            + 1_116,
+            // 1_116 -> 1_124 (fgdb-2a50): six MetaRestorePhase arms plus the
+            // Operational/Abandoned nested terminal pair.
+            + 1_124,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );

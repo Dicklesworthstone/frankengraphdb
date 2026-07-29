@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 pub mod identity;
+pub mod marker;
 pub mod pack;
 pub mod root;
 pub mod scrub;
@@ -31,6 +32,9 @@ pub mod symbolize;
 pub use identity::{
     CipherDescriptor, EncodedObject, EncodingDescriptor, IdentifiedObject, LocationForm,
     PlacedObject, PlacementDescriptor, ProtectedObject,
+};
+pub use marker::{
+    ChainError, ChainedMarker, CommitMarker, EffectSource, HeadUpdate, MarkerChain, MarkerRef,
 };
 pub use pack::{
     DomainAxis, PackBuilder, PackDomain, PackError, PackedObjectGroup, SubobjectLocator,

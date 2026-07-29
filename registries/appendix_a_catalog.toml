@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "64535886e6dbb525694d6676b315397b959291e2901b9bcd456ae0e61861d4d3"
 
 [target_manifest]
-target_count = 3665
+target_count = 3682
 projection_fallback_count = 134
-target_source_assignment_sha256 = "1136c6b6739e518d46daf52e35b4ea7e5d65f641d2f483aa054ea7c266899ea1"
+target_source_assignment_sha256 = "2162b89734852b0dde868d46aed1ca08e6b0d23d6fb2a803fc9f5901be905de3"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -641,11 +641,11 @@ registry_epoch = 1
 
 [[projection_epoch]]
 registry = "wire_types"
-registry_epoch = 42
+registry_epoch = 43
 
 [[projection_epoch]]
 registry = "durable_fields"
-registry_epoch = 78
+registry_epoch = 79
 
 [[logical_kind]]
 slice_id = "a03"
@@ -54427,7 +54427,7 @@ symbol = "MetaRestorePhase"
 generic_signature = ""
 source_key = "top|MetaRestorePhase"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a18:2381"]
 
 [[top_level_candidate]]
@@ -112417,4 +112417,375 @@ target_row_id = "a10:logical-kind:audit-freeze-field"
 slice_id = "a10"
 source_key = "top|AuditFreezeField<Tag>"
 target_kind = "logical-kind"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a18"
+row_id = "a18:wire-type:meta-restore-phase"
+wire_type_id = 0x055b
+name = "MetaRestorePhase"
+kind = "union"
+status = "reserved"
+encoding_context = "closed union MetaRestorePhase (a18)"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a18"
+row_id = "a18:wire-type:meta-restore-phase-active-hidden"
+wire_type_id = 0x055c
+name = "MetaRestorePhase.active_hidden"
+kind = "union_variant"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0001
+status = "reserved"
+encoding_context = "arm ActiveHidden of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a18"
+row_id = "a18:wire-type:meta-restore-phase-abandon-authorized-hidden"
+wire_type_id = 0x055d
+name = "MetaRestorePhase.abandon_authorized_hidden"
+kind = "union_variant"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0002
+status = "reserved"
+encoding_context = "arm AbandonAuthorizedHidden of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a18"
+row_id = "a18:wire-type:meta-restore-phase-promoted-awaiting-reopen"
+wire_type_id = 0x055e
+name = "MetaRestorePhase.promoted_awaiting_reopen"
+kind = "union_variant"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0003
+status = "reserved"
+encoding_context = "arm PromotedAwaitingReopen of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a18"
+row_id = "a18:wire-type:meta-restore-phase-abandoned-awaiting-terminal-pin"
+wire_type_id = 0x055f
+name = "MetaRestorePhase.abandoned_awaiting_terminal_pin"
+kind = "union_variant"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0004
+status = "reserved"
+encoding_context = "arm AbandonedAwaitingTerminalPin of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a18"
+row_id = "a18:wire-type:meta-restore-phase-awaiting-source-access-cleanup"
+wire_type_id = 0x0560
+name = "MetaRestorePhase.awaiting_source_access_cleanup"
+kind = "union_variant"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0005
+status = "reserved"
+encoding_context = "arm AwaitingSourceAccessCleanup of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[wire_type]]
+slice_id = "a18"
+row_id = "a18:wire-type:meta-restore-phase-awaiting-source-release"
+wire_type_id = 0x0561
+name = "MetaRestorePhase.awaiting_source_release"
+kind = "union_variant"
+containing_union = "MetaRestorePhase"
+wire_tag = 0x0006
+status = "reserved"
+encoding_context = "arm AwaitingSourceRelease of closed union MetaRestorePhase"
+allowed_containing_schemas = ["MetaRestorePhase"]
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:meta-restore-phase-2ff38e40d7f3337f"
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaRestorePhase"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a18"
+row_id = "a18:union:meta-restore-phase-awaiting-source-access-cleanup-terminal-63a915af3f884df0"
+union_name = "MetaRestorePhaseAwaitingSourceAccessCleanupTerminal"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase.AwaitingSourceAccessCleanup.terminal"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MetaRestorePhase"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:meta-restore-phase-active-hidden-87b4a8fcf1e59e0b"
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0001
+source_arm_name = "ActiveHidden"
+stable_name = "active_hidden"
+payload_kind = "inline-record"
+payload_sha256 = "7ca0fce9d492be43bba310839ac59e473fa8734cc92fc5df7361c55c2bd3fe2e"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:meta-restore-phase-abandon-authorized-hidden-eddd2b1a32d05ead"
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0002
+source_arm_name = "AbandonAuthorizedHidden"
+stable_name = "abandon_authorized_hidden"
+payload_kind = "inline-record"
+payload_sha256 = "6e30b8c7b5a280500987616ce55de2e3ddc7da84bf66a0a0572d26745984225d"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:meta-restore-phase-promoted-awaiting-reopen-413e13080529ec93"
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0003
+source_arm_name = "PromotedAwaitingReopen"
+stable_name = "promoted_awaiting_reopen"
+payload_kind = "inline-record"
+payload_sha256 = "34df00498bbc6513828eba98c738e6b845093a0b51b94f0183e93ffb4df80546"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:meta-restore-phase-abandoned-awaiting-terminal-pin-ed0777b3ad9a9442"
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0004
+source_arm_name = "AbandonedAwaitingTerminalPin"
+stable_name = "abandoned_awaiting_terminal_pin"
+payload_kind = "inline-record"
+payload_sha256 = "d99107150d7a963ce2a6abdcfcf1f4b74b6a3be5071c7bea92874020f45cb1ee"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:meta-restore-phase-awaiting-source-access-cleanup-0a2f589ac73eba39"
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0005
+source_arm_name = "AwaitingSourceAccessCleanup"
+stable_name = "awaiting_source_access_cleanup"
+payload_kind = "inline-record"
+payload_sha256 = "ec6139a595acbedfd12c1dfdefc6ce63f81f66ddd9c4bbd50c8e819cdb0e7301"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:meta-restore-phase-awaiting-source-release-da20393aae6337ca"
+union_name = "MetaRestorePhase"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase"
+arm_tag = 0x0006
+source_arm_name = "AwaitingSourceRelease"
+stable_name = "awaiting_source_release"
+payload_kind = "inline-record"
+payload_sha256 = "9d9f52e7fb85b05bb70ec609d517f7a768d7cb1e5c45d4fcccff2c473c81f5e5"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:meta-restore-phase-awaiting-source-access-cleanup-terminal-operational-1011e6d05e6c967b"
+union_name = "MetaRestorePhaseAwaitingSourceAccessCleanupTerminal"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase.AwaitingSourceAccessCleanup.terminal"
+arm_tag = 0x0001
+source_arm_name = "Operational"
+stable_name = "operational"
+payload_kind = "inline-record"
+payload_sha256 = "a4a2ce8151ad7e073843bd1ddc4c3068bdfa13b5678947179c9721895616ecd4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a18"
+row_id = "a18:union-arm:meta-restore-phase-awaiting-source-access-cleanup-terminal-abandoned-700cbd6a0a7664c6"
+union_name = "MetaRestorePhaseAwaitingSourceAccessCleanupTerminal"
+containing_schema = "MetaRestorePhase"
+union_path = "MetaRestorePhase.AwaitingSourceAccessCleanup.terminal"
+arm_tag = 0x0002
+source_arm_name = "Abandoned"
+stable_name = "abandoned"
+payload_kind = "inline-record"
+payload_sha256 = "86c9aed8b7f831b123423f1d1908a8447df54cd30f7801b52205c854fe6e5d63"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[target]]
+row_id = "a18:target:wire-type-meta-restore-phase"
+target_row_id = "a18:wire-type:meta-restore-phase"
+slice_id = "a18"
+source_key = "top|MetaRestorePhase"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:wire-type-meta-restore-phase-active-hidden"
+target_row_id = "a18:wire-type:meta-restore-phase-active-hidden"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|ActiveHidden"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:wire-type-meta-restore-phase-abandon-authorized-hidden"
+target_row_id = "a18:wire-type:meta-restore-phase-abandon-authorized-hidden"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|AbandonAuthorizedHidden"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:wire-type-meta-restore-phase-promoted-awaiting-reopen"
+target_row_id = "a18:wire-type:meta-restore-phase-promoted-awaiting-reopen"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|PromotedAwaitingReopen"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:wire-type-meta-restore-phase-abandoned-awaiting-terminal-pin"
+target_row_id = "a18:wire-type:meta-restore-phase-abandoned-awaiting-terminal-pin"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|AbandonedAwaitingTerminalPin"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:wire-type-meta-restore-phase-awaiting-source-access-cleanup"
+target_row_id = "a18:wire-type:meta-restore-phase-awaiting-source-access-cleanup"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|AwaitingSourceAccessCleanup"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:wire-type-meta-restore-phase-awaiting-source-release"
+target_row_id = "a18:wire-type:meta-restore-phase-awaiting-source-release"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|AwaitingSourceRelease"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-meta-restore-phase-2ff38e40d7f3337f"
+target_row_id = "a18:union:meta-restore-phase-2ff38e40d7f3337f"
+slice_id = "a18"
+source_key = "union|MetaRestorePhase|MetaRestorePhase"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-meta-restore-phase-awaiting-source-access-cleanup-terminal-63a915af3f884df0"
+target_row_id = "a18:union:meta-restore-phase-awaiting-source-access-cleanup-terminal-63a915af3f884df0"
+slice_id = "a18"
+source_key = "union|MetaRestorePhase|MetaRestorePhase.AwaitingSourceAccessCleanup.terminal"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-meta-restore-phase-active-hidden-87b4a8fcf1e59e0b"
+target_row_id = "a18:union-arm:meta-restore-phase-active-hidden-87b4a8fcf1e59e0b"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|ActiveHidden"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-meta-restore-phase-abandon-authorized-hidden-eddd2b1a32d05ead"
+target_row_id = "a18:union-arm:meta-restore-phase-abandon-authorized-hidden-eddd2b1a32d05ead"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|AbandonAuthorizedHidden"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-meta-restore-phase-promoted-awaiting-reopen-413e13080529ec93"
+target_row_id = "a18:union-arm:meta-restore-phase-promoted-awaiting-reopen-413e13080529ec93"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|PromotedAwaitingReopen"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-meta-restore-phase-abandoned-awaiting-terminal-pin-ed0777b3ad9a9442"
+target_row_id = "a18:union-arm:meta-restore-phase-abandoned-awaiting-terminal-pin-ed0777b3ad9a9442"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|AbandonedAwaitingTerminalPin"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-meta-restore-phase-awaiting-source-access-cleanup-0a2f589ac73eba39"
+target_row_id = "a18:union-arm:meta-restore-phase-awaiting-source-access-cleanup-0a2f589ac73eba39"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|AwaitingSourceAccessCleanup"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-meta-restore-phase-awaiting-source-release-da20393aae6337ca"
+target_row_id = "a18:union-arm:meta-restore-phase-awaiting-source-release-da20393aae6337ca"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase|AwaitingSourceRelease"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-meta-restore-phase-awaiting-source-access-cleanup-terminal-operational-1011e6d05e6c967b"
+target_row_id = "a18:union-arm:meta-restore-phase-awaiting-source-access-cleanup-terminal-operational-1011e6d05e6c967b"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase.AwaitingSourceAccessCleanup.terminal|Operational"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a18:target:union-arm-meta-restore-phase-awaiting-source-access-cleanup-terminal-abandoned-700cbd6a0a7664c6"
+target_row_id = "a18:union-arm:meta-restore-phase-awaiting-source-access-cleanup-terminal-abandoned-700cbd6a0a7664c6"
+slice_id = "a18"
+source_key = "arm|MetaRestorePhase|MetaRestorePhase.AwaitingSourceAccessCleanup.terminal|Abandoned"
+target_kind = "union-arm"
 definition_status = "declared"

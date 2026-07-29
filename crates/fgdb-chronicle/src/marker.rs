@@ -1,0 +1,401 @@
+//! `CommitMarker`: the ~100-byte record that *is* the commit stream.
+//!
+//! Everything B1 claims rests here. A marker is what a commit durably becomes,
+//! and the chain of markers is simultaneously the MVCC version order, the
+//! time-travel history, the replication stream, and the branch-head record —
+//! not four mechanisms that agree, one mechanism read four ways.
+//!
+//! TWO PROPERTIES MAKE THAT WORK, and both are enforced here rather than
+//! assumed:
+//!
+//! 1. **The chain hash.** `chain_hash` covers the prior chain value plus the
+//!    marker's own bytes excluding `chain_hash` itself. So the chain value at
+//!    sequence N commits to the entire history up to N: tampering with any
+//!    earlier marker invalidates every marker after it, and detection names
+//!    the exact sequence where the history diverges.
+//!
+//! 2. **No forward references.** The marker deliberately names no terminal
+//!    outcome and no future record, fragment, or batch. Apply constructs the
+//!    marker FIRST and later objects may name it — which is what keeps the
+//!    outcome and distributed-batch graphs acyclic. Verification therefore
+//!    needs nothing that does not already exist, and a reader can validate a
+//!    stream prefix without the suffix.
+//!
+//! Branch heads ride the same structure: each `head_update` carries the
+//! `expected_previous` marker for its branch, so advancing a head is a
+//! compare-and-swap against the history rather than a write that hopes.
+//!
+//! THIS INCREMENT lands the Local effect source. The `Global` arm carries W12
+//! meta types whose union arms are still in the G0 decision batch, so it is
+//! absent rather than guessed — a subset of the final abstraction, not a
+//! substitute for it (doctrine 7).
+
+use fgdb_crypto::Digest;
+use fgdb_types::ids::ObjectId;
+
+/// Domain separator for the marker chain hash.
+pub const MARKER_CHAIN_DOMAIN: &[u8] = b"fgdb:commit-marker-chain:v1";
+
+/// The chain value before any marker exists. Genesis chains from this, so
+/// every stream has a defined origin rather than an implicit zero.
+pub const CHAIN_ORIGIN: Digest = Digest([0u8; 32]);
+
+/// The transaction-history identity used by branch heads, version
+/// origins/retirements, checkpoints, MMR leaves, and merges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkerRef {
+    pub marker_oid: ObjectId,
+    pub commit_seq: u64,
+}
+
+/// Where a commit's effects came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectSource {
+    /// Local apply: the already-built capsule and delta template.
+    Local {
+        capsule_ref: ObjectId,
+        logical_delta_template_digest: Digest,
+    },
+}
+
+impl EffectSource {
+    fn write_into(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Local {
+                capsule_ref,
+                logical_delta_template_digest,
+            } => {
+                // The arm tag is part of the transcript: a reader that does
+                // not know a future tag must reject the marker, not skip it.
+                out.push(0x01);
+                out.extend_from_slice(&capsule_ref.0);
+                out.extend_from_slice(&logical_delta_template_digest.0);
+            }
+        }
+    }
+}
+
+/// One branch head this commit advances.
+///
+/// `expected_previous` is the compare-and-swap: `None` means "this branch has
+/// no head yet", and `Some(marker)` means "advance only if the head is still
+/// exactly that marker". The marker itself becomes the new head implicitly —
+/// it does not name its own successor, which is what keeps the graph acyclic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadUpdate {
+    pub graph: u64,
+    pub branch: u64,
+    pub expected_previous: Option<MarkerRef>,
+}
+
+impl HeadUpdate {
+    fn write_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.graph.to_be_bytes());
+        out.extend_from_slice(&self.branch.to_be_bytes());
+        match self.expected_previous {
+            None => out.push(0x00),
+            Some(previous) => {
+                out.push(0x01);
+                out.extend_from_slice(&previous.marker_oid.0);
+                out.extend_from_slice(&previous.commit_seq.to_be_bytes());
+            }
+        }
+    }
+}
+
+/// A canonical commit marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitMarker {
+    pub logical_command_seq: u64,
+    pub commit_seq: u64,
+    pub effect_source: EffectSource,
+    pub prev_global: Option<MarkerRef>,
+    /// Canonically sorted by `(graph, branch)` — the sort is part of the
+    /// transcript, so two apply paths producing the same updates in different
+    /// orders produce the same marker.
+    pub head_updates: Vec<HeadUpdate>,
+    pub merge_record_oid: Option<ObjectId>,
+    pub coordinate_schema_transition_digest: Digest,
+    pub topology_epoch: u64,
+    pub policy_epoch: u64,
+    pub revocation_index: u64,
+    pub txn_token: [u8; 16],
+    pub commit_hlc: u64,
+    pub final_effect_digest: Digest,
+    pub authorization_decision_digest: Digest,
+    pub resource_effect_digest: Digest,
+    pub payload_availability_certificate_oid: Option<ObjectId>,
+    pub flags: u32,
+}
+
+impl CommitMarker {
+    /// The marker's canonical bytes, EXCLUDING the chain hash — which is
+    /// exactly the transcript the chain hash is computed over. There is no
+    /// second, shorter encoding: this function is the only definition of what
+    /// a marker's bytes are.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&self.logical_command_seq.to_be_bytes());
+        out.extend_from_slice(&self.commit_seq.to_be_bytes());
+        self.effect_source.write_into(&mut out);
+        match self.prev_global {
+            None => out.push(0x00),
+            Some(previous) => {
+                out.push(0x01);
+                out.extend_from_slice(&previous.marker_oid.0);
+                out.extend_from_slice(&previous.commit_seq.to_be_bytes());
+            }
+        }
+        out.extend_from_slice(&(self.head_updates.len() as u32).to_be_bytes());
+        for update in &self.head_updates {
+            update.write_into(&mut out);
+        }
+        match self.merge_record_oid {
+            None => out.push(0x00),
+            Some(oid) => {
+                out.push(0x01);
+                out.extend_from_slice(&oid.0);
+            }
+        }
+        out.extend_from_slice(&self.coordinate_schema_transition_digest.0);
+        out.extend_from_slice(&self.topology_epoch.to_be_bytes());
+        out.extend_from_slice(&self.policy_epoch.to_be_bytes());
+        out.extend_from_slice(&self.revocation_index.to_be_bytes());
+        out.extend_from_slice(&self.txn_token);
+        out.extend_from_slice(&self.commit_hlc.to_be_bytes());
+        out.extend_from_slice(&self.final_effect_digest.0);
+        out.extend_from_slice(&self.authorization_decision_digest.0);
+        out.extend_from_slice(&self.resource_effect_digest.0);
+        match self.payload_availability_certificate_oid {
+            None => out.push(0x00),
+            Some(oid) => {
+                out.push(0x01);
+                out.extend_from_slice(&oid.0);
+            }
+        }
+        out.extend_from_slice(&self.flags.to_be_bytes());
+        out
+    }
+
+    /// `chain_hash` hashes the prior chain value plus marker bytes excluding
+    /// `chain_hash` (plan a10:1938).
+    pub fn chain_hash(&self, prior_chain: Digest) -> Digest {
+        let mut hasher = fgdb_crypto::Hasher::new();
+        hasher.update(MARKER_CHAIN_DOMAIN);
+        hasher.update(&prior_chain.0);
+        hasher.update(&self.canonical_bytes());
+        hasher.finalize()
+    }
+
+    /// Whether the head updates are canonically sorted and free of duplicate
+    /// coordinates. A duplicate `(graph, branch)` would make the marker's own
+    /// effect on that head ambiguous.
+    fn head_updates_are_canonical(&self) -> bool {
+        self.head_updates
+            .windows(2)
+            .all(|pair| (pair[0].graph, pair[0].branch) < (pair[1].graph, pair[1].branch))
+    }
+}
+
+/// Why a marker could not be appended to a chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainError {
+    /// `commit_seq` is not exactly one past the current tail. The commit
+    /// sequence is gap-free by construction: a gap would make "the history up
+    /// to N" ambiguous, and a repeat would make it contradictory.
+    NonContiguousCommitSeq { expected: u64, found: u64 },
+    /// `logical_command_seq` did not advance. Two commits cannot share one
+    /// logical command position.
+    NonMonotonicCommandSeq { previous: u64, found: u64 },
+    /// Head updates are unsorted or contain a duplicate `(graph, branch)`.
+    NonCanonicalHeadUpdates,
+    /// A branch head compare-and-swap failed: the branch's head is not what
+    /// this marker expected. THE WRITE IS REFUSED — this is the mechanism that
+    /// makes concurrent branch advancement safe, so it must never be a
+    /// warning.
+    HeadCasMismatch {
+        graph: u64,
+        branch: u64,
+        expected: Option<MarkerRef>,
+        actual: Option<MarkerRef>,
+    },
+}
+
+impl core::fmt::Display for ChainError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NonContiguousCommitSeq { expected, found } => {
+                write!(f, "commit_seq {found} is not the expected {expected}")
+            }
+            Self::NonMonotonicCommandSeq { previous, found } => {
+                write!(f, "logical_command_seq {found} does not exceed {previous}")
+            }
+            Self::NonCanonicalHeadUpdates => {
+                f.write_str("head updates are unsorted or contain a duplicate coordinate")
+            }
+            Self::HeadCasMismatch {
+                graph,
+                branch,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "branch ({graph},{branch}) head is {actual:?}, marker expected {expected:?}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for ChainError {}
+
+/// An appended marker together with the chain value it produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainedMarker {
+    pub marker: CommitMarker,
+    pub marker_oid: ObjectId,
+    /// The chain value AFTER this marker — the commitment to all history
+    /// through `marker.commit_seq`.
+    pub chain_hash: Digest,
+}
+
+/// The commit stream: an append-only chain of markers with branch heads.
+///
+/// This is deliberately the whole of B1's version universe in one structure.
+/// A reader asking "what was the state at sequence N", "what is this branch's
+/// head", "what changed between N and M", or "what must a replica apply next"
+/// is asking the same object four different questions.
+#[derive(Debug, Clone, Default)]
+pub struct MarkerChain {
+    entries: Vec<ChainedMarker>,
+    heads: Vec<((u64, u64), MarkerRef)>,
+}
+
+impl MarkerChain {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The chain value committing to all history so far.
+    pub fn chain_value(&self) -> Digest {
+        self.entries
+            .last()
+            .map_or(CHAIN_ORIGIN, |entry| entry.chain_hash)
+    }
+
+    /// The next `commit_seq` this chain will accept. Sequences start at 1, so
+    /// 0 can never be a valid commit and an uninitialised field cannot look
+    /// like the first commit.
+    pub fn next_commit_seq(&self) -> u64 {
+        self.entries
+            .last()
+            .map_or(1, |entry| entry.marker.commit_seq + 1)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn entries(&self) -> &[ChainedMarker] {
+        &self.entries
+    }
+
+    /// A branch's current head, if it has one.
+    pub fn head(&self, graph: u64, branch: u64) -> Option<MarkerRef> {
+        self.heads
+            .iter()
+            .find(|((g, b), _)| *g == graph && *b == branch)
+            .map(|(_, marker)| *marker)
+    }
+
+    /// Append one marker, enforcing every structural law before anything is
+    /// mutated — so a refused append leaves the chain and every head exactly
+    /// as they were.
+    pub fn append(&mut self, marker: CommitMarker) -> Result<&ChainedMarker, ChainError> {
+        let expected_seq = self.next_commit_seq();
+        if marker.commit_seq != expected_seq {
+            return Err(ChainError::NonContiguousCommitSeq {
+                expected: expected_seq,
+                found: marker.commit_seq,
+            });
+        }
+        if let Some(last) = self.entries.last()
+            && marker.logical_command_seq <= last.marker.logical_command_seq
+        {
+            return Err(ChainError::NonMonotonicCommandSeq {
+                previous: last.marker.logical_command_seq,
+                found: marker.logical_command_seq,
+            });
+        }
+        if !marker.head_updates_are_canonical() {
+            return Err(ChainError::NonCanonicalHeadUpdates);
+        }
+
+        // Every head compare-and-swap is checked BEFORE any is applied: a
+        // marker that advances three branches must advance all three or none,
+        // or a partial failure would leave the stream describing a state that
+        // never existed.
+        for update in &marker.head_updates {
+            let actual = self.head(update.graph, update.branch);
+            if actual != update.expected_previous {
+                return Err(ChainError::HeadCasMismatch {
+                    graph: update.graph,
+                    branch: update.branch,
+                    expected: update.expected_previous,
+                    actual,
+                });
+            }
+        }
+
+        let chain_hash = marker.chain_hash(self.chain_value());
+        // The marker's identity is its own canonical bytes under the chain
+        // value, so two markers with identical content at different points in
+        // history are distinct objects — which is what makes a MarkerRef a
+        // history identity rather than a content coincidence.
+        let marker_oid = ObjectId(chain_hash.0);
+
+        for update in &marker.head_updates {
+            let new_head = MarkerRef {
+                marker_oid,
+                commit_seq: marker.commit_seq,
+            };
+            match self
+                .heads
+                .iter_mut()
+                .find(|((g, b), _)| *g == update.graph && *b == update.branch)
+            {
+                Some((_, head)) => *head = new_head,
+                None => self.heads.push(((update.graph, update.branch), new_head)),
+            }
+        }
+
+        self.entries.push(ChainedMarker {
+            marker,
+            marker_oid,
+            chain_hash,
+        });
+        Ok(self.entries.last().expect("just pushed"))
+    }
+
+    /// Verify the whole chain from the origin, returning the first sequence
+    /// whose recomputed chain value disagrees.
+    ///
+    /// This needs nothing beyond the entries themselves — no index, no future
+    /// object — because markers carry no forward references. That is what lets
+    /// a replica or a recovery pass validate a stream PREFIX without waiting
+    /// for the rest of it.
+    pub fn verify(&self) -> Result<(), u64> {
+        let mut chain = CHAIN_ORIGIN;
+        for entry in &self.entries {
+            let recomputed = entry.marker.chain_hash(chain);
+            if recomputed != entry.chain_hash {
+                return Err(entry.marker.commit_seq);
+            }
+            chain = recomputed;
+        }
+        Ok(())
+    }
+}
