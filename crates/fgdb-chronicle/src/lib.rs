@@ -22,6 +22,7 @@
 
 pub mod identity;
 pub mod pack;
+pub mod scrub;
 pub mod symbol;
 pub mod symbolize;
 
@@ -33,5 +34,6 @@ pub use pack::{
     DomainAxis, PackBuilder, PackDomain, PackError, PackedObjectGroup, SubobjectLocator,
     WriteKeyDomain,
 };
+pub use scrub::{LostReason, ScrubReport, ScrubVerdict, scrub_object};
 pub use symbol::{SymbolError, SymbolRecord};
 pub use symbolize::{RecoveryTarget, SymbolizeError, decode_object, encode_object};
