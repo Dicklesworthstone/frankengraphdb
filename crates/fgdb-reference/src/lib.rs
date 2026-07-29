@@ -36,7 +36,7 @@ use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId, LogicalDeltaTemplate,
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A materialized vertex.
@@ -841,6 +841,57 @@ impl ReferenceGraph {
     }
 }
 
+/// How a branch came to exist (plan:2000).
+///
+/// A CLOSED union whose shape enforces the plan's rule: "The Genesis tag
+/// forbids parent/head/boundary fields; Fork requires all four." `Genesis`
+/// carries no fields at all, so a genesis branch cannot name a parent even by
+/// mistake — the prohibition is structural rather than a validation someone
+/// must remember to run.
+///
+/// SUBSET NOTE (doctrine 7): the plan's `Fork` arm additionally carries
+/// `parent_head: StrongMarkerRef` and `boundary_reservation_identity`. Neither
+/// is spellable here — `StrongMarkerRef` needs an active object kind, and the
+/// reservation belongs to W4's certification machinery. The boundary sequence
+/// is the load-bearing part for semantics and it is present.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchOrigin {
+    Genesis,
+    Fork {
+        parent_branch: BranchId,
+        fork_boundary_commit_seq: CommitSeq,
+    },
+}
+
+/// Why a branch operation was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchError {
+    /// The parent named by a fork does not exist. Forking from nothing would
+    /// produce a branch whose history has no origin.
+    NoSuchParent { graph: GraphId, parent: BranchId },
+    /// The target branch already exists. A branch is created once; permitting a
+    /// second fork onto a live branch would silently replace its history.
+    BranchExists { graph: GraphId, branch: BranchId },
+    /// A branch may not fork from itself.
+    SelfFork { branch: BranchId },
+}
+
+impl core::fmt::Display for BranchError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoSuchParent { graph, parent } => {
+                write!(f, "no branch {parent:?} in graph {graph:?} to fork from")
+            }
+            Self::BranchExists { graph, branch } => {
+                write!(f, "branch {branch:?} in graph {graph:?} already exists")
+            }
+            Self::SelfFork { branch } => write!(f, "branch {branch:?} cannot fork from itself"),
+        }
+    }
+}
+
+impl core::error::Error for BranchError {}
+
 /// The materialized database: one [`ReferenceGraph`] per `(graph, branch)`.
 ///
 /// Keyed by coordinate because a template may carry entries for several, and
@@ -849,6 +900,9 @@ impl ReferenceGraph {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ReferenceDatabase {
     coordinates: BTreeMap<(GraphId, BranchId), ReferenceGraph>,
+    /// How each branch came to exist. Separate from the state map because a
+    /// branch's origin is metadata about history, not part of the graph.
+    origins: BTreeMap<(GraphId, BranchId), BranchOrigin>,
 }
 
 impl ReferenceDatabase {
@@ -858,6 +912,69 @@ impl ReferenceDatabase {
 
     pub fn graph(&self, graph: GraphId, branch: BranchId) -> Option<&ReferenceGraph> {
         self.coordinates.get(&(graph, branch))
+    }
+
+    /// How this branch came to exist, if it exists.
+    ///
+    /// A coordinate that received writes without an explicit fork is `Genesis`:
+    /// it has no parent, which is the honest reading of a branch nobody forked.
+    pub fn branch_origin(&self, graph: GraphId, branch: BranchId) -> Option<BranchOrigin> {
+        self.origins.get(&(graph, branch)).copied()
+    }
+
+    /// Fork `child` from `parent` at `boundary`.
+    ///
+    /// **THE SEMANTICS, which is what the real engine must match:** the child
+    /// begins as exactly the parent's state at the fork point, and from then on
+    /// the two diverge with no leakage in either direction. That is B1's
+    /// git-style branching and B6's branch-per-agent isolation, and it is what
+    /// the laws in `tests/branch_fork.rs` pin.
+    ///
+    /// **THE COMPLEXITY, which the real engine must NOT match.** This copies the
+    /// parent's state, which is O(n). plan:451 is explicit that branch creation
+    /// "adds only metadata and key wraps, so its data-copy complexity is O(1)"
+    /// and that "reads select the branch head and follow explicit branch-parent
+    /// links atop structurally shared objects". A copy produces identical
+    /// OBSERVABLE behaviour by a mechanism the engine may not use. That is
+    /// legitimate here and only here: §15 defines this crate as deliberately
+    /// simple, single-threaded and never optimized, existing so that "what
+    /// should this return" is a program. It would be a doctrine-7 substitute
+    /// anywhere else, and the same plan paragraph warns specifically against
+    /// falsely claiming O(1), so nothing in this crate should ever be cited as
+    /// evidence about fork cost.
+    pub fn fork_branch(
+        &mut self,
+        graph: GraphId,
+        parent: BranchId,
+        child: BranchId,
+        boundary: CommitSeq,
+    ) -> Result<(), BranchError> {
+        if parent == child {
+            return Err(BranchError::SelfFork { branch: child });
+        }
+        if self.coordinates.contains_key(&(graph, child))
+            || self.origins.contains_key(&(graph, child))
+        {
+            return Err(BranchError::BranchExists {
+                graph,
+                branch: child,
+            });
+        }
+        let inherited = self
+            .coordinates
+            .get(&(graph, parent))
+            .cloned()
+            .ok_or(BranchError::NoSuchParent { graph, parent })?;
+
+        self.coordinates.insert((graph, child), inherited);
+        self.origins.insert(
+            (graph, child),
+            BranchOrigin::Fork {
+                parent_branch: parent,
+                fork_boundary_commit_seq: boundary,
+            },
+        );
+        Ok(())
     }
 
     pub fn coordinate_count(&self) -> usize {
@@ -874,9 +991,18 @@ impl ReferenceDatabase {
     pub fn apply_template(&mut self, template: &LogicalDeltaTemplate) -> Result<(), ApplyError> {
         let mut candidate = self.clone();
         for entry in template.coordinate_entries() {
+            let key = (entry.graph, entry.branch);
+            // A coordinate that receives writes without having been forked is
+            // Genesis. Recorded on first write rather than inferred later,
+            // because "no origin" and "genesis origin" are different claims and
+            // only one of them is true here.
+            candidate
+                .origins
+                .entry(key)
+                .or_insert(BranchOrigin::Genesis);
             candidate
                 .coordinates
-                .entry((entry.graph, entry.branch))
+                .entry(key)
                 .or_default()
                 .apply_entry(entry)?;
         }
