@@ -79,8 +79,12 @@ impl IdentifiedObject {
         canonical_header: &[u8],
         canonical_payload: &[u8],
     ) -> Self {
-        let digest =
-            fgdb_crypto::logical_object_id(k_oid, &namespace.0, canonical_header, canonical_payload);
+        let digest = fgdb_crypto::logical_object_id(
+            k_oid,
+            &namespace.0,
+            canonical_header,
+            canonical_payload,
+        );
         let mut canonical_plaintext =
             Vec::with_capacity(canonical_header.len() + canonical_payload.len());
         canonical_plaintext.extend_from_slice(canonical_header);
@@ -143,18 +147,12 @@ impl IdentifiedObject {
         descriptor: CipherDescriptor,
         compressed_plaintext: &[u8],
     ) -> ProtectedObject {
-        let aad = aead::object_aead_aad(
-            &Digest(self.object_id.0),
-            &descriptor.canonical_bytes(),
-        );
-        let sealed = aead::xchacha20poly1305_seal(
-            dek,
-            &descriptor.object_nonce,
-            &aad,
-            compressed_plaintext,
-        );
+        let aad = aead::object_aead_aad(&Digest(self.object_id.0), &descriptor.canonical_bytes());
+        let sealed =
+            aead::xchacha20poly1305_seal(dek, &descriptor.object_nonce, &aad, compressed_plaintext);
         let tag_start = sealed.len() - usize::from(descriptor.object_tag_len);
-        let ciphertext_id = ciphertext_identity(&descriptor, &sealed[..tag_start], &sealed[tag_start..]);
+        let ciphertext_id =
+            ciphertext_identity(&descriptor, &sealed[..tag_start], &sealed[tag_start..]);
         ProtectedObject {
             object_id: self.object_id,
             descriptor,

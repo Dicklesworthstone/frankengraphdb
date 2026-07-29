@@ -6,17 +6,25 @@
 //! crate lands that substrate in dependency order, and the first thing every
 //! later layer needs is object identity.
 //!
-//! THIS INCREMENT: plan §5.1's noncircular identity pipeline
-//! ([`identity`]) — keyed `ObjectId` → object AEAD → `CiphertextId` →
-//! `EncodingId` → `PlacementId`, as four types where each can only be built
-//! from the previous one. Later increments add the RaptorQ symbolization and
-//! `SymbolRecord` wire format, the `CommitCapsule`/`CommitMarker` two-fsync
-//! protocol, the `WriteCoordinator`, retention tiers, and branches.
+//! LANDED SO FAR:
+//! - [`identity`] — plan §5.1's noncircular identity pipeline: keyed
+//!   `ObjectId` → object AEAD → `CiphertextId` → `EncodingId` →
+//!   `PlacementId`, as four types where each can only be built from the
+//!   previous one.
+//! - [`symbol`] — the durable `SymbolRecord` wire format and its total
+//!   authentication transcript, verifiable only against an authenticated
+//!   encoding.
+//!
+//! Later increments add the RaptorQ symbolization itself (consuming
+//! asupersync's RFC 6330 implementation), the `CommitCapsule`/`CommitMarker`
+//! two-fsync protocol, the `WriteCoordinator`, retention tiers, and branches.
 #![forbid(unsafe_code)]
 
 pub mod identity;
+pub mod symbol;
 
 pub use identity::{
     CipherDescriptor, EncodedObject, EncodingDescriptor, IdentifiedObject, LocationForm,
     PlacedObject, PlacementDescriptor, ProtectedObject,
 };
+pub use symbol::{SymbolError, SymbolRecord};

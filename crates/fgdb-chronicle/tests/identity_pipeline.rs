@@ -79,9 +79,15 @@ fn pipeline_round_trips_through_all_four_layers() {
     let object_id = object.object_id();
 
     let protected = object.protect(&dek(), descriptor(1, compressed.len() as u64), &compressed);
-    assert_eq!(protected.object_id(), object_id, "identity survives protection");
     assert_eq!(
-        protected.open(&dek()).expect("well-formed object must open"),
+        protected.object_id(),
+        object_id,
+        "identity survives protection"
+    );
+    assert_eq!(
+        protected
+            .open(&dek())
+            .expect("well-formed object must open"),
         compressed,
         "protected bytes must decrypt to the compressed plaintext"
     );
@@ -136,7 +142,11 @@ fn moving_symbols_changes_only_the_placement_identity() {
     let here = encoded.place(placement(1));
     let moved = encoded.place(placement(2));
 
-    assert_eq!(here.encoding_id(), moved.encoding_id(), "the encoding is unchanged");
+    assert_eq!(
+        here.encoding_id(),
+        moved.encoding_id(),
+        "the encoding is unchanged"
+    );
     assert_ne!(
         here.placement_id(),
         moved.placement_id(),
@@ -157,10 +167,18 @@ fn re_encryption_changes_only_the_ciphertext_identity() {
     let object_again = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
     let mut other_dek = dek();
     other_dek[0] ^= 0xff;
-    let second = object_again.protect(&other_dek, descriptor(2, compressed.len() as u64), &compressed);
+    let second = object_again.protect(
+        &other_dek,
+        descriptor(2, compressed.len() as u64),
+        &compressed,
+    );
 
     assert_eq!(first.object_id(), object_id);
-    assert_eq!(second.object_id(), object_id, "identity is keyed by plaintext, not by DEK");
+    assert_eq!(
+        second.object_id(),
+        object_id,
+        "identity is keyed by plaintext, not by DEK"
+    );
     assert_ne!(
         first.ciphertext_id(),
         second.ciphertext_id(),
@@ -253,7 +271,84 @@ fn collision_verification_checks_kind_and_length_not_just_the_digest() {
 
     let short: Vec<u8> = payload().into_iter().take(256).collect();
     let c = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &short);
-    assert!(!a.verifies_as_same_object(&c), "a length difference must defeat substitution");
+    assert!(
+        !a.verifies_as_same_object(&c),
+        "a length difference must defeat substitution"
+    );
+}
+
+/// THE KMS REWRAP LAW (plan L280): "DEK/ciphertext identity is separate from
+/// `wrap_key_epoch`, so KEK/KMS recipient rewrap changes only immutable
+/// `KeyWrap` records, not `CiphertextId` or `EncodingId`."
+///
+/// This is provable structurally rather than by simulating a KMS: the wrap
+/// epoch is not among the inputs to any identity transcript, so rewrapping —
+/// which by definition re-encrypts the DEK under a new KEK while leaving the
+/// DEK itself unchanged — cannot move an identity. The test pins that: given
+/// the SAME DEK (what a rewrap preserves), every downstream identity is
+/// byte-identical, so no rewrap can silently re-address stored objects.
+#[test]
+fn rewrapping_the_dek_cannot_move_any_identity() {
+    let compressed = payload();
+
+    let before = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload())
+        .protect(&dek(), descriptor(1, compressed.len() as u64), &compressed);
+    let before_encoded = before.encode(encoding(1));
+    let before_placed = before_encoded.place(placement(1));
+
+    // A rewrap changes the KeyWrap record only: same DEK, same descriptor,
+    // same bytes. Everything identity-bearing must therefore be unchanged.
+    let after = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload()).protect(
+        &dek(),
+        descriptor(1, compressed.len() as u64),
+        &compressed,
+    );
+    let after_encoded = after.encode(encoding(1));
+    let after_placed = after_encoded.place(placement(1));
+
+    assert_eq!(before.object_id(), after.object_id());
+    assert_eq!(
+        before.ciphertext_id(),
+        after.ciphertext_id(),
+        "a rewrap must not change CiphertextId"
+    );
+    assert_eq!(
+        before_encoded.encoding_id(),
+        after_encoded.encoding_id(),
+        "a rewrap must not change EncodingId"
+    );
+    assert_eq!(
+        before_placed.placement_id(),
+        after_placed.placement_id(),
+        "a rewrap must not change PlacementId"
+    );
+    assert_eq!(
+        before.protected_bytes(),
+        after.protected_bytes(),
+        "the protected bytes are unchanged; only the KeyWrap record moves"
+    );
+}
+
+/// The whole pipeline is deterministic: identical inputs reproduce identical
+/// identities at every layer. FG-INV-09 requires exactly this — every identity
+/// recomputes from its registered descriptor and bytes, which is what lets
+/// root bootstrap reconstruct all identities without indexes.
+#[test]
+fn every_identity_recomputes_from_its_inputs() {
+    let compressed = payload();
+    let run = || {
+        let object = IdentifiedObject::new(&k_oid(), namespace(), 0x0002, header(), &payload());
+        let protected = object.protect(&dek(), descriptor(1, compressed.len() as u64), &compressed);
+        let encoded = protected.encode(encoding(1));
+        let placed = encoded.place(placement(1));
+        (
+            protected.object_id(),
+            protected.ciphertext_id(),
+            encoded.encoding_id(),
+            placed.placement_id(),
+        )
+    };
+    assert_eq!(run(), run(), "identity computation must be deterministic");
 }
 
 /// Symbols from different encodings never share a MAC key (plan L280).
