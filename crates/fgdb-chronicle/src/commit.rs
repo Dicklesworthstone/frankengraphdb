@@ -42,6 +42,10 @@ pub const CAPSULE_DIR: &str = "capsules";
 /// The append-only marker log.
 pub const COMMIT_LOG_NAME: &str = "commits.log";
 
+/// Stack buffer used to compare an existing immutable capsule with the
+/// deterministic candidate without allocating a second capsule-sized `Vec`.
+const CAPSULE_COMPARE_BUFFER_BYTES: usize = 8 * 1024;
+
 /// Per-entry framing magic, so a torn tail is distinguishable from a valid
 /// entry that happens to start with a small length.
 pub const ENTRY_MAGIC: [u8; 4] = *b"FGCM";
@@ -72,6 +76,13 @@ pub enum CommitError {
     MarkerTooLarge {
         body_len: usize,
         max_body_len: usize,
+    },
+    /// The content-addressed capsule path already exists with bytes other than
+    /// the deterministic container this commit would publish. Existing
+    /// capsule objects are immutable, so the coordinator refuses rather than
+    /// overwrite either the prior object or evidence of corruption.
+    CapsulePathConflict {
+        capsule_oid: ObjectId,
     },
     /// A log entry before the final one is malformed. Unlike a torn tail this
     /// is corruption: entries preceding it were durable, so the damage is not
@@ -112,6 +123,10 @@ impl core::fmt::Display for CommitError {
             } => write!(
                 f,
                 "marker body is {body_len} bytes, above the {max_body_len}-byte framing limit"
+            ),
+            Self::CapsulePathConflict { capsule_oid } => write!(
+                f,
+                "immutable capsule path for {capsule_oid:?} contains different bytes"
             ),
             Self::CorruptLogEntry { commit_seq } => {
                 write!(f, "commit log entry at seq {commit_seq} is corrupt")
@@ -247,6 +262,47 @@ impl CommitCoordinator {
             name.push(char::from_digit(u32::from(byte & 0xf), 16).expect("nibble"));
         }
         dir.join(CAPSULE_DIR).join(format!("{name}.capsule"))
+    }
+
+    /// Compare a freshly opened existing capsule with the bytes deterministic
+    /// sealing produced for the same object identity.
+    ///
+    /// This is deliberately streaming: a capsule is already materialized once
+    /// for publication, and deduplication must not require another
+    /// capsule-sized allocation. A length or byte mismatch is a conflict;
+    /// genuine read failures remain I/O errors.
+    fn existing_capsule_matches(file: &mut File, expected: &[u8]) -> Result<bool, CommitError> {
+        let expected_len = u64::try_from(expected.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "capsule container length does not fit u64",
+            )
+        })?;
+        if file.metadata()?.len() != expected_len {
+            return Ok(false);
+        }
+
+        let mut actual = [0u8; CAPSULE_COMPARE_BUFFER_BYTES];
+        for expected_chunk in expected.chunks(actual.len()) {
+            match file.read_exact(&mut actual[..expected_chunk.len()]) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(false);
+                }
+                Err(error) => return Err(error.into()),
+            }
+            // ubs:ignore -- durable encrypted container bytes, not secret material.
+            if actual[..expected_chunk.len()] != expected_chunk[..] {
+                return Ok(false);
+            }
+        }
+
+        // Defend the exact comparison against a file that grew after the
+        // metadata read. Same-directory writer exclusion is a separate
+        // protocol concern, but accepting bytes we did not compare would still
+        // be wrong here.
+        let mut trailing = [0u8; 1];
+        Ok(file.read(&mut trailing)? == 0)
     }
 
     /// Read a durable capsule's bytes back.
@@ -386,12 +442,33 @@ impl CommitCoordinator {
         // name it. A marker pointing at non-durable bytes would be a commit
         // pointing at bytes that may not exist.
         let capsule_path = Self::capsule_path(&self.dir, capsule_oid);
-        let mut capsule_file = OpenOptions::new()
+        let encoded_capsule = encode_container(&sealed);
+        let capsule_file = match OpenOptions::new()
+            .read(true)
             .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&capsule_path)?;
-        capsule_file.write_all(&encode_container(&sealed))?;
+            .create_new(true)
+            .open(&capsule_path)
+        {
+            Ok(mut file) => {
+                file.write_all(&encoded_capsule)?;
+                file
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(&capsule_path)?;
+                if !metadata.file_type().is_file() {
+                    return Err(CommitError::CapsulePathConflict { capsule_oid });
+                }
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&capsule_path)?;
+                if !Self::existing_capsule_matches(&mut file, &encoded_capsule)? {
+                    return Err(CommitError::CapsulePathConflict { capsule_oid });
+                }
+                file
+            }
+            Err(error) => return Err(error.into()),
+        };
         if crash_at == Some(CrashPoint::AfterCapsuleBeforeD1) {
             return Err(CommitError::Io(std::io::Error::other("crash: before D1")));
         }

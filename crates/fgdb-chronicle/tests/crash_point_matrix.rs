@@ -152,6 +152,20 @@ fn capsule_file_count(dir: &Path) -> usize {
         .count()
 }
 
+fn only_capsule_path(dir: &Path) -> PathBuf {
+    let mut entries = std::fs::read_dir(dir.join(CAPSULE_DIR)).expect("capsule dir");
+    let path = entries
+        .next()
+        .expect("one capsule")
+        .expect("read capsule entry")
+        .path();
+    assert!(
+        entries.next().is_none(),
+        "the fixture must contain exactly one capsule"
+    );
+    path
+}
+
 // ---------------------------------------------------------------------------
 // The canonical-bytes round trip. Recovery reads markers back from the log, so
 // a marker that does not survive its own encoding is a commit that cannot be
@@ -296,6 +310,113 @@ fn a_committed_capsule_is_never_an_orphan() {
             "every capsule here is named by a committed marker"
         );
         assert_eq!(capsule_file_count(&dir), 3);
+    });
+}
+
+/// A content-addressed path is immutable even when its current bytes are
+/// corrupt. Rewriting it in place is especially dangerous: an earlier durable
+/// marker may already name that object, so a short rewrite or crash can destroy
+/// a commit that completed before this coordinator existed.
+#[test]
+fn a_conflicting_existing_capsule_path_is_never_overwritten() {
+    let dir = scratch_dir("capsule-path-conflict");
+    under_lab(35, move |cx| {
+        let plaintext = capsule_bytes(1);
+
+        // Reach D1 once so the fixture obtains the exact path the coordinator
+        // derives, but leave no marker. Then model pre-existing wrong bytes at
+        // that path. The next commit must preserve them as evidence rather than
+        // silently replacing them.
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+        let chain_snapshot = coordinator.chain().clone();
+        let interrupted = coordinator.commit_with_crash(
+            cx,
+            &plaintext,
+            |seq, oid| marker_for(seq, oid, &chain_snapshot),
+            Some(CrashPoint::AfterD1),
+        );
+        assert!(interrupted.is_err(), "the fixture stops before the marker");
+        drop(coordinator);
+
+        let path = only_capsule_path(&dir);
+        let mut sentinel = std::fs::read(&path).expect("read valid container");
+        assert!(!sentinel.is_empty(), "the encoded container is non-empty");
+        let changed_at = sentinel.len() / 2;
+        sentinel[changed_at] ^= 0x80;
+        std::fs::write(&path, &sentinel).expect("seed same-length conflicting capsule bytes");
+
+        let mut reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+        let chain_snapshot = reopened.chain().clone();
+        let result = reopened.commit(cx, &plaintext, |seq, oid| {
+            marker_for(seq, oid, &chain_snapshot)
+        });
+        assert!(
+            matches!(
+                result,
+                Err(CommitError::CapsulePathConflict { capsule_oid: found })
+                    if found == capsule_oid(1)
+            ),
+            "a collision must be typed and name the derived identity; got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read preserved capsule"),
+            sentinel,
+            "the existing path is immutable even when its bytes are wrong"
+        );
+        assert!(!reopened.is_poisoned());
+        assert_eq!(reopened.next_commit_seq(), 1);
+        assert_eq!(reopened.chain().len(), 0);
+        assert!(log_bytes(&dir).is_empty(), "no marker may be written");
+    });
+}
+
+/// Deterministic sealing makes legitimate deduplication ordinary: two commits
+/// may name the same capsule bytes. No-replace publication must therefore
+/// distinguish an identical existing object from a conflicting one rather than
+/// turning every `AlreadyExists` into an error.
+#[test]
+fn identical_payloads_reuse_one_capsule_and_both_markers_survive_restart() {
+    let dir = scratch_dir("capsule-dedup");
+    under_lab(36, move |cx| {
+        let plaintext = capsule_bytes(1);
+        let expected_oid = capsule_oid(1);
+        let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
+
+        for expected_seq in 1..=2 {
+            let chain_snapshot = coordinator.chain().clone();
+            let marker_ref = coordinator
+                .commit(cx, &plaintext, |seq, oid| {
+                    assert_eq!(seq, expected_seq);
+                    assert_eq!(oid, expected_oid);
+                    marker_for(seq, oid, &chain_snapshot)
+                })
+                .expect("deduplicated commit");
+            assert_eq!(marker_ref.commit_seq, expected_seq);
+        }
+
+        assert_eq!(
+            capsule_file_count(&dir),
+            1,
+            "identical deterministic containers share one immutable object"
+        );
+        assert_eq!(
+            coordinator
+                .read_capsule(expected_oid)
+                .expect("read shared capsule"),
+            plaintext
+        );
+        drop(coordinator);
+
+        let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
+        assert_eq!(reopened.chain().len(), 2);
+        assert_eq!(reopened.chain().verify(), Ok(()));
+        assert_eq!(capsule_file_count(&dir), 1);
+        assert_eq!(
+            reopened
+                .read_capsule(expected_oid)
+                .expect("recover shared capsule"),
+            plaintext
+        );
     });
 }
 
