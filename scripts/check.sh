@@ -822,8 +822,21 @@ run_ubs() {
 # (src/canonical.rs, tests/canonical_encoding.rs) scanned alone report exactly 1
 # critical, this one; scanning the whole post-commit 152-file domain gives
 # 137 / 808 / 124, so panic and timing-safe did not move at all.
+# MOVED 2026-07-29 (fgdb-w2-delta-batches-og6n): timing-safe 808 -> 809, +1, in
+# `crates/fgdb-reference/src/lib.rs`. The one finding is the sketch family's
+# before-image check in the semantics oracle:
+#     if actual != *before_state_digest
+# It compares a SKETCH STATE DIGEST the row declares against the one the oracle
+# materialized. Both sides are ordinary content digests of test-visible state in
+# a crate that is compiled for tests and fuzzing only and never shipped; there
+# is no secret, no remote caller, and no timing channel. Making it constant-time
+# would need `subtle` or `ring`, which Doctrine #1 forbids, and the genuine
+# constant-time compares in this workspace are explicit XOR-accumulate loops
+# (aead.rs tag compare, symbol.rs MAC compare).
+# ATTRIBUTED BY DIFFERENTIAL: the new crate's two files scanned alone report
+# exactly 1 critical, this one, with panic and JWT both clean.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=808"
+  "Secret/token comparisons without timing-safe equality=809"
   "panic!/unreachable!/todo!/unimplemented!=137"
   "JWT decode, validation bypass, or missing claim binding=124"
 )

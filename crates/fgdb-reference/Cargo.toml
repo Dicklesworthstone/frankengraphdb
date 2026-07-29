@@ -1,0 +1,13 @@
+[package]
+name = "fgdb-reference"
+version = "0.0.1"
+edition = "2024"
+description = "The executable semantics oracle (plan §15): a deliberately simple, single-threaded, obviously-correct materialization of the logical semantics over canonical maps, compiled for tests and fuzzing only and never optimized. This increment lands delta-stream materialization into graph state with checked before-images; bead fgdb-w2-delta-batches-og6n."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+fgdb-delta-types = { path = "../fgdb-delta-types" }
+fgdb-types = { path = "../fgdb-types" }
