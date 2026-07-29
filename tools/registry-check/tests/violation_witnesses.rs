@@ -183,6 +183,95 @@ fn unexpected_appendix_projection_class_is_seen_to_fire() {
     assert_code(&codes, "catalog_projection_unexpected");
 }
 
+// ===========================================================================
+// Appendix A top-level candidate metadata — `appendix_a::validate_catalog`
+// ===========================================================================
+
+/// One Appendix A law reached by changing one top-level-candidate fact.
+///
+/// This is deliberately a table: the real catalog is loaded once, every row
+/// receives a fresh clone, and the exact code must be added by that row's
+/// mutation. A code already present in the control is reported as UNRUN rather
+/// than being allowed to masquerade as a witness.
+struct AppendixCandidateWitness {
+    code: &'static str,
+    fact: &'static str,
+    mutate: fn(&mut appendix_a::Catalog),
+}
+
+fn unprojected_candidate_mut(
+    catalog: &mut appendix_a::Catalog,
+) -> &mut appendix_a::TopLevelCandidate {
+    let projected: BTreeSet<&str> = catalog
+        .projection_rows
+        .iter()
+        .map(|row| row.canonical_symbol.as_str())
+        .collect();
+    catalog
+        .top_level_candidates
+        .iter_mut()
+        .find(|row| {
+            row.identity_class == "unclassified" && !projected.contains(row.symbol.as_str())
+        })
+        .expect("catalog has an unprojected unclassified candidate")
+}
+
+#[rustfmt::skip]
+fn appendix_candidate_witnesses() -> Vec<AppendixCandidateWitness> {
+    vec![
+    AppendixCandidateWitness { code: "catalog_candidate_kind_invalid", fact: "a candidate's source_kind leaves the closed vocabulary", mutate: |c| c.top_level_candidates[0].source_kind = "invented".into() },
+    AppendixCandidateWitness { code: "catalog_candidate_symbol_invalid", fact: "a candidate symbol stops being one source name", mutate: |c| c.top_level_candidates[0].symbol = "not a source symbol".into() },
+    AppendixCandidateWitness { code: "catalog_candidate_class_invalid", fact: "a candidate's identity_class leaves the closed vocabulary", mutate: |c| c.top_level_candidates[0].identity_class = "invented".into() },
+    AppendixCandidateWitness { code: "catalog_candidate_class_mismatch", fact: "a projected wire candidate is relabelled logical", mutate: |c| c.top_level_candidates.iter_mut().find(|row| row.symbol == "AbandonedRestoreTerminalPinBasisRef").expect("wire candidate exists").identity_class = "logical".into() },
+    AppendixCandidateWitness { code: "catalog_candidate_class_conflict", fact: "one symbol is projected into both wire and logical registries", mutate: |c| { let symbol = c.top_level_candidates.iter().find(|row| row.symbol == "AbandonedRestoreTerminalPinBasisRef").expect("wire candidate exists").symbol.clone(); c.projection_rows.iter_mut().find(|row| row.projection == "logical_object_kinds").expect("logical projection exists").canonical_symbol = symbol; } },
+    AppendixCandidateWitness { code: "catalog_candidate_class_unproved", fact: "an unprojected candidate claims a durable identity class", mutate: |c| unprojected_candidate_mut(c).identity_class = "wire".into() },
+    AppendixCandidateWitness { code: "catalog_candidate_source_key_invalid", fact: "a candidate source_key stops deriving from its symbol and generic signature", mutate: |c| c.top_level_candidates[0].source_key.push_str("-wrong") },
+    AppendixCandidateWitness { code: "catalog_candidate_duplicate", fact: "one top-level source candidate is repeated", mutate: |c| { let duplicate = c.top_level_candidates[0].clone(); c.top_level_candidates.push(duplicate); } },
+    AppendixCandidateWitness { code: "slice_census_pin_invalid", fact: "a slice's field-candidate count becomes negative", mutate: |c| c.slices[0].field_candidate_count = -1 },
+    ]
+}
+
+#[test]
+fn appendix_candidate_metadata_laws_are_seen_to_fire() {
+    let base = appendix_catalog();
+    let control: BTreeSet<String> = appendix_a::validate_catalog(&base)
+        .into_iter()
+        .map(|violation| violation.code)
+        .collect();
+
+    let mut silent = Vec::new();
+    let mut unrun = Vec::new();
+    for row in appendix_candidate_witnesses() {
+        if control.contains(row.code) {
+            unrun.push(format!("{} [{}]", row.code, row.fact));
+            continue;
+        }
+        let mut mutated = base.clone();
+        (row.mutate)(&mut mutated);
+        let codes: BTreeSet<String> = appendix_a::validate_catalog(&mutated)
+            .into_iter()
+            .map(|violation| violation.code)
+            .collect();
+        if !codes.contains(row.code) {
+            silent.push(format!("{} [{}] -> {codes:?}", row.code, row.fact));
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "{} Appendix A candidate-metadata laws did not fire on the fact that violates them:\n{}",
+        silent.len(),
+        silent.join("\n")
+    );
+    assert!(
+        unrun.is_empty(),
+        "UNRUN: {} Appendix A witness row(s) were not exercised because their code is already \
+         present in the baseline, so mutating for them would prove nothing. UNRUN is neither pass \
+         nor fail:\n{}",
+        unrun.len(),
+        unrun.join("\n")
+    );
+}
+
 #[test]
 fn workspace_unsafe_lint_drift_is_seen_to_fire() {
     let root = repo_root();
@@ -962,6 +1051,7 @@ fn the_liveness_self_test_guard_can_be_false() {
 #[test]
 fn every_witness_row_names_a_distinct_law() {
     let mut codes: Vec<&'static str> = Vec::new();
+    codes.extend(appendix_candidate_witnesses().iter().map(|row| row.code));
     for group in [
         topology_header_witnesses(),
         topology_crate_witnesses(),
@@ -980,7 +1070,7 @@ fn every_witness_row_names_a_distinct_law() {
     codes.extend(threat_witnesses().iter().map(|row| row.code));
     codes.extend(registry_witnesses().iter().map(|row| row.code));
 
-    assert_eq!(codes.len(), 109, "table row count moved");
+    assert_eq!(codes.len(), 118, "table row count moved");
     let distinct: BTreeSet<&str> = codes.iter().copied().collect();
     // `active_not_a_member`/`active_manifest_missing` are two laws reached by
     // one fact. The island rows above deliberately use separate scan facts.
