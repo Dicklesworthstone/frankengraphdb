@@ -928,3 +928,34 @@ pub fn canonicalize(entries: &mut [CoordinateEntry]) -> Result<(), CanonicalErro
     entries.sort_by_key(|entry| entry.coordinate());
     Ok(())
 }
+
+impl crate::LogicalDeltaBatch {
+    /// The batch's canonical bytes — the transcript its `batch_digest` is taken
+    /// over, and therefore what makes that digest an idempotency key two
+    /// implementations could ever agree on.
+    ///
+    /// The digest itself is NOT stored here, for the same reason the template's
+    /// is not: hashing needs `fgdb-crypto`, which sits at a higher foundation
+    /// position than this crate. A field holding a caller-supplied digest that
+    /// nothing in this crate could verify would be a field free to lie, which
+    /// is worse than not having it.
+    ///
+    /// Provenance is included: the source template digest and the marker
+    /// identity are part of the transcript, so two batches with identical
+    /// payloads from different commits are different batches.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, CanonicalError> {
+        let mut w = Writer::new();
+        w.u16(self.format());
+        w.bytes32(self.source_template_digest());
+        let marker = self.commit_marker_identity();
+        w.oid(marker.marker_oid);
+        w.u64(marker.commit_seq.0);
+        w.u64(self.commit_seq().0);
+        w.u64(self.frontier().0);
+        w.count(self.coordinate_entries().len())?;
+        for entry in self.coordinate_entries() {
+            entry.write(&mut w)?;
+        }
+        Ok(w.finish())
+    }
+}

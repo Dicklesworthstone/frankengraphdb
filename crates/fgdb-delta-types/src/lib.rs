@@ -385,7 +385,7 @@ impl CommittedMarker {
 /// use fgdb_types::MarkerRef;
 ///
 /// fn order_with_bare_identity(template: LogicalDeltaTemplate, marker: MarkerRef) {
-///     let _ = LogicalDeltaBatch::order(template, marker);
+///     let _ = LogicalDeltaBatch::order(&template, [0u8; 32], marker);
 /// }
 /// ```
 ///
@@ -399,33 +399,81 @@ impl CommittedMarker {
 ///     template: LogicalDeltaTemplate,
 ///     marker: CommittedMarker,
 /// ) -> LogicalDeltaBatch {
-///     LogicalDeltaBatch { template, marker }
+///     LogicalDeltaBatch {
+///         format: 1,
+///         coordinate_entries: template.coordinate_entries().to_vec(),
+///         source_template_digest: [0u8; 32],
+///         commit_marker_identity: marker.marker(),
+///         commit_seq: marker.marker().commit_seq,
+///         frontier: marker.marker().commit_seq,
+///     }
 /// }
 /// ```
 #[derive(Clone, PartialEq, Debug)]
 pub struct LogicalDeltaBatch {
-    template: LogicalDeltaTemplate,
-    marker: CommittedMarker,
+    format: u16,
+    /// The payloads, OWNED. A batch that referenced its template would keep the
+    /// template alive for as long as the batch is retained, which is the
+    /// opposite of the retention direction the plan specifies.
+    coordinate_entries: Vec<CoordinateEntry>,
+    /// Non-retaining provenance: the digest of the template this was derived
+    /// from, not the template.
+    source_template_digest: [u8; 32],
+    /// Non-retaining provenance: the marker's IDENTITY. Ordering still requires
+    /// a [`CommittedMarker`] to construct, so the committedness law is intact —
+    /// but the batch stores only the identity, not the capability.
+    commit_marker_identity: MarkerRef,
+    commit_seq: fgdb_types::CommitSeq,
+    frontier: fgdb_types::CommitSeq,
 }
 
 impl LogicalDeltaBatch {
     /// The one door: order a sequence-neutral template by its committed
     /// marker.
-    pub fn order(template: LogicalDeltaTemplate, marker: CommittedMarker) -> Self {
-        LogicalDeltaBatch { template, marker }
+    pub fn order(
+        template: &LogicalDeltaTemplate,
+        source_template_digest: [u8; 32],
+        marker: CommittedMarker,
+    ) -> Self {
+        let commit_seq = marker.marker().commit_seq;
+        LogicalDeltaBatch {
+            format: DELTA_FORMAT_V1,
+            coordinate_entries: template.coordinate_entries().to_vec(),
+            source_template_digest,
+            commit_marker_identity: marker.marker(),
+            commit_seq,
+            // Local frontier IS this batch's own sequence (plan:1926
+            // `frontier: Local{commit_seq}`): a local batch advances the
+            // frontier to exactly the commit that produced it.
+            frontier: commit_seq,
+        }
     }
 
-    pub fn template(&self) -> &LogicalDeltaTemplate {
-        &self.template
+    pub fn format(&self) -> u16 {
+        self.format
     }
 
-    pub fn marker(&self) -> CommittedMarker {
-        self.marker
+    /// The payloads this batch owns.
+    pub fn coordinate_entries(&self) -> &[CoordinateEntry] {
+        &self.coordinate_entries
+    }
+
+    pub fn source_template_digest(&self) -> &[u8; 32] {
+        &self.source_template_digest
+    }
+
+    /// The marker identity, which is provenance rather than a retained edge.
+    pub fn commit_marker_identity(&self) -> MarkerRef {
+        self.commit_marker_identity
+    }
+
+    pub fn frontier(&self) -> fgdb_types::CommitSeq {
+        self.frontier
     }
 
     /// The batch's position in history (from its committed marker).
     pub fn commit_seq(&self) -> fgdb_types::CommitSeq {
-        self.marker.0.commit_seq
+        self.commit_seq
     }
 }
 
@@ -610,10 +658,73 @@ mod tests {
                 commit_seq: CommitSeq(41999),
             };
             let committed = CommittedMarker::attest(marker, &commit_cx);
-            let batch = LogicalDeltaBatch::order(template.clone(), committed);
+            let batch = LogicalDeltaBatch::order(&template, [0x33; 32], committed);
             assert_eq!(batch.commit_seq(), CommitSeq(41999));
-            assert_eq!(batch.template(), &template);
-            assert_eq!(batch.marker().marker(), marker);
+            assert_eq!(
+                batch.frontier(),
+                CommitSeq(41999),
+                "a local batch's frontier is its own sequence"
+            );
+            // The batch OWNS the payloads and RETAINS neither the template nor
+            // the marker capability — only their identities.
+            assert_eq!(batch.coordinate_entries(), template.coordinate_entries());
+            assert_eq!(batch.source_template_digest(), &[0x33; 32]);
+            assert_eq!(batch.commit_marker_identity(), marker);
+        });
+    }
+
+    /// THE RETENTION DIRECTION (plan:1926): "a retained batch owns payloads
+    /// directly but does not retain template/fragment, marker/decision,
+    /// capsule, or predecessor history."
+    ///
+    /// Demonstrated by DROPPING the template and finding the batch whole. A
+    /// batch that referenced its template would keep it alive for as long as
+    /// the batch is retained, which inverts the intended lifetime and is the
+    /// shape this type had before.
+    #[test]
+    fn a_batch_owns_its_payloads_and_retains_neither_template_nor_marker() {
+        with_commit_cx(0x000D_317C, |commit_cx| {
+            let source = template();
+            let entries = source.coordinate_entries().to_vec();
+            let marker = MarkerRef {
+                marker_oid: ObjectId([0xAA; 32]),
+                commit_seq: CommitSeq(7),
+            };
+            let batch = LogicalDeltaBatch::order(
+                &source,
+                [0x33; 32],
+                CommittedMarker::attest(marker, &commit_cx),
+            );
+
+            drop(source);
+
+            assert_eq!(
+                batch.coordinate_entries(),
+                entries,
+                "the payloads outlive the template they came from"
+            );
+            assert_eq!(batch.source_template_digest(), &[0x33; 32]);
+            assert_eq!(batch.commit_marker_identity(), marker);
+            assert_eq!(batch.commit_seq(), CommitSeq(7));
+            assert_eq!(batch.frontier(), CommitSeq(7));
+
+            // Provenance is in the transcript: identical payloads from a
+            // different commit are a different batch.
+            let other = LogicalDeltaBatch::order(
+                &template(),
+                [0x33; 32],
+                CommittedMarker::attest(
+                    MarkerRef {
+                        marker_oid: ObjectId([0xBB; 32]),
+                        commit_seq: CommitSeq(8),
+                    },
+                    &commit_cx,
+                ),
+            );
+            assert_ne!(
+                batch.canonical_bytes().expect("encodes"),
+                other.canonical_bytes().expect("encodes")
+            );
         });
     }
 
@@ -635,10 +746,14 @@ mod tests {
                 },
                 &commit_cx,
             );
-            let b1 = LogicalDeltaBatch::order(t.clone(), m1);
-            let b2 = LogicalDeltaBatch::order(t, m2);
+            let b1 = LogicalDeltaBatch::order(&t, [0x33; 32], m1);
+            let b2 = LogicalDeltaBatch::order(&t, [0x33; 32], m2);
             assert_ne!(b1, b2, "order comes from the marker, not the rows");
-            assert_eq!(b1.template(), b2.template());
+            assert_eq!(
+                b1.coordinate_entries(),
+                b2.coordinate_entries(),
+                "identical payloads under different markers"
+            );
         });
     }
 }

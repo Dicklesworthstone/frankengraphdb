@@ -443,11 +443,15 @@ fn run_transcript(root: &asupersync::Cx) {
         commit_seq: CommitSeq(41999),
     };
     let committed_marker = CommittedMarker::attest(marker, &contexts.commit());
-    let batch = LogicalDeltaBatch::order(template, committed_marker);
+    let batch = LogicalDeltaBatch::order(&template, [0x33; 32], committed_marker);
     t.emit(&format!(
         "ordered batch at commit_seq {:?} with {} rows",
         batch.commit_seq(),
-        batch.template().row_count()
+        batch
+            .coordinate_entries()
+            .iter()
+            .map(|e| e.rows.len())
+            .sum::<usize>()
     ));
 
     // 4. One envelope per §15.0 claim kind, with the lattice at the boundary.
