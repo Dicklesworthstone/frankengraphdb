@@ -60,6 +60,89 @@ pub struct Edge {
     pub valid_time: Option<ValidTimePeriod>,
 }
 
+/// One hop of a path: the edge traversed and the vertex it arrives at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathStep {
+    pub edge: EId,
+    pub to: VId,
+}
+
+/// A path: where it started and every hop since.
+///
+/// Stores the START plus hops rather than a vertex list, because a vertex list
+/// cannot distinguish two parallel edges between the same pair — and telling
+/// those apart is exactly what separates `Trail` from `Simple`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Path {
+    pub start: VId,
+    pub steps: Vec<PathStep>,
+}
+
+impl Path {
+    /// The vertex this path currently ends at.
+    pub fn end(&self) -> VId {
+        self.steps.last().map_or(self.start, |step| step.to)
+    }
+
+    /// Every vertex visited, in order, including repeats.
+    pub fn vertices(&self) -> Vec<VId> {
+        let mut out = vec![self.start];
+        out.extend(self.steps.iter().map(|step| step.to));
+        out
+    }
+
+    /// Every edge traversed, in order.
+    pub fn edge_ids(&self) -> Vec<EId> {
+        self.steps.iter().map(|step| step.edge).collect()
+    }
+
+    pub fn hop_count(&self) -> usize {
+        self.steps.len()
+    }
+}
+
+/// GQL path modes (ISO/IEC 39075; plan:657 names the four).
+///
+/// They form a CONTAINMENT CHAIN — `Acyclic` ⊆ `Simple` ⊆ `Trail` ⊆ `Walk` —
+/// which is why they are one closed union rather than four unrelated flags. The
+/// nesting is a law worth testing: an implementation that confuses two adjacent
+/// modes breaks it, and one that collapses two modes passes every test that only
+/// checks each mode alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathMode {
+    /// No restriction: vertices and edges may repeat.
+    Walk,
+    /// No repeated EDGES. A vertex may recur, reached by a different edge.
+    Trail,
+    /// No repeated VERTICES except that the first may equal the last, so a
+    /// closed walk is admissible. This is the ONLY difference from `Acyclic`.
+    Simple,
+    /// No repeated vertices at all — not even a closed walk.
+    Acyclic,
+}
+
+impl PathMode {
+    /// May `current` be extended by `edge` arriving at `next`?
+    ///
+    /// `target` is needed because `Simple` admits returning to the start only
+    /// when that closes the path: a mid-path return to the start is a repeated
+    /// vertex like any other.
+    fn admits(self, current: &Path, edge: EId, next: VId, target: VId) -> bool {
+        match self {
+            Self::Walk => true,
+            Self::Trail => !current.steps.iter().any(|step| step.edge == edge),
+            Self::Simple => {
+                if next == current.start {
+                    // Closing the walk is allowed only if this is the answer.
+                    return next == target;
+                }
+                !current.vertices().contains(&next)
+            }
+            Self::Acyclic => !current.vertices().contains(&next),
+        }
+    }
+}
+
 /// Why a row could not be applied.
 ///
 /// Every arm names the row's subject and the exact disagreement, because the
@@ -347,6 +430,83 @@ impl ReferenceGraph {
             .filter(|(_, edge)| edge.src == vid || edge.dst == vid)
             .map(|(eid, _)| *eid)
             .collect()
+    }
+
+    // ---- path modes (GQL / ISO 39075, plan:657) ---------------------------
+
+    /// Every path from `from` to `to` over `relation`, up to `max_hops`,
+    /// admissible under `mode`, in canonical order.
+    ///
+    /// Deliberately an exhaustive walk: §15 defines this crate as obviously
+    /// correct rather than fast, and "enumerate then filter" is the definition
+    /// of each mode rather than an encoding of it. A real planner must produce
+    /// the same SET.
+    ///
+    /// `max_hops` is required, not optional. Under `Walk` a cycle admits
+    /// infinitely many paths, so an unbounded call would not terminate — and a
+    /// silent internal default would make the result depend on a number the
+    /// caller never chose.
+    pub fn paths(
+        &self,
+        from: VId,
+        to: VId,
+        relation: RelationId,
+        mode: PathMode,
+        max_hops: usize,
+    ) -> Vec<Path> {
+        let mut found = Vec::new();
+        if !self.vertices.contains_key(&from) || !self.vertices.contains_key(&to) {
+            return found;
+        }
+        let mut current = Path {
+            start: from,
+            steps: Vec::new(),
+        };
+        self.extend_path(&mut current, to, relation, mode, max_hops, &mut found);
+        // Canonical order: shorter paths first, then lexicographically by the
+        // edges traversed. Two runs must agree, and "the order the search
+        // happened to find them" is not a specification.
+        found.sort_by(|a, b| {
+            a.steps
+                .len()
+                .cmp(&b.steps.len())
+                .then_with(|| a.edge_ids().cmp(&b.edge_ids()))
+        });
+        found
+    }
+
+    fn extend_path(
+        &self,
+        current: &mut Path,
+        target: VId,
+        relation: RelationId,
+        mode: PathMode,
+        max_hops: usize,
+        found: &mut Vec<Path>,
+    ) {
+        if current.end() == target && !current.steps.is_empty() {
+            found.push(current.clone());
+            // Do NOT return: a longer path may also reach the target, and under
+            // Walk or Trail that longer path is a distinct answer.
+        }
+        if current.steps.len() >= max_hops {
+            return;
+        }
+        let tip = current.end();
+        for (eid, edge) in &self.edges {
+            if edge.relation != relation || edge.src != tip {
+                continue;
+            }
+            if !mode.admits(current, *eid, edge.dst, target) {
+                continue;
+            }
+            current.steps.push(PathStep {
+                edge: *eid,
+                to: edge.dst,
+            });
+            self.extend_path(current, target, relation, mode, max_hops, found);
+            current.steps.pop();
+        }
     }
 
     // ---- temporal selectors (§15: the oracle implements temporal selectors) --
