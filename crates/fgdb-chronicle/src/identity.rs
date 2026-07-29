@@ -248,7 +248,7 @@ pub struct EncodingDescriptor {
 }
 
 impl EncodingDescriptor {
-    fn canonical_bytes(&self, ciphertext_id: Digest) -> Vec<u8> {
+    pub(crate) fn canonical_bytes(&self, ciphertext_id: Digest) -> Vec<u8> {
         let mut out = Vec::with_capacity(32 + 2 + 8 + 8 + 4 + 2 + 2 + 2);
         out.extend_from_slice(&ciphertext_id.0);
         out.extend_from_slice(&self.fec_profile.to_be_bytes());
@@ -261,6 +261,29 @@ impl EncodingDescriptor {
         out
     }
 }
+
+/// Which declared identity failed to recompute from its descriptor.
+///
+/// Deliberately separate from an AEAD failure: this fires BEFORE any bytes are
+/// opened, and it means the descriptor set itself is not self-consistent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityMismatch {
+    /// The declared `EncodingId` is not the digest of its own descriptor.
+    EncodingId,
+    /// The declared `PlacementId` is not the digest of its own descriptor.
+    PlacementId,
+}
+
+impl core::fmt::Display for IdentityMismatch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::EncodingId => "declared EncodingId does not recompute from its descriptor",
+            Self::PlacementId => "declared PlacementId does not recompute from its descriptor",
+        })
+    }
+}
+
+impl core::error::Error for IdentityMismatch {}
 
 /// Stage 3 — *how it is coded*.
 ///
@@ -298,6 +321,51 @@ impl EncodedObject {
     /// The per-encoding symbol-authentication key (plan L280):
     /// `K_symbol = KDF(DEK, "fgdb:symbol-auth:v1" ‖ EncodingId)`. Symbols from
     /// different encodings therefore never share a MAC key.
+    /// RECOVERY CONSTRUCTOR. Rebuild an encoding from durable descriptors
+    /// alone — no plaintext, no prior stage value — and VERIFY the declared
+    /// identities recompute from them.
+    ///
+    /// This is what bootstrap recovery does: it holds a descriptor set read
+    /// out of a durable frame and must decide whether that set really names
+    /// the object it claims. Returning a checked value rather than a raw
+    /// struct is the point — a reconstruction that skipped the recomputation
+    /// would let a rewritten descriptor redirect recovery at other bytes.
+    pub fn reconstruct(
+        object_id: ObjectId,
+        cipher_descriptor: CipherDescriptor,
+        ciphertext_id: Digest,
+        descriptor: EncodingDescriptor,
+        declared_encoding_id: Digest,
+    ) -> Result<Self, IdentityMismatch> {
+        let recomputed = fgdb_crypto::encoding_id(&descriptor.canonical_bytes(ciphertext_id));
+        if recomputed != declared_encoding_id {
+            return Err(IdentityMismatch::EncodingId);
+        }
+        Ok(Self {
+            cipher_descriptor,
+            object_id,
+            ciphertext_id,
+            descriptor,
+            encoding_id: declared_encoding_id,
+        })
+    }
+
+    /// Verify that a declared `PlacementId` recomputes from its descriptor
+    /// against THIS encoding. Placement is where symbols physically live, so a
+    /// rewritten placement is how an attacker or a bug points recovery at the
+    /// wrong span.
+    pub fn verify_placement(
+        &self,
+        descriptor: &PlacementDescriptor,
+        declared_placement_id: Digest,
+    ) -> Result<(), IdentityMismatch> {
+        let recomputed = fgdb_crypto::placement_id(&descriptor.canonical_bytes(self.encoding_id));
+        if recomputed != declared_placement_id {
+            return Err(IdentityMismatch::PlacementId);
+        }
+        Ok(())
+    }
+
     /// The cipher descriptor carried forward from stage 2 — the authenticated
     /// source of the AAD and nonce a decoder needs.
     pub fn cipher_descriptor(&self) -> &CipherDescriptor {
@@ -406,7 +474,7 @@ pub struct PlacementDescriptor {
 }
 
 impl PlacementDescriptor {
-    fn canonical_bytes(&self, encoding_id: Digest) -> Vec<u8> {
+    pub(crate) fn canonical_bytes(&self, encoding_id: Digest) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&encoding_id.0);
         out.extend_from_slice(&self.placement_epoch.to_be_bytes());

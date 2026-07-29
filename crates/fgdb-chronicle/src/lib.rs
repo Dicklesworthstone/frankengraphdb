@@ -35,7 +35,10 @@ pub use pack::{
     DomainAxis, PackBuilder, PackDomain, PackError, PackedObjectGroup, SubobjectLocator,
     WriteKeyDomain,
 };
-pub use root::{IdentityTuple, RootBootstrap, RootSelection, RootSlot, SlotError, select_root};
+pub use root::{
+    IdentityTuple, RootBootstrap, RootRecoveryError, RootSelection, RootSlot, SlotError,
+    recover_root_object, select_root,
+};
 pub use scrub::{LostReason, ScrubReport, ScrubVerdict, scrub_object};
 pub use symbol::{SymbolError, SymbolRecord};
 pub use symbolize::{RecoveryTarget, SymbolizeError, decode_object, encode_object};

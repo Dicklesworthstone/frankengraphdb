@@ -36,7 +36,13 @@
 //! self-sufficient bootstrap descriptor, and the selection rule are complete
 //! and enforced as specified.
 
+use crate::identity::{
+    CipherDescriptor, EncodedObject, EncodingDescriptor, IdentityMismatch, LocationForm,
+    PlacementDescriptor,
+};
+use crate::symbolize::{RecoveryTarget, SymbolizeError, decode_object};
 use fgdb_crypto::Digest;
+use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 
 /// Fixed slot size. Both slots are exactly this, at offsets 0 and 4096.
 pub const SLOT_LEN: usize = 4096;
@@ -498,4 +504,159 @@ impl<'a> Cursor<'a> {
     fn take_u64(&mut self) -> u64 {
         u64::from_be_bytes(self.take_array::<8>())
     }
+}
+
+/// Why self-sufficient root recovery failed. Every variant is fail-closed and
+/// names WHICH check refused, because the escalations differ: a descriptor
+/// that does not recompute is a corrupt or rewritten frame, while insufficient
+/// symbols is a repair problem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootRecoveryError {
+    /// A declared identity did not recompute from its own descriptor.
+    DescriptorMismatch(IdentityMismatch),
+    /// The symbols could not reproduce the root object.
+    Recovery(SymbolizeError),
+    /// The recovered root's authenticated identity tuple disagrees with the
+    /// slot that pointed at it. A perfectly valid root belonging to another
+    /// database, incarnation, or visibility epoch must never be adopted.
+    IdentityTupleMismatch,
+}
+
+impl core::fmt::Display for RootRecoveryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DescriptorMismatch(inner) => write!(f, "root descriptor rejected: {inner}"),
+            Self::Recovery(inner) => write!(f, "root object not recovered: {inner}"),
+            Self::IdentityTupleMismatch => {
+                f.write_str("recovered root belongs to a different database identity")
+            }
+        }
+    }
+}
+
+impl core::error::Error for RootRecoveryError {}
+
+impl RootBootstrap {
+    /// Rebuild the root's exact `CipherDescriptorWithoutDigest`.
+    pub fn cipher_descriptor(&self) -> CipherDescriptor {
+        CipherDescriptor {
+            object_kind: self.object_kind,
+            canonical_plaintext_len: self.canonical_plaintext_len,
+            codec_profile: self.codec_profile,
+            compressed_len: self.compressed_len,
+            data_crypto_profile: self.data_crypto_profile,
+            dek_id: self.dek_id,
+            object_nonce: self.nonce_or_siv,
+            object_tag_len: self.object_tag_len,
+        }
+    }
+
+    /// Rebuild the root's complete `EncodingDescriptorWithoutId`.
+    pub fn encoding_descriptor(&self) -> EncodingDescriptor {
+        EncodingDescriptor {
+            fec_profile: self.fec_profile,
+            transfer_length: self.transfer_length,
+            oti_common: self.oti_common,
+            oti_scheme: self.oti_scheme,
+            symbol_size: self.symbol_size,
+            source_block_count: self.source_block_count,
+            symbol_auth_profile: self.symbol_auth_profile,
+        }
+    }
+
+    /// Rebuild the root's specialized ContiguousSpan
+    /// `PlacementDescriptorWithoutId`.
+    pub fn placement_descriptor(&self) -> PlacementDescriptor {
+        PlacementDescriptor {
+            placement_epoch: self.root_placement_epoch,
+            failure_domain_policy: self.failure_domain_policy_id,
+            location_form: LocationForm::ContiguousSpan {
+                failure_domain_id: self.root_failure_domain_id,
+                segment_id: self.segment_id,
+                offset: self.offset,
+                encoded_len: self.encoded_len,
+                symbol_inventory_digest: Digest(self.root_symbol_inventory_digest),
+            },
+        }
+    }
+}
+
+/// SELF-SUFFICIENT ROOT RECOVERY, in the exact order the plan specifies.
+///
+/// Nothing here is read from the object being opened, and nothing is read from
+/// an index: every descriptor comes from the slot, which is why a database can
+/// be recovered from a fixed offset with no prior state.
+///
+/// The order matters as much as the steps. Descriptors are verified to
+/// recompute their own declared identities BEFORE any symbol is trusted;
+/// symbols are authenticated before they enter a decode; the keyed `ObjectId`
+/// is recomputed from the recovered plaintext; and only then is the root's own
+/// authenticated identity tuple compared against the slot. A check moved later
+/// than this would let a rewritten field steer the ones before it.
+pub fn recover_root_object(
+    slot: &RootSlot,
+    serialized_symbols: &[Vec<u8>],
+    k_oid: &[u8; 32],
+    dek: &[u8; 32],
+    recovered_identity_tuple: impl Fn(&[u8]) -> IdentityTuple,
+) -> Result<Vec<u8>, RootRecoveryError> {
+    let bootstrap = &slot.bootstrap;
+    let root_object_id = ObjectId(slot.root_manifest_oid);
+
+    // Step 1: the descriptor set must be self-consistent. An EncodingId that
+    // is not the digest of its own descriptor means the frame was rewritten,
+    // and no amount of valid symbols makes that safe.
+    let encoding = EncodedObject::reconstruct(
+        root_object_id,
+        bootstrap.cipher_descriptor(),
+        Digest(bootstrap.ciphertext_id),
+        bootstrap.encoding_descriptor(),
+        Digest(bootstrap.root_encoding_id),
+    )
+    .map_err(RootRecoveryError::DescriptorMismatch)?;
+
+    // Step 2: the placement must recompute too — placement is WHERE the
+    // symbols are, so a rewritten placement is how recovery gets pointed at
+    // another object's bytes.
+    encoding
+        .verify_placement(
+            &bootstrap.placement_descriptor(),
+            Digest(bootstrap.root_placement_id),
+        )
+        .map_err(RootRecoveryError::DescriptorMismatch)?;
+
+    // Steps 3-5: authenticate every symbol, decode, open the AEAD, and
+    // recompute the keyed ObjectId. `decode_object` owns that sequence and
+    // fails closed at each stage.
+    let protected_len = usize::try_from(bootstrap.encoded_len)
+        .map_err(|_| RootRecoveryError::Recovery(SymbolizeError::InvalidParameters))?;
+    let namespace = DatabaseSecurityNamespaceId(slot.database_security_namespace_id);
+    let recovered = decode_object(
+        &encoding,
+        serialized_symbols,
+        RecoveryTarget {
+            k_oid,
+            namespace,
+            object_id: root_object_id,
+            // The root's protected bytes ARE its complete canonical
+            // plaintext, header included, so the header is not a separate
+            // recomputation input. Passing it again would hash it twice and
+            // no well-formed root would ever recover. The §5.1 transcript
+            // concatenates header and payload, so hashing the whole canonical
+            // plaintext as the payload reproduces the identical byte stream.
+            canonical_header: &[],
+            protected_len,
+        },
+        dek,
+    )
+    .map_err(RootRecoveryError::Recovery)?;
+
+    // Step 6: the recovered root's OWN authenticated identity tuple must agree
+    // with the slot that pointed at it. Every preceding check proves the bytes
+    // are the object named; this one proves the object belongs to THIS
+    // database, incarnation, continuity lineage, and visibility epoch.
+    if recovered_identity_tuple(&recovered) != slot.identity_tuple() {
+        return Err(RootRecoveryError::IdentityTupleMismatch);
+    }
+    Ok(recovered)
 }

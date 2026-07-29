@@ -759,8 +759,22 @@ run_ubs() {
 # ATTRIBUTED BY DIFFERENTIAL: fgdb-chronicle is a new crate, so `ubs
 # crates/fgdb-chronicle/` reports the whole delta; measured 3 in that one file
 # and 0 elsewhere in the crate.
+# MOVED 2026-07-29 (fgdb-w2-root-bootstrap-hbf): timing-safe 799 -> 800, +1, in
+# `crates/fgdb-chronicle/src/root.rs`. The one finding is the identity-tuple
+# comparison that ends self-sufficient root recovery:
+#     if recovered_identity_tuple(&recovered) != slot.identity_tuple()
+# That tuple is an AUTHENTICATED PUBLIC IDENTITY (database id, namespace,
+# incarnation, continuity digest, visibility epoch), not a secret or a MAC, and
+# the comparison happens AFTER the AEAD and the keyed-ObjectId recomputation
+# have already authenticated the bytes. There is nothing to leak by timing: an
+# attacker who could vary the input has already failed two cryptographic
+# checks. The genuine constant-time compares in this workspace are written as
+# explicit XOR-accumulate loops (aead.rs tag compare, symbol.rs MAC compare).
+# ATTRIBUTED BY DIFFERENTIAL: `ubs crates/fgdb-chronicle/` before this
+# increment reported 3 criticals and after reports 4, with the single new site
+# in root.rs and 0 elsewhere.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=799"
+  "Secret/token comparisons without timing-safe equality=800"
   "panic!/unreachable!/todo!/unimplemented!=135"
   "JWT decode, validation bypass, or missing claim binding=123"
 )
