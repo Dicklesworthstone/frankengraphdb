@@ -4195,7 +4195,7 @@ fn idr_a13_branch_reference_fields_are_source_determined() {
         let fields = identity
             .fields
             .iter()
-            .filter(|row| row.containing_schema == owner && row.stable_name == name)
+            .filter(|row| row.containing_schema.eq(owner) && row.stable_name.eq(name))
             .collect::<Vec<_>>();
         assert_eq!(fields.len(), 1, "{owner}.{name} must exist exactly once");
         let field = fields[0];
@@ -4208,14 +4208,14 @@ fn idr_a13_branch_reference_fields_are_source_determined() {
         let owner_order = identity
             .logical
             .iter()
-            .find(|row| row.name == identity::generic_free_family(owner))
+            .find(|row| row.name.eq(identity::generic_free_family(owner)))
             .expect("A13 field owner resolves")
             .construction_order;
         assert_eq!(field.construction_order, owner_order);
         let resolved_target_order = identity
             .logical
             .iter()
-            .find(|row| row.name == identity::generic_free_family(target))
+            .find(|row| row.name.eq(identity::generic_free_family(target)))
             .expect("A13 StrongRef target resolves")
             .construction_order;
         assert_eq!(resolved_target_order, target_order);
@@ -4239,7 +4239,7 @@ fn idr_a13_branch_reference_fields_are_source_determined() {
         let targets = catalog
             .targets
             .iter()
-            .filter(|row| row.source_key == source_key)
+            .filter(|row| row.source_key.eq(source_key.as_str()))
             .collect::<Vec<_>>();
         assert_eq!(targets.len(), 1, "{source_key} maps exactly once");
         let target_row = targets[0];
