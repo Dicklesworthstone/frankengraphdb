@@ -88,8 +88,14 @@ pub enum ArenaError {
     BadAlignment { align: usize },
     /// The block, plus the padding its alignment needs, cannot fit a chunk.
     BlockLargerThanChunk { len: usize, chunk_bytes: usize },
-    /// The region's byte budget is exhausted.
+    /// The region's live-logical-byte budget is exhausted: the sum of live
+    /// block lengths would exceed `max_live_bytes`.
     RegionFull { requested: usize, remaining: usize },
+    /// The region's resident-byte limit is exhausted: the next chunk would
+    /// push total chunk capacity past `max_resident_bytes`. Charged per chunk,
+    /// before any allocation or metadata mutation, so a refusal changes
+    /// nothing.
+    ResidentLimitExceeded { requested: usize, remaining: usize },
     /// The process allocator refused backing storage or region metadata.
     BackingAllocationFailed { requested: usize },
     /// The slot table can no longer mint a representable handle.
@@ -150,6 +156,13 @@ impl std::fmt::Display for ArenaError {
                 requested,
                 remaining,
             } => write!(f, "region full: wanted {requested}, {remaining} remain"),
+            Self::ResidentLimitExceeded {
+                requested,
+                remaining,
+            } => write!(
+                f,
+                "resident limit exceeded: wanted {requested}, {remaining} remain"
+            ),
             Self::BackingAllocationFailed { requested } => {
                 write!(f, "backing allocation of {requested} bytes failed")
             }
@@ -236,6 +249,24 @@ pub struct RegionAudit {
     pub blocks_released: u64,
     /// Blocks still live when the region ended, reclaimed by the end itself.
     pub blocks_live_at_end: u64,
+    /// Chunks created over the region's whole life. Chunks are never freed
+    /// early — the allocator site's provenance argument rests on their
+    /// stability — so this is also the chunk count the region's `Drop`
+    /// reclaims.
+    pub chunks_allocated: u64,
+    /// Largest retained resident footprint the region ever held, in bytes
+    /// (the sum of `Vec::capacity()` over live chunks at its maximum).
+    /// Resident bytes are monotone over a region's life today, so this equals
+    /// the footprint at the end; the field is named for the peak so an
+    /// early-reclamation change cannot silently stale its meaning. This is
+    /// the number W3 admission control binds to the plan's `resident_bytes`
+    /// axis.
+    pub peak_resident_bytes: u64,
+    /// Total alignment padding consumed inside chunks over the region's
+    /// whole life. Padding is charged implicitly — it lives inside charged
+    /// chunk capacity — and reported here so internal fragmentation is an
+    /// audited quantity rather than an invisible tax.
+    pub alignment_padding_bytes: u64,
 }
 
 impl RegionAudit {
@@ -291,7 +322,12 @@ pub struct Region {
     used_in_last: usize,
     slots: Vec<Slot>,
     free_slots: Vec<u32>,
-    max_bytes: usize,
+    max_live_bytes: usize,
+    max_resident_bytes: usize,
+    resident_bytes: usize,
+    peak_resident_bytes: u64,
+    chunks_allocated: u64,
+    alignment_padding_bytes: u64,
     bytes_allocated: u64,
     bytes_reclaimed: u64,
     blocks_allocated: u64,
@@ -312,17 +348,49 @@ struct Resolved {
 }
 
 impl Region {
-    /// Open a region whose chunks are `chunk_bytes` each and which will hand
-    /// out at most `max_bytes` in total.
+    /// Open a region whose chunks are `chunk_bytes` each, under two explicit
+    /// budgets.
+    ///
+    /// * `max_live_bytes` is the **live-logical-byte budget**: the sum of
+    ///   `len` over live blocks never exceeds it. Releasing a block returns
+    ///   its bytes to this budget, so a working set that shrinks can grow
+    ///   again. This is the operator-facing working-set contract.
+    /// * `max_resident_bytes` is the **resident-byte limit**: the sum of
+    ///   `Vec::capacity()` over retained chunks never exceeds it. It is
+    ///   charged per chunk at creation — at the capacity the allocator
+    ///   actually accepted, which `try_reserve_exact` contractually bounds
+    ///   only from below — which inherently charges alignment padding and
+    ///   in-chunk slack: they live inside charged chunks. It is *not*
+    ///   returned on release: chunks are never freed early, because the
+    ///   allocator site's provenance argument rests on chunk stability, so
+    ///   resident consumption is monotone over the region's life. This is
+    ///   the number admission control binds to the plan's `resident_bytes`
+    ///   axis; region metadata and allocator-internal slack beyond
+    ///   `Vec::capacity` are outside it by design.
     ///
     /// # Panics
     ///
-    /// If `chunk_bytes` is zero. A zero-byte chunk cannot hold any block, and
-    /// every subsequent allocation would fail with a confusing error rather
-    /// than at the mistake.
+    /// If the budget triple is not totally ordered as
+    /// `0 < chunk_bytes <= max_live_bytes <= max_resident_bytes`. A chunk
+    /// larger than the live budget would be unreachable waste, a live budget
+    /// above the resident limit could never be reached, and a zero-byte chunk
+    /// cannot hold any block; all three are configuration mistakes best named
+    /// at construction rather than as a confusing first-allocation refusal.
     #[must_use]
-    pub fn with_capacity(chunk_bytes: usize, max_bytes: usize) -> Self {
+    pub fn with_capacity(
+        chunk_bytes: usize,
+        max_live_bytes: usize,
+        max_resident_bytes: usize,
+    ) -> Self {
         assert!(chunk_bytes > 0, "a region needs a non-zero chunk size");
+        assert!(
+            chunk_bytes <= max_live_bytes,
+            "chunk size {chunk_bytes} exceeds the live-byte budget {max_live_bytes}"
+        );
+        assert!(
+            max_live_bytes <= max_resident_bytes,
+            "live-byte budget {max_live_bytes} exceeds the resident limit {max_resident_bytes}"
+        );
         Self {
             id: NEXT_REGION_ID.fetch_add(1, Ordering::Relaxed),
             chunks: Vec::new(),
@@ -330,7 +398,12 @@ impl Region {
             used_in_last: 0,
             slots: Vec::new(),
             free_slots: Vec::new(),
-            max_bytes,
+            max_live_bytes,
+            max_resident_bytes,
+            resident_bytes: 0,
+            peak_resident_bytes: 0,
+            chunks_allocated: 0,
+            alignment_padding_bytes: 0,
             bytes_allocated: 0,
             bytes_reclaimed: 0,
             blocks_allocated: 0,
@@ -370,6 +443,40 @@ impl Region {
         self.live_bytes
     }
 
+    /// The live-logical-byte budget: the most [`Region::live_bytes`] may
+    /// reach. Returned in full by release.
+    #[must_use]
+    pub const fn max_live_bytes(&self) -> usize {
+        self.max_live_bytes
+    }
+
+    /// Bytes currently held as retained chunk capacity: the sum of
+    /// `Vec::capacity()` over this region's chunks, measured at creation.
+    /// Charged per chunk and never returned before the region ends, so this
+    /// is monotone over the region's life. Region metadata (the chunk table,
+    /// slot table, and free list) and allocator-internal slack beyond what
+    /// `Vec::capacity` reports are outside this number by design: it is the
+    /// admission-control charge for block storage, exactly what the W3
+    /// adapter binds to the plan's `resident_bytes` axis.
+    #[must_use]
+    pub const fn resident_bytes(&self) -> usize {
+        self.resident_bytes
+    }
+
+    /// The resident-byte limit: the most [`Region::resident_bytes`] may
+    /// reach. Never returned by release; reclaimed wholesale when the region
+    /// ends.
+    #[must_use]
+    pub const fn max_resident_bytes(&self) -> usize {
+        self.max_resident_bytes
+    }
+
+    /// Alignment padding consumed inside chunks so far.
+    #[must_use]
+    pub const fn alignment_padding_bytes(&self) -> u64 {
+        self.alignment_padding_bytes
+    }
+
     /// End the region normally, reclaiming every live block.
     #[must_use]
     pub fn close(self) -> RegionAudit {
@@ -406,6 +513,9 @@ impl Region {
             blocks_allocated: self.blocks_allocated,
             blocks_released: self.blocks_released,
             blocks_live_at_end: live,
+            chunks_allocated: self.chunks_allocated,
+            peak_resident_bytes: self.peak_resident_bytes,
+            alignment_padding_bytes: self.alignment_padding_bytes,
         }
     }
 
@@ -649,7 +759,7 @@ impl RegionAlloc for Region {
                 chunk_bytes: self.chunk_bytes,
             });
         }
-        let remaining = self.max_bytes.saturating_sub(self.live_bytes);
+        let remaining = self.max_live_bytes.saturating_sub(self.live_bytes);
         if len > remaining {
             return Err(ArenaError::RegionFull {
                 requested: len,
@@ -672,12 +782,25 @@ impl RegionAlloc for Region {
                 .and_then(|s| s.checked_add(len))
                 .is_some_and(|end| end <= self.chunk_bytes)
             {
-                placed = Some((self.chunks.len() - 1, self.used_in_last + pad));
+                placed = Some((self.chunks.len() - 1, self.used_in_last + pad, pad));
             }
         }
         let new_chunk = match placed {
             Some(_) => None,
             None => {
+                // The resident charge is checked before the chunk exists:
+                // refusal here is deterministic and leaves the region
+                // byte-identical. Chunks are never freed early, so this limit
+                // — not the live budget — is what bounds the region's actual
+                // footprint under allocate/release churn.
+                let resident_remaining =
+                    self.max_resident_bytes.saturating_sub(self.resident_bytes);
+                if self.chunk_bytes > resident_remaining {
+                    return Err(ArenaError::ResidentLimitExceeded {
+                        requested: self.chunk_bytes,
+                        remaining: resident_remaining,
+                    });
+                }
                 let mut chunk = Vec::new();
                 chunk.try_reserve_exact(self.chunk_bytes).map_err(|_| {
                     ArenaError::BackingAllocationFailed {
@@ -685,6 +808,24 @@ impl RegionAlloc for Region {
                     }
                 })?;
                 chunk.resize(self.chunk_bytes, 0_u8);
+                // `try_reserve_exact` contractually guarantees only
+                // `capacity() >= chunk_bytes` — the allocator may accept a
+                // larger layout — so the retained charge is the capacity the
+                // vector actually reports, measured before the chunk becomes
+                // region-visible. Under the pinned toolchain `try_reserve_exact`
+                // records exactly the requested capacity, so this equals
+                // `chunk_bytes` today; the measurement is what keeps the hard
+                // limit honest if that implementation detail ever moves. A
+                // refusal drops the chunk while it is still a local: nothing
+                // region-visible has mutated, and the transient local is
+                // outside the retained bound by construction.
+                let accepted = chunk.capacity();
+                if accepted > resident_remaining {
+                    return Err(ArenaError::ResidentLimitExceeded {
+                        requested: accepted,
+                        remaining: resident_remaining,
+                    });
+                }
                 let base = chunk.as_ptr().addr();
                 let pad = (align - (base % align)) % align;
                 if pad + len > self.chunk_bytes {
@@ -698,7 +839,7 @@ impl RegionAlloc for Region {
                     .map_err(|_| ArenaError::BackingAllocationFailed {
                         requested: mem::size_of::<Vec<u8>>(),
                     })?;
-                Some((chunk, pad))
+                Some((chunk, pad, accepted))
             }
         };
 
@@ -733,16 +874,20 @@ impl RegionAlloc for Region {
             })?;
         }
 
-        let (chunk_index, start) = match (placed, new_chunk) {
+        let (chunk_index, start, pad) = match (placed, new_chunk) {
             (Some(place), None) => place,
-            (None, Some((chunk, pad))) => {
+            (None, Some((chunk, pad, accepted))) => {
                 let index = self.chunks.len();
                 self.chunks.push(chunk);
-                (index, pad)
+                self.resident_bytes += accepted;
+                self.chunks_allocated += 1;
+                self.peak_resident_bytes = self.peak_resident_bytes.max(self.resident_bytes as u64);
+                (index, pad, pad)
             }
             _ => unreachable!("placement planning must choose exactly one chunk"),
         };
         self.used_in_last = start + len;
+        self.alignment_padding_bytes += pad as u64;
 
         let slot_index = match reusable {
             Some(index) => {
@@ -902,12 +1047,22 @@ impl RegionScope {
     ///
     /// # Panics
     ///
-    /// Panics if `chunk_bytes` is zero, matching [`Region::with_capacity`].
+    /// Panics if the budget triple is not totally ordered as
+    /// `0 < chunk_bytes <= max_live_bytes <= max_resident_bytes`, matching
+    /// [`Region::with_capacity`].
     #[must_use]
-    pub fn with_capacity(chunk_bytes: usize, max_bytes: usize) -> Self {
+    pub fn with_capacity(
+        chunk_bytes: usize,
+        max_live_bytes: usize,
+        max_resident_bytes: usize,
+    ) -> Self {
         Self {
             state: RegionScopeState {
-                region: RefCell::new(Some(Region::with_capacity(chunk_bytes, max_bytes))),
+                region: RefCell::new(Some(Region::with_capacity(
+                    chunk_bytes,
+                    max_live_bytes,
+                    max_resident_bytes,
+                ))),
                 owners: Cell::new(0),
                 last_allocation_error: Cell::new(None),
                 allocator_fault: Cell::new(None),
@@ -949,6 +1104,18 @@ impl RegionScope {
             .borrow()
             .as_ref()
             .map_or(0, Region::live_bytes)
+    }
+
+    /// Bytes currently held as chunk capacity. Monotone over the region's
+    /// life; the number W3 admission control binds to the plan's
+    /// `resident_bytes` axis.
+    #[must_use]
+    pub fn resident_bytes(&self) -> usize {
+        self.state
+            .region
+            .borrow()
+            .as_ref()
+            .map_or(0, Region::resident_bytes)
     }
 
     /// End the region normally after every typed container has dropped.
@@ -1485,7 +1652,7 @@ mod tests {
 
     #[test]
     fn blocks_are_aligned_as_requested() {
-        let mut region = Region::with_capacity(4096, 1 << 20);
+        let mut region = Region::with_capacity(4096, 1 << 20, 1 << 21);
         for align in [1_usize, 2, 4, 8, 16, 32, MAX_BLOCK_ALIGN] {
             // A one-byte block between each aligned one, so the bump offset is
             // odd as often as not and the padding actually has to do work.
@@ -1498,7 +1665,7 @@ mod tests {
 
     #[test]
     fn a_released_handle_is_refused_even_after_its_slot_is_reused() {
-        let mut region = Region::with_capacity(256, 4096);
+        let mut region = Region::with_capacity(256, 4096, 4096);
         let first = region.alloc_block(16, 1).expect("first");
         assert_eq!(region.release(first), Ok(16));
         let second = region.alloc_block(16, 1).expect("second");
@@ -1516,8 +1683,8 @@ mod tests {
 
     #[test]
     fn a_handle_from_another_region_is_refused() {
-        let mut a = Region::with_capacity(256, 4096);
-        let mut b = Region::with_capacity(256, 4096);
+        let mut a = Region::with_capacity(256, 4096, 4096);
+        let mut b = Region::with_capacity(256, 4096, 4096);
         let from_a = a.alloc_block(16, 1).expect("block");
         assert_ne!(a.id(), b.id());
         assert!(matches!(
@@ -1534,7 +1701,7 @@ mod tests {
 
     #[test]
     fn a_repeated_handle_is_refused_rather_than_aliased() {
-        let mut region = Region::with_capacity(256, 4096);
+        let mut region = Region::with_capacity(256, 4096, 4096);
         let handle = region.alloc_block(16, 1).expect("block");
         assert!(matches!(
             region.blocks_mut(&[handle, handle]),
@@ -1547,7 +1714,7 @@ mod tests {
 
     #[test]
     fn disjoint_blocks_are_borrowed_simultaneously() {
-        let mut region = Region::with_capacity(256, 4096);
+        let mut region = Region::with_capacity(256, 4096, 4096);
         let a = region.alloc_block(8, 1).expect("a");
         let b = region.alloc_block(8, 8).expect("b");
         let c = region.alloc_block(8, 1).expect("c");
@@ -1566,7 +1733,7 @@ mod tests {
     #[test]
     fn an_out_of_bounds_edit_writes_nothing_on_either_path() {
         for &path in COMPILED_EDIT_PATHS {
-            let mut region = Region::with_capacity(256, 4096);
+            let mut region = Region::with_capacity(256, 4096, 4096);
             let a = region.alloc_block(4, 1).expect("a");
             let b = region.alloc_block(4, 1).expect("b");
             let edits = [
@@ -1608,7 +1775,7 @@ mod tests {
                 Region::cancel as fn(Region) -> RegionAudit,
             ),
         ] {
-            let mut region = Region::with_capacity(128, 4096);
+            let mut region = Region::with_capacity(128, 4096, 4096);
             let keep = region.alloc_block(32, 8).expect("keep");
             let drop_me = region.alloc_block(48, 1).expect("drop");
             assert_eq!(region.release(drop_me), Ok(48));
@@ -1624,19 +1791,26 @@ mod tests {
                 audit.bytes_allocated
             );
             assert_eq!(audit.blocks_live_at_end, 1);
+            // The resident side of the ledger: one 128-byte chunk held both
+            // blocks, the first block's alignment pad is under its alignment,
+            // and the peak never exceeded the configured limit.
+            assert_eq!(audit.chunks_allocated, 1);
+            assert_eq!(audit.peak_resident_bytes, 128);
+            assert!(audit.alignment_padding_bytes < 8);
+            assert!(audit.peak_resident_bytes <= 4096);
         }
     }
 
     #[test]
     fn a_closed_region_refuses_everything() {
-        let mut region = Region::with_capacity(128, 4096);
+        let mut region = Region::with_capacity(128, 4096, 4096);
         let handle = region.alloc_block(8, 1).expect("block");
         let audit = region.close();
         assert!(audit.balanced());
         // The handle outlives the region value only in the test's own hands;
         // what matters is that a region cannot be reopened, which the type
         // system already guarantees by consuming `self`.
-        let reopened = Region::with_capacity(128, 4096);
+        let reopened = Region::with_capacity(128, 4096, 4096);
         assert!(matches!(
             reopened.block(handle),
             Err(ArenaError::ForeignHandle { .. })
@@ -1645,7 +1819,7 @@ mod tests {
 
     #[test]
     fn the_budget_is_enforced_and_release_returns_it() {
-        let mut region = Region::with_capacity(64, 96);
+        let mut region = Region::with_capacity(64, 96, 128);
         let a = region.alloc_block(64, 1).expect("a");
         assert!(matches!(
             region.alloc_block(64, 1),
@@ -1663,7 +1837,7 @@ mod tests {
         // The half of "bit-identical fallback" that is easy to skip: agreement
         // on inputs both paths accept proves nothing about the inputs one of
         // them would have waved through.
-        let mut region = Region::with_capacity(256, 4096);
+        let mut region = Region::with_capacity(256, 4096, 4096);
         let a = region.alloc_block(8, 1).expect("a");
         let stale = region.alloc_block(8, 1).expect("stale");
         region.release(stale).expect("release");
@@ -1700,5 +1874,107 @@ mod tests {
             );
             assert!(sequential.is_err(), "case was meant to be refused");
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "a region needs a non-zero chunk size")]
+    fn construction_refuses_a_zero_chunk() {
+        let _ = Region::with_capacity(0, 64, 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds the live-byte budget")]
+    fn construction_refuses_a_chunk_larger_than_the_live_budget() {
+        // The bead's named case: `chunk_bytes` greater than the live budget
+        // can never be anything but unreachable waste, so the refusal happens
+        // at construction, not as a surprising first-allocation failure.
+        let _ = Region::with_capacity(128, 64, 128);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds the resident limit")]
+    fn construction_refuses_a_live_budget_above_the_resident_limit() {
+        // Live bytes occupy resident chunk capacity, so a live budget above
+        // the resident limit is unreachable: a configuration mistake, named
+        // at construction.
+        let _ = Region::with_capacity(64, 128, 64);
+    }
+
+    #[test]
+    fn resident_limit_is_charged_per_chunk_and_refusals_mutate_nothing() {
+        // The hole this contract closes: released ranges are never reused, so
+        // under allocate/release churn the live budget stays open while chunk
+        // capacity grows without bound. The resident limit is what refuses,
+        // and it refuses before anything mutates.
+        let mut region = Region::with_capacity(64, 96, 128);
+        let first = region.alloc_block(64, 1).expect("first");
+        assert_eq!(region.release(first), Ok(64));
+        let second = region.alloc_block(64, 1).expect("second: a fresh chunk");
+        assert_eq!(region.release(second), Ok(64));
+        // Under the pinned toolchain `try_reserve_exact` records exactly the
+        // requested capacity, so the accepted charge equals `chunk_bytes`.
+        // If that implementation detail ever moves, this assertion turns red
+        // on purpose: the accounting changed meaningfully and the audit
+        // contract must be re-examined, not quietly re-baselined.
+        assert_eq!(region.resident_bytes(), 128);
+        assert_eq!(region.live_bytes(), 0);
+
+        let before = (
+            region.bytes_allocated(),
+            region.bytes_reclaimed(),
+            region.live_bytes(),
+            region.resident_bytes(),
+        );
+        assert!(matches!(
+            region.alloc_block(64, 1),
+            Err(ArenaError::ResidentLimitExceeded {
+                requested: 64,
+                remaining: 0
+            })
+        ));
+        let after = (
+            region.bytes_allocated(),
+            region.bytes_reclaimed(),
+            region.live_bytes(),
+            region.resident_bytes(),
+        );
+        assert_eq!(
+            before, after,
+            "a resident refusal mutated region accounting"
+        );
+        // The live budget alone would have waved this allocation through;
+        // the two budgets answer different questions, and that is the point.
+        assert!(64 <= region.max_live_bytes() - region.live_bytes());
+
+        let audit = region.close();
+        assert!(audit.balanced());
+        assert_eq!(audit.chunks_allocated, 2);
+        assert_eq!(audit.peak_resident_bytes, 128);
+    }
+
+    #[test]
+    fn alignment_padding_is_charged_and_audited() {
+        let mut region = Region::with_capacity(256, 4096, 4096);
+        let a = region.alloc_block(8, 1).expect("a");
+        let b = region.alloc_block(8, MAX_BLOCK_ALIGN).expect("b");
+        let address_a = region.block(a).expect("a live").as_ptr().addr();
+        let address_b = region.block(b).expect("b live").as_ptr().addr();
+        assert_eq!(address_b % MAX_BLOCK_ALIGN, 0);
+        // `a` needs no padding at align 1, so the exact pad before `b` is
+        // observable from the two addresses.
+        let expected_pad = address_b - (address_a + 8);
+        assert!(expected_pad < MAX_BLOCK_ALIGN);
+        assert_eq!(region.alignment_padding_bytes(), expected_pad as u64);
+        // Padding lives inside charged chunk capacity: part of the resident
+        // footprint, never part of live bytes.
+        assert_eq!(region.live_bytes(), 16);
+        assert_eq!(region.resident_bytes(), 256);
+        assert!(16 + expected_pad <= region.resident_bytes());
+
+        let audit = region.close();
+        assert!(audit.balanced());
+        assert_eq!(audit.alignment_padding_bytes, expected_pad as u64);
+        assert_eq!(audit.chunks_allocated, 1);
+        assert_eq!(audit.peak_resident_bytes, 256);
     }
 }

@@ -68,7 +68,7 @@ fn query_cx() -> QueryCx {
 }
 
 fn test_scope() -> RegionScope {
-    RegionScope::with_capacity(1 << 20, 1 << 28)
+    RegionScope::with_capacity(1 << 20, 1 << 28, 1 << 30)
 }
 
 fn build<'region>(

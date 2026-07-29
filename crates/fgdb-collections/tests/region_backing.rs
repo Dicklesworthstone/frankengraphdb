@@ -53,7 +53,7 @@ fn query_cx() -> QueryCx {
 }
 
 fn scope() -> RegionScope {
-    RegionScope::with_capacity(1 << 20, 1 << 29)
+    RegionScope::with_capacity(1 << 20, 1 << 29, 1 << 30)
 }
 
 fn assert_cancelled_and_balanced(scope: RegionScope) {

@@ -1667,7 +1667,7 @@ mod tests {
     }
 
     fn test_scope() -> RegionScope {
-        RegionScope::with_capacity(1 << 20, 1 << 29)
+        RegionScope::with_capacity(1 << 20, 1 << 29, 1 << 30)
     }
 
     fn owned_entries(tree: &AdaptiveRadixTree<'_, u64>) -> Vec<(Vec<u8>, u64)> {

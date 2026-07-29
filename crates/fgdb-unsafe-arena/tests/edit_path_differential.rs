@@ -94,7 +94,7 @@ struct Fixture {
 impl Fixture {
     fn build(seed: u64, blocks: usize) -> Self {
         let mut rng = Rng(seed);
-        let mut region = Region::with_capacity(512, 1 << 16);
+        let mut region = Region::with_capacity(512, 1 << 16, 1 << 17);
         let mut handles = Vec::with_capacity(blocks);
         for _ in 0..blocks {
             let len = 4 + rng.below(28);
@@ -311,7 +311,7 @@ fn the_seam_is_usable_through_the_trait_alone() {
         alloc.block_mut(handle).expect("live").fill(byte);
         handle
     }
-    let mut region = Region::with_capacity(256, 4096);
+    let mut region = Region::with_capacity(256, 4096, 4096);
     let handle = fill(&mut region, 32, 0x5a);
     assert_eq!(region.block(handle).expect("live"), &[0x5a; 32]);
     let audit = region.close();
@@ -393,7 +393,7 @@ fn vec_script(seed: u64, operations: usize) -> Vec<VecOp> {
 fn typed_operations_and_reallocations_match_ordinary_vec() {
     let cx = query_cx();
     for seed in [3_u64, 0x1111_2222_3333_4444, 0xfedc_ba98_7654_3210] {
-        let scope = RegionScope::with_capacity(1 << 20, 1 << 26);
+        let scope = RegionScope::with_capacity(1 << 20, 1 << 26, 1 << 27);
         let mut actual = RegionVec::new_in(&scope).expect("typed vector");
         let mut oracle = Vec::new();
         for (index, operation) in vec_script(seed, 256).into_iter().enumerate() {
@@ -454,7 +454,7 @@ fn typed_operations_and_reallocations_match_ordinary_vec() {
 #[test]
 fn allocation_refusals_leave_the_element_sequence_unchanged() {
     let (root, cx) = query_root();
-    let scope = RegionScope::with_capacity(128, 32);
+    let scope = RegionScope::with_capacity(64, 64, 128);
     let mut vector = RegionVec::with_capacity_in(&scope, &cx, 4).expect("four u64 values");
     for value in 0_u64..4 {
         vector
@@ -510,7 +510,7 @@ fn push_aligned<T>(scope: &RegionScope, cx: &QueryCx, value: T) {
 #[test]
 fn supported_alignments_zsts_and_overaligned_refusal_are_explicit() {
     let cx = query_cx();
-    let scope = RegionScope::with_capacity(4096, 1 << 20);
+    let scope = RegionScope::with_capacity(4096, 1 << 20, 1 << 21);
     push_aligned(&scope, &cx, 1_u8);
     push_aligned(&scope, &cx, Align2);
     push_aligned(&scope, &cx, Align4);
@@ -603,7 +603,7 @@ fn exercise_drop_glue(outcome: RegionOutcome) {
     let cx = query_cx();
     let created = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicUsize::new(0));
-    let scope = RegionScope::with_capacity(4096, 1 << 22);
+    let scope = RegionScope::with_capacity(4096, 1 << 22, 1 << 23);
     {
         let mut values = RegionVec::new_in(&scope).expect("drop vector");
         for value in 0..96 {
@@ -647,7 +647,7 @@ fn generic_drop_glue_is_exact_on_close_and_cancel() {
 #[cfg(not(miri))]
 fn forgotten_typed_owner_refuses_finalization() {
     let cx = query_cx();
-    let scope = RegionScope::with_capacity(256, 4096);
+    let scope = RegionScope::with_capacity(256, 4096, 4096);
     let mut vector = RegionVec::new_in(&scope).expect("typed vector");
     vector.try_push(&cx, 42_u64).expect("value");
     std::mem::forget(vector);
@@ -673,7 +673,7 @@ fn recursive_and_collection_shaped_values_use_typed_region_storage() {
     }
 
     let cx = query_cx();
-    let scope = RegionScope::with_capacity(1 << 16, 1 << 22);
+    let scope = RegionScope::with_capacity(1 << 16, 1 << 22, 1 << 23);
     let mut root_children = RegionVec::new_in(&scope).expect("ART children");
     let leaf = ArtNode {
         value: String::from("leaf"),

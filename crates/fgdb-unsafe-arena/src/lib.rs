@@ -74,6 +74,25 @@
 //! the arena that leaks when a query is cancelled mid-build, which under
 //! asupersync's obligation model is a routine event rather than an error.
 //!
+//! # Two budgets, not one ambiguous one
+//!
+//! Every region carries an explicit, totally ordered budget triple
+//! (`0 < chunk_bytes <= max_live_bytes <= max_resident_bytes`, asserted at
+//! construction). The **live-logical-byte budget** caps the sum of live block
+//! lengths and is returned by `release` — the operator working-set contract.
+//! The **resident-byte limit** caps the sum of `Vec::capacity()` over
+//! retained chunks — charged per chunk at creation, at the capacity the
+//! allocator actually accepted (`try_reserve_exact` contractually bounds
+//! capacity only from below) — and is never returned before the region ends:
+//! chunks are never freed early, because the allocator site's provenance
+//! argument rests on their stability. Padding lives inside charged chunks, so
+//! the resident number is the honest retained footprint, and it is the value
+//! admission control binds to the plan's `resident_bytes` axis. Region
+//! metadata and allocator-internal slack beyond `Vec::capacity` are outside
+//! the number by design. [`RegionAudit`] reports `chunks_allocated`,
+//! `peak_resident_bytes`, and `alignment_padding_bytes` so fragmentation is
+//! an audited quantity rather than an invisible tax.
+//!
 //! # What is deliberately NOT here
 //!
 //! No public raw pointers and no public `unsafe fn`: every export is safe to
