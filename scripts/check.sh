@@ -810,10 +810,22 @@ run_ubs() {
 # this increment's own new files (commit.rs, crash_point_matrix.rs) contribute
 # zero — confirmed separately by scanning the 150-file domain with and without
 # them, which left both counts identical.
+# MOVED 2026-07-29 (fgdb-w1-foundation-types-tjk): JWT 123 -> 124, +1, in
+# `crates/fgdb-delta-types/src/canonical.rs`. The one finding is the scanner
+# matching the substring "decode" in the delta codec's scalar reader:
+#     CanonicalScalar::decode(encoded).map_err(|_| CanonicalError::Scalar)
+# Same false-positive class as the 123 already pinned, and false by construction
+# for the same reason: `jsonwebtoken`, `DecodingKey` and `jwt` appear in ZERO
+# tracked files and Doctrine #1 forbids ever adding them. Renaming a canonical
+# decoder to avoid the word "decode" would be the wrong trade.
+# ATTRIBUTED BY DIFFERENTIAL: the two files this increment adds
+# (src/canonical.rs, tests/canonical_encoding.rs) scanned alone report exactly 1
+# critical, this one; scanning the whole post-commit 152-file domain gives
+# 137 / 808 / 124, so panic and timing-safe did not move at all.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=808"
   "panic!/unreachable!/todo!/unimplemented!=137"
-  "JWT decode, validation bypass, or missing claim binding=123"
+  "JWT decode, validation bypass, or missing claim binding=124"
 )
 
 # ubs_critical_ratchet <log> -> 0 when the critical partition equals the baseline

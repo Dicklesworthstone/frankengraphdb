@@ -23,7 +23,7 @@ use fgdb_claim::{
     EvidenceClaim, RefinementStatus, RegistryClaimClass, StatisticalErrorControl, class, justify,
 };
 use fgdb_delta_types::{
-    CommittedMarker, DeltaRow, DeltaTemplateKey, ElementId, EscrowDomainId, LabelId,
+    CommittedMarker, CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId,
     LogicalDeltaBatch, LogicalDeltaTemplate, OperationKey, PropertyKeyId, RelationId, SchemaEpoch,
     ValidTimePeriod,
 };
@@ -425,16 +425,19 @@ fn run_transcript(root: &asupersync::Cx) {
     ];
     let families: Vec<String> = rows.iter().map(|r| format!("{:?}", r.family())).collect();
     t.emit(&format!("delta families: {}", families.join(",")));
-    let template = LogicalDeltaTemplate::new(
-        DeltaTemplateKey {
+    let template = LogicalDeltaTemplate::build(
+        oid(0x11),
+        [0x22; 32],
+        vec![CoordinateEntry {
             graph: GraphId(1),
             branch: BranchId(1),
             relation: RelationId(3),
             schema_epoch: SchemaEpoch(2),
-            intent_semantics_oid: oid(0x11),
-        },
-        rows,
-    );
+            schema_transition: None,
+            rows,
+        }],
+    )
+    .expect("canonical template");
     let marker = MarkerRef {
         marker_oid: oid(0xAA),
         commit_seq: CommitSeq(41999),
@@ -444,7 +447,7 @@ fn run_transcript(root: &asupersync::Cx) {
     t.emit(&format!(
         "ordered batch at commit_seq {:?} with {} rows",
         batch.commit_seq(),
-        batch.template().rows().len()
+        batch.template().row_count()
     ));
 
     // 4. One envelope per §15.0 claim kind, with the lattice at the boundary.

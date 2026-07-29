@@ -25,10 +25,12 @@
 
 #![forbid(unsafe_code)]
 
+mod canonical;
 mod zweight;
 
 use fgdb_types::{BranchId, CanonicalScalar, CommitCx, EId, GraphId, MarkerRef, ObjectId, VId};
 
+pub use canonical::{CanonicalError, DELTA_FORMAT_V1, canonicalize};
 pub use fgdb_bigint::{ArithmeticOperation as ZWeightOperation, LimbLimit};
 pub use zweight::{ZWeight, ZWeightError};
 
@@ -208,38 +210,108 @@ pub enum DeltaFamily {
     Constraint,
 }
 
-/// The template key: graph / branch / relation / schema epoch /
-/// `IntentSemanticsOid`. Everything a template's rows mean is pinned by this
-/// key; nothing about *when* is.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct DeltaTemplateKey {
+/// One coordinate's slice of a template: the graph/branch/relation it applies
+/// to, the schema state it was validated under, and its delta payload.
+///
+/// This is Appendix A's `coordinate_entries[]` element (plan:1924). It is a
+/// separate level rather than being folded into the template root because one
+/// commit may touch several graphs or branches **atomically**; a template that
+/// can name only one coordinate cannot express such a commit at all, and the
+/// only way to encode it would be to split it into commits that are no longer
+/// atomic. The shape is therefore load-bearing, not organisational.
+///
+/// SUBSET NOTE (doctrine 7). The plan spells the payload as
+/// `delta_payload_ref: ConditionalCoordinateRef` plus a `delta_payload_digest`
+/// that cross-checks it. Neither is spellable today: `LogicalDeltaTemplate`
+/// and the payload kinds are `reserved` rather than `active` in the Appendix A
+/// catalog, and `fgdb-types` const-asserts the active set, so naming them
+/// would not compile. The rows are therefore carried inline — the payload
+/// itself rather than a reference to it, which is a subset of the final
+/// abstraction and not a substitute for it. When those kinds activate, the
+/// rows move behind the ref and the digest becomes a stored field; the
+/// canonical bytes defined here are already exactly what that digest is taken
+/// over, so no part of the format has to be re-derived.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CoordinateEntry {
     pub graph: GraphId,
     pub branch: BranchId,
     pub relation: RelationId,
+    /// Stands in for the plan's `validated_schema_binding`: the schema epoch
+    /// these rows were validated under. The full binding is
+    /// `fgdb-w4-schema-catalog`'s to define.
     pub schema_epoch: SchemaEpoch,
-    pub intent_semantics_oid: ObjectId,
+    /// `schema_transition: None | Some{transition_ref}`, named by object id
+    /// until `SchemaTransition` is an active kind.
+    pub schema_transition: Option<ObjectId>,
+    /// The payload: canonically ordered, duplicate-free delta rows.
+    pub rows: Vec<DeltaRow>,
 }
 
 /// Sequence-neutral logical delta template. By construction this type has no
 /// commit sequence, no marker, and no ordering field of any kind — it cannot
 /// express "when", only "what".
+///
+/// Its identity is the digest of [`canonical_bytes`](Self::canonical_bytes),
+/// which is why there is no constructor that skips canonicalization: a
+/// template built from unordered entries would carry an identity nobody could
+/// reproduce from the same effects, and the capsule, the marker, and every
+/// downstream cross-check compare precisely that digest.
 #[derive(Clone, PartialEq, Debug)]
 pub struct LogicalDeltaTemplate {
-    key: DeltaTemplateKey,
-    rows: Vec<DeltaRow>,
+    format: u16,
+    intent_semantics_oid: ObjectId,
+    source_intent_root_digest: [u8; 32],
+    coordinate_entries: Vec<CoordinateEntry>,
 }
 
 impl LogicalDeltaTemplate {
-    pub fn new(key: DeltaTemplateKey, rows: Vec<DeltaRow>) -> Self {
-        LogicalDeltaTemplate { key, rows }
+    /// Build a template: canonicalize the entries, then validate the result.
+    ///
+    /// Canonicalizing cannot fix a duplicate coordinate or a duplicate row —
+    /// sorting only makes equal things adjacent — so validation after sorting
+    /// is where those are caught. That division is deliberate: merging two
+    /// entries for the same coordinate is `NetEffectNormalForm`'s job, and an
+    /// encoder that quietly did it would be inventing effects.
+    pub fn build(
+        intent_semantics_oid: ObjectId,
+        source_intent_root_digest: [u8; 32],
+        mut coordinate_entries: Vec<CoordinateEntry>,
+    ) -> Result<Self, CanonicalError> {
+        canonicalize(&mut coordinate_entries)?;
+        let template = LogicalDeltaTemplate {
+            format: DELTA_FORMAT_V1,
+            intent_semantics_oid,
+            source_intent_root_digest,
+            coordinate_entries,
+        };
+        template.validate()?;
+        Ok(template)
     }
 
-    pub fn key(&self) -> &DeltaTemplateKey {
-        &self.key
+    pub fn format(&self) -> u16 {
+        self.format
     }
 
-    pub fn rows(&self) -> &[DeltaRow] {
-        &self.rows
+    pub fn intent_semantics_oid(&self) -> ObjectId {
+        self.intent_semantics_oid
+    }
+
+    pub fn source_intent_root_digest(&self) -> &[u8; 32] {
+        &self.source_intent_root_digest
+    }
+
+    pub fn coordinate_entries(&self) -> &[CoordinateEntry] {
+        &self.coordinate_entries
+    }
+
+    /// Every row across every coordinate, in canonical order.
+    pub fn rows(&self) -> impl Iterator<Item = &DeltaRow> {
+        self.coordinate_entries.iter().flat_map(|e| e.rows.iter())
+    }
+
+    /// Total rows across every coordinate.
+    pub fn row_count(&self) -> usize {
+        self.coordinate_entries.iter().map(|e| e.rows.len()).sum()
     }
 }
 
@@ -384,14 +456,26 @@ mod tests {
         output
     }
 
-    fn key() -> DeltaTemplateKey {
-        DeltaTemplateKey {
+    const INTENT_SEMANTICS: ObjectId = ObjectId([0x11; 32]);
+
+    fn entry(rows: Vec<DeltaRow>) -> CoordinateEntry {
+        CoordinateEntry {
             graph: GraphId(1),
             branch: BranchId(1),
             relation: RelationId(3),
             schema_epoch: SchemaEpoch(2),
-            intent_semantics_oid: ObjectId([0x11; 32]),
+            schema_transition: None,
+            rows,
         }
+    }
+
+    fn template() -> LogicalDeltaTemplate {
+        LogicalDeltaTemplate::build(
+            INTENT_SEMANTICS,
+            [0x22; 32],
+            vec![entry(one_row_of_each_family())],
+        )
+        .expect("canonical template")
     }
 
     fn one_row_of_each_family() -> Vec<DeltaRow> {
@@ -513,12 +597,13 @@ mod tests {
     #[test]
     fn template_is_sequence_neutral_and_batch_is_ordered() {
         with_commit_cx(0x000D_317A, |commit_cx| {
-            let template = LogicalDeltaTemplate::new(key(), one_row_of_each_family());
+            let template = template();
             // The template type carries no order: its full public surface is the
-            // key and rows. (The absence of any marker/seq accessor is the
-            // compile-time half of this test.)
-            assert_eq!(template.key(), &key());
-            assert_eq!(template.rows().len(), 12);
+            // coordinate entries and their rows. (The absence of any marker or
+            // sequence accessor is the compile-time half of this test.)
+            assert_eq!(template.coordinate_entries().len(), 1);
+            assert_eq!(template.row_count(), 12);
+            assert_eq!(template.intent_semantics_oid(), INTENT_SEMANTICS);
 
             let marker = MarkerRef {
                 marker_oid: ObjectId([0xAA; 32]),
@@ -535,7 +620,7 @@ mod tests {
     #[test]
     fn identical_templates_under_different_markers_are_different_batches() {
         with_commit_cx(0x000D_317B, |commit_cx| {
-            let t = LogicalDeltaTemplate::new(key(), one_row_of_each_family());
+            let t = template();
             let m1 = CommittedMarker::attest(
                 MarkerRef {
                     marker_oid: ObjectId([1; 32]),
