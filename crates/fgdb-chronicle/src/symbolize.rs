@@ -216,7 +216,12 @@ pub fn decode_object(
     // Every symbol is authenticated against the encoding BEFORE it can
     // influence a decode: a forged or foreign symbol must not even enter the
     // linear system, let alone perturb the recovered bytes.
-    let decoder = InactivationDecoder::new(k, symbol_size, code_seed(encoding));
+    //
+    // `EncodingId` is an unkeyed digest, so descriptor self-consistency does
+    // not authenticate `k`. Use the fallible constructor before it can turn an
+    // attacker-rewritten transfer length into a process panic.
+    let decoder = InactivationDecoder::try_new(k, symbol_size, code_seed(encoding))
+        .map_err(|_| SymbolizeError::InvalidParameters)?;
 
     // The decoder's own LDPC/HDPC constraint equations seed the system. They
     // are derived from the code parameters, never transmitted, so they cost no
@@ -242,6 +247,8 @@ pub fn decode_object(
     }
 
     let decoded = decoder
+        // This is the RFC 6330 erasure decoder; no JWT or signature state exists here.
+        // ubs:ignore -- exact false match is `InactivationDecoder::decode`, not a JWT decoder.
         .decode(&received)
         .map_err(|_| SymbolizeError::InsufficientSymbols)?;
     if decoded.source.len() < k {

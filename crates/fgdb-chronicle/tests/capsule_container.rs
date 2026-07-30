@@ -246,6 +246,37 @@ fn a_rewritten_transfer_length_is_refused() {
     ));
 }
 
+/// A self-consistent descriptor is not necessarily authentic. `EncodingId` is
+/// an unkeyed digest, so an attacker can rewrite `transfer_length` and
+/// recompute the ID without possessing the DEK. Recovery must reject an
+/// unsupported RFC 6330 source-block size as data, not let the infallible
+/// decoder constructor panic the process.
+#[test]
+fn a_self_consistent_oversized_transfer_length_fails_without_panicking() {
+    let capsule = sealed();
+    let mut descriptor = capsule.descriptor.clone();
+    descriptor.transfer_length = 56_404 * u64::from(descriptor.symbol_size);
+
+    let identified = IdentifiedObject::new(&K_OID, NAMESPACE, KIND, &[], &plaintext());
+    let protected = identified.protect(&DEK, descriptor.cipher_descriptor(), &plaintext());
+    assert_eq!(
+        protected.ciphertext_id().0,
+        descriptor.ciphertext_id,
+        "the control must preserve the capsule's authenticated ciphertext"
+    );
+    descriptor.encoding_id = protected
+        .encode(descriptor.encoding_descriptor())
+        .encoding_id()
+        .0;
+
+    assert!(matches!(
+        recover_from(&[], &descriptor, capsule.object_id),
+        Err(CapsuleError::Recovery(
+            fgdb_chronicle::symbolize::SymbolizeError::InvalidParameters
+        ))
+    ));
+}
+
 /// The declared repair budget is fixed by the authenticated `fec_profile`.
 /// Rewriting the redundant count must therefore fail rather than changing a
 /// durability decision without changing the `EncodingId`.
