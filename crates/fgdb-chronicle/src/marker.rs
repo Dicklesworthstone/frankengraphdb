@@ -248,6 +248,45 @@ impl core::fmt::Display for ChainError {
 
 impl core::error::Error for ChainError {}
 
+/// Why a whole-chain verification failed, and where.
+///
+/// Carries the sequence AND the cause. The previous return type was a bare `u64`,
+/// which could only ever mean "the chain hash disagrees here" — once `verify`
+/// enforces the structural laws too, a caller that cannot tell a broken hash from
+/// a sequence gap cannot act on the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainVerifyFailure {
+    pub commit_seq: u64,
+    pub cause: ChainVerifyCause,
+}
+
+/// What was wrong with the entry `verify` stopped at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainVerifyCause {
+    /// A law `validate` enforces at append time does not hold for this entry.
+    Structure(ChainError),
+    /// The entry's stored `chain_hash` or `marker_oid` is not what replaying the
+    /// prefix produces.
+    DerivedValueMismatch,
+}
+
+impl core::fmt::Display for ChainVerifyFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match &self.cause {
+            ChainVerifyCause::Structure(cause) => {
+                write!(f, "commit {}: {cause}", self.commit_seq)
+            }
+            ChainVerifyCause::DerivedValueMismatch => write!(
+                f,
+                "commit {}: stored chain hash or marker id does not match the replayed prefix",
+                self.commit_seq
+            ),
+        }
+    }
+}
+
+impl core::error::Error for ChainVerifyFailure {}
+
 /// An appended marker together with the chain value it produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainedMarker {
@@ -301,6 +340,55 @@ impl MarkerChain {
 
     pub fn entries(&self) -> &[ChainedMarker] {
         &self.entries
+    }
+
+    /// Fold one entry's head updates into the head index.
+    ///
+    /// Extracted so the head index has exactly ONE writer. A second copy in a
+    /// constructor would be a duplicated law, and duplicated laws drift — the same
+    /// reason `verify` below re-uses `validate` rather than restating its checks.
+    fn advance_heads(&mut self, chained: &ChainedMarker) {
+        for update in &chained.marker.head_updates {
+            let new_head = MarkerRef {
+                marker_oid: chained.marker_oid,
+                commit_seq: chained.marker.commit_seq,
+            };
+            match self
+                .heads
+                .iter_mut()
+                .find(|((g, b), _)| *g == update.graph && *b == update.branch)
+            {
+                Some((_, head)) => *head = new_head,
+                None => self.heads.push(((update.graph, update.branch), new_head)),
+            }
+        }
+    }
+
+    /// Build a chain directly from entries, bypassing every append-time check.
+    ///
+    /// **THE SECOND CONSTRUCTION PATH, ADDED DELIBERATELY AND ONLY WITH THE FIX
+    /// THAT COVERS IT** (fgdb-dcq7). `verify` used to check chain-hash continuity
+    /// and nothing else, so a chain containing a sequence gap, a non-advancing
+    /// command sequence, unsorted head updates or a head CAS that never held would
+    /// have passed it. That was LATENT rather than live precisely because no
+    /// constructor like this one existed: every chain in the world came through
+    /// `append`, which validates.
+    ///
+    /// Adding this makes the narrowness real, so it lands in the same change as the
+    /// `verify` that closes it — never in a state where the hole is reachable. The
+    /// identical shape bit the delta index earlier (ffbf187), where a
+    /// `from_parts_for_test` turned an unreachable check into a live hole.
+    ///
+    /// The head index is DERIVED from the entries here rather than left empty, so a
+    /// chain built this way answers `head` consistently with one built by appending.
+    #[doc(hidden)]
+    pub fn from_parts_for_test(entries: Vec<ChainedMarker>) -> Self {
+        let mut chain = Self::new();
+        for entry in entries {
+            chain.advance_heads(&entry);
+            chain.entries.push(entry);
+        }
+        chain
     }
 
     /// A branch's current head, if it has one.
@@ -395,40 +483,54 @@ impl MarkerChain {
             });
         }
 
-        for update in &chained.marker.head_updates {
-            let new_head = MarkerRef {
-                marker_oid: chained.marker_oid,
-                commit_seq: chained.marker.commit_seq,
-            };
-            match self
-                .heads
-                .iter_mut()
-                .find(|((g, b), _)| *g == update.graph && *b == update.branch)
-            {
-                Some((_, head)) => *head = new_head,
-                None => self.heads.push(((update.graph, update.branch), new_head)),
-            }
-        }
-
+        self.advance_heads(&chained);
         self.entries.push(chained);
         Ok(self.entries.last().expect("just pushed"))
     }
 
-    /// Verify the whole chain from the origin, returning the first sequence
-    /// whose recomputed chain value disagrees.
+    /// Verify the whole chain from the origin: **this chain is exactly what
+    /// appending its markers in order would have produced.**
     ///
-    /// This needs nothing beyond the entries themselves — no index, no future
-    /// object — because markers carry no forward references. That is what lets
-    /// a replica or a recovery pass validate a stream PREFIX without waiting
-    /// for the rest of it.
-    pub fn verify(&self) -> Result<(), u64> {
-        let mut chain = CHAIN_ORIGIN;
+    /// IT USED TO CHECK CHAIN-HASH CONTINUITY AND NOTHING ELSE (fgdb-dcq7), while
+    /// every test in this crate reads it as the general "is this chain sound"
+    /// question. So a chain carrying a sequence gap, a non-advancing command
+    /// sequence, unsorted head updates, or a head CAS that never held would have
+    /// verified — each of them a law `validate` enforces at append time.
+    ///
+    /// Closed by REPLAY rather than by restating the predicates: this rebuilds the
+    /// chain from the origin through `validate`, which is the same code path an
+    /// append takes, and compares the derived values at every step. So `verify`
+    /// enforces every law `validate` does, by construction and forever — a law
+    /// added to `validate` tomorrow is enforced here the same day. Restating the
+    /// four checks would have been the obvious fix and would have created two
+    /// copies of one law, which is how they drift apart.
+    ///
+    /// Still needs nothing beyond the entries themselves — no index, no future
+    /// object — because markers carry no forward references, so a replica or a
+    /// recovery pass can verify a stream PREFIX without waiting for the rest.
+    pub fn verify(&self) -> Result<(), ChainVerifyFailure> {
+        let mut rebuilt = Self::new();
         for entry in &self.entries {
-            let recomputed = entry.marker.chain_hash(chain);
-            if recomputed != entry.chain_hash {
-                return Err(entry.marker.commit_seq);
+            let commit_seq = entry.marker.commit_seq;
+            let chained = rebuilt
+                .validate(&entry.marker)
+                .map_err(|cause| ChainVerifyFailure {
+                    commit_seq,
+                    cause: ChainVerifyCause::Structure(cause),
+                })?;
+            // Both derived values, not just the chain hash: the marker's identity
+            // IS its canonical bytes under the chain value, so a stored oid that
+            // disagrees is a different object wearing this one's place in history.
+            if chained.chain_hash != entry.chain_hash || chained.marker_oid != entry.marker_oid {
+                return Err(ChainVerifyFailure {
+                    commit_seq,
+                    cause: ChainVerifyCause::DerivedValueMismatch,
+                });
             }
-            chain = recomputed;
+            rebuilt.adopt(chained).map_err(|cause| ChainVerifyFailure {
+                commit_seq,
+                cause: ChainVerifyCause::Structure(cause),
+            })?;
         }
         Ok(())
     }

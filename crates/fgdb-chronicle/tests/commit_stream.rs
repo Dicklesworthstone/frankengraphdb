@@ -14,7 +14,8 @@
 //!     same marker.
 
 use fgdb_chronicle::marker::{
-    CHAIN_ORIGIN, ChainError, CommitMarker, EffectSource, HeadUpdate, MarkerChain, MarkerRef,
+    CHAIN_ORIGIN, ChainError, ChainVerifyCause, ChainVerifyFailure, ChainedMarker, CommitMarker,
+    EffectSource, HeadUpdate, MarkerChain, MarkerRef,
 };
 use fgdb_crypto::Digest;
 use fgdb_types::ids::ObjectId;
@@ -400,4 +401,227 @@ fn a_stream_prefix_verifies_without_its_suffix() {
             value = recomputed;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// verify() enforces every law validate() does (fgdb-dcq7)
+// ---------------------------------------------------------------------------
+//
+// It used to check chain-hash continuity and NOTHING ELSE, while every test in
+// this crate reads it as the general "is this chain sound" question. That was
+// latent rather than live only because no constructor bypassed `append` — which
+// `from_parts_for_test` now does, so the hole and its fix land together.
+//
+// **EVERY FIXTURE BELOW IS FORGED WITH CONSISTENT HASHES**, and that is what makes
+// these laws discriminating. Simply mutating a marker inside a real chain changes
+// its canonical bytes, so the stored chain hash stops matching and the OLD verify
+// would have caught it as a hash mismatch — proving nothing about the structural
+// laws. `forged` recomputes every chain hash over the malformed markers, so each
+// chain passes chain-hash continuity by construction and can only be refused by a
+// check that the old implementation did not have.
+
+/// Build a chain whose stored derived values are internally CONSISTENT with the
+/// markers given, however malformed those markers are as a sequence.
+fn forged(markers: Vec<CommitMarker>) -> MarkerChain {
+    let mut chain_value = CHAIN_ORIGIN;
+    let mut entries = Vec::new();
+    for marker in markers {
+        let chain_hash = marker.chain_hash(chain_value);
+        entries.push(ChainedMarker {
+            marker,
+            marker_oid: ObjectId(chain_hash.0),
+            chain_hash,
+        });
+        chain_value = chain_hash;
+    }
+    MarkerChain::from_parts_for_test(entries)
+}
+
+/// CONTROL: a forged chain that breaks NO law verifies.
+///
+/// Without it every law below would pass against an implementation that refused
+/// every forged chain outright, which would be useless in the opposite direction.
+#[test]
+fn a_forged_but_lawful_chain_verifies() {
+    let chain = forged(vec![marker(1, 10), marker(2, 20), marker(3, 30)]);
+    assert_eq!(chain.verify(), Ok(()));
+    // And it agrees with a chain built the ordinary way.
+    let mut appended = MarkerChain::new();
+    for m in [marker(1, 10), marker(2, 20), marker(3, 30)] {
+        appended.append(m).expect("appends");
+    }
+    assert_eq!(appended.verify(), Ok(()));
+    assert_eq!(
+        appended.entries().last().map(|e| e.chain_hash),
+        chain.entries().last().map(|e| e.chain_hash),
+        "forging reproduces the real chain values, so the fixtures are honest"
+    );
+}
+
+/// A GAP in the commit sequence is refused, though every chain hash is consistent.
+#[test]
+fn verify_refuses_a_commit_sequence_gap() {
+    let chain = forged(vec![marker(1, 10), marker(3, 30)]);
+    assert_eq!(
+        chain.verify(),
+        Err(ChainVerifyFailure {
+            commit_seq: 3,
+            cause: ChainVerifyCause::Structure(ChainError::NonContiguousCommitSeq {
+                expected: 2,
+                found: 3,
+            }),
+        })
+    );
+}
+
+/// A REPEATED commit sequence is refused — the other half of contiguity.
+#[test]
+fn verify_refuses_a_repeated_commit_sequence() {
+    let chain = forged(vec![marker(1, 10), marker(1, 20)]);
+    assert!(matches!(
+        chain.verify(),
+        Err(ChainVerifyFailure {
+            cause: ChainVerifyCause::Structure(ChainError::NonContiguousCommitSeq { .. }),
+            ..
+        })
+    ));
+}
+
+/// A NON-ADVANCING logical command sequence is refused.
+#[test]
+fn verify_refuses_a_non_advancing_command_sequence() {
+    let chain = forged(vec![marker(1, 50), marker(2, 20)]);
+    assert_eq!(
+        chain.verify(),
+        Err(ChainVerifyFailure {
+            commit_seq: 2,
+            cause: ChainVerifyCause::Structure(ChainError::NonMonotonicCommandSeq {
+                previous: 50,
+                found: 20,
+            }),
+        })
+    );
+}
+
+/// NON-CANONICAL head updates are refused.
+#[test]
+fn verify_refuses_non_canonical_head_updates() {
+    let unsorted = with_heads(
+        marker(1, 10),
+        vec![
+            HeadUpdate {
+                graph: 1,
+                branch: 9,
+                expected_previous: None,
+            },
+            HeadUpdate {
+                graph: 1,
+                branch: 2,
+                expected_previous: None,
+            },
+        ],
+    );
+    let chain = forged(vec![unsorted]);
+    assert_eq!(
+        chain.verify(),
+        Err(ChainVerifyFailure {
+            commit_seq: 1,
+            cause: ChainVerifyCause::Structure(ChainError::NonCanonicalHeadUpdates),
+        })
+    );
+}
+
+/// A head CAS THAT NEVER HELD is refused — the law with the most reach, since it
+/// is the one that makes a branch head a fact rather than an assertion.
+#[test]
+fn verify_refuses_a_head_cas_that_never_held() {
+    let claiming = with_heads(
+        marker(1, 10),
+        vec![HeadUpdate {
+            graph: 1,
+            branch: 2,
+            // Claims to follow a head that cannot exist: nothing precedes commit 1.
+            expected_previous: Some(MarkerRef {
+                marker_oid: oid(0xaa),
+                commit_seq: 0,
+            }),
+        }],
+    );
+    let chain = forged(vec![claiming]);
+    assert_eq!(
+        chain.verify(),
+        Err(ChainVerifyFailure {
+            commit_seq: 1,
+            cause: ChainVerifyCause::Structure(ChainError::HeadCasMismatch {
+                graph: 1,
+                branch: 2,
+                expected: Some(MarkerRef {
+                    marker_oid: oid(0xaa),
+                    commit_seq: 0,
+                }),
+                actual: None,
+            }),
+        })
+    );
+}
+
+/// A corrupted stored chain hash is still refused — the check verify always had
+/// must not have been lost while making it total.
+#[test]
+fn verify_still_refuses_a_corrupted_chain_hash() {
+    let mut appended = MarkerChain::new();
+    for m in [marker(1, 10), marker(2, 20)] {
+        appended.append(m).expect("appends");
+    }
+    let mut entries = appended.entries().to_vec();
+    entries[1].chain_hash = digest(0xee);
+    assert_eq!(
+        MarkerChain::from_parts_for_test(entries).verify(),
+        Err(ChainVerifyFailure {
+            commit_seq: 2,
+            cause: ChainVerifyCause::DerivedValueMismatch,
+        })
+    );
+}
+
+/// A corrupted stored marker id is refused too. The identity IS the canonical
+/// bytes under the chain value, so an oid that disagrees names a different object
+/// standing in this one's place in history — invisible to a hash-only check.
+#[test]
+fn verify_refuses_a_corrupted_marker_id() {
+    let mut appended = MarkerChain::new();
+    appended.append(marker(1, 10)).expect("appends");
+    let mut entries = appended.entries().to_vec();
+    entries[0].marker_oid = oid(0x5c);
+    assert_eq!(
+        MarkerChain::from_parts_for_test(entries).verify(),
+        Err(ChainVerifyFailure {
+            commit_seq: 1,
+            cause: ChainVerifyCause::DerivedValueMismatch,
+        })
+    );
+}
+
+/// A chain built by `from_parts_for_test` answers `head` the same way an appended
+/// one does — the test constructor derives the index rather than leaving it empty.
+///
+/// A constructor that skipped the index would make every `head`-reading validator
+/// lie on test-built chains, which is the defect this whole bead is about, one
+/// level down.
+#[test]
+fn a_test_built_chain_has_a_real_head_index() {
+    let m = with_heads(
+        marker(1, 10),
+        vec![HeadUpdate {
+            graph: 1,
+            branch: 2,
+            expected_previous: None,
+        }],
+    );
+    let mut appended = MarkerChain::new();
+    appended.append(m).expect("appends");
+    let rebuilt = MarkerChain::from_parts_for_test(appended.entries().to_vec());
+
+    assert_eq!(rebuilt.head(1, 2), appended.head(1, 2));
+    assert!(rebuilt.head(1, 2).is_some(), "and it is actually populated");
 }
