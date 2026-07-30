@@ -1252,6 +1252,55 @@ run_registered_command() {
   fi
 }
 
+# Return success only when a failed workspace test log contains the measured
+# shared-target race and no evidence of another failure.
+#
+# Cargo reports this race as one `could not execute process ... (never
+# executed)` diagnostic paired with `No such file or directory (os error 2)`.
+# The pairing matters: ENOENT by itself can describe a missing input, and
+# "never executed" by itself can describe another process-launch failure.
+#
+# A real failure always dominates the retry opportunity. In particular, a
+# failing test, compiler diagnostic, panic, signal, or a different child-process
+# failure makes the first attempt authoritative and red. This prevents a flaky
+# test from borrowing the missing-binary retry and turning green on its second
+# run.
+cargo_test_retryable_missing_binary_race() { # log
+  local log="$1"
+  [ -f "$log" ] || return 1
+
+  awk '
+    index($0, "could not execute process") &&
+      index($0, "(never executed)") {
+        never_executed += 1
+      }
+    index($0, "No such file or directory (os error 2)") {
+      missing_binary += 1
+    }
+    /^test result: FAILED/ ||
+      /^failures:$/ ||
+      /^thread .* panicked/ ||
+      /process did not exit successfully/ ||
+      /process didn.t exit successfully/ ||
+      /signal: [0-9]+/ {
+        disqualifying_failure = 1
+      }
+    /^error(\[[^]]+\])?:/ &&
+      $0 !~ /^error: test failed, to rerun pass / &&
+      $0 !~ /^error: [0-9]+ targets? failed:$/ {
+        disqualifying_failure = 1
+      }
+    END {
+      if (never_executed > 0 &&
+          never_executed == missing_binary &&
+          !disqualifying_failure) {
+        exit 0
+      }
+      exit 1
+    }
+  ' "$log"
+}
+
 # Run the workspace test gate and keep its output, because the registered
 # cargo-test artifacts below are attributed FROM it.
 #
@@ -1267,9 +1316,34 @@ run_registered_command() {
 # the tests of a second, dependency-free package named on the same command line.
 # No cargo flag recovers that case, so the honest verdict for an artifact whose
 # binary never ran is UNRUN, not RED.
+#
+# fgdb-a9tg adds one narrower recovery: the shared `/data/tmp/cargo-target`
+# sometimes removes a scheduled test binary underneath another pane. When the
+# classifier above proves that is the ONLY failure, rerun the workspace once
+# and say so in the transcript. The first log remains in the gate-log directory;
+# registered cargo-test attribution uses only the retry log. A second ENOENT or
+# any real failure stays red, and there is never a third attempt.
 run_cargo_test_workspace() {
-  cargo test --workspace --no-fail-fast 2>&1 | tee "$CARGO_TEST_LOG"
-  return "${PIPESTATUS[0]}"
+  local first_log="$CARGO_TEST_LOG"
+  local first_rc
+  local retry_log
+  local retry_rc
+
+  cargo test --workspace --no-fail-fast 2>&1 | tee "$first_log"
+  first_rc="${PIPESTATUS[0]}"
+  if [ "$first_rc" -eq 0 ] ||
+      [ "$first_rc" -ne 101 ] ||
+      ! cargo_test_retryable_missing_binary_race "$first_log"; then
+    return "$first_rc"
+  fi
+
+  retry_log="${first_log%.log}.retry-1.log"
+  printf '    cargo-test retry 1/1: attempt 1 hit only the shared-target '\
+'never-executed ENOENT race; rerunning once (attempt log: %s)\n' "$first_log"
+  cargo test --workspace --no-fail-fast 2>&1 | tee "$retry_log"
+  retry_rc="${PIPESTATUS[0]}"
+  CARGO_TEST_LOG="$retry_log"
+  return "$retry_rc"
 }
 
 # Decide one registered cargo-test artifact's outcome from the workspace run,
@@ -2463,6 +2537,130 @@ EOF
     return 1
   fi
 
+  # Shared-target retry controls (fgdb-a9tg). A fake Cargo command gives the
+  # runner three deterministic histories:
+  #   race -> pass        exactly one visible retry, final evidence selected
+  #   race + real red     no retry; the real failure dominates
+  #   race -> race        one retry only; the second race remains red
+  #   race + exit 130     no retry; only Cargo's measured exit 101 qualifies
+  # The first and third histories distinguish "retry exists" from an unbounded
+  # loop, while the second prevents a flaky real test from borrowing the retry.
+  mkdir -p "$work/fake-cargo"
+  cat >"$work/fake-cargo/cargo" <<'EOF'
+#!/usr/bin/env bash
+set -u
+attempt=0
+if [ -f "$FGDB_RETRY_COUNTER" ]; then
+  read -r attempt <"$FGDB_RETRY_COUNTER"
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$FGDB_RETRY_COUNTER"
+
+race() {
+  cat >&2 <<'RACE'
+error: test failed, to rerun pass `-p demo --test vanished`
+Caused by:
+  could not execute process `/data/tmp/cargo-target/debug/deps/vanished-1234` (never executed)
+Caused by:
+  No such file or directory (os error 2)
+RACE
+}
+
+case "$FGDB_RETRY_MODE:$attempt" in
+  race_then_pass:1 | race_twice:1 | race_twice:2 | race_wrong_exit:1)
+    race
+    if [ "$FGDB_RETRY_MODE" = "race_wrong_exit" ]; then
+      exit 130
+    fi
+    exit 101
+    ;;
+  race_with_real_failure:1)
+    race
+    printf '%s\n' \
+      'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured' >&2
+    exit 101
+    ;;
+  *)
+    cat <<'PASS'
+     Running tests/ran_ok.rs (/t/deps/ran_ok-1111111111111111)
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+PASS
+    exit 0
+    ;;
+esac
+EOF
+  chmod +x "$work/fake-cargo/cargo"
+
+  cargo_retry_case() { # mode expected-rc expected-attempts label
+    local mode="$1" expected_rc="$2" expected_attempts="$3" label="$4"
+    local case_root="$work/retry-$mode"
+    local output="$case_root/output.log"
+    local selected="$case_root/selected.log"
+    local counter="$case_root/attempts"
+    local rc=0
+    mkdir -p "$case_root"
+    if (
+      PATH="$work/fake-cargo:$PATH"
+      export PATH
+      FGDB_RETRY_MODE="$mode"
+      FGDB_RETRY_COUNTER="$counter"
+      export FGDB_RETRY_MODE FGDB_RETRY_COUNTER
+      CARGO_TEST_LOG="$case_root/core-cargo-test.log"
+      run_cargo_test_workspace || rc=$?
+      printf '%s\n' "$CARGO_TEST_LOG" >"$selected"
+      exit "$rc"
+    ) >"$output" 2>&1; then
+      rc=0
+    else
+      rc=$?
+    fi
+    if [ "$rc" -ne "$expected_rc" ]; then
+      echo "SELF-TEST RED: $label exited $rc, expected $expected_rc" >&2
+      return 1
+    fi
+    if [ "$(cat "$counter")" -ne "$expected_attempts" ]; then
+      echo "SELF-TEST RED: $label ran an unexpected number of attempts" >&2
+      return 1
+    fi
+    case "$mode" in
+      race_then_pass)
+        if ! grep -Fq "cargo-test retry 1/1" "$output" ||
+            ! grep -Fq ".retry-1.log" "$selected" ||
+            ! grep -Fq "test result: ok." "$(cat "$selected")"; then
+          echo "SELF-TEST RED: the passing retry was not visible and attributable" >&2
+          return 1
+        fi
+        ;;
+      race_with_real_failure)
+        if grep -Fq "cargo-test retry 1/1" "$output"; then
+          echo "SELF-TEST RED: a real test failure borrowed the ENOENT retry" >&2
+          return 1
+        fi
+        ;;
+      race_wrong_exit)
+        if grep -Fq "cargo-test retry 1/1" "$output"; then
+          echo "SELF-TEST RED: a non-Cargo failure exit borrowed the ENOENT retry" >&2
+          return 1
+        fi
+        ;;
+      race_twice)
+        if [ "$(grep -Fc "cargo-test retry 1/1" "$output")" -ne 1 ]; then
+          echo "SELF-TEST RED: the retry cap was not exactly one" >&2
+          return 1
+        fi
+        ;;
+    esac
+  }
+  cargo_retry_case race_then_pass 0 2 \
+    "a pure missing-binary race followed by pass" || return 1
+  cargo_retry_case race_with_real_failure 101 1 \
+    "a missing-binary race beside a real test failure" || return 1
+  cargo_retry_case race_twice 101 2 \
+    "a repeated missing-binary race" || return 1
+  cargo_retry_case race_wrong_exit 130 1 \
+    "an ENOENT transcript beside a non-Cargo exit" || return 1
+
   verdict_stream_control "$work" || return 1
   verdict_contract_control "$work" || return 1
   tree_scope_control "$work" || return 1
@@ -2474,6 +2672,8 @@ EOF
   echo "  registered gate without a runner: UNRUN and nonzero"
   echo "  cargo-test attribution: pass / red / unrun / ambiguous all separated"
   echo "  unrun cargo-test artifact: UNRUN and nonzero"
+  echo "  shared-target cargo race: one visible retry only; real failures dominate;"
+  echo "    a repeated ENOENT remains red and final attribution uses the retry log"
   echo "  reporting contract: every verdict on stdout, under both ^RED and ^FAIL,"
   echo "    and absent from a green run's stdout (streams captured separately)"
   echo "  verdict contract: conformant gate silent; L1/L2/L3/L4 rogues each named;"
