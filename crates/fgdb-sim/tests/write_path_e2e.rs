@@ -53,7 +53,11 @@ const LABEL: LabelId = LabelId(10);
 const NAME: PropertyKeyId = PropertyKeyId(100);
 const INTENT_SEMANTICS: ObjectId = ObjectId([0x11; 32]);
 const SOURCE_INTENT_ROOT_DIGEST: [u8; 32] = [0x22; 32];
-const SCHEMA_EPOCH: SchemaEpoch = SchemaEpoch(7);
+// ZERO, matching the epoch a fresh coordinate actually has. It was an arbitrary
+// 7, which nothing asserted on and which the template-schema preflight landed in
+// 2c30b60 correctly refuses: an entry may not declare a binding the coordinate is
+// not at. The fixture was wrong and the new check found it.
+const SCHEMA_EPOCH: SchemaEpoch = SchemaEpoch(0);
 
 fn keys() -> CapsuleKeys {
     CapsuleKeys {
