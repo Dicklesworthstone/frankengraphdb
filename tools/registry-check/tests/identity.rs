@@ -11022,12 +11022,15 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | ("LocalResultDeliveryLease", "activation_applied_ref")
         )
     };
-    // mn8i's 80 exact-order rows all carry this source-position witness.
-    // Five are also recognized through their embedded ordinary-union type;
-    // this exact marker removes the complete cohort without enumerating a
-    // second, drift-prone copy of the source reader's field list.
-    let post_erratum_a12_exact_order_field =
-        |retention_and_cut_rule: &str| retention_and_cut_rule.contains("source-position tag");
+    // mn8i's exact-order cohort includes every A12 row plus ten older
+    // source-position rows from other slices. Preserve that complete historical
+    // cohort while identifying A12 members by what they ARE, not only by an
+    // optional phrase in free text. The source-position suite below separately
+    // requires every A12 member to carry the phrase.
+    let post_erratum_a12_exact_order_field = |retention_and_cut_rule: &str| {
+        retention_and_cut_rule.starts_with("a12:")
+            || retention_and_cut_rule.contains("source-position tag")
+    };
     let post_erratum_a13_branch_reference_field = |schema: &str, name: &str| {
         matches!(
             (schema, name),
@@ -17475,6 +17478,34 @@ fn idr_a12_genuine_residue_class_rulings_and_source_dispatch_are_nonvacuous() {
 // rows plus the five named semantic residue fields against that one derivation.
 // ---------------------------------------------------------------------------
 
+struct A12ExactOrderSubjects<'a> {
+    rows: Vec<&'a FieldRow>,
+    all_keys: BTreeSet<(String, String)>,
+    witnessed_keys: BTreeSet<(String, String)>,
+}
+
+fn a12_exact_order_subjects(identity: &IdentityRegistries) -> A12ExactOrderSubjects<'_> {
+    let rows: Vec<_> = identity
+        .fields
+        .iter()
+        .filter(|row| row.retention_and_cut_rule.starts_with("a12:"))
+        .collect();
+    let all_keys = rows
+        .iter()
+        .map(|row| (row.containing_schema.clone(), row.stable_name.clone()))
+        .collect();
+    let witnessed_keys = rows
+        .iter()
+        .filter(|row| row.retention_and_cut_rule.contains("source-position tag"))
+        .map(|row| (row.containing_schema.clone(), row.stable_name.clone()))
+        .collect();
+    A12ExactOrderSubjects {
+        rows,
+        all_keys,
+        witnessed_keys,
+    }
+}
+
 #[test]
 fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
     let base = real_identity();
@@ -17618,16 +17649,54 @@ fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
         }
     }
 
-    let landed: Vec<_> = base
+    let A12ExactOrderSubjects {
+        rows: a12_rows,
+        all_keys: all_a12_keys,
+        witnessed_keys: witnessed_a12_keys,
+    } = a12_exact_order_subjects(&base);
+    assert_eq!(
+        witnessed_a12_keys, all_a12_keys,
+        "every A12 field must carry the source-position witness; the witness \
+         phrase never selects which A12 fields receive the order laws"
+    );
+    assert_eq!(a12_rows.len(), 80, "the mn8i landed field tranche moved");
+
+    // NEGATIVE CONTROL: removing the free-text marker must leave the row in the
+    // A12 subject population and remove it only from the witnessed population.
+    // This is the exact mutation the old self-selected filter rewarded.
+    let mut unmarked_probe = base.clone();
+    let probe_row = unmarked_probe
         .fields
-        .iter()
-        .filter(|row| {
+        .iter_mut()
+        .find(|row| {
             row.retention_and_cut_rule.starts_with("a12:")
                 && row.retention_and_cut_rule.contains("source-position tag")
         })
-        .collect();
-    assert_eq!(landed.len(), 80, "the mn8i landed field tranche moved");
-    for row in &landed {
+        .expect("the A12 witness cohort is nonempty");
+    let probe_key = (
+        probe_row.containing_schema.clone(),
+        probe_row.stable_name.clone(),
+    );
+    probe_row.retention_and_cut_rule =
+        probe_row
+            .retention_and_cut_rule
+            .replacen("source-position tag", "source ordinal", 1);
+    let A12ExactOrderSubjects {
+        all_keys: probe_all_keys,
+        witnessed_keys: probe_witnessed_keys,
+        ..
+    } = a12_exact_order_subjects(&unmarked_probe);
+    assert!(
+        probe_all_keys.contains(&probe_key) && !probe_witnessed_keys.contains(&probe_key),
+        "unmarked-row control FIRED: the row must stay in the A12 subject set \
+         while leaving the witness set"
+    );
+    assert_ne!(
+        probe_witnessed_keys, probe_all_keys,
+        "unmarked-row control FIRED: the equality guard must reject the narrowed set"
+    );
+
+    for row in &a12_rows {
         // A k3sa (iii) collection-element member is OWNED by its minted element
         // kind but still SPELLED under the original schema in the source census,
         // so the source-position join must resolve back through that owner. The
@@ -17697,7 +17766,7 @@ fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
         );
     }
     assert_eq!(
-        landed.len() + residue.len(),
+        a12_rows.len() + residue.len(),
         85,
         "85 genuine obligations = 80 landed + 5 named semantic residue"
     );
