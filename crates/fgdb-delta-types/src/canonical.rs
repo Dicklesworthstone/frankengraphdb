@@ -1004,20 +1004,37 @@ impl LogicalDeltaTemplate {
 /// to prevent.
 ///
 /// Returns an error if any row cannot be encoded, since ordering is defined by
-/// the encoding.
+/// the encoding. On error, `entries` is left unchanged: callers must never
+/// observe a half-canonicalized slice whose earlier rows were reordered or
+/// whose failing row collection was consumed.
 pub fn canonicalize(entries: &mut [CoordinateEntry]) -> Result<(), CanonicalError> {
-    for entry in entries.iter_mut() {
-        for row in &mut entry.rows {
-            row.canonicalize_embedded_collections();
-        }
-        // Encode once, sort the pairs: re-encoding inside a comparator would
-        // make sorting quadratic in encoding cost for no benefit.
-        let mut encoded: Vec<(Vec<u8>, DeltaRow)> = core::mem::take(&mut entry.rows)
-            .into_iter()
-            .map(|row| row.canonical_bytes().map(|bytes| (bytes, row)))
-            .collect::<Result<_, _>>()?;
-        encoded.sort_by(|left, right| left.0.cmp(&right.0));
-        entry.rows = encoded.into_iter().map(|(_, row)| row).collect();
+    let canonical_rows: Vec<Vec<DeltaRow>> = entries
+        .iter()
+        .map(|entry| -> Result<Vec<DeltaRow>, CanonicalError> {
+            // Work on clones until every row in every entry has encoded. The
+            // public API takes borrowed caller state, so publishing one entry
+            // before a later error would make `Err` destructive.
+            let mut encoded: Vec<(Vec<u8>, DeltaRow)> = entry
+                .rows
+                .iter()
+                .cloned()
+                .map(|mut row| {
+                    row.canonicalize_embedded_collections();
+                    row.canonical_bytes().map(|bytes| (bytes, row))
+                })
+                .collect::<Result<_, _>>()?;
+
+            // Encode once, sort the pairs: re-encoding inside a comparator
+            // would make sorting quadratic in encoding cost for no benefit.
+            encoded.sort_by(|left, right| left.0.cmp(&right.0));
+            Ok(encoded.into_iter().map(|(_, row)| row).collect())
+        })
+        .collect::<Result<_, _>>()?;
+
+    // This is the commit point. No fallible operation remains, so every entry
+    // is published together and coordinate sorting cannot expose partial work.
+    for (entry, rows) in entries.iter_mut().zip(canonical_rows) {
+        entry.rows = rows;
     }
     entries.sort_by_key(|entry| entry.coordinate());
     Ok(())

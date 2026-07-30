@@ -569,6 +569,27 @@ fn canonicalize_is_idempotent() {
     assert_eq!(entries, once, "canonicalizing twice must change nothing");
 }
 
+#[test]
+fn canonicalize_is_atomic_on_error() {
+    let valid_but_unsorted = embedded_collection_rows(7, 2)[0].1.clone();
+    let duplicate = embedded_collection_rows(2, 2)[0].1.clone();
+    let mut entries = vec![
+        entry(2, 1, 3, vec![valid_but_unsorted]),
+        entry(1, 1, 3, vec![duplicate]),
+    ];
+    let before = entries.clone();
+
+    assert_eq!(
+        canonicalize(&mut entries),
+        Err(CanonicalError::NonCanonicalLabelOrder { index: 1 }),
+        "the later duplicate must still be reported precisely"
+    );
+    assert_eq!(
+        entries, before,
+        "an error must not reorder earlier rows, empty the failing entry, or sort coordinates"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Refusals
 // ---------------------------------------------------------------------------
