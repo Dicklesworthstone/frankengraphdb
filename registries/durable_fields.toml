@@ -16968,6 +16968,17 @@ version_status = "reserved"
 max_size_bytes = 16777216
 
 [[union]]
+union_name = "MandatoryInventoryEntryValue"
+containing_schema = "MandatoryInventoryEntry"
+union_path = "MandatoryInventoryEntry.value"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MandatoryInventoryEntry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
 union_name = "MetaConstraintReservationRecordState"
 containing_schema = "MetaConstraintReservationRecord"
 union_path = "MetaConstraintReservationRecord.state"
@@ -25916,6 +25927,32 @@ source_arm_name = "Shard"
 stable_name = "shard"
 payload_kind = "inline-record"
 payload_sha256 = "b1bcf07f36014c2b518c95d80caac02f5d996186cf7fcc3fb943fb9d07f34ad0"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MandatoryInventoryEntryValue"
+containing_schema = "MandatoryInventoryEntry"
+union_path = "MandatoryInventoryEntry.value"
+arm_tag = 0x0001
+source_arm_name = "RetainedStrong"
+stable_name = "retained_strong"
+payload_kind = "inline-record"
+payload_sha256 = "e0c6df2bbf13d1247605539d06a833cb973c8834c1329a1ca6d821ba222bbf37"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+union_name = "MandatoryInventoryEntryValue"
+containing_schema = "MandatoryInventoryEntry"
+union_path = "MandatoryInventoryEntry.value"
+arm_tag = 0x0002
+source_arm_name = "CurrentCheckpointObservation"
+stable_name = "current_checkpoint_observation"
+payload_kind = "inline-record"
+payload_sha256 = "0ea9229207468041ab154233d7ca856081ddcf41209a4319ddbef5d1f8ffa618"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216

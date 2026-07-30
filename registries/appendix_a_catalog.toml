@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "64535886e6dbb525694d6676b315397b959291e2901b9bcd456ae0e61861d4d3"
 
 [target_manifest]
-target_count = 3716
+target_count = 3719
 projection_fallback_count = 135
-target_source_assignment_sha256 = "6e0db06e77c1772e30220d8988650fe7b18534fc72238a8ea49a380c88413518"
+target_source_assignment_sha256 = "8a0cb7da4e2d8bfd20335634d6670e18bb66349ec1a303448402489a52450235"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -36303,6 +36303,19 @@ max_size_bytes = 16777216
 
 [[union]]
 slice_id = "a14"
+row_id = "a14:union:mandatory-inventory-entry-value-c6f08dd58723f7b9"
+union_name = "MandatoryInventoryEntryValue"
+containing_schema = "MandatoryInventoryEntry"
+union_path = "MandatoryInventoryEntry.value"
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["MandatoryInventoryEntry"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union]]
+slice_id = "a14"
 row_id = "a14:union:mandatory-inventory-role-265cf33f3496616a"
 union_name = "MandatoryInventoryRole"
 containing_schema = "MandatoryInventory"
@@ -37365,6 +37378,36 @@ payload_kind = "unit"
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 1
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:mandatory-inventory-entry-value-retained-strong-e94aed0d6661ce30"
+union_name = "MandatoryInventoryEntryValue"
+containing_schema = "MandatoryInventoryEntry"
+union_path = "MandatoryInventoryEntry.value"
+arm_tag = 0x0001
+source_arm_name = "RetainedStrong"
+stable_name = "retained_strong"
+payload_kind = "inline-record"
+payload_sha256 = "e0c6df2bbf13d1247605539d06a833cb973c8834c1329a1ca6d821ba222bbf37"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
+
+[[union_arm]]
+slice_id = "a14"
+row_id = "a14:union-arm:mandatory-inventory-entry-value-current-checkpoint-observation-3e2531c8d11e6d1e"
+union_name = "MandatoryInventoryEntryValue"
+containing_schema = "MandatoryInventoryEntry"
+union_path = "MandatoryInventoryEntry.value"
+arm_tag = 0x0002
+source_arm_name = "CurrentCheckpointObservation"
+stable_name = "current_checkpoint_observation"
+payload_kind = "inline-record"
+payload_sha256 = "0ea9229207468041ab154233d7ca856081ddcf41209a4319ddbef5d1f8ffa618"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 16777216
 
 [[union_arm]]
 slice_id = "a14"
@@ -81450,6 +81493,30 @@ row_id = "a14:target:union-arm-gc-semantic-state-role-retired-08268cbedafd9df2"
 target_row_id = "a14:union-arm:gc-semantic-state-role-retired-08268cbedafd9df2"
 slice_id = "a14"
 source_key = "arm|GcSemanticState<Role>|GcSemanticState<Role>|Retired"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-mandatory-inventory-entry-value-c6f08dd58723f7b9"
+target_row_id = "a14:union:mandatory-inventory-entry-value-c6f08dd58723f7b9"
+slice_id = "a14"
+source_key = "union|MandatoryInventoryEntry|MandatoryInventoryEntry.value"
+target_kind = "union"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-mandatory-inventory-entry-value-retained-strong-e94aed0d6661ce30"
+target_row_id = "a14:union-arm:mandatory-inventory-entry-value-retained-strong-e94aed0d6661ce30"
+slice_id = "a14"
+source_key = "arm|MandatoryInventoryEntry|MandatoryInventoryEntry.value|RetainedStrong"
+target_kind = "union-arm"
+definition_status = "declared"
+
+[[target]]
+row_id = "a14:target:union-arm-mandatory-inventory-entry-value-current-checkpoint-observation-3e2531c8d11e6d1e"
+target_row_id = "a14:union-arm:mandatory-inventory-entry-value-current-checkpoint-observation-3e2531c8d11e6d1e"
+slice_id = "a14"
+source_key = "arm|MandatoryInventoryEntry|MandatoryInventoryEntry.value|CurrentCheckpointObservation"
 target_kind = "union-arm"
 definition_status = "declared"
 

@@ -4617,6 +4617,103 @@ fn idr_five_bodyless_a14_candidates_are_forced_not_a_durable_schema() {
     );
 }
 
+/// fgdb-8uy7: the MandatoryInventoryEntry.value union and both arms released
+/// on the wire host. ARM TAGS ARE SOURCE ORDER — RetainedStrong (plan:2039
+/// column 307) before CurrentCheckpointObservation (column 353) — and the
+/// census's alphabetical arm_names print is the opposite; shipping the
+/// alphabetical order is a silently inverted durable format that loads clean
+/// and is wrong forever.
+#[test]
+fn idr_mandatory_inventory_entry_value_union_is_source_ordered_on_the_wire_host() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+
+    let unions = identity
+        .ordinary_unions
+        .iter()
+        .filter(|union| union.union_name.eq("MandatoryInventoryEntryValue"))
+        .collect::<Vec<_>>();
+    assert_eq!(unions.len(), 1, "the value union lands exactly once");
+    let union = unions[0];
+    assert_eq!(union.containing_schema, "MandatoryInventoryEntry");
+    assert_eq!(union.union_path, "MandatoryInventoryEntry.value");
+    assert_eq!(
+        union.field_tag, None,
+        "a union on a wire host carries no field_tag anchor (the 41-union wire-host shape)"
+    );
+    assert_eq!(union.tag_wire_type, "u8");
+    assert_eq!(
+        union.allowed_containing_schemas,
+        ["MandatoryInventoryEntry".to_owned()]
+    );
+
+    // SOURCE ORDER, verified by plan column, never the alphabetical census print.
+    let mut arms = union.arms.iter();
+    let retained = arms.next().expect("first arm");
+    assert_eq!(retained.arm_tag, 0x0001);
+    assert_eq!(retained.source_arm_name, "RetainedStrong");
+    assert_eq!(retained.stable_name, "retained_strong");
+    assert_eq!(retained.payload_kind, "inline-record");
+    assert_eq!(
+        retained.payload_sha256.as_deref(),
+        Some("e0c6df2bbf13d1247605539d06a833cb973c8834c1329a1ca6d821ba222bbf37"),
+        "the RetainedStrong payload digest is taken from the ArmCandidate, \
+         independently of the bodyless RegisteredStrongRef vocabulary"
+    );
+    let checkpoint = arms.next().expect("second arm");
+    assert_eq!(checkpoint.arm_tag, 0x0002);
+    assert_eq!(checkpoint.source_arm_name, "CurrentCheckpointObservation");
+    assert_eq!(checkpoint.payload_kind, "inline-record");
+    assert_eq!(
+        checkpoint.payload_sha256.as_deref(),
+        Some("0ea9229207468041ab154233d7ca856081ddcf41209a4319ddbef5d1f8ffa618")
+    );
+    assert!(arms.next().is_none(), "exactly two arms");
+
+    // The CurrentCheckpointObservation arm is that symbol's real structural
+    // home — no contradiction with its top-level forced not-a-durable-schema
+    // (fgdb-1bhc), because the source keys differ.
+    for (kind, source_key, row_slug) in [
+        (
+            "union",
+            "union|MandatoryInventoryEntry|MandatoryInventoryEntry.value",
+            "union-mandatory-inventory-entry-value-c6f08dd58723f7b9",
+        ),
+        (
+            "union-arm",
+            "arm|MandatoryInventoryEntry|MandatoryInventoryEntry.value|RetainedStrong",
+            "union-arm-mandatory-inventory-entry-value-retained-strong-e94aed0d6661ce30",
+        ),
+        (
+            "union-arm",
+            "arm|MandatoryInventoryEntry|MandatoryInventoryEntry.value|CurrentCheckpointObservation",
+            "union-arm-mandatory-inventory-entry-value-current-checkpoint-observation-3e2531c8d11e6d1e",
+        ),
+    ] {
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key.eq(source_key))
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{source_key} maps exactly once");
+        let target = targets[0];
+        assert_eq!(target.row_id, format!("a14:target:{row_slug}"));
+        assert_eq!(target.slice_id, "a14");
+        assert_eq!(target.target_kind, kind);
+        assert_eq!(target.definition_status, "declared");
+    }
+
+    // No [[field]] row may hang off the wire host — the 9 entry member
+    // candidates stay correctly absent.
+    assert!(
+        identity
+            .fields
+            .iter()
+            .all(|row| row.containing_schema != "MandatoryInventoryEntry"),
+        "a field row was hung off the wire host"
+    );
+}
+
 #[test]
 fn idr_a13_branch_install_specs_are_forced_logical_at_the_source_floor() {
     let identity = real_identity();
@@ -9490,6 +9587,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | "SequenceNeutralAuditEventBodyOutcome"
                 | "TopologyRetirementAckFloorRef"
                 | "WitnessPolicyRotation"
+                // fgdb-8uy7 lands the a14:2039 value union and both arms of
+                // MandatoryInventoryEntry on the wire host — younger than the
+                // frozen A10 witness, and its two arms fold into the same
+                // historical-width pins the rest of this list protects.
+                | "MandatoryInventoryEntryValue"
         )
     };
     pre_erratum
@@ -11216,7 +11318,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // distinct source unions and both are younger than the witness.
         // 382 -> 384 (fgdb-2a50): MetaRestorePhase and its nested terminal are
         // the two source-spelled unions released by the Meta twin.
-        pre_erratum.ordinary_unions.len() + 384,
+        // 384 -> 385 (fgdb-8uy7): MandatoryInventoryEntryValue, the a14:2039
+        // value union on the wire host, claimed by post_erratum_union; both of
+        // its arms fold into the same reconstruction the arm-width pins freeze.
+        // current_union_count carries it (391 -> 392).
+        pre_erratum.ordinary_unions.len() + 385,
         current_union_count,
         "historical witness ordinary-union cohort drift: the post-erratum filters \
          removed a number of unions other than 378. This assert compares a \
@@ -11317,7 +11423,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             // two role-specific seal_state unions.
             // 1_116 -> 1_124 (fgdb-2a50): six MetaRestorePhase arms plus the
             // Operational/Abandoned nested terminal pair.
-            + 1_124,
+            // 1_124 -> 1_126 (fgdb-8uy7): RetainedStrong and
+            // CurrentCheckpointObservation, the two source-ordered arms of
+            // MandatoryInventoryEntryValue, fold into the same reconstruction
+            // with the union its filter claims. current_ordinary_arm_count
+            // carries both (1_146 -> 1_148).
+            + 1_126,
         current_ordinary_arm_count,
         "historical witness ordinary-union arm cohort drift (unrecognised arm)"
     );
