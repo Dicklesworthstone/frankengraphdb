@@ -507,3 +507,279 @@ fn an_intent_the_graph_refuses_fails_its_statement() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The delete family: the cascade is COMPUTED, never supplied
+// ---------------------------------------------------------------------------
+
+fn vertex(vid: u128, name: &str) -> DeltaRow {
+    DeltaRow::CreateVertex {
+        vid: VId(vid),
+        birth_ordinal: vid as u64,
+        labels: vec![LABEL],
+        props: vec![(NAME, text(name))],
+        valid_time: None,
+    }
+}
+
+fn edge(eid: u128, src: u128, dst: u128) -> DeltaRow {
+    DeltaRow::CreateEdge {
+        eid: EId(eid),
+        birth_ordinal: eid as u64,
+        src: VId(src),
+        relation: REL,
+        dst: VId(dst),
+        canonical_key: None,
+        props: vec![],
+        valid_time: None,
+    }
+}
+
+fn graph(rows: Vec<DeltaRow>) -> ReferenceGraph {
+    let mut g = ReferenceGraph::new();
+    for row in rows {
+        g.apply_row(&row).expect("fixture row applies");
+    }
+    g
+}
+
+/// The cascade image of a `DeleteVertex` row, or `None` for any other row.
+///
+/// An accessor rather than a `panic!` arm on the non-matching case: tests assert
+/// with `expect`, and a `panic!` in a test file moves the workspace UBS panic
+/// class.
+fn cascade_of(row: &DeltaRow) -> Option<&Vec<EId>> {
+    match row {
+        DeltaRow::DeleteVertex {
+            sorted_retired_incident_edges,
+            ..
+        } => Some(sorted_retired_incident_edges),
+        _ => None,
+    }
+}
+
+/// The `(before, after)` images of a `Property` row.
+fn property_images(row: &DeltaRow) -> Option<(&Option<CanonicalScalar>, &Option<CanonicalScalar>)> {
+    match row {
+        DeltaRow::Property { before, after, .. } => Some((before, after)),
+        _ => None,
+    }
+}
+
+/// THE LAW THE DELETE FAMILY EXISTS FOR. `DeleteVertex` takes no edge list, and
+/// finalization computes the retired-edge image from the state it evaluates
+/// against. The materializer then checks that image for EQUALITY, so a computed
+/// cascade is the only kind that can be right — and the intent's signature makes
+/// a wrong one unspellable rather than merely refused.
+#[test]
+fn a_delete_vertex_intent_computes_its_own_cascade() {
+    let basis = graph(vec![
+        vertex(1, "ada"),
+        vertex(2, "grace"),
+        vertex(3, "hopper"),
+        edge(10, 1, 2),
+        edge(11, 3, 1),
+        edge(12, 2, 3),
+    ]);
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::DeleteVertex { vid: VId(1) }])],
+    );
+    let (effects, failures) = outcome.committed_parts().expect("committed");
+    assert!(failures.is_empty());
+    assert_eq!(effects.len(), 1);
+    assert_eq!(
+        cascade_of(&effects[0]).expect("a DeleteVertex row"),
+        &vec![EId(10), EId(11)],
+        "both incident edges, sorted, and NOT the edge between 2 and 3"
+    );
+
+    // And the computed image is exactly what the materializer accepts.
+    let mut applied = basis.clone();
+    applied
+        .apply_row(&effects[0])
+        .expect("the cascade image is exact");
+    assert!(applied.vertex(VId(1)).is_none());
+    assert!(applied.edge(EId(10)).is_none() && applied.edge(EId(11)).is_none());
+    assert!(applied.edge(EId(12)).is_some(), "unrelated edges survive");
+}
+
+/// A self-loop is incident twice and must appear ONCE in the cascade image.
+///
+/// The equality check makes this observable: a naive concatenation of out-edges
+/// and in-edges lists the loop twice, and the materializer then refuses the row as
+/// claiming a retirement that never happened. The failure is a refusal rather than
+/// a corruption, which is why it is worth having the law rather than trusting the
+/// helper.
+#[test]
+fn a_self_loop_appears_once_in_the_cascade() {
+    let basis = graph(vec![vertex(1, "ada"), edge(20, 1, 1)]);
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::DeleteVertex { vid: VId(1) }])],
+    );
+    let (effects, _) = outcome.committed_parts().expect("committed");
+    assert_eq!(
+        cascade_of(&effects[0]).expect("a DeleteVertex row"),
+        &vec![EId(20)]
+    );
+    let mut applied = basis.clone();
+    applied.apply_row(&effects[0]).expect("applies");
+    assert_eq!(applied.vertex_count(), 0);
+    assert_eq!(applied.edge_count(), 0);
+}
+
+/// Deleting what is not there emits nothing rather than failing — the same
+/// reading that makes a no-op `SetProp` emit nothing. A delete is a statement
+/// about the END state, and the end state is already what was asked for.
+#[test]
+fn deleting_an_absent_element_emits_nothing() {
+    let basis = graph(vec![vertex(1, "ada")]);
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![
+            Intent::DeleteVertex { vid: VId(99) },
+            Intent::DeleteEdge { eid: EId(99) },
+        ])],
+    );
+    let (effects, failures) = outcome.committed_parts().expect("committed");
+    assert!(effects.is_empty(), "no effects: {effects:?}");
+    assert!(failures.is_empty(), "and not a failure either");
+}
+
+/// Deleting an edge retires only that edge, leaving both endpoints.
+#[test]
+fn a_delete_edge_intent_leaves_its_endpoints() {
+    let basis = graph(vec![vertex(1, "ada"), vertex(2, "grace"), edge(10, 1, 2)]);
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::DeleteEdge { eid: EId(10) }])],
+    );
+    let (effects, _) = outcome.committed_parts().expect("committed");
+    let mut applied = basis.clone();
+    for row in effects {
+        applied.apply_row(row).expect("applies");
+    }
+    assert_eq!(applied.vertex_count(), 2);
+    assert_eq!(applied.edge_count(), 0);
+}
+
+/// A cascade computed against a state that a LATER intent in the same statement
+/// changed must reflect that change — read-your-own-writes reaching into the
+/// cascade.
+///
+/// Deleting the edge first and then the vertex must produce an EMPTY cascade
+/// image, because by the time the delete is finalized the edge is already gone.
+/// A cascade computed against the statement's opening state would list the edge,
+/// and the materializer would refuse the row for claiming a retirement that had
+/// already happened.
+#[test]
+fn a_cascade_sees_earlier_intents_in_the_same_statement() {
+    let basis = graph(vec![vertex(1, "ada"), vertex(2, "grace"), edge(10, 1, 2)]);
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![
+            Intent::DeleteEdge { eid: EId(10) },
+            Intent::DeleteVertex { vid: VId(1) },
+        ])],
+    );
+    let (effects, _) = outcome.committed_parts().expect("committed");
+    assert_eq!(effects.len(), 2);
+    let cascade = cascade_of(&effects[1]).expect("a DeleteVertex row");
+    assert!(
+        cascade.is_empty(),
+        "the edge was already retired by the previous intent: {cascade:?}"
+    );
+    let mut applied = basis.clone();
+    for row in effects {
+        applied
+            .apply_row(row)
+            .expect("the whole statement applies in order");
+    }
+    assert_eq!(applied.vertex_count(), 1);
+}
+
+/// Removing a property is distinct from setting it to null: `after: None` versus
+/// `after: Some(Null)`. An absent property and one holding null are different
+/// states, and collapsing them would make removal unexpressible.
+#[test]
+fn removing_a_property_is_not_setting_it_to_null() {
+    let basis = graph(vec![vertex(1, "ada")]);
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::RemoveProp {
+            elem: ElementId::Vertex(VId(1)),
+            name: NAME,
+        }])],
+    );
+    let (effects, _) = outcome.committed_parts().expect("committed");
+    let (before, after) = property_images(&effects[0]).expect("a Property row");
+    assert!(before.is_some(), "the before image is computed");
+    assert!(after.is_none(), "removal is an absent after image");
+    let mut applied = basis.clone();
+    applied.apply_row(&effects[0]).expect("applies");
+    assert!(
+        !applied
+            .vertex(VId(1))
+            .expect("the vertex survives")
+            .props
+            .contains_key(&NAME)
+    );
+}
+
+/// Removing an absent property emits nothing.
+#[test]
+fn removing_an_absent_property_emits_nothing() {
+    let basis = graph(vec![vertex(1, "ada")]);
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::RemoveProp {
+            elem: ElementId::Vertex(VId(1)),
+            name: PropertyKeyId(4242),
+        }])],
+    );
+    let (effects, failures) = outcome.committed_parts().expect("committed");
+    assert!(effects.is_empty() && failures.is_empty());
+}
+
+/// `EnsureVertex` is idempotent: the second evaluation emits nothing, and it does
+/// NOT fail the way a second `CreateVertex` would.
+#[test]
+fn ensure_vertex_is_idempotent() {
+    let basis = ReferenceGraph::new();
+    let ensure = || {
+        Statement::new(vec![Intent::EnsureVertex {
+            vid: VId(1),
+            labels: vec![LABEL],
+            props: vec![(NAME, text("ada"))],
+        }])
+    };
+    let outcome = evaluate(&basis, &[ensure()]);
+    let (effects, _) = outcome.committed_parts().expect("committed");
+    assert_eq!(effects.len(), 1);
+
+    let mut applied = basis.clone();
+    applied.apply_row(&effects[0]).expect("applies");
+
+    let again = evaluate(&applied, &[ensure()]);
+    let (effects, failures) = again.committed_parts().expect("committed");
+    assert!(
+        effects.is_empty() && failures.is_empty(),
+        "the second ensure is a no-op, not a failure: {effects:?} {failures:?}"
+    );
+
+    // Whereas a bare create against the same state is a refusal.
+    let created = evaluate(
+        &applied,
+        &[Statement::new(vec![Intent::CreateVertex {
+            vid: VId(1),
+            labels: vec![LABEL],
+            props: vec![],
+        }])],
+    );
+    let (effects, failures) = created.committed_parts().expect("committed");
+    assert!(
+        effects.is_empty() && failures.len() == 1,
+        "a duplicate create is a statement error"
+    );
+}

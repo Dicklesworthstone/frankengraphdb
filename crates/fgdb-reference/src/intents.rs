@@ -28,9 +28,12 @@
 //!    replaced — and a transaction that cannot see its own writes is not a
 //!    transaction.
 //!
-//! SUBSET NOTE (doctrine 7). Appendix B lists eighteen intent kinds; five are
+//! SUBSET NOTE (doctrine 7). Appendix B lists eighteen intent kinds; nine are
 //! here — the ones whose reduction has semantics rather than being a direct
-//! transcription. `AdjustCounter`, `SketchUpdate`, escrow, valid-time and schema
+//! transcription. The delete family earns its place on the cascade alone: the
+//! retired-edge image is COMPUTED by finalization and checked for equality by the
+//! materializer, so it is the sharpest instance in the vocabulary of the rule that
+//! an intent declares what it wants and an effect declares what was true. `AdjustCounter`, `SketchUpdate`, escrow, valid-time and schema
 //! intents each need machinery that belongs to other beads (registered algebra
 //! profiles, sketch profiles, valid-time contracts, the schema catalog), and
 //! guessing at them here would be worse than their absence. What is here is a
@@ -86,6 +89,35 @@ pub enum Intent {
         etype: RelationId,
         dst: VId,
         constraint_id: ObjectId,
+        props: Vec<(PropertyKeyId, CanonicalScalar)>,
+    },
+    /// Retire a vertex and everything hanging off it.
+    ///
+    /// THE CASCADE IS COMPUTED, NEVER SUPPLIED. `DeltaRow::DeleteVertex` carries
+    /// `sorted_retired_incident_edges`, and the materializer checks that image
+    /// for EQUALITY with the actual incident set — too few leaves a dangling
+    /// edge, too many claims a retirement that never happened. Finalization is
+    /// the step that knows the answer, so this intent takes no edge list. Letting
+    /// a caller pass one would make the cascade an assertion the caller could get
+    /// wrong, and the whole point of §9.1's finalization is that it cannot be.
+    DeleteVertex { vid: VId },
+    /// Retire one edge.
+    DeleteEdge { eid: EId },
+    /// Remove a property, if it is there.
+    ///
+    /// Distinct from `SetProp` with a null value: an absent property and a
+    /// property holding null are different states, and Appendix B's before/after
+    /// images spell the difference as `None` versus `Some(Null)`. Collapsing them
+    /// would make removal unexpressible.
+    RemoveProp {
+        elem: ElementId,
+        name: PropertyKeyId,
+    },
+    /// Create the vertex only if it does not already exist. IDEMPOTENT by
+    /// construction, the vertex counterpart of `EnsureEdge`.
+    EnsureVertex {
+        vid: VId,
+        labels: Vec<LabelId>,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
     },
     /// Set `name` to `value` only if it currently equals `expected`.
@@ -346,6 +378,57 @@ fn reduce(state: &ReferenceGraph, intent: &Intent) -> Reduction {
                 relation: *etype,
                 dst: *dst,
                 canonical_key: None,
+                props: sorted_props(props),
+                valid_time: None,
+            }])
+        }
+        Intent::DeleteVertex { vid } => {
+            if state.vertex(*vid).is_none() {
+                // Deleting what is not there emits nothing rather than failing.
+                // A delete is a statement about the END state, and the end state
+                // is already what was asked for — the same reading that makes
+                // SetProp-to-the-current-value a no-op.
+                return Reduction::Nothing;
+            }
+            Reduction::Effects(vec![DeltaRow::DeleteVertex {
+                vid: *vid,
+                before_version: ObjectId([0u8; 32]),
+                // COMPUTED from the state being finalized against. `incident_edges`
+                // returns them sorted and deduplicated, which is what the
+                // materializer's equality check demands — a self-loop appears once,
+                // not twice, though it is both an in-edge and an out-edge.
+                sorted_retired_incident_edges: state.incident_edges(*vid),
+            }])
+        }
+        Intent::DeleteEdge { eid } => {
+            if state.edge(*eid).is_none() {
+                return Reduction::Nothing;
+            }
+            Reduction::Effects(vec![DeltaRow::DeleteEdge {
+                eid: *eid,
+                before_version: ObjectId([0u8; 32]),
+            }])
+        }
+        Intent::RemoveProp { elem, name } => {
+            let before = property_of(state, *elem, *name);
+            if before.is_none() {
+                return Reduction::Nothing;
+            }
+            Reduction::Effects(vec![DeltaRow::Property {
+                elem: *elem,
+                property: *name,
+                before,
+                after: None,
+            }])
+        }
+        Intent::EnsureVertex { vid, labels, props } => {
+            if state.vertex(*vid).is_some() {
+                return Reduction::Nothing;
+            }
+            Reduction::Effects(vec![DeltaRow::CreateVertex {
+                vid: *vid,
+                birth_ordinal: state.vertex_count() as u64 + 1,
+                labels: sorted_labels(labels),
                 props: sorted_props(props),
                 valid_time: None,
             }])
