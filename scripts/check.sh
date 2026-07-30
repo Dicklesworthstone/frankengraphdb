@@ -881,10 +881,20 @@ run_ubs() {
 # tools/registry-check/src/appendix_source.rs scanned alone moved 51 -> 60 in
 # this class with panic and JWT both unmoved; the full tracked-source scan moved
 # 808 -> 817 with only this class changing.
+# MOVED 2026-07-30 (fgdb-raptorq-decoder-boundary-panic-hpjb, df25e8c): JWT
+# 123 -> 122, -1. The typed-decoder-bound fix replaced InactivationDecoder::new
+# with try_new and attributed the exact false match inline at the call —
+# `InactivationDecoder::decode` is the RFC 6330 erasure decoder, not a JWT
+# decoder, and the crate has no JWT, signature-bypass, or authentication-
+# validation state. The finding suppression landed there; the count was not
+# updated, so this line records it. ATTRIBUTED BY DIFFERENTIAL: the UBS
+# module's own JWT matcher reports crates/fgdb-chronicle/src/symbolize.rs at
+# 0 findings against 1 at its parent, and the full tracked-source scan moved
+# 123 -> 122 with only this class changing.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=817"
   "panic!/unreachable!/todo!/unimplemented!=137"
-  "JWT decode, validation bypass, or missing claim binding=123"
+  "JWT decode, validation bypass, or missing claim binding=122"
 )
 
 # ubs_critical_ratchet <log> -> 0 when the critical partition equals the baseline
