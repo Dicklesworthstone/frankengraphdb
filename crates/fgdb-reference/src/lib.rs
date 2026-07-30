@@ -33,6 +33,7 @@
 #![forbid(unsafe_code)]
 
 pub mod intents;
+pub mod ssi;
 pub mod txn;
 
 use fgdb_delta_types::{

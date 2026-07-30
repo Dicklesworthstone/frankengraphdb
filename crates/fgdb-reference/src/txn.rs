@@ -27,13 +27,14 @@
 
 use crate::intents::{Outcome, Statement, StatementFailure, evaluate};
 use crate::{
-    ApplyError, ConflictKey, ReferenceDatabase, ReferenceGraph, Snapshot, SnapshotError,
+    ApplyError, ConflictKey, ReferenceDatabase, ReferenceGraph, Snapshot, SnapshotError, Vertex,
     collect_conflict_keys,
 };
 use fgdb_delta_types::{
-    CanonicalError, CoordinateEntry, DeltaRow, LogicalDeltaTemplate, RelationId, SchemaEpoch,
+    CanonicalError, CoordinateEntry, DeltaRow, ElementId, LogicalDeltaTemplate, PropertyKeyId,
+    RelationId, SchemaEpoch,
 };
-use fgdb_types::{BranchId, CommitSeq, GraphId, ObjectId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, GraphId, ObjectId, VId};
 use std::collections::BTreeSet;
 
 /// A transaction reading at a fixed sequence, writing into a private workspace.
@@ -51,6 +52,10 @@ pub struct Transaction {
     /// workspace, never against the basis or the live database.
     workspace: ReferenceGraph,
     effects: Vec<DeltaRow>,
+    /// What this transaction depended on. Separate from the write set because an
+    /// rw-antidependency needs both, and a transaction that reads x and writes y
+    /// is exactly the shape write-write conflict detection cannot see.
+    read_set: BTreeSet<ConflictKey>,
     statement_failures: usize,
     /// Which statement aborted, if one did. Once set, the transaction is
     /// finished: further `execute` calls are refused rather than ignored, since
@@ -155,6 +160,7 @@ impl Transaction {
             snapshot,
             workspace,
             effects: Vec::new(),
+            read_set: BTreeSet::new(),
             statement_failures: 0,
             aborted_at: None,
         })
@@ -165,8 +171,87 @@ impl Transaction {
     }
 
     /// What this transaction sees: its snapshot plus its own writes.
+    ///
+    /// **AN UNTRACKED READ.** Nothing read through here enters the read set, so
+    /// it is invisible to [`crate::ssi`]. That is correct for a test making an
+    /// assertion about state and wrong for anything modelling what a transaction
+    /// *depended on* — use [`read_vertex`](Self::read_vertex) and its siblings
+    /// for that. The distinction is named rather than removed because assertions
+    /// genuinely should not create dependencies: a test that inspected the
+    /// workspace would otherwise change the history it is checking.
     pub fn workspace(&self) -> &ReferenceGraph {
         &self.workspace
+    }
+
+    /// Every conflict key this transaction has READ through a tracked read.
+    ///
+    /// Reads are tracked because rw-antidependencies are what separates
+    /// serializable from snapshot isolation: write-write conflicts alone cannot
+    /// see write skew, since the two writers touch different elements. The read
+    /// set is the other half of that edge.
+    pub fn read_set(&self) -> &BTreeSet<ConflictKey> {
+        &self.read_set
+    }
+
+    /// Read a vertex, recording the dependency.
+    ///
+    /// Returns an owned clone rather than a borrow: this crate is never
+    /// optimized, and a `&mut self` read that also handed out a reference would
+    /// make every tracked read exclusive for its whole lifetime.
+    pub fn read_vertex(&mut self, vid: VId) -> Option<Vertex> {
+        self.read_set
+            .insert(ConflictKey::Element(ElementId::Vertex(vid)));
+        self.workspace.vertex(vid).cloned()
+    }
+
+    /// Read one property of one element, recording the dependency.
+    pub fn read_property(
+        &mut self,
+        elem: ElementId,
+        property: PropertyKeyId,
+    ) -> Option<CanonicalScalar> {
+        self.read_set.insert(ConflictKey::Element(elem));
+        match elem {
+            ElementId::Vertex(vid) => self.workspace.vertex(vid)?.props.get(&property).cloned(),
+            ElementId::Edge(eid) => self.workspace.edge(eid)?.props.get(&property).cloned(),
+        }
+    }
+
+    /// Read the neighbours of a vertex over one relation, recording the vertex
+    /// and every edge traversed.
+    ///
+    /// SCOPED, and the limit matters: recording the edges that EXIST cannot
+    /// express a dependency on an edge that does not. A concurrent transaction
+    /// inserting a new neighbour therefore forms no rw edge here, so this read
+    /// set catches write skew over existing elements and NOT predicate phantoms.
+    /// Full phantom detection needs predicate or index-range tracking, which
+    /// belongs with Strata's adjacency structures; claiming it here would be a
+    /// substitute for a mechanism this crate does not have.
+    pub fn read_neighbours(&mut self, vid: VId, relation: RelationId) -> Vec<VId> {
+        self.read_set
+            .insert(ConflictKey::Element(ElementId::Vertex(vid)));
+        for eid in self.workspace.incident_edges(vid) {
+            self.read_set
+                .insert(ConflictKey::Element(ElementId::Edge(eid)));
+        }
+        self.workspace.neighbours(vid, relation)
+    }
+
+    /// Assemble this transaction's trace for the SSI oracle.
+    ///
+    /// Taken BEFORE `commit`, which consumes the transaction; the sequence it
+    /// landed at comes from the outcome via
+    /// [`TxnTrace::committed_at`](crate::ssi::TxnTrace::committed_at). A trace
+    /// that is never marked committed models a transaction that did not commit,
+    /// and forms no edges.
+    pub fn trace(&self, id: usize) -> crate::ssi::TxnTrace {
+        crate::ssi::TxnTrace {
+            id,
+            snapshot_high: self.snapshot.high(),
+            commit_seq: None,
+            reads: self.read_set.clone(),
+            writes: self.write_set(),
+        }
     }
 
     pub fn effects(&self) -> &[DeltaRow] {
