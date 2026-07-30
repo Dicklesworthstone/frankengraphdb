@@ -732,6 +732,30 @@ fn parse_identifier(bytes: &[u8], start: usize) -> Option<usize> {
     Some(end)
 }
 
+/// A record member name may contain `-` only BETWEEN identifier-continue
+/// bytes (fgdb-u27g): the source spells hyphenated compounds —
+/// `complete_member_target_family_and_no-start_bijection` (a14:2055) — and
+/// splitting on the hyphen mints a bogus member plus a bogus `-start_*`
+/// exact_type whose `noncanonical field separator` ambiguity reads like a
+/// source defect rather than a reader one. A dash not followed by an
+/// identifier-continue byte ends the name exactly as before, so a trailing
+/// dash still reports against the source.
+fn parse_member_name(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut end = parse_identifier(bytes, start)?;
+    while bytes.get(end).copied() == Some(b'-')
+        && bytes
+            .get(end + 1)
+            .copied()
+            .is_some_and(is_identifier_continue)
+    {
+        end += 1;
+        while bytes.get(end).copied().is_some_and(is_identifier_continue) {
+            end += 1;
+        }
+    }
+    Some(end)
+}
+
 fn parse_upper_identifier(bytes: &[u8], start: usize) -> Option<usize> {
     if !bytes
         .get(start)
@@ -2791,7 +2815,7 @@ fn parse_record_fields(
             });
             continue;
         }
-        let Some(name_end) = parse_identifier(bytes, start) else {
+        let Some(name_end) = parse_member_name(bytes, start) else {
             continue;
         };
         let name = field_mapped.text[start..name_end].to_owned();
@@ -5665,6 +5689,146 @@ mod tests {
                 .fields
                 .iter()
                 .all(|candidate| !candidate.key.stable_name.eq("fabricated_ckb9_control")),
+            "fabricated-absent control unexpectedly matched"
+        );
+    }
+
+    /// fgdb-u27g: a hyphenated member name is ONE member. Splitting on the
+    /// hyphen mints a bogus member plus a bogus `-tail` exact_type whose
+    /// `noncanonical field separator` ambiguity reads like a source defect
+    /// rather than a reader one. The dash is name-continuation only BETWEEN
+    /// identifier-continue bytes; a trailing dash reports against the source
+    /// exactly as before.
+    #[test]
+    fn hyphenated_member_names_stay_whole() {
+        let source = "`Spec` is `{complete_member_target_family_and_no-start_bijection,multi-segment-hyphenated_name:u8,trailing-dash-:u16,plain_member}`.\n";
+        let slices = [SourceSliceSpec {
+            id: "t",
+            start_line: 1,
+            end_line: 1,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1, &slices)
+            .expect("hyphenated-member source must census");
+        let field = |stable_name: &str| {
+            census
+                .fields
+                .iter()
+                .find(|candidate| candidate.key.stable_name == stable_name) // ubs:ignore -- public census-row name equality in a test census; no secret or token is compared here.
+        };
+
+        // The whole hyphenated name is one typeless shorthand member.
+        let hyphenated = field("complete_member_target_family_and_no-start_bijection")
+            .expect("the hyphenated member must census whole");
+        assert!(
+            hyphenated.exact_types.is_empty(),
+            "a shorthand member carries no exact type"
+        );
+        // Multiple segments and a typed hyphenated name both stay whole.
+        let typed = field("multi-segment-hyphenated_name").expect("multi-segment member");
+        assert_eq!(typed.exact_types, ["u8".to_owned()]);
+        // No bogus split products anywhere: no truncated member, and the
+        // ONLY dash-leading exact type in the fixture belongs to the
+        // genuinely malformed trailing-dash member below — the split happens
+        // exactly where the source is actually broken, never on a
+        // well-formed hyphenated name.
+        assert!(
+            field("complete_member_target_family_and_no").is_none(),
+            "the truncated split member must not exist"
+        );
+        let dash_leading: Vec<&str> = census
+            .fields
+            .iter()
+            .filter(|candidate| candidate.exact_types.iter().any(|t| t.starts_with('-')))
+            .map(|candidate| candidate.key.stable_name.as_str())
+            .collect();
+        assert_eq!(
+            dash_leading,
+            ["trailing-dash"],
+            "a dash-leading exact type is only the genuinely malformed source's own report"
+        );
+        // The trailing dash is NOT swallowed: `trailing-dash-:u16` still
+        // reports against the source exactly as before the fix.
+        let trailing = field("trailing-dash").expect("the dash ends the name");
+        assert_eq!(trailing.exact_types, ["-:u16".to_owned()]);
+        assert!(
+            census.ambiguities.iter().any(|candidate| {
+                candidate.key.path.as_deref() == Some("Spec.trailing-dash")  // ubs:ignore -- public census-row name equality in a test census; no secret or token is compared here.
+                    && candidate.raw.contains("noncanonical")
+            }) || census
+                .ambiguities
+                .iter()
+                .any(|candidate| { candidate.key.path.as_deref() == Some("Spec.trailing-dash") }), // ubs:ignore -- public census-row name equality in a test census; no secret or token is compared here.
+            "a trailing dash must still report against the source"
+        );
+        // The plain member is untouched.
+        assert!(field("plain_member").is_some());
+    }
+
+    /// The real-Appendix witness (fgdb-u27g): a14:2055's
+    /// `complete_member_target_family_and_no-start_bijection` and every
+    /// sibling hyphenated member census whole, and no field in the Appendix
+    /// carries the bogus dash-leading exact_type the reader used to mint.
+    #[test]
+    fn appendix_hyphenated_members_census_whole() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let slices = [SourceSliceSpec {
+            id: "appendix-a",
+            start_line: 1388,
+            end_line: 2728,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the pinned Appendix A source must census");
+
+        // The filed witness and the sibling hyphenated members the same
+        // defect hid or mangled.
+        for path in [
+            "LocalGcCancellationAuthorizeSpec.complete_member_target_family_and_no-start_bijection",
+            "GlobalGcCancellationCompletionSpec.complete_participant_family_target_and_no-start_bijection_proof_ref",
+            "NoStartFenced.dispatch-never-sent_and_cancellation_receipt_refs",
+            "RestoreKeyProviderReceiptRef.ArchiveEscrow.grant_and_share-release_proof",
+            "RestoreKeyProviderReceiptRef.Hsm.nonexportability_and_key-origin_attestation",
+            "RoleTransitionReadyCertificate.old-Local",
+            "RaftRoleTransitionCertificate.frozen-visible",
+        ] {
+            assert!(
+                census
+                    .fields
+                    .iter()
+                    .any(|candidate| candidate.key.path.eq(path)),
+                "the hyphenated member {path} is still not whole"
+            );
+        }
+        // The defect shape is gone appendix-wide.
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| !candidate.exact_types.iter().any(|t| t.starts_with('-'))),
+            "a dash-leading exact type survived"
+        );
+        assert!(
+            census.fields.iter().all(|candidate| !candidate
+                .key
+                .stable_name
+                .eq("complete_member_target_family_and_no")),
+            "the truncated split member survived"
+        );
+        // Fabricated-absent control.
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| !candidate.key.stable_name.eq("fabricated_u27g_control")),
             "fabricated-absent control unexpectedly matched"
         );
     }

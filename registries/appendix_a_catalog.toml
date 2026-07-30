@@ -189,14 +189,14 @@ expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fi
 definition_status = "declared"
 top_level_candidate_count = 28
 top_level_candidate_ids_sha256 = "241f0fc9ae5b593987505fcb3854cce92d284140ab9388a710c43b42153c22fc"
-field_candidate_count = 273
-field_candidate_ids_sha256 = "f9c7bc3ea127b36f27b4027b85d0913567df1200b0ae72084ba1a4c099a226f6"
+field_candidate_count = 274
+field_candidate_ids_sha256 = "1a85d5797ef611bfc8953c868d287c69cbdc383c22b2459a2dc0e41adf3cd0fc"
 union_candidate_count = 14
 union_candidate_ids_sha256 = "2a98b59e5fdde61d2551ce3ab35fbfbac5066f590aa5026011e7c7c6239226dd"
 arm_candidate_count = 48
 arm_candidate_ids_sha256 = "977c725fde3710ac8aa048c573b003275e0ca47c66586fbfedca7a10aecf812d"
-ambiguity_count = 214
-ambiguity_ids_sha256 = "774819ae20e7b6be3bd8281ff2c34fe9925595ffee7e5b2d1735b0f5ca3d0266"
+ambiguity_count = 210
+ambiguity_ids_sha256 = "fbfc0d1eca630dd7cbe8c1136ffd7ec297b1633f5587a47112ec2edb252dbc35"
 
 [[slice]]
 ordinal = 5
@@ -214,14 +214,14 @@ expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fi
 definition_status = "declared"
 top_level_candidate_count = 81
 top_level_candidate_ids_sha256 = "4cef4236798589aba740015ffc9b600f5db3003c5c4273617111d388f8d3339b"
-field_candidate_count = 711
-field_candidate_ids_sha256 = "c72d26aa29a3952a717cc13110b8dda713de93c59a1c2352a14bed3bb2e736cb"
+field_candidate_count = 712
+field_candidate_ids_sha256 = "d936cf80659f18758732cc05d1b3f868a44c080b1cd540f897b87804af637d9d"
 union_candidate_count = 20
 union_candidate_ids_sha256 = "e5f78118ed170d6fe31876c746e6d60f6a32f22e2ecfc4a498412c1e63ecd537"
 arm_candidate_count = 60
 arm_candidate_ids_sha256 = "628c0d4bdf5ed53ef8e4f7908dbf182fdb8686d28695ab723816f9f9df2be627"
-ambiguity_count = 533
-ambiguity_ids_sha256 = "7276831f4ecba0532e265d1db8ed2ed1c961bef3a825f05777e2e7d179e61b91"
+ambiguity_count = 529
+ambiguity_ids_sha256 = "1c459c868d10cea12a23f1c33b5dea6b9e70a7a03c6ff9c48b927e1602f72da1"
 
 [[slice]]
 ordinal = 6
@@ -290,13 +290,13 @@ definition_status = "declared"
 top_level_candidate_count = 112
 top_level_candidate_ids_sha256 = "8891ad276c2be5ac38d4dbfc7d3786acfb7c76539c689bb8070a60b5655e7433"
 field_candidate_count = 1101
-field_candidate_ids_sha256 = "c3f79afe39a37d095525eadd362ed4c596d876895199ad22c1eea015c8757ea0"
+field_candidate_ids_sha256 = "fe5ef12f7a9273484f9bbd72a77b6c67cde0ef2acf0fed9d6575ea7a7ab6ca24"
 union_candidate_count = 42
 union_candidate_ids_sha256 = "867a6dc2f093d342e80d0dc5e1a4fd6597a97b94ec6353a08ac250ae04da2fd8"
 arm_candidate_count = 142
 arm_candidate_ids_sha256 = "dbaca4cd29c32a02c0aec03ab339767c83e9e485eeaaae7719e646971e9fb5c1"
 ambiguity_count = 710
-ambiguity_ids_sha256 = "93e3c660fc3903d789c9c804ccad92b5ed99fdd45d5c33f3d531c8aa48262b69"
+ambiguity_ids_sha256 = "a4e3e6bcccd179f52ac2d9ad710bde106f0f8079fa04f83dc5191d97f18f54c7"
 
 [[slice]]
 ordinal = 9
@@ -440,13 +440,13 @@ definition_status = "declared"
 top_level_candidate_count = 18
 top_level_candidate_ids_sha256 = "cd6c91e2598fa0d6a76bf7c607c134b03d5697324fef1ec2121fcd304c03d6e4"
 field_candidate_count = 127
-field_candidate_ids_sha256 = "e2129234bd835495f0035b89d1c510bb889468fbec7622362943c1f1548d2914"
+field_candidate_ids_sha256 = "42614e4db93e303977f57c7172a0c9ce1c7e43f0d4cee4e4fd884a641d393743"
 union_candidate_count = 5
 union_candidate_ids_sha256 = "15e303a3e58a1840bb506926c05b7cb208a699ec1a1bb3deab7e0b013acc8fab"
 arm_candidate_count = 14
 arm_candidate_ids_sha256 = "c7df914eb8691036d5d60156878e4b216c4cc223434d4dd70e37b61a999f8a8e"
 ambiguity_count = 85
-ambiguity_ids_sha256 = "178f2f07b7354b769b32cbb27f1a9daff72570145fda5f2070fadff7e3a6a32a"
+ambiguity_ids_sha256 = "2d031394de0aab84a9aefc8c8294aa194247b51d205cd05041500c131c362d53"
 
 [[slice]]
 ordinal = 15
@@ -465,13 +465,13 @@ definition_status = "declared"
 top_level_candidate_count = 99
 top_level_candidate_ids_sha256 = "fa41629df7e0f3230f88a0ae3b1cbeec1d1c2f5f003f4c44b141fd6c7d1b5e92"
 field_candidate_count = 1035
-field_candidate_ids_sha256 = "f4ca09af8ae6f11ec7c980bb3bdb9c8f2bb74610b8db70e046a95ea55b6bae5e"
+field_candidate_ids_sha256 = "c780027d7b605547074ca25631992f2016f9d9d765a3dea7b2bc32a3242db6d6"
 union_candidate_count = 51
 union_candidate_ids_sha256 = "7ae8c34a227cf7241c420848692817ab58f1052869af7470c1f788a1c1805a98"
 arm_candidate_count = 162
 arm_candidate_ids_sha256 = "51becf54c432a95fac5e4cb79fc7245f373904d7f97f629645619b10729ad798"
 ambiguity_count = 805
-ambiguity_ids_sha256 = "40b3f858874fa71a48ed7695c592898226271eaa3c2d6279c75017e6cbb0ccf4"
+ambiguity_ids_sha256 = "d9787d07e4193700cff2b046034a01306a7692040c3a201743e1ce1408bba3ff"
 
 [[slice]]
 ordinal = 16
@@ -515,13 +515,13 @@ definition_status = "declared"
 top_level_candidate_count = 69
 top_level_candidate_ids_sha256 = "edb6a78d2c538b2cfd427c483ab00cf6e32186eb0aba17328ae4affd64982165"
 field_candidate_count = 777
-field_candidate_ids_sha256 = "3e81cd4c1044cb659265d2174333b8f23056c50a4433cb8a944f2bd1b005676d"
+field_candidate_ids_sha256 = "06f0f97bbffdb98c9ba6a5bb5907c7f1a49e780d5a2296b07b5a1f1aedcc2737"
 union_candidate_count = 30
 union_candidate_ids_sha256 = "6be970c7ace5683babf2d496844f3edc401e3af6730612f31457836185fb91a8"
 arm_candidate_count = 90
 arm_candidate_ids_sha256 = "b1d4a5eeeb726f3507f450387bb4e97b044a615263978cd41bb14cd826133bfa"
 ambiguity_count = 704
-ambiguity_ids_sha256 = "db1781264d00ec43f7bef3a1b0d3c255055bffe172f67c1d8d1c721f4a19647f"
+ambiguity_ids_sha256 = "994f258be842a8818e3225360804b9697f4a5e73d172014aabe8b0d2727e5d5d"
 
 [[slice]]
 ordinal = 18
@@ -540,13 +540,13 @@ definition_status = "declared"
 top_level_candidate_count = 109
 top_level_candidate_ids_sha256 = "d5882e79c10e0dc176276d4fa863e0279b39401640fa19ffbaee0ea3e3327858"
 field_candidate_count = 1266
-field_candidate_ids_sha256 = "43d5e25663b52ccfb427befb35a070f587460131bd044c021aa66657142cc38b"
+field_candidate_ids_sha256 = "8cbf789a9e60338a32d5771c36b999621ccaeed57bac78ddfbea002fe32cb35c"
 union_candidate_count = 60
 union_candidate_ids_sha256 = "cf3f0bd8864484edb0da07210aed947e6380e63bec8e94c592bada3ad40548f5"
 arm_candidate_count = 173
 arm_candidate_ids_sha256 = "54b8b512d2bb51b4fc68046e2228bb367083b84762c0e9a3d35303f04fece79a"
 ambiguity_count = 901
-ambiguity_ids_sha256 = "0bba402d9bc6964b970394266775cd0376e5f749580cba1b8ed1a5722269b49d"
+ambiguity_ids_sha256 = "4eca2bd69e545c4203fd9d2b065424a4d96783cc450ff998240ebe53d1b44cbf"
 
 [[slice]]
 ordinal = 19

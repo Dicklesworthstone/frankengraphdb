@@ -869,8 +869,20 @@ run_ubs() {
 # compares are explicit XOR-accumulate loops guarding real MACs. Using that shape
 # here would falsely claim secret material. ATTRIBUTION: the eight changed files
 # scan at 0 criticals; the full 175-source scan measures this class at exactly 808.
+# MOVED 2026-07-30 (fgdb-u27g): timing-safe 808 -> 817, +9, all re-anchor
+# residue. The hyphenated-member fix and its two census tests insert ~180 lines
+# into tools/registry-check/src/appendix_source.rs; the matcher's (file,line)
+# anchoring re-flags nine PRE-EXISTING comparison statements at their shifted
+# windows (`assigned == display_name`, `affected_source_keys == [...]`,
+# `schema.key.family == ...`), each one the long-standing false-positive shape
+# where a catalog-name identifier (`name`, `family`, `path`) is file-wide in the
+# sensitive-var set. The three genuinely new test lines of that same shape are
+# ubs:ignore-annotated at their exact lines (net 0). ATTRIBUTED BY DIFFERENTIAL:
+# tools/registry-check/src/appendix_source.rs scanned alone moved 51 -> 60 in
+# this class with panic and JWT both unmoved; the full tracked-source scan moved
+# 808 -> 817 with only this class changing.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=808"
+  "Secret/token comparisons without timing-safe equality=817"
   "panic!/unreachable!/todo!/unimplemented!=137"
   "JWT decode, validation bypass, or missing claim binding=123"
 )
