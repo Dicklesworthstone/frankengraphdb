@@ -36,7 +36,7 @@ use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId, LogicalDeltaTemplate,
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A materialized vertex.
@@ -239,6 +239,16 @@ pub enum ApplyError {
     OperationKeyReused {
         key: OperationKey,
     },
+    /// A template was offered at a sequence the coordinate has already passed.
+    /// History is append-only: re-applying a sequence would either duplicate
+    /// effects or silently rewrite what that sequence meant, and the commit
+    /// stream this materializes is gap-free and monotone by construction.
+    SequenceNotAdvancing {
+        graph: GraphId,
+        branch: BranchId,
+        applied_through: CommitSeq,
+        offered: CommitSeq,
+    },
 }
 
 impl core::fmt::Display for ApplyError {
@@ -308,6 +318,15 @@ impl core::fmt::Display for ApplyError {
             Self::CascadeImageMismatch { vid, .. } => write!(
                 f,
                 "deletion of {vid:?} declares a cascade image that is not its incident edge set"
+            ),
+            Self::SequenceNotAdvancing {
+                graph,
+                branch,
+                applied_through,
+                offered,
+            } => write!(
+                f,
+                "({graph:?}, {branch:?}) has applied through {applied_through:?}; {offered:?} does not advance"
             ),
             Self::OperationKeyReused { key } => {
                 write!(f, "operation key {key:?} already names a different effect")
@@ -1020,7 +1039,19 @@ impl ReferenceGraph {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchOrigin {
     Genesis,
-    Fork { parent_branch: BranchId },
+    Fork {
+        parent_branch: BranchId,
+        /// The parent's `applied_through` at the moment of the fork.
+        ///
+        /// DERIVED, never supplied. An earlier version of this type took a
+        /// boundary from the caller and stored it, which was a counterfeit: the
+        /// materializer could not select or verify a historical boundary, so the
+        /// value constrained nothing while the signature advertised historical
+        /// forking (fgdb-vyb0). This is the honest version — it records the
+        /// sequence the parent had actually applied, which is a fact the
+        /// database owns and can check.
+        parent_applied_through: CommitSeq,
+    },
 }
 
 /// Why a branch operation was refused.
@@ -1063,6 +1094,13 @@ pub struct ReferenceDatabase {
     /// How each branch came to exist. Separate from the state map because a
     /// branch's origin is metadata about history, not part of the graph.
     origins: BTreeMap<(GraphId, BranchId), BranchOrigin>,
+    /// The highest commit sequence each coordinate has applied.
+    ///
+    /// This is the honest half of a history model: it says how FAR a coordinate
+    /// has been advanced, without claiming the ability to read it AS OF an
+    /// earlier sequence. Snapshot reads need per-element version history, which
+    /// this slice does not have — see the note on `applied_through`.
+    applied_through: BTreeMap<(GraphId, BranchId), CommitSeq>,
 }
 
 impl ReferenceDatabase {
@@ -1072,6 +1110,19 @@ impl ReferenceDatabase {
 
     pub fn graph(&self, graph: GraphId, branch: BranchId) -> Option<&ReferenceGraph> {
         self.coordinates.get(&(graph, branch))
+    }
+
+    /// The highest commit sequence this coordinate has applied.
+    ///
+    /// NOT a snapshot capability. It answers "how far has this branch been
+    /// advanced", which is what the SI oracle's precondition needs (no read may
+    /// see a sequence above the snapshot) and what a fork boundary can honestly
+    /// record. It does NOT let a caller read the graph as it stood at an
+    /// earlier sequence: that needs per-element version history, which this
+    /// materializer does not keep. Anything claiming AS OF <sequence> must land
+    /// with that history, not with this.
+    pub fn applied_through(&self, graph: GraphId, branch: BranchId) -> Option<CommitSeq> {
+        self.applied_through.get(&(graph, branch)).copied()
     }
 
     /// How this branch came to exist, if it exists.
@@ -1127,12 +1178,21 @@ impl ReferenceDatabase {
             .get(&(graph, parent))
             .cloned()
             .ok_or(BranchError::NoSuchParent { graph, parent })?;
+        // DERIVED, not supplied: the boundary is where the parent actually is.
+        let parent_applied_through = self
+            .applied_through
+            .get(&(graph, parent))
+            .copied()
+            .unwrap_or(CommitSeq(0));
 
         self.coordinates.insert((graph, child), inherited);
+        self.applied_through
+            .insert((graph, child), parent_applied_through);
         self.origins.insert(
             (graph, child),
             BranchOrigin::Fork {
                 parent_branch: parent,
+                parent_applied_through,
             },
         );
         Ok(())
@@ -1149,10 +1209,28 @@ impl ReferenceDatabase {
     /// entry 1 and not at entry 3 leaves the database exactly as it was. A
     /// partially-applied commit would put the database in a state no commit
     /// stream describes, which is the one outcome an oracle must never produce.
-    pub fn apply_template(&mut self, template: &LogicalDeltaTemplate) -> Result<(), ApplyError> {
+    pub fn apply_template(
+        &mut self,
+        template: &LogicalDeltaTemplate,
+        commit_seq: CommitSeq,
+    ) -> Result<(), ApplyError> {
         let mut candidate = self.clone();
         for entry in template.coordinate_entries() {
             let key = (entry.graph, entry.branch);
+            // The sequence must ADVANCE for every coordinate this template
+            // touches. Checked inside the all-or-nothing candidate, so a
+            // template that advances one coordinate and not another applies to
+            // neither.
+            if let Some(applied) = candidate.applied_through.get(&key).copied()
+                && commit_seq.0 <= applied.0
+            {
+                return Err(ApplyError::SequenceNotAdvancing {
+                    graph: entry.graph,
+                    branch: entry.branch,
+                    applied_through: applied,
+                    offered: commit_seq,
+                });
+            }
             // A coordinate that receives writes without having been forked is
             // Genesis. Recorded on first write rather than inferred later,
             // because "no origin" and "genesis origin" are different claims and
@@ -1166,6 +1244,7 @@ impl ReferenceDatabase {
                 .entry(key)
                 .or_default()
                 .apply_entry(entry)?;
+            candidate.applied_through.insert(key, commit_seq);
         }
         *self = candidate;
         Ok(())

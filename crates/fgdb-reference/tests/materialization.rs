@@ -16,7 +16,7 @@ use fgdb_delta_types::{
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
 use fgdb_reference::{ApplyError, ReferenceDatabase, ReferenceGraph};
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
 
 fn oid(seed: u8) -> ObjectId {
     ObjectId([seed; 32])
@@ -500,7 +500,7 @@ fn a_multi_coordinate_template_lands_in_separate_graphs() {
     .expect("template builds");
 
     let mut db = ReferenceDatabase::new();
-    db.apply_template(&template).expect("applies");
+    db.apply_template(&template, CommitSeq(1)).expect("applies");
 
     assert_eq!(db.coordinate_count(), 2);
     assert_eq!(
@@ -537,6 +537,7 @@ fn a_template_that_fails_partway_applies_nothing() {
             vec![entry(1, 1, vec![create_vertex(1, 1, "ada")])],
         )
         .expect("builds"),
+        CommitSeq(1),
     )
     .expect("first commit applies");
     let settled = db.clone();
@@ -554,7 +555,7 @@ fn a_template_that_fails_partway_applies_nothing() {
     .expect("builds");
 
     assert!(matches!(
-        db.apply_template(&bad),
+        db.apply_template(&bad, CommitSeq(2)),
         Err(ApplyError::DanglingEndpoint { .. })
     ));
     assert_eq!(

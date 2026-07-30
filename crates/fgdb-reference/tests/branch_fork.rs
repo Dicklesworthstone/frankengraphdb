@@ -18,7 +18,7 @@ use fgdb_delta_types::{
     SchemaEpoch,
 };
 use fgdb_reference::{BranchError, BranchOrigin, ReferenceDatabase};
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
 
 const GRAPH: GraphId = GraphId(1);
 const MAIN: BranchId = BranchId(1);
@@ -54,8 +54,11 @@ fn edge(eid: u128, src: u128, dst: u128) -> DeltaRow {
     }
 }
 
-/// Apply `rows` to one coordinate.
-fn apply(db: &mut ReferenceDatabase, branch: BranchId, rows: Vec<DeltaRow>) {
+/// Apply `rows` to one coordinate at `seq`.
+///
+/// The sequence is explicit at every call site because `apply_template` now
+/// requires it and refuses one that does not advance — history is append-only.
+fn apply_at(db: &mut ReferenceDatabase, branch: BranchId, seq: u64, rows: Vec<DeltaRow>) {
     let template = LogicalDeltaTemplate::build(
         ObjectId([0x11; 32]),
         [0x22; 32],
@@ -69,7 +72,8 @@ fn apply(db: &mut ReferenceDatabase, branch: BranchId, rows: Vec<DeltaRow>) {
         }],
     )
     .expect("template builds");
-    db.apply_template(&template).expect("applies");
+    db.apply_template(&template, CommitSeq(seq))
+        .expect("applies");
 }
 
 fn name_on(db: &ReferenceDatabase, branch: BranchId, vid: u128) -> Option<CanonicalScalar> {
@@ -83,9 +87,10 @@ fn name_on(db: &ReferenceDatabase, branch: BranchId, vid: u128) -> Option<Canoni
 /// main with two vertices and an edge, ready to fork.
 fn seeded() -> ReferenceDatabase {
     let mut db = ReferenceDatabase::new();
-    apply(
+    apply_at(
         &mut db,
         MAIN,
+        1,
         vec![vertex(1, "ada"), vertex(2, "grace"), edge(10, 1, 2)],
     );
     db
@@ -119,6 +124,7 @@ fn a_fork_records_its_parent() {
         db.branch_origin(GRAPH, FEATURE),
         Some(BranchOrigin::Fork {
             parent_branch: MAIN,
+            parent_applied_through: CommitSeq(1),
         })
     );
     assert_eq!(
@@ -165,7 +171,7 @@ fn the_child_does_not_see_the_parents_later_writes() {
     let mut db = seeded();
     db.fork_branch(GRAPH, MAIN, FEATURE).expect("forks");
 
-    apply(&mut db, MAIN, vec![vertex(3, "alan")]);
+    apply_at(&mut db, MAIN, 2, vec![vertex(3, "alan")]);
 
     assert_eq!(db.graph(GRAPH, MAIN).expect("main").vertex_count(), 3);
     assert_eq!(
@@ -190,7 +196,7 @@ fn the_parent_does_not_see_the_childs_writes() {
     let mut db = seeded();
     db.fork_branch(GRAPH, MAIN, FEATURE).expect("forks");
 
-    apply(&mut db, FEATURE, vec![vertex(4, "hopper")]);
+    apply_at(&mut db, FEATURE, 2, vec![vertex(4, "hopper")]);
 
     assert_eq!(db.graph(GRAPH, FEATURE).expect("feature").vertex_count(), 3);
     assert_eq!(
@@ -214,9 +220,10 @@ fn both_branches_may_diverge_on_the_same_identity() {
     let mut db = seeded();
     db.fork_branch(GRAPH, MAIN, FEATURE).expect("forks");
 
-    apply(
+    apply_at(
         &mut db,
         MAIN,
+        2,
         vec![DeltaRow::Property {
             elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
             property: PROP,
@@ -224,9 +231,10 @@ fn both_branches_may_diverge_on_the_same_identity() {
             after: Some(text("ada-on-main")),
         }],
     );
-    apply(
+    apply_at(
         &mut db,
         FEATURE,
+        2,
         vec![DeltaRow::Property {
             elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
             property: PROP,
@@ -246,9 +254,10 @@ fn both_branches_may_diverge_on_the_same_identity() {
 fn before_images_are_checked_per_branch() {
     let mut db = seeded();
     db.fork_branch(GRAPH, MAIN, FEATURE).expect("forks");
-    apply(
+    apply_at(
         &mut db,
         MAIN,
+        2,
         vec![DeltaRow::Property {
             elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
             property: PROP,
@@ -278,7 +287,7 @@ fn before_images_are_checked_per_branch() {
     )
     .expect("builds");
     assert!(
-        db.apply_template(&template).is_err(),
+        db.apply_template(&template, CommitSeq(3)).is_err(),
         "a row whose basis is another branch's state must not apply here"
     );
     assert_eq!(
@@ -291,6 +300,90 @@ fn before_images_are_checked_per_branch() {
 // ---------------------------------------------------------------------------
 // Refusals
 // ---------------------------------------------------------------------------
+
+/// HISTORY IS APPEND-ONLY. A template offered at a sequence the coordinate has
+/// already passed is refused, in both the equal and the lower case. Re-applying
+/// a sequence would either duplicate its effects or silently rewrite what that
+/// sequence meant, and the commit stream this materializes is gap-free and
+/// monotone by construction — so accepting one would model a stream that cannot
+/// exist.
+#[test]
+fn a_sequence_that_does_not_advance_is_refused() {
+    let mut db = seeded();
+    assert_eq!(db.applied_through(GRAPH, MAIN), Some(CommitSeq(1)));
+
+    for offered in [0u64, 1] {
+        let template = LogicalDeltaTemplate::build(
+            ObjectId([0x11; 32]),
+            [0x22; 32],
+            vec![CoordinateEntry {
+                graph: GRAPH,
+                branch: MAIN,
+                relation: REL,
+                schema_epoch: SchemaEpoch(0),
+                schema_transition: None,
+                rows: vec![vertex(50 + offered as u128, "late")],
+            }],
+        )
+        .expect("builds");
+        let result = db.apply_template(&template, CommitSeq(offered));
+        assert!(
+            matches!(
+                result,
+                Err(fgdb_reference::ApplyError::SequenceNotAdvancing { .. })
+            ),
+            "offering {offered} against applied_through 1 must be refused; got {result:?}"
+        );
+    }
+
+    assert_eq!(
+        db.applied_through(GRAPH, MAIN),
+        Some(CommitSeq(1)),
+        "a refusal does not move the frontier"
+    );
+    assert_eq!(
+        db.graph(GRAPH, MAIN).expect("main").vertex_count(),
+        2,
+        "and applies nothing"
+    );
+}
+
+/// A forked child inherits the parent's position, so its OWN next write must
+/// advance past it. Without this, a child could re-apply the sequence range it
+/// inherited and diverge from a history that never happened.
+#[test]
+fn a_child_must_advance_past_its_inherited_position() {
+    let mut db = seeded();
+    db.fork_branch(GRAPH, MAIN, FEATURE).expect("forks");
+    assert_eq!(db.applied_through(GRAPH, FEATURE), Some(CommitSeq(1)));
+
+    let template = LogicalDeltaTemplate::build(
+        ObjectId([0x11; 32]),
+        [0x22; 32],
+        vec![CoordinateEntry {
+            graph: GRAPH,
+            branch: FEATURE,
+            relation: REL,
+            schema_epoch: SchemaEpoch(0),
+            schema_transition: None,
+            rows: vec![vertex(60, "replay")],
+        }],
+    )
+    .expect("builds");
+    assert!(
+        db.apply_template(&template, CommitSeq(1)).is_err(),
+        "the child may not re-apply the sequence it inherited"
+    );
+
+    // Advancing works.
+    apply_at(&mut db, FEATURE, 2, vec![vertex(61, "fresh")]);
+    assert_eq!(db.applied_through(GRAPH, FEATURE), Some(CommitSeq(2)));
+    assert_eq!(
+        db.applied_through(GRAPH, MAIN),
+        Some(CommitSeq(1)),
+        "and the parent's position is untouched"
+    );
+}
 
 #[test]
 fn forking_from_a_nonexistent_branch_is_refused() {
@@ -316,7 +409,7 @@ fn forking_from_a_nonexistent_branch_is_refused() {
 fn forking_onto_an_existing_branch_is_refused() {
     let mut db = seeded();
     db.fork_branch(GRAPH, MAIN, FEATURE).expect("first fork");
-    apply(&mut db, FEATURE, vec![vertex(4, "hopper")]);
+    apply_at(&mut db, FEATURE, 2, vec![vertex(4, "hopper")]);
     let settled = db.clone();
 
     assert_eq!(
@@ -330,8 +423,8 @@ fn forking_onto_an_existing_branch_is_refused() {
 
     // Also refused when the target exists only because it was written to.
     let mut written = ReferenceDatabase::new();
-    apply(&mut written, MAIN, vec![vertex(1, "ada")]);
-    apply(&mut written, FEATURE, vec![vertex(9, "independent")]);
+    apply_at(&mut written, MAIN, 1, vec![vertex(1, "ada")]);
+    apply_at(&mut written, FEATURE, 1, vec![vertex(9, "independent")]);
     assert_eq!(
         written.fork_branch(GRAPH, MAIN, FEATURE),
         Err(BranchError::BranchExists {
@@ -358,7 +451,7 @@ fn forks_chain_and_all_levels_stay_isolated() {
     const RELEASE: BranchId = BranchId(3);
     let mut db = seeded();
     db.fork_branch(GRAPH, MAIN, FEATURE).expect("fork 1");
-    apply(&mut db, FEATURE, vec![vertex(4, "hopper")]);
+    apply_at(&mut db, FEATURE, 2, vec![vertex(4, "hopper")]);
     db.fork_branch(GRAPH, FEATURE, RELEASE).expect("fork 2");
 
     assert_eq!(
@@ -370,10 +463,13 @@ fn forks_chain_and_all_levels_stay_isolated() {
         db.branch_origin(GRAPH, RELEASE),
         Some(BranchOrigin::Fork {
             parent_branch: FEATURE,
+            // feature applied its post-fork write at 2, so that is where
+            // release begins — derived from the chain, not chosen.
+            parent_applied_through: CommitSeq(2),
         })
     );
 
-    apply(&mut db, RELEASE, vec![vertex(5, "lovelace")]);
+    apply_at(&mut db, RELEASE, 3, vec![vertex(5, "lovelace")]);
     assert_eq!(db.graph(GRAPH, MAIN).expect("m").vertex_count(), 2);
     assert_eq!(db.graph(GRAPH, FEATURE).expect("f").vertex_count(), 3);
     assert_eq!(db.graph(GRAPH, RELEASE).expect("r").vertex_count(), 4);
