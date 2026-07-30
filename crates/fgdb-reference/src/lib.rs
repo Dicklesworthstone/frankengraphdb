@@ -33,6 +33,7 @@
 #![forbid(unsafe_code)]
 
 pub mod intents;
+pub mod txn;
 
 use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId, LogicalDeltaTemplate,
@@ -1189,6 +1190,101 @@ pub struct ReferenceDatabase {
     history: BTreeMap<(GraphId, BranchId), Vec<CommitRecord>>,
 }
 
+/// What a delta row writes, for the purpose of deciding whether two
+/// transactions conflict.
+///
+/// **A CONFLICT DOMAIN IS COARSER THAN A ROW AND FINER THAN A BRANCH,** and
+/// which is which is a semantic decision per family rather than a mechanical
+/// one. Two rows collide when they name the same key; anything they do not name
+/// cannot collide. That makes the omissions the interesting part, so every
+/// family is accounted for explicitly and [`DeltaRow::conflict_keys`] has no
+/// wildcard arm — a new row family is a compile error here rather than a silent
+/// hole that lets two conflicting writes both commit.
+///
+/// [`DeltaRow::conflict_keys`]: ReferenceDatabase::conflict_keys_since
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConflictKey {
+    /// One vertex or edge version. Creating an edge names the EDGE and not its
+    /// endpoints: under snapshot isolation two transactions adding different
+    /// edges to one vertex do not conflict, which is correct SI behaviour and
+    /// also precisely how phantoms slip through it. Detecting those is SSI's
+    /// job, over adjacency, and it is not this rule.
+    Element(ElementId),
+    /// One escrow domain.
+    ///
+    /// WORTH RECORDING: escrow exists in the plan so that concurrent
+    /// reservations against one balance need NOT conflict. The row shape here
+    /// cannot deliver that — `Escrow` carries `before_value`/`after_value` and
+    /// the materializer checks the closure — so in this oracle an escrow write
+    /// is an absolute checked transition like any other, and calling it
+    /// commutative would be a claim the code does not support. Emitting the key
+    /// is the honest reading of the row we actually have.
+    Escrow(EscrowDomainId),
+    /// One sketch profile's state, named by its profile object.
+    Sketch(ObjectId),
+    /// The coordinate's schema and constraint roots, which the `Schema` and
+    /// `Constraint` families both move. One key rather than two, because a
+    /// transaction that moves the schema root and one that moves the constraint
+    /// root are not independent: `Constraint` carries before/after images of
+    /// BOTH axes, so either write invalidates the other's before-image.
+    CoordinateRoots,
+}
+
+/// Add everything `row` writes to `keys`.
+///
+/// TOTAL OVER THE ROW FAMILIES BY CONSTRUCTION: no wildcard arm, so a new
+/// `DeltaRow` variant stops this crate compiling instead of quietly writing
+/// nothing. A conflict rule that silently omits a family does not report a
+/// missing conflict — it reports "no conflict", and both transactions commit.
+pub fn collect_conflict_keys(row: &DeltaRow, keys: &mut BTreeSet<ConflictKey>) {
+    match row {
+        DeltaRow::CreateVertex { vid, .. } => {
+            keys.insert(ConflictKey::Element(ElementId::Vertex(*vid)));
+        }
+        DeltaRow::CreateEdge { eid, .. } | DeltaRow::DeleteEdge { eid, .. } => {
+            keys.insert(ConflictKey::Element(ElementId::Edge(*eid)));
+        }
+        DeltaRow::DeleteVertex {
+            vid,
+            sorted_retired_incident_edges,
+            ..
+        } => {
+            // The cascade writes the edges too, so a concurrent write to any
+            // retired edge is a conflict with this deletion.
+            keys.insert(ConflictKey::Element(ElementId::Vertex(*vid)));
+            keys.extend(
+                sorted_retired_incident_edges
+                    .iter()
+                    .map(|eid| ConflictKey::Element(ElementId::Edge(*eid))),
+            );
+        }
+        DeltaRow::LabelMembership { vid, .. } => {
+            keys.insert(ConflictKey::Element(ElementId::Vertex(*vid)));
+        }
+        DeltaRow::Property { elem, .. }
+        | DeltaRow::ValidTime { elem, .. }
+        | DeltaRow::Counter { elem, .. } => {
+            keys.insert(ConflictKey::Element(*elem));
+        }
+        DeltaRow::Escrow {
+            domain_id, subject, ..
+        } => {
+            // Both: the row moves the domain balance AND is checked against the
+            // subject, so a concurrent write to either invalidates it.
+            keys.insert(ConflictKey::Escrow(*domain_id));
+            keys.insert(ConflictKey::Element(*subject));
+        }
+        DeltaRow::Sketch {
+            sketch_profile_oid, ..
+        } => {
+            keys.insert(ConflictKey::Sketch(*sketch_profile_oid));
+        }
+        DeltaRow::Schema { .. } | DeltaRow::Constraint { .. } => {
+            keys.insert(ConflictKey::CoordinateRoots);
+        }
+    }
+}
+
 /// A `(graph, branch)` pair: one materialization coordinate.
 type Coordinate = (GraphId, BranchId);
 
@@ -1257,6 +1353,10 @@ pub enum SnapshotError {
         applied_through: CommitSeq,
         requested: CommitSeq,
     },
+    /// A genesis snapshot was asked for on a coordinate that already exists.
+    /// "Create this branch" and "start a transaction on this branch" are
+    /// different intentions, so the permissive reading is refused.
+    CoordinateAlreadyExists { graph: GraphId, branch: BranchId },
     /// A fork's parent is not in the database.
     ///
     /// Unreachable while branches are never removed, and kept deliberately: the
@@ -1298,6 +1398,9 @@ impl core::fmt::Display for SnapshotError {
                 "coordinate {graph:?}/{branch:?} has applied through {applied_through:?}, \
                  cannot read as of {requested:?}"
             ),
+            Self::CoordinateAlreadyExists { graph, branch } => {
+                write!(f, "coordinate {graph:?}/{branch:?} already exists")
+            }
             Self::BrokenLineage {
                 graph,
                 branch,
@@ -1340,6 +1443,35 @@ impl ReferenceDatabase {
         self.applied_through.get(&(graph, branch)).copied()
     }
 
+    /// Everything committed to this coordinate **after** `since` wrote, as
+    /// conflict keys.
+    ///
+    /// This is the raw material of first-committer-wins: a transaction that read
+    /// at `since` conflicts exactly when its own write set meets this. Only the
+    /// coordinate's OWN records are consulted — an ancestor cannot commit into a
+    /// branch after the fork, so a parent's later commits are not a conflict for
+    /// a child, they are simply not in its history.
+    pub fn conflict_keys_since(
+        &self,
+        graph: GraphId,
+        branch: BranchId,
+        since: CommitSeq,
+    ) -> BTreeSet<ConflictKey> {
+        let mut keys = BTreeSet::new();
+        let Some(records) = self.history.get(&(graph, branch)) else {
+            return keys;
+        };
+        for record in records {
+            if record.seq.0 <= since.0 {
+                continue;
+            }
+            for row in &record.entry.rows {
+                collect_conflict_keys(row, &mut keys);
+            }
+        }
+        keys
+    }
+
     /// How many commits this coordinate recorded **itself**.
     ///
     /// A forked child reports 0 until it is written to, however large its
@@ -1364,6 +1496,36 @@ impl ReferenceDatabase {
             graph,
             branch,
             high,
+        })
+    }
+
+    /// Mint the empty snapshot of a coordinate that **does not exist yet**.
+    ///
+    /// FOUND BY WRITING THE TRANSACTION LAWS: there was no way to express the
+    /// first transaction on a branch. `snapshot` refuses an absent coordinate —
+    /// correctly, since reading a branch nobody created is a caller error — but
+    /// writing is precisely how a branch comes to exist, so refusing there closed
+    /// the only door in. `apply_template` already creates a coordinate on first
+    /// write and records it as `Genesis`; this is that same rule reachable from
+    /// the transaction path.
+    ///
+    /// It REFUSES a coordinate that already exists, rather than quietly handing
+    /// back sequence zero. The two cases want opposite handling — "create this
+    /// branch" and "start a transaction on this branch" are different intentions
+    /// — and a permissive `begin` that silently fell back to genesis would let a
+    /// typo'd branch name read as a legitimately new branch.
+    pub fn genesis_snapshot(
+        &self,
+        graph: GraphId,
+        branch: BranchId,
+    ) -> Result<Snapshot, SnapshotError> {
+        if self.origins.contains_key(&(graph, branch)) {
+            return Err(SnapshotError::CoordinateAlreadyExists { graph, branch });
+        }
+        Ok(Snapshot {
+            graph,
+            branch,
+            high: CommitSeq(0),
         })
     }
 
@@ -1411,6 +1573,18 @@ impl ReferenceDatabase {
     /// fact rather than two facts that must be kept in step.
     pub fn read(&self, snapshot: &Snapshot) -> Result<ReferenceGraph, SnapshotError> {
         let mut graph = ReferenceGraph::new();
+        // A genesis snapshot names a coordinate with no history. Sequence zero of
+        // a branch that does not exist yet is the same empty graph as sequence
+        // zero of one that does, so this answers rather than refusing — which
+        // keeps every minted snapshot readable instead of leaving one shape of
+        // Snapshot that `read` rejects.
+        if snapshot.high.0 == 0
+            && !self
+                .origins
+                .contains_key(&(snapshot.graph, snapshot.branch))
+        {
+            return Ok(graph);
+        }
         for (key, cap) in self.lineage(snapshot.graph, snapshot.branch, snapshot.high)? {
             let Some(records) = self.history.get(&key) else {
                 continue;
