@@ -986,6 +986,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000d
+stable_name = "parent_successor_epoch_record_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the BranchKeyEpochRecord elements this BranchForkBundle<Role:AuthorityOwningRole> carries; retained while the owner is retained, and the acyclic order 40 <= 80 keeps every edge backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
 field_tag = 0x000e
 stable_name = "parent_successor_root_ref"
 exact_wire_type = "StrongRef"
@@ -1001,6 +1016,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0010
+stable_name = "child_epoch_record_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the BranchKeyEpochRecord elements this BranchForkBundle<Role:AuthorityOwningRole> carries; retained while the owner is retained, and the acyclic order 40 <= 80 keeps every edge backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
 field_tag = 0x0011
 stable_name = "child_root_ref"
 exact_wire_type = "StrongRef"
@@ -1011,6 +1041,36 @@ target_schema_id = "KeyEnvelopeRoot"
 construction_order = 80
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchForkBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0013
+stable_name = "grant_record_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeGrantRecord"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the KeyEnvelopeGrantRecord<Role> elements this BranchForkBundle<Role:AuthorityOwningRole> carries; retained while the owner is retained, and the acyclic order 60 <= 80 keeps every edge backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchForkBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0014
+stable_name = "portable_grant_bytes_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "KeyEnvelopeGrantBytes"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the KeyEnvelopeGrantBytes elements this BranchForkBundle<Role:AuthorityOwningRole> carries; retained while the owner is retained, and the acyclic order 20 <= 80 keeps every edge backward-only (a13:2029)"
 version_status = "reserved"
 max_size_bytes = 40
 
@@ -1091,6 +1151,21 @@ max_size_bytes = 40
 
 [[field]]
 containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x0008
+stable_name = "closed_epoch_record_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the BranchKeyEpochRecord elements this BranchGrantBundle<Role:AuthorityOwningRole> carries; retained while the owner is retained, and the acyclic order 40 <= 80 keeps every edge backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
 field_tag = 0x0009
 stable_name = "frozen_root_ref"
 exact_wire_type = "StrongRef"
@@ -1101,6 +1176,21 @@ target_schema_id = "KeyEnvelopeRoot"
 construction_order = 80
 role_predicate = "true"
 retention_and_cut_rule = "strong reference to the KeyEnvelopeRoot this BranchGrantBundle<Role:AuthorityOwningRole> names; retained while the referrer is retained, and the acyclic order 50 <= 80 keeps the reference backward-only (a13:2029)"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[field]]
+containing_schema = "BranchGrantBundle<Role:AuthorityOwningRole>"
+field_tag = 0x000b
+stable_name = "successor_epoch_record_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "BranchKeyEpochRecord"
+construction_order = 80
+role_predicate = "true"
+retention_and_cut_rule = "repeated strong reference to the BranchKeyEpochRecord elements this BranchGrantBundle<Role:AuthorityOwningRole> carries; retained while the owner is retained, and the acyclic order 40 <= 80 keeps every edge backward-only (a13:2029)"
 version_status = "reserved"
 max_size_bytes = 40
 

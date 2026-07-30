@@ -4257,6 +4257,172 @@ fn idr_a13_branch_reference_fields_are_source_determined() {
     }
 }
 
+/// fgdb-a13-collection-reference-residue-k5lb: the six A13 `[StrongRef<T>]`
+/// array members follow the K3SA carrier contract — StrongRef +
+/// cardinality=many targeting the element type DIRECTLY, never a generated
+/// collection-element wrapper. The artifact's no-many blocker is dead (K3SA
+/// landed StrongRef+many), and owner-exclusivity is not claimed.
+#[test]
+fn idr_a13_collection_reference_fields_follow_the_k3sa_carrier_contract() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let cases = [
+        (
+            "BranchForkBundle<Role:AuthorityOwningRole>",
+            "parent_successor_epoch_record_refs",
+            0x000d,
+            "BranchKeyEpochRecord",
+            40,
+            "branch-fork-bundle-role-authority-owning-role-parent-successor-epoch-record-refs",
+        ),
+        (
+            "BranchForkBundle<Role:AuthorityOwningRole>",
+            "child_epoch_record_refs",
+            0x0010,
+            "BranchKeyEpochRecord",
+            40,
+            "branch-fork-bundle-role-authority-owning-role-child-epoch-record-refs",
+        ),
+        (
+            "BranchForkBundle<Role:AuthorityOwningRole>",
+            "grant_record_refs",
+            0x0013,
+            "KeyEnvelopeGrantRecord",
+            60,
+            "branch-fork-bundle-role-authority-owning-role-grant-record-refs",
+        ),
+        (
+            "BranchForkBundle<Role:AuthorityOwningRole>",
+            "portable_grant_bytes_refs",
+            0x0014,
+            "KeyEnvelopeGrantBytes",
+            20,
+            "branch-fork-bundle-role-authority-owning-role-portable-grant-bytes-refs",
+        ),
+        (
+            "BranchGrantBundle<Role:AuthorityOwningRole>",
+            "closed_epoch_record_refs",
+            0x0008,
+            "BranchKeyEpochRecord",
+            40,
+            "branch-grant-bundle-role-authority-owning-role-closed-epoch-record-refs",
+        ),
+        (
+            "BranchGrantBundle<Role:AuthorityOwningRole>",
+            "successor_epoch_record_refs",
+            0x000b,
+            "BranchKeyEpochRecord",
+            40,
+            "branch-grant-bundle-role-authority-owning-role-successor-epoch-record-refs",
+        ),
+    ];
+
+    assert_eq!(cases.len(), 6);
+    for (owner, name, tag, target, target_order, row_slug) in cases {
+        let fields = identity
+            .fields
+            .iter()
+            .filter(|row| row.containing_schema.eq(owner) && row.stable_name.eq(name))
+            .collect::<Vec<_>>();
+        assert_eq!(fields.len(), 1, "{owner}.{name} must exist exactly once");
+        let field = fields[0];
+        assert_eq!(field.field_tag, tag);
+        assert_eq!(field.exact_wire_type, "StrongRef");
+        assert_eq!(field.cardinality, "many");
+        assert_eq!(field.identity_class, "logical");
+        assert_eq!(field.reference_semantics, "strong");
+        assert_eq!(field.target_schema_id.as_deref(), Some(target));
+        let owner_order = identity
+            .logical
+            .iter()
+            .find(|row| row.name.eq(identity::generic_free_family(owner)))
+            .expect("A13 field owner resolves")
+            .construction_order;
+        assert_eq!(field.construction_order, owner_order);
+        let resolved_target_order = identity
+            .logical
+            .iter()
+            .find(|row| row.name.eq(identity::generic_free_family(target)))
+            .expect("A13 collection target resolves")
+            .construction_order;
+        assert_eq!(resolved_target_order, target_order);
+        assert!(target_order <= owner_order);
+        assert!(
+            field
+                .retention_and_cut_rule
+                .contains("repeated strong reference"),
+            "{owner}.{name} must read as the repeated-reference carrier, not a single edge"
+        );
+        assert!(
+            field
+                .retention_and_cut_rule
+                .contains(&format!("acyclic order {target_order} <= {owner_order}")),
+            "{owner}.{name} must retain the source-derived order witness"
+        );
+        assert_eq!(field.role_predicate, "true");
+        assert_eq!(field.version_status, "reserved");
+        assert_eq!(field.max_size_bytes, 40);
+
+        let source_key = format!("field|{owner}|{owner}.{name}|{name}");
+        let targets = catalog
+            .targets
+            .iter()
+            .filter(|row| row.source_key.eq(source_key.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1, "{source_key} maps exactly once");
+        let target_row = targets[0];
+        assert_eq!(target_row.row_id, format!("a13:target:field-{row_slug}"));
+        assert_eq!(target_row.target_row_id, format!("a13:field:{row_slug}"));
+        assert_eq!(target_row.slice_id, "a13");
+        assert_eq!(target_row.target_kind, "field");
+        assert_eq!(target_row.definition_status, "declared");
+    }
+
+    // NEGATIVE LAW, first half: the representation is uniform — no field on
+    // either bundle owner carries a source array member in any OTHER shape.
+    // A row weakened to cardinality "one", re-typed off StrongRef, or
+    // re-keyed onto a wrapper turns this red.
+    for (owner, name, _, _, _, _) in cases {
+        for row in identity
+            .fields
+            .iter()
+            .filter(|row| row.containing_schema.eq(owner) && row.stable_name.eq(name))
+        {
+            assert!(
+                row.cardinality == "many" && row.exact_wire_type == "StrongRef",
+                "{owner}.{name} weakened off the carrier contract"
+            );
+        }
+    }
+
+    // NEGATIVE LAW, second half: the direct representation mints NO
+    // collection-element wrapper kinds. A landing that invents
+    // *EpochRecordRefsRecord / *GrantRecordRefsRecord / *GrantBytesRefsRecord
+    // (the K3SA inline-element treatment, which does not apply to
+    // source-spelled [StrongRef<T>] arrays) turns this red.
+    assert!(
+        identity.logical.iter().all(|row| {
+            !row.name.contains("EpochRecordRefs")
+                && !row.name.contains("GrantRecordRefs")
+                && !row.name.contains("GrantBytesRefs")
+        }),
+        "a collection-element wrapper kind was minted for a source [StrongRef<T>] array"
+    );
+
+    // The artifact's blocker stays dead: the durable format carries a nonzero
+    // population of StrongRef + cardinality=many rows, and these six are in
+    // it. Do not restore the vacuous assertion that none exist.
+    let strong_many = identity
+        .fields
+        .iter()
+        .filter(|row| row.exact_wire_type == "StrongRef" && row.cardinality == "many")
+        .count();
+    assert!(
+        strong_many >= 13,
+        "the StrongRef+many population shrank below the landed K3SA+A13 cohort: {strong_many}"
+    );
+}
+
 #[test]
 fn idr_a13_branch_install_specs_are_forced_logical_at_the_source_floor() {
     let identity = real_identity();
@@ -10701,6 +10867,22 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "resulting_key_grant_registry_ref"
                 )
                 | (
+                    "BranchForkBundle<Role:AuthorityOwningRole>",
+                    "parent_successor_epoch_record_refs"
+                )
+                | (
+                    "BranchForkBundle<Role:AuthorityOwningRole>",
+                    "child_epoch_record_refs"
+                )
+                | (
+                    "BranchForkBundle<Role:AuthorityOwningRole>",
+                    "grant_record_refs"
+                )
+                | (
+                    "BranchForkBundle<Role:AuthorityOwningRole>",
+                    "portable_grant_bytes_refs"
+                )
+                | (
                     "BranchForkSpec<Role:AuthorityOwningRole>",
                     "boundary_reservation_ref"
                 )
@@ -10728,6 +10910,14 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 | (
                     "BranchGrantBundle<Role:AuthorityOwningRole>",
                     "resulting_key_grant_registry_ref"
+                )
+                | (
+                    "BranchGrantBundle<Role:AuthorityOwningRole>",
+                    "closed_epoch_record_refs"
+                )
+                | (
+                    "BranchGrantBundle<Role:AuthorityOwningRole>",
+                    "successor_epoch_record_refs"
                 )
                 | ("BranchGrantSpec<Role:AuthorityOwningRole>", "bundle_ref")
                 | ("BranchKeyEpochRecord", "boundary_reservation_ref")
@@ -11007,7 +11197,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // StrongRef fields are claimed by post_erratum_a13_branch_reference_field.
         // The current field count carries them and the reconstruction stays at
         // the frozen 225.
-        pre_erratum.fields.len() + 788,
+        // 788 -> 794 (fgdb-a13-collection-reference-residue-k5lb): the six A13
+        // [StrongRef<T>] array members land under the K3SA carrier contract
+        // (StrongRef + cardinality=many, direct element targets), claimed by
+        // post_erratum_a13_branch_reference_field. The current field count
+        // carries them and the reconstruction stays at the frozen 225.
+        pre_erratum.fields.len() + 794,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
