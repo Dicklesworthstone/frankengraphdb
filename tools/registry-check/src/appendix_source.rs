@@ -2053,7 +2053,15 @@ fn direct_schemas_from_inline(
             let Some(open_index) = anonymous_brace_body_open(text) else {
                 continue;
             };
-            if matching_delimiter(text, open_index).is_err() {
+            let Ok(close) = matching_delimiter(text, open_index) else {
+                continue;
+            };
+            // The phrase cue owns ONE anonymous body and nothing else
+            // (fresh-eyes review on fgdb-ckb9): a fragment with anything
+            // after the balanced closer is not that body — claiming it
+            // whole would fold trailing prose into a confirmed schema, so
+            // it is left to the unclaimed-range pass exactly as before.
+            if !text[close + 1..].trim().is_empty() {
                 continue;
             }
             if let Some(occurrence) = make_schema_occurrence(
@@ -5724,6 +5732,53 @@ mod tests {
                 .iter()
                 .all(|candidate| !candidate.key.stable_name.eq("fabricated_ckb9_control")),
             "fabricated-absent control unexpectedly matched"
+        );
+    }
+
+    /// Fresh-eyes corrective (fgdb-ckb9 review): the phrase cue owns ONE
+    /// anonymous body and nothing else. A fragment with anything after the
+    /// balanced closer is not that body — claiming it whole would fold
+    /// trailing prose into a confirmed schema. The discriminator: an exact
+    /// cue with a balanced body plus trailing prose mints NO owner; the
+    /// positive real-source control above keeps passing.
+    #[test]
+    fn phrase_cue_with_trailing_prose_mints_no_owner() {
+        let source = "The generated common header of every Local/Meta/Shard payload also contains `{member:u8} trailing prose`.\n";
+        let slices = [SourceSliceSpec {
+            id: "t",
+            start_line: 1,
+            end_line: 1,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1, &slices)
+            .expect("trailing-prose source must census");
+        assert!(
+            census
+                .schemas
+                .iter()
+                .all(|candidate| !candidate.key.family.eq("GeneratedPayloadCommonHeader")),
+            "a balanced body with trailing prose was claimed as a confirmed schema"
+        );
+        // The unclaimed-range pass records it exactly as any other
+        // unowned structural fragment — fail-closed, not ambiguous-owned.
+        assert!(
+            census.ambiguities.iter().any(|candidate| {
+                matches!(candidate.key.kind, AmbiguityKind::UnownedStructuralFragment)
+            }),
+            "the trailing-prose fragment lost its unowned reading"
+        );
+
+        // DISCRIMINATOR CONTROL: the same cue with NOTHING after the closer
+        // mints the owner — proving the law accepts exactly the one-body
+        // shape rather than rejecting the cue outright.
+        let clean = "The generated common header of every Local/Meta/Shard payload also contains `{member:u8}`.\n";
+        let clean_census =
+            census_appendix_source(clean.as_bytes(), 1, &slices).expect("clean source must census");
+        assert!(
+            clean_census
+                .schemas
+                .iter()
+                .any(|candidate| candidate.key.family.eq("GeneratedPayloadCommonHeader")),
+            "the one-body shape must still mint the owner"
         );
     }
 
