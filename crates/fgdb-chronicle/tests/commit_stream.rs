@@ -408,9 +408,10 @@ fn a_stream_prefix_verifies_without_its_suffix() {
 // ---------------------------------------------------------------------------
 //
 // It used to check chain-hash continuity and NOTHING ELSE, while every test in
-// this crate reads it as the general "is this chain sound" question. That was
-// latent rather than live only because no constructor bypassed `append` — which
-// `from_parts_for_test` now does, so the hole and its fix land together.
+// this crate reads it as the general "is this chain sound" question. Recovery
+// now validates raw entries through `verify_entries` or the fallible
+// `from_entries`; there is no unchecked way to turn these fixtures into a
+// usable `MarkerChain`.
 //
 // **EVERY FIXTURE BELOW IS FORGED WITH CONSISTENT HASHES**, and that is what makes
 // these laws discriminating. Simply mutating a marker inside a real chain changes
@@ -420,9 +421,9 @@ fn a_stream_prefix_verifies_without_its_suffix() {
 // chain passes chain-hash continuity by construction and can only be refused by a
 // check that the old implementation did not have.
 
-/// Build a chain whose stored derived values are internally CONSISTENT with the
-/// markers given, however malformed those markers are as a sequence.
-fn forged(markers: Vec<CommitMarker>) -> MarkerChain {
+/// Build raw entries whose stored derived values are internally CONSISTENT with
+/// the markers given, however malformed those markers are as a sequence.
+fn forged(markers: Vec<CommitMarker>) -> Vec<ChainedMarker> {
     let mut chain_value = CHAIN_ORIGIN;
     let mut entries = Vec::new();
     for marker in markers {
@@ -434,7 +435,7 @@ fn forged(markers: Vec<CommitMarker>) -> MarkerChain {
         });
         chain_value = chain_hash;
     }
-    MarkerChain::from_parts_for_test(entries)
+    entries
 }
 
 /// CONTROL: a forged chain that breaks NO law verifies.
@@ -443,8 +444,9 @@ fn forged(markers: Vec<CommitMarker>) -> MarkerChain {
 /// every forged chain outright, which would be useless in the opposite direction.
 #[test]
 fn a_forged_but_lawful_chain_verifies() {
-    let chain = forged(vec![marker(1, 10), marker(2, 20), marker(3, 30)]);
-    assert_eq!(chain.verify(), Ok(()));
+    let entries = forged(vec![marker(1, 10), marker(2, 20), marker(3, 30)]);
+    assert_eq!(MarkerChain::verify_entries(&entries), Ok(()));
+    let rebuilt = MarkerChain::from_entries(&entries).expect("lawful entries reconstruct");
     // And it agrees with a chain built the ordinary way.
     let mut appended = MarkerChain::new();
     for m in [marker(1, 10), marker(2, 20), marker(3, 30)] {
@@ -453,7 +455,7 @@ fn a_forged_but_lawful_chain_verifies() {
     assert_eq!(appended.verify(), Ok(()));
     assert_eq!(
         appended.entries().last().map(|e| e.chain_hash),
-        chain.entries().last().map(|e| e.chain_hash),
+        rebuilt.entries().last().map(|e| e.chain_hash),
         "forging reproduces the real chain values, so the fixtures are honest"
     );
 }
@@ -461,25 +463,28 @@ fn a_forged_but_lawful_chain_verifies() {
 /// A GAP in the commit sequence is refused, though every chain hash is consistent.
 #[test]
 fn verify_refuses_a_commit_sequence_gap() {
-    let chain = forged(vec![marker(1, 10), marker(3, 30)]);
+    let entries = forged(vec![marker(1, 10), marker(3, 30)]);
+    let expected = ChainVerifyFailure {
+        commit_seq: 3,
+        cause: ChainVerifyCause::Structure(ChainError::NonContiguousCommitSeq {
+            expected: 2,
+            found: 3,
+        }),
+    };
+    assert_eq!(MarkerChain::verify_entries(&entries), Err(expected.clone()));
     assert_eq!(
-        chain.verify(),
-        Err(ChainVerifyFailure {
-            commit_seq: 3,
-            cause: ChainVerifyCause::Structure(ChainError::NonContiguousCommitSeq {
-                expected: 2,
-                found: 3,
-            }),
-        })
+        MarkerChain::from_entries(&entries)
+            .expect_err("malformed raw entries must not produce a usable chain"),
+        expected,
     );
 }
 
 /// A REPEATED commit sequence is refused — the other half of contiguity.
 #[test]
 fn verify_refuses_a_repeated_commit_sequence() {
-    let chain = forged(vec![marker(1, 10), marker(1, 20)]);
+    let entries = forged(vec![marker(1, 10), marker(1, 20)]);
     assert!(matches!(
-        chain.verify(),
+        MarkerChain::verify_entries(&entries),
         Err(ChainVerifyFailure {
             cause: ChainVerifyCause::Structure(ChainError::NonContiguousCommitSeq { .. }),
             ..
@@ -490,9 +495,9 @@ fn verify_refuses_a_repeated_commit_sequence() {
 /// A NON-ADVANCING logical command sequence is refused.
 #[test]
 fn verify_refuses_a_non_advancing_command_sequence() {
-    let chain = forged(vec![marker(1, 50), marker(2, 20)]);
+    let entries = forged(vec![marker(1, 50), marker(2, 20)]);
     assert_eq!(
-        chain.verify(),
+        MarkerChain::verify_entries(&entries),
         Err(ChainVerifyFailure {
             commit_seq: 2,
             cause: ChainVerifyCause::Structure(ChainError::NonMonotonicCommandSeq {
@@ -521,9 +526,9 @@ fn verify_refuses_non_canonical_head_updates() {
             },
         ],
     );
-    let chain = forged(vec![unsorted]);
+    let entries = forged(vec![unsorted]);
     assert_eq!(
-        chain.verify(),
+        MarkerChain::verify_entries(&entries),
         Err(ChainVerifyFailure {
             commit_seq: 1,
             cause: ChainVerifyCause::Structure(ChainError::NonCanonicalHeadUpdates),
@@ -547,9 +552,9 @@ fn verify_refuses_a_head_cas_that_never_held() {
             }),
         }],
     );
-    let chain = forged(vec![claiming]);
+    let entries = forged(vec![claiming]);
     assert_eq!(
-        chain.verify(),
+        MarkerChain::verify_entries(&entries),
         Err(ChainVerifyFailure {
             commit_seq: 1,
             cause: ChainVerifyCause::Structure(ChainError::HeadCasMismatch {
@@ -576,7 +581,7 @@ fn verify_still_refuses_a_corrupted_chain_hash() {
     let mut entries = appended.entries().to_vec();
     entries[1].chain_hash = digest(0xee);
     assert_eq!(
-        MarkerChain::from_parts_for_test(entries).verify(),
+        MarkerChain::verify_entries(&entries),
         Err(ChainVerifyFailure {
             commit_seq: 2,
             cause: ChainVerifyCause::DerivedValueMismatch,
@@ -594,7 +599,7 @@ fn verify_refuses_a_corrupted_marker_id() {
     let mut entries = appended.entries().to_vec();
     entries[0].marker_oid = oid(0x5c);
     assert_eq!(
-        MarkerChain::from_parts_for_test(entries).verify(),
+        MarkerChain::verify_entries(&entries),
         Err(ChainVerifyFailure {
             commit_seq: 1,
             cause: ChainVerifyCause::DerivedValueMismatch,
@@ -602,14 +607,13 @@ fn verify_refuses_a_corrupted_marker_id() {
     );
 }
 
-/// A chain built by `from_parts_for_test` answers `head` the same way an appended
-/// one does — the test constructor derives the index rather than leaving it empty.
+/// A chain rebuilt from validated entries answers `head` the same way an
+/// appended one does.
 ///
-/// A constructor that skipped the index would make every `head`-reading validator
-/// lie on test-built chains, which is the defect this whole bead is about, one
-/// level down.
+/// Reconstruction must derive the index through the same single writer as
+/// ordinary adoption.
 #[test]
-fn a_test_built_chain_has_a_real_head_index() {
+fn a_rebuilt_chain_has_a_real_head_index() {
     let m = with_heads(
         marker(1, 10),
         vec![HeadUpdate {
@@ -620,7 +624,7 @@ fn a_test_built_chain_has_a_real_head_index() {
     );
     let mut appended = MarkerChain::new();
     appended.append(m).expect("appends");
-    let rebuilt = MarkerChain::from_parts_for_test(appended.entries().to_vec());
+    let rebuilt = MarkerChain::from_entries(appended.entries()).expect("valid chain rebuilds");
 
     assert_eq!(rebuilt.head(1, 2), appended.head(1, 2));
     assert!(rebuilt.head(1, 2).is_some(), "and it is actually populated");

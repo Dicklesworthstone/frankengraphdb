@@ -364,31 +364,44 @@ impl MarkerChain {
         }
     }
 
-    /// Build a chain directly from entries, bypassing every append-time check.
+    /// Reconstruct a chain from stored entries, validating the complete prefix.
     ///
-    /// **THE SECOND CONSTRUCTION PATH, ADDED DELIBERATELY AND ONLY WITH THE FIX
-    /// THAT COVERS IT** (fgdb-dcq7). `verify` used to check chain-hash continuity
-    /// and nothing else, so a chain containing a sequence gap, a non-advancing
-    /// command sequence, unsorted head updates or a head CAS that never held would
-    /// have passed it. That was LATENT rather than live precisely because no
-    /// constructor like this one existed: every chain in the world came through
-    /// `append`, which validates.
-    ///
-    /// Adding this makes the narrowness real, so it lands in the same change as the
-    /// `verify` that closes it — never in a state where the hole is reachable. The
-    /// identical shape bit the delta index earlier (ffbf187), where a
-    /// `from_parts_for_test` turned an unreachable check into a live hole.
-    ///
-    /// The head index is DERIVED from the entries here rather than left empty, so a
-    /// chain built this way answers `head` consistently with one built by appending.
-    #[doc(hidden)]
-    pub fn from_parts_for_test(entries: Vec<ChainedMarker>) -> Self {
-        let mut chain = Self::new();
+    /// Raw storage is an untrusted representation, not a second unchecked
+    /// constructor. Every entry therefore follows the same [`validate`](Self::validate)
+    /// path as [`append`](Self::append), both derived values must match, and the
+    /// head index advances only after that entry is accepted. An error returns no
+    /// partially trusted `MarkerChain`.
+    pub fn from_entries(entries: &[ChainedMarker]) -> Result<Self, ChainVerifyFailure> {
+        let mut rebuilt = Self::new();
         for entry in entries {
-            chain.advance_heads(&entry);
-            chain.entries.push(entry);
+            let commit_seq = entry.marker.commit_seq;
+            let chained = rebuilt
+                .validate(&entry.marker)
+                .map_err(|cause| ChainVerifyFailure {
+                    commit_seq,
+                    cause: ChainVerifyCause::Structure(cause),
+                })?;
+            if chained.chain_hash != entry.chain_hash || chained.marker_oid != entry.marker_oid {
+                return Err(ChainVerifyFailure {
+                    commit_seq,
+                    cause: ChainVerifyCause::DerivedValueMismatch,
+                });
+            }
+            rebuilt.adopt(chained).map_err(|cause| ChainVerifyFailure {
+                commit_seq,
+                cause: ChainVerifyCause::Structure(cause),
+            })?;
         }
-        chain
+        Ok(rebuilt)
+    }
+
+    /// Verify raw stored entries without constructing a usable chain.
+    ///
+    /// This is the discriminator for recovery and mutation fixtures: malformed
+    /// bytes may be represented as `ChainedMarker` values, but they never become
+    /// authoritative heads or a chain value.
+    pub fn verify_entries(entries: &[ChainedMarker]) -> Result<(), ChainVerifyFailure> {
+        Self::from_entries(entries).map(drop)
     }
 
     /// A branch's current head, if it has one.
@@ -509,30 +522,7 @@ impl MarkerChain {
     /// object — because markers carry no forward references, so a replica or a
     /// recovery pass can verify a stream PREFIX without waiting for the rest.
     pub fn verify(&self) -> Result<(), ChainVerifyFailure> {
-        let mut rebuilt = Self::new();
-        for entry in &self.entries {
-            let commit_seq = entry.marker.commit_seq;
-            let chained = rebuilt
-                .validate(&entry.marker)
-                .map_err(|cause| ChainVerifyFailure {
-                    commit_seq,
-                    cause: ChainVerifyCause::Structure(cause),
-                })?;
-            // Both derived values, not just the chain hash: the marker's identity
-            // IS its canonical bytes under the chain value, so a stored oid that
-            // disagrees is a different object wearing this one's place in history.
-            if chained.chain_hash != entry.chain_hash || chained.marker_oid != entry.marker_oid {
-                return Err(ChainVerifyFailure {
-                    commit_seq,
-                    cause: ChainVerifyCause::DerivedValueMismatch,
-                });
-            }
-            rebuilt.adopt(chained).map_err(|cause| ChainVerifyFailure {
-                commit_seq,
-                cause: ChainVerifyCause::Structure(cause),
-            })?;
-        }
-        Ok(())
+        Self::verify_entries(&self.entries)
     }
 }
 
