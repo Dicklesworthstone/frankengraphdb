@@ -857,8 +857,20 @@ run_ubs() {
 # ATTRIBUTED BY DIFFERENTIAL: the two changed delta files scanned alone moved
 # from 1 critical in this class to 0, while the full tracked-source scan moved
 # from 1071 total to 1070 and reported only this class changing, 124 -> 123.
+# MOVED 2026-07-30 (fgdb-reference-snapshot-provenance-9bvm, fgdb-ew8z):
+# timing-safe 810 -> 808, -2. Line-specific `ubs:ignore` dispositions now name
+# the public, non-authentication semantics of the pre-existing sketch before-image
+# digest and logical-template integrity digest comparisons. The new stream-prefix
+# provenance comparison carries the same narrow disposition, so it contributes
+# zero rather than increasing this class by one. These are content fingerprints
+# any holder can recompute, not MACs, credentials, bearer tokens, or other secrets.
+# WHY NOT MAKE THEM CONSTANT-TIME ANYWAY: doctrine #1 forbids the subtle/ring
+# helpers the scanner recommends, while this workspace's genuine constant-time
+# compares are explicit XOR-accumulate loops guarding real MACs. Using that shape
+# here would falsely claim secret material. ATTRIBUTION: the eight changed files
+# scan at 0 criticals; the full 175-source scan measures this class at exactly 808.
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=810"
+  "Secret/token comparisons without timing-safe equality=808"
   "panic!/unreachable!/todo!/unimplemented!=137"
   "JWT decode, validation bypass, or missing claim binding=123"
 )

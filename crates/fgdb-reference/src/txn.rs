@@ -391,6 +391,16 @@ impl Transaction {
         intent_semantics: ObjectId,
         commit_seq: CommitSeq,
     ) -> Result<TxnOutcome, TxnError> {
+        // THE WRITE-SIDE HALF of the provenance hole: `begin_at` validates against
+        // the database it began on, and this used to accept an arbitrary `&mut
+        // ReferenceDatabase`. If the before-images happened to match, a capability
+        // minted from database A committed its effects into B
+        // (fgdb-reference-snapshot-provenance-9bvm). Checked BEFORE the abort arm,
+        // because a transaction pointed at the wrong database has not earned a
+        // verdict about its own guards.
+        db.check_provenance(&self.snapshot)
+            .map_err(TxnError::Snapshot)?;
+
         if let Some(statement) = self.aborted_at {
             return Ok(TxnOutcome::Aborted { statement });
         }

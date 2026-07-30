@@ -40,8 +40,14 @@ use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId, LogicalDeltaTemplate,
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, DatabaseId, EId, GraphId, ObjectId, VId};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+/// Domain separation for the stream-prefix digest. A bare hash of the bytes would
+/// collide with any other transcript that happens to hash the same material.
+const PREFIX_DIGEST_DOMAIN: &[u8] = b"fgdb.reference.stream-prefix.v1";
+const LINEAGE_DIGEST_DOMAIN: &[u8] = b"fgdb.reference.snapshot-lineage.v1";
 
 /// A materialized vertex.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -290,6 +296,24 @@ pub enum ApplyError {
         expected: CommitSeq,
         offered: CommitSeq,
     },
+    /// The template's canonical bytes could not be produced, so the stream-prefix
+    /// digest cannot be computed.
+    ///
+    /// The current public constructors validate before returning a
+    /// `LogicalDeltaTemplate`, so this is a defensive boundary rather than a
+    /// claimed reachable path. `canonical_bytes` is nevertheless fallible, and
+    /// applying durable input must preserve its typed cause instead of turning a
+    /// future constructor or format change into a panic.
+    TemplateNotCanonical(fgdb_delta_types::CanonicalError),
+    /// The stream frontier had no recorded prefix digest.
+    ///
+    /// Private state construction makes this an internal contradiction today, but
+    /// folding an all-`0xff` sentinel into the next digest would turn corruption
+    /// into a plausible new history. The oracle fails closed and names the missing
+    /// sequence instead.
+    PrefixDigestMissing {
+        seq: CommitSeq,
+    },
     /// A template with no coordinate entries.
     ///
     /// Refused rather than treated as a successful no-op. An empty template
@@ -403,6 +427,14 @@ impl core::fmt::Display for ApplyError {
                 f,
                 "the stream's next commit is {expected:?}; {offered:?} is not it"
             ),
+            Self::TemplateNotCanonical(cause) => write!(
+                f,
+                "the template's canonical bytes could not be produced, so its \
+                 stream-prefix digest is unknowable: {cause}"
+            ),
+            Self::PrefixDigestMissing { seq } => {
+                write!(f, "the stream-prefix digest at {seq:?} is missing")
+            }
             Self::EmptyTemplate => {
                 write!(f, "a template with no coordinate entries is not a commit")
             }
@@ -944,6 +976,7 @@ impl ReferenceGraph {
                     .get(sketch_profile_oid)
                     .copied()
                     .unwrap_or([0u8; 32]);
+                // ubs:ignore — canonical sketch state is a public before-image, not authentication material.
                 if actual != *before_state_digest {
                     return Err(ApplyError::SketchBeforeMismatch {
                         profile: *sketch_profile_oid,
@@ -1230,6 +1263,54 @@ impl core::fmt::Display for BranchError {
 
 impl core::error::Error for BranchError {}
 
+/// Authority that identifies the database lineage allowed to spend a snapshot.
+///
+/// A standalone database holds an `Arc` in every snapshot, preventing
+/// allocator-address reuse after the issuer is dropped; equality is allocation
+/// identity, not the `()` value inside it. Durable replay instead supplies the
+/// plan's persisted [`DatabaseId`], so two independently materialized views of one
+/// database retain the same authority across recovery.
+#[derive(Clone)]
+enum DatabaseAuthority {
+    /// One standalone in-memory database lineage.
+    Ephemeral(Arc<()>),
+    /// A durable identity supplied by the recovery harness.
+    Durable(DatabaseId),
+}
+
+impl DatabaseAuthority {
+    fn fresh() -> Self {
+        Self::Ephemeral(Arc::new(()))
+    }
+
+    fn durable(database_id: DatabaseId) -> Self {
+        Self::Durable(database_id)
+    }
+}
+
+impl core::fmt::Debug for DatabaseAuthority {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Ephemeral(_) => f.write_str("EphemeralDatabaseAuthority"),
+            Self::Durable(_) => f.write_str("DurableDatabaseAuthority"),
+        }
+    }
+}
+
+impl PartialEq for DatabaseAuthority {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Ephemeral(left), Self::Ephemeral(right)) => Arc::ptr_eq(left, right),
+            (Self::Durable(left), Self::Durable(right)) => left == right,
+            (Self::Ephemeral(_), Self::Durable(_)) | (Self::Durable(_), Self::Ephemeral(_)) => {
+                false
+            }
+        }
+    }
+}
+
+impl Eq for DatabaseAuthority {}
+
 /// The materialized database: one [`ReferenceGraph`] per `(graph, branch)`.
 ///
 /// Keyed by coordinate because a template may carry entries for several, and
@@ -1237,6 +1318,16 @@ impl core::error::Error for BranchError {}
 /// error a single-coordinate materializer cannot even represent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReferenceDatabase {
+    /// Opaque authority standing in for the plan's durable `database_id`.
+    ///
+    /// A `Clone` deliberately shares this authority: it is another materialized
+    /// view of the same database lineage, and the history/head bases below decide
+    /// whether a particular snapshot is still valid there. A separately
+    /// constructed [`new`](Self::new) database gets a fresh authority even when
+    /// its current bytes happen to match; durable recovery must opt into the same
+    /// persisted ID through [`with_database_id`](Self::with_database_id). Content
+    /// equality alone is not authority to spend a transaction capability.
+    authority: DatabaseAuthority,
     coordinates: BTreeMap<(GraphId, BranchId), ReferenceGraph>,
     /// How each branch came to exist. Separate from the state map because a
     /// branch's origin is metadata about history, not part of the graph.
@@ -1252,6 +1343,22 @@ pub struct ReferenceDatabase {
     /// need the per-coordinate value. Two frontiers answering two different
     /// questions: "what has this branch seen" and "where is the stream".
     replay_frontier: CommitSeq,
+    /// The digest of the stream through each applied sequence.
+    ///
+    /// **THIS IS THE HISTORY COMPONENT OF SNAPSHOT PROVENANCE**
+    /// (fgdb-reference-snapshot-provenance-9bvm). A `Snapshot` used to carry only
+    /// `(graph, branch, high)`, so it was freely transferable: a snapshot minted
+    /// against one database could be read against ANOTHER, which silently answered
+    /// with its own state. With equal frontiers and divergent histories nothing
+    /// distinguished them at all.
+    ///
+    /// Keyed by sequence rather than being one running digest, and that is the
+    /// whole trick: the digest of the stream THROUGH `high` never changes as the
+    /// database advances, so a snapshot stays valid across later commits (which is
+    /// a law) while still being refused by a database whose history through `high`
+    /// differs. A single current digest would invalidate every snapshot on the
+    /// next commit.
+    prefix_digests: BTreeMap<CommitSeq, [u8; 32]>,
     /// What each coordinate applied, at which sequence, oldest first.
     ///
     /// **THIS IS THE HISTORY MODEL, and its shape is the whole point.** B1's
@@ -1488,20 +1595,61 @@ struct CommitRecord {
 
 /// A read capability pinned to one coordinate at one commit sequence.
 ///
-/// **THE SI ORACLE'S INVARIANT IS STRUCTURAL HERE, NOT CHECKED.** §15 asks for
-/// an oracle asserting that no read sees a sequence above the snapshot. A
-/// `Snapshot` is minted only by [`ReferenceDatabase::snapshot`] or
-/// [`ReferenceDatabase::snapshot_at`], both of which refuse a `high` above the
-/// coordinate's frontier, and [`ReferenceDatabase::read`] folds only records at
-/// or below it. There is no constructor and no mutator, so "a read above the
-/// snapshot" is not a condition to detect — it is a state the type cannot
-/// reach. The alternative, passing a bare sequence to every read, makes the
-/// invariant a discipline that every future call site has to remember.
+/// **THE SI ORACLE'S INVARIANT, and exactly how far the structural part reaches.**
+/// §15 asks for an oracle asserting that no read sees a sequence above the
+/// snapshot. Two mechanisms deliver it, and they are not the same strength:
+///
+/// * WITHIN one database it is structural. A `Snapshot` is minted only by
+///   [`snapshot`](ReferenceDatabase::snapshot),
+///   [`snapshot_at`](ReferenceDatabase::snapshot_at) or
+///   [`genesis_snapshot`](ReferenceDatabase::genesis_snapshot), each of which
+///   refuses a `high` above the coordinate's frontier, and there is no constructor
+///   and no mutator — so "a read above the snapshot" is a state the type cannot
+///   reach rather than a condition to detect.
+/// * ACROSS database values it is CHECKED, not structural, and the earlier version of
+///   this comment overclaimed by not saying so. A value with no provenance is
+///   freely transferable, so nothing stopped a snapshot from one database being
+///   read against another. It now carries an opaque issuing authority plus
+///   history and head bases, and both
+///   [`read`](ReferenceDatabase::read) and `Transaction::commit` revalidate it.
+///
+/// The distinction matters because the two failures look nothing alike: the first
+/// would be a logic error inside one history, the second silently answers a
+/// question about database A using database B's state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotKind {
+    /// A snapshot of a branch that existed when the capability was minted.
+    ExistingHead,
+    /// A capability to create a branch that was absent when it was minted.
+    ///
+    /// Kept distinct from `ExistingHead` at sequence zero: both see empty rows,
+    /// but only this arm may legitimately reach coordinate-creation conflict
+    /// certification when another handle of the same authority wins the race.
+    GenesisClaim,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     graph: GraphId,
     branch: BranchId,
     high: CommitSeq,
+    kind: SnapshotKind,
+    /// The database authority that minted this capability.
+    ///
+    /// A true [`ReferenceDatabase::clone`] shares it; a separately constructed
+    /// same-state database does not. This is what closes the empty/genesis case,
+    /// where there are no history bytes to distinguish two authorities.
+    authority: DatabaseAuthority,
+    /// The digest of the minting database's stream through `high`.
+    ///
+    /// Without it a snapshot was a bare `(graph, branch, high)` triple and
+    /// therefore FREELY TRANSFERABLE: reading it against a different database
+    /// silently answered with that database's state, and two databases with equal
+    /// frontiers but divergent histories were indistinguishable
+    /// (fgdb-reference-snapshot-provenance-9bvm).
+    basis: [u8; 32],
+    /// The exact branch ancestry that selects a head from that stream.
+    lineage_basis: [u8; 32],
 }
 
 impl Snapshot {
@@ -1540,6 +1688,24 @@ pub enum SnapshotError {
     /// "Create this branch" and "start a transaction on this branch" are
     /// different intentions, so the permissive reading is refused.
     CoordinateAlreadyExists { graph: GraphId, branch: BranchId },
+    /// The database says it applied `seq` but has no stream-prefix digest there.
+    ///
+    /// Private state construction makes this an internal contradiction today.
+    /// Surfaced as a typed refusal because silently substituting an "unknown"
+    /// sentinel would mint a capability with counterfeit provenance.
+    PrefixDigestMissing { seq: CommitSeq },
+    /// The snapshot was minted against a different history.
+    ///
+    /// The issuing database authority, stream prefix, or selected branch lineage
+    /// does not match this database at `high`. Refused rather than answered,
+    /// because answering means silently substituting one database's state for
+    /// another's — the reported failure was not a crash but a WRONG ANSWER, which
+    /// is the worse of the two.
+    ForeignSnapshot {
+        graph: GraphId,
+        branch: BranchId,
+        high: CommitSeq,
+    },
     /// A fork's parent is not in the database.
     ///
     /// Unreachable while branches are never removed, and kept deliberately: the
@@ -1584,6 +1750,18 @@ impl core::fmt::Display for SnapshotError {
             Self::CoordinateAlreadyExists { graph, branch } => {
                 write!(f, "coordinate {graph:?}/{branch:?} already exists")
             }
+            Self::PrefixDigestMissing { seq } => {
+                write!(f, "the stream-prefix digest at {seq:?} is missing")
+            }
+            Self::ForeignSnapshot {
+                graph,
+                branch,
+                high,
+            } => write!(
+                f,
+                "the snapshot of {graph:?}/{branch:?} at {high:?} belongs to a \
+                 different database authority, history, or branch head"
+            ),
             Self::BrokenLineage {
                 graph,
                 branch,
@@ -1610,6 +1788,7 @@ impl core::error::Error for SnapshotError {}
 impl Default for ReferenceDatabase {
     fn default() -> Self {
         Self {
+            authority: DatabaseAuthority::fresh(),
             coordinates: BTreeMap::new(),
             origins: BTreeMap::new(),
             applied_through: BTreeMap::new(),
@@ -1618,6 +1797,7 @@ impl Default for ReferenceDatabase {
             // from a Default impl on CommitSeq, so the starting point of the
             // stream is stated where it matters.
             replay_frontier: CommitSeq(0),
+            prefix_digests: BTreeMap::new(),
             history: BTreeMap::new(),
         }
     }
@@ -1626,6 +1806,36 @@ impl Default for ReferenceDatabase {
 impl ReferenceDatabase {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reconstruct one durable database authority.
+    ///
+    /// Every replay/open of the same database must receive its persisted
+    /// [`DatabaseId`]; independently authoritative databases must not share one.
+    /// Unlike [`new`](Self::new), this constructor intentionally makes separately
+    /// materialized values authority-compatible. Stream-prefix and exact-head
+    /// bases still reject divergent reconstructions.
+    pub fn with_database_id(database_id: DatabaseId) -> Self {
+        Self {
+            authority: DatabaseAuthority::durable(database_id),
+            ..Self::default()
+        }
+    }
+
+    /// The digest of the stream through `seq`.
+    ///
+    /// Zero is the empty stream, and every database's empty stream has the same
+    /// content basis. Snapshot authority remains separate: identical empty content
+    /// does not authorize one database to spend another's genesis capability.
+    ///
+    /// An unknown nonzero sequence is `None`, not an in-band sentinel that could
+    /// collide with a real digest.
+    pub fn prefix_digest(&self, seq: CommitSeq) -> Option<[u8; 32]> {
+        if seq.0 == 0 {
+            Some([0u8; 32])
+        } else {
+            self.prefix_digests.get(&seq).copied()
+        }
     }
 
     /// The stream's frontier — the highest sequence applied across every
@@ -1759,10 +1969,17 @@ impl ReferenceDatabase {
         let high = self
             .applied_through(graph, branch)
             .ok_or(SnapshotError::NoSuchCoordinate { graph, branch })?;
+        let basis = self
+            .prefix_digest(high)
+            .ok_or(SnapshotError::PrefixDigestMissing { seq: high })?;
         Ok(Snapshot {
             graph,
             branch,
             high,
+            kind: SnapshotKind::ExistingHead,
+            authority: self.authority.clone(),
+            basis,
+            lineage_basis: self.lineage_digest(graph, branch)?,
         })
     }
 
@@ -1793,6 +2010,12 @@ impl ReferenceDatabase {
             graph,
             branch,
             high: CommitSeq(0),
+            kind: SnapshotKind::GenesisClaim,
+            authority: self.authority.clone(),
+            // The empty stream and empty visible lineage have common content
+            // bases. `authority` above still distinguishes independent databases.
+            basis: [0u8; 32],
+            lineage_basis: [0u8; 32],
         })
     }
 
@@ -1817,10 +2040,17 @@ impl ReferenceDatabase {
                 requested: high,
             });
         }
+        let basis = self
+            .prefix_digest(high)
+            .ok_or(SnapshotError::PrefixDigestMissing { seq: high })?;
         Ok(Snapshot {
             graph,
             branch,
             high,
+            kind: SnapshotKind::ExistingHead,
+            authority: self.authority.clone(),
+            basis,
+            lineage_basis: self.lineage_digest(graph, branch)?,
         })
     }
 
@@ -1839,6 +2069,7 @@ impl ReferenceDatabase {
     /// says the recorded stream and the materialized state are two views of one
     /// fact rather than two facts that must be kept in step.
     pub fn read(&self, snapshot: &Snapshot) -> Result<ReferenceGraph, SnapshotError> {
+        self.check_provenance(snapshot)?;
         let mut graph = ReferenceGraph::new();
         // A genesis snapshot names a coordinate with no history. Sequence zero of
         // a branch that does not exist yet is the same empty graph as sequence
@@ -1874,6 +2105,94 @@ impl ReferenceDatabase {
             }
         }
         Ok(graph)
+    }
+
+    /// Refuse a snapshot outside this database authority or selected history/head.
+    ///
+    /// Authority closes the empty-stream case and keeps an independently rebuilt
+    /// same-state database from spending this capability. Within one authority
+    /// (including a true clone), the stream-prefix and exact-lineage bases answer
+    /// the remaining question: *does this value still select the history and head
+    /// that minted it?* Everything else is refused, including equal-frontier
+    /// divergent histories and forks whose lineage changed without a stream append.
+    pub fn check_provenance(&self, snapshot: &Snapshot) -> Result<(), SnapshotError> {
+        // ubs:ignore — non-secret stream-history content identity, not authentication material.
+        let prefix_matches = self.prefix_digest(snapshot.high) == Some(snapshot.basis);
+        if self.authority != snapshot.authority || !prefix_matches {
+            return Err(SnapshotError::ForeignSnapshot {
+                graph: snapshot.graph,
+                branch: snapshot.branch,
+                high: snapshot.high,
+            });
+        }
+        let lineage_matches = match snapshot.kind {
+            SnapshotKind::ExistingHead => self
+                .lineage_digest(snapshot.graph, snapshot.branch)
+                .is_ok_and(|basis| basis == snapshot.lineage_basis),
+            SnapshotKind::GenesisClaim => {
+                snapshot.high.0 == 0 && snapshot.lineage_basis == [0u8; 32]
+            }
+        };
+        if !lineage_matches {
+            return Err(SnapshotError::ForeignSnapshot {
+                graph: snapshot.graph,
+                branch: snapshot.branch,
+                high: snapshot.high,
+            });
+        }
+        Ok(())
+    }
+
+    /// Digest the exact ancestry that identifies a selected branch head.
+    ///
+    /// The stream prefix alone is insufficient because `fork_branch_at` changes
+    /// lineage without appending a template. Hashing only the effective read caps
+    /// is also insufficient: at sequence zero every cap is zero, and at a sequence
+    /// below two different fork boundaries both reads may currently fold the same
+    /// rows. A snapshot is still a capability for one selected head, so the raw
+    /// parent and fork boundary are part of the identity.
+    fn lineage_digest(&self, graph: GraphId, branch: BranchId) -> Result<[u8; 32], SnapshotError> {
+        let mut chain = Vec::new();
+        let mut key = (graph, branch);
+        loop {
+            let origin =
+                self.origins
+                    .get(&key)
+                    .copied()
+                    .ok_or(SnapshotError::NoSuchCoordinate {
+                        graph: key.0,
+                        branch: key.1,
+                    })?;
+            chain.push((key, origin));
+            match origin {
+                BranchOrigin::Genesis => break,
+                BranchOrigin::Fork { parent_branch, .. } => {
+                    key = (key.0, parent_branch);
+                }
+            }
+        }
+        chain.reverse();
+
+        let mut hasher = fgdb_crypto::Hasher::new();
+        hasher.update(LINEAGE_DIGEST_DOMAIN);
+        for ((ancestor_graph, ancestor_branch), origin) in chain {
+            hasher.update(&ancestor_graph.0.to_le_bytes());
+            hasher.update(&ancestor_branch.0.to_le_bytes());
+            match origin {
+                BranchOrigin::Genesis => {
+                    hasher.update(&[0]);
+                }
+                BranchOrigin::Fork {
+                    parent_branch,
+                    fork_boundary,
+                } => {
+                    hasher.update(&[1]);
+                    hasher.update(&parent_branch.0.to_le_bytes());
+                    hasher.update(&fork_boundary.0.to_le_bytes());
+                }
+            }
+        }
+        Ok(hasher.finalize().0)
     }
 
     /// The ancestor chain from genesis to `branch`, each capped at the sequence
@@ -2155,6 +2474,25 @@ impl ReferenceDatabase {
         self.preflight_template_schema(template)?;
         let mut candidate = self.clone();
         candidate.replay_frontier = commit_seq;
+        // Folded over the PREVIOUS prefix and this template's canonical bytes, so
+        // the value at each sequence is a function of the whole stream up to it —
+        // two databases agree here exactly when their histories agree.
+        let mut hasher = fgdb_crypto::Hasher::new();
+        hasher.update(PREFIX_DIGEST_DOMAIN);
+        let previous =
+            self.prefix_digest(self.replay_frontier)
+                .ok_or(ApplyError::PrefixDigestMissing {
+                    seq: self.replay_frontier,
+                })?;
+        hasher.update(&previous);
+        hasher.update(&commit_seq.0.to_le_bytes());
+        let canonical = template
+            .canonical_bytes()
+            .map_err(ApplyError::TemplateNotCanonical)?;
+        hasher.update(&canonical);
+        candidate
+            .prefix_digests
+            .insert(commit_seq, hasher.finalize().0);
         for entry in template.coordinate_entries() {
             let key = (entry.graph, entry.branch);
             // The sequence must ADVANCE from the pre-template state for every
@@ -2200,5 +2538,56 @@ impl ReferenceDatabase {
         }
         *self = candidate;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod provenance_internal_tests {
+    use super::{ApplyError, ReferenceDatabase, SnapshotError};
+    use fgdb_delta_types::{CoordinateEntry, LogicalDeltaTemplate, RelationId, SchemaEpoch};
+    use fgdb_types::{BranchId, CommitSeq, GraphId, ObjectId};
+
+    fn rowless_template() -> LogicalDeltaTemplate {
+        LogicalDeltaTemplate::build(
+            ObjectId([0x11; 32]),
+            [0x22; 32],
+            vec![CoordinateEntry {
+                graph: GraphId(1),
+                branch: BranchId(1),
+                relation: RelationId(1),
+                schema_epoch: SchemaEpoch(0),
+                schema_transition: None,
+                rows: vec![],
+            }],
+        )
+        .expect("template builds")
+    }
+
+    /// The prefix map is private, so only an internal test can construct this
+    /// contradiction. The refusal must happen before candidate state is installed.
+    #[test]
+    fn a_missing_frontier_digest_fails_closed_without_moving_state() {
+        let mut db = ReferenceDatabase::new();
+        db.replay_frontier = CommitSeq(1);
+        let settled = db.clone();
+
+        assert_eq!(
+            db.apply_template(&rowless_template(), CommitSeq(2)),
+            Err(ApplyError::PrefixDigestMissing { seq: CommitSeq(1) })
+        );
+        assert_eq!(db, settled);
+    }
+
+    #[test]
+    fn a_snapshot_cannot_mint_an_unknown_history_basis() {
+        let mut db = ReferenceDatabase::new();
+        db.apply_template(&rowless_template(), CommitSeq(1))
+            .expect("initial template applies");
+        db.prefix_digests.remove(&CommitSeq(1));
+
+        assert_eq!(
+            db.snapshot(GraphId(1), BranchId(1)),
+            Err(SnapshotError::PrefixDigestMissing { seq: CommitSeq(1) })
+        );
     }
 }

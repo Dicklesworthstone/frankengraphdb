@@ -23,7 +23,7 @@ use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, LabelId, LogicalDeltaTemplate, PropertyKeyId, RelationId,
     SchemaEpoch,
 };
-use fgdb_reference::ReferenceDatabase;
+use fgdb_reference::{ReferenceDatabase, SnapshotError};
 use fgdb_sim::{
     PreparedCapsule, ReplayError, commit_capsule, materialize, prepare_capsule, replay,
 };
@@ -218,9 +218,45 @@ fn materializing_twice_yields_identical_state() {
         for capsule in &three_commits() {
             commit_capsule(&mut coordinator, cx, capsule, vec![]).expect("commit");
         }
+        let first = materialize(cx, &coordinator).expect("first");
+        let second = materialize(cx, &coordinator).expect("second");
+        assert_eq!(first, second);
+
+        let snapshot = first.snapshot(GRAPH, BRANCH).expect("snapshot");
         assert_eq!(
-            materialize(cx, &coordinator).expect("first"),
-            materialize(cx, &coordinator).expect("second")
+            second.read(&snapshot).expect("same authority"),
+            first.read(&snapshot).expect("minting authority")
+        );
+    });
+}
+
+/// The replay authority includes the database directory, not just capsule keys.
+///
+/// Operators commonly configure several databases with the same key material.
+/// Equal empty content does not make those databases one authority: a genesis
+/// capability minted for one directory must not be spendable against another.
+#[test]
+fn independent_directories_do_not_share_snapshot_authority() {
+    let first_dir = scratch_dir("authority-first");
+    let second_dir = scratch_dir("authority-second");
+    under_lab(3, move |cx| {
+        let first_coordinator =
+            CommitCoordinator::open(&first_dir, keys()).expect("open first database");
+        let second_coordinator =
+            CommitCoordinator::open(&second_dir, keys()).expect("open second database");
+        let first = materialize(cx, &first_coordinator).expect("materialize first database");
+        let second = materialize(cx, &second_coordinator).expect("materialize second database");
+        let snapshot = first
+            .genesis_snapshot(GRAPH, BRANCH)
+            .expect("first genesis snapshot");
+
+        assert_eq!(
+            second.read(&snapshot),
+            Err(SnapshotError::ForeignSnapshot {
+                graph: GRAPH,
+                branch: BRANCH,
+                high: fgdb_types::CommitSeq(0),
+            })
         );
     });
 }

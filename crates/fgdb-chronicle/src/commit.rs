@@ -242,6 +242,16 @@ impl CommitCoordinator {
         &self.chain
     }
 
+    /// The directory whose durable stream this coordinator owns.
+    ///
+    /// Recovery/verification layers use its canonical identity to bind
+    /// independently materialized reference views to one database. They must not
+    /// reconstruct this path from capsule or log filenames, which are private
+    /// storage details.
+    pub fn database_dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Bytes of partial entry this open discarded as a torn tail.
     ///
     /// Reported rather than swallowed: discarding a tail is correct, but it is

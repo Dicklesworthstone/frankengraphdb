@@ -34,7 +34,7 @@ use fgdb_delta_types::{
 };
 use fgdb_reference::{ApplyError, ReferenceDatabase};
 use fgdb_types::context::CommitCx;
-use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
+use fgdb_types::ids::{DatabaseId, DatabaseSecurityNamespaceId, ObjectId};
 
 /// Object kind for a committed effect capsule. `0x0274` is the Appendix A
 /// reservation for `CommittedEffectCapsule`; it is spelled here as a constant
@@ -42,6 +42,9 @@ use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
 /// naming it in the type system would not compile (see the subset note on
 /// `CoordinateEntry`).
 pub const CAPSULE_OBJECT_KIND: u16 = 0x0274;
+
+/// Domain for the verification-layer stand-in for `RootSlot.database_id`.
+const REFERENCE_DATABASE_ID_DOMAIN: &[u8] = b"fgdb.reference.replay-database-id.v1";
 
 /// A template prepared for commit: its canonical bytes, the identity those
 /// bytes have, and the digest the marker will declare.
@@ -264,7 +267,7 @@ pub fn materialize(
 /// recovered chain, which holds only entries that reached D2 — so it can make
 /// the attestation honestly rather than needing a back door.
 pub fn replay(cx: &CommitCx, coordinator: &CommitCoordinator) -> Result<Replayed, ReplayError> {
-    let mut database = ReferenceDatabase::new();
+    let mut database = ReferenceDatabase::with_database_id(reference_database_id(cx, coordinator)?);
     let mut index = LocalDeltaBatchIndex::new();
     for entry in coordinator.chain().entries() {
         let commit_seq = entry.marker.commit_seq;
@@ -282,6 +285,7 @@ pub fn replay(cx: &CommitCx, coordinator: &CommitCoordinator) -> Result<Replayed
         let bytes = coordinator.read_capsule(*capsule_ref)?;
 
         let recomputed = template_digest(&bytes);
+        // ubs:ignore — canonical logical-effect integrity is public, not authentication material.
         if recomputed != *logical_delta_template_digest {
             return Err(ReplayError::TemplateDigestMismatch {
                 commit_seq,
@@ -318,4 +322,34 @@ pub fn replay(cx: &CommitCx, coordinator: &CommitCoordinator) -> Result<Replayed
             .map_err(|error| ReplayError::Index { commit_seq, error })?;
     }
     Ok(Replayed { database, index })
+}
+
+/// Bind every replay of one durable coordinator directory to the same reference
+/// database authority.
+///
+/// The current Chronicle slice has not yet threaded Appendix A's persisted
+/// `database_id` through `CommitCoordinator`, so the verification layer derives a
+/// deterministic stand-in from the canonical directory plus its complete capsule
+/// identity domain. The directory is included because two independent databases
+/// may deliberately use the same key/namespace profile. Once the root stack owns
+/// `DatabaseId`, this derivation is replaced by that field without changing
+/// `ReferenceDatabase`'s contract.
+fn reference_database_id(
+    cx: &CommitCx,
+    coordinator: &CommitCoordinator,
+) -> Result<DatabaseId, ReplayError> {
+    let canonical_dir = cx
+        .with_restriction(|| std::fs::canonicalize(coordinator.database_dir()))
+        .map_err(CommitError::from)?;
+    let keys = coordinator.keys();
+    let mut hasher = fgdb_crypto::Hasher::new();
+    hasher.update(REFERENCE_DATABASE_ID_DOMAIN);
+    hasher.update(&keys.k_oid);
+    hasher.update(&keys.namespace.0);
+    hasher.update(&keys.object_kind.to_le_bytes());
+    hasher.update(canonical_dir.as_os_str().as_encoded_bytes());
+    let digest = hasher.finalize();
+    let mut database_id = [0u8; 16];
+    database_id.copy_from_slice(&digest.0[..16]);
+    Ok(DatabaseId(database_id))
 }
