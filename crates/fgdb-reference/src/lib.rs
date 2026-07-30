@@ -1191,16 +1191,17 @@ pub struct ReferenceDatabase {
     history: BTreeMap<(GraphId, BranchId), Vec<CommitRecord>>,
 }
 
-/// What a delta row writes, for the purpose of deciding whether two
-/// transactions conflict.
+/// What a transaction reports when commit certification refuses it.
 ///
 /// **A CONFLICT DOMAIN IS COARSER THAN A ROW AND FINER THAN A BRANCH,** and
-/// which is which is a semantic decision per family rather than a mechanical
-/// one. Two rows collide when they name the same key; anything they do not name
-/// cannot collide. That makes the omissions the interesting part, so every
-/// family is accounted for explicitly and [`DeltaRow::conflict_keys`] has no
-/// wildcard arm — a new row family is a compile error here rather than a silent
-/// hole that lets two conflicting writes both commit.
+/// which is which is a semantic decision per family rather than a mechanical one.
+/// Most variants are ordinary first-committer-wins write domains: two rows
+/// collide when they name the same key. [`EndpointExistence`](Self::EndpointExistence)
+/// is different because its shared/exclusive access mode cannot be represented
+/// by set intersection; it is produced only by the constraint-certification
+/// summary below. That makes omissions the interesting part, so both collectors
+/// have no wildcard arm — a new row family is a compile error rather than a
+/// silent hole that lets two conflicting transactions both commit.
 ///
 /// [`DeltaRow::conflict_keys`]: ReferenceDatabase::conflict_keys_since
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1231,6 +1232,14 @@ pub enum ConflictKey {
     /// rather than about its contents, which is exactly why element keys cannot
     /// catch two racing genesis transactions whose effects happen to be disjoint.
     CoordinateExistence,
+    /// One vertex's continued existence as an edge endpoint.
+    ///
+    /// Reported by the asymmetric constraint-certification rule: creating an
+    /// edge takes shared access to both endpoints, while deleting a vertex takes
+    /// exclusive access to this domain. This key is deliberately NOT emitted by
+    /// [`collect_conflict_keys`]. Putting it in an edge's ordinary write set
+    /// would make two unrelated edge creations at one hub conflict.
+    EndpointExistence(VId),
     /// The coordinate's schema and constraint roots, which the `Schema` and
     /// `Constraint` families both move. One key rather than two, because a
     /// transaction that moves the schema root and one that moves the constraint
@@ -1239,12 +1248,94 @@ pub enum ConflictKey {
     CoordinateRoots,
 }
 
-/// Add everything `row` writes to `keys`.
+/// The commit-time domains that cannot be represented by one ordinary write set.
+///
+/// Creating an edge reads the continued existence of both endpoints (shared);
+/// deleting a vertex invalidates that fact (exclusive). Shared/shared is legal,
+/// while either shared/exclusive ordering is a conflict. Keeping the modes in
+/// separate sets is the part that prevents hub vertices from becoming
+/// serialization points.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CertificationSummary {
+    writes: BTreeSet<ConflictKey>,
+    endpoint_shared: BTreeSet<VId>,
+    endpoint_exclusive: BTreeSet<VId>,
+}
+
+impl CertificationSummary {
+    pub(crate) fn from_transaction(rows: &[DeltaRow], claims_genesis: bool) -> Self {
+        let mut summary = Self::default();
+        if claims_genesis {
+            summary.writes.insert(ConflictKey::CoordinateExistence);
+        }
+        for row in rows {
+            summary.collect_row(row);
+        }
+        summary
+    }
+
+    fn collect_row(&mut self, row: &DeltaRow) {
+        collect_conflict_keys(row, &mut self.writes);
+        match row {
+            DeltaRow::CreateEdge { src, dst, .. } => {
+                self.endpoint_shared.extend([*src, *dst]);
+            }
+            DeltaRow::DeleteVertex { vid, .. } => {
+                self.endpoint_exclusive.insert(*vid);
+            }
+            DeltaRow::CreateVertex { .. }
+            | DeltaRow::DeleteEdge { .. }
+            | DeltaRow::LabelMembership { .. }
+            | DeltaRow::Property { .. }
+            | DeltaRow::ValidTime { .. }
+            | DeltaRow::Counter { .. }
+            | DeltaRow::Escrow { .. }
+            | DeltaRow::Sketch { .. }
+            | DeltaRow::Schema { .. }
+            | DeltaRow::Constraint { .. } => {}
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.writes.is_empty()
+            && self.endpoint_shared.is_empty()
+            && self.endpoint_exclusive.is_empty()
+    }
+
+    /// Conflicts between this candidate and effects committed since its basis.
+    pub(crate) fn conflicts_with(&self, committed: &Self) -> Vec<ConflictKey> {
+        let mut conflicts: BTreeSet<ConflictKey> = self
+            .writes
+            .intersection(&committed.writes)
+            .copied()
+            .collect();
+
+        // Shared/shared is intentionally absent. Exclusive/exclusive is already
+        // the ordinary DeleteVertex write/write collision on the vertex element;
+        // adding this reporting key too would make one cause appear twice.
+        for vid in self
+            .endpoint_shared
+            .intersection(&committed.endpoint_exclusive)
+            .chain(
+                self.endpoint_exclusive
+                    .intersection(&committed.endpoint_shared),
+            )
+        {
+            conflicts.insert(ConflictKey::EndpointExistence(*vid));
+        }
+        conflicts.into_iter().collect()
+    }
+}
+
+/// Add everything `row` ordinarily writes to `keys`.
 ///
 /// TOTAL OVER THE ROW FAMILIES BY CONSTRUCTION: no wildcard arm, so a new
 /// `DeltaRow` variant stops this crate compiling instead of quietly writing
-/// nothing. A conflict rule that silently omits a family does not report a
-/// missing conflict — it reports "no conflict", and both transactions commit.
+/// nothing. Asymmetric constraint accesses are collected separately by
+/// [`CertificationSummary`]; putting a shared dependency in this set would turn
+/// it into an exclusive write. A conflict rule that silently omits a family does
+/// not report a missing conflict — it reports "no conflict", and both
+/// transactions commit.
 pub fn collect_conflict_keys(row: &DeltaRow, keys: &mut BTreeSet<ConflictKey>) {
     match row {
         DeltaRow::CreateVertex { vid, .. } => {
@@ -1484,7 +1575,21 @@ impl ReferenceDatabase {
         branch: BranchId,
         since: CommitSeq,
     ) -> Result<BTreeSet<ConflictKey>, SnapshotError> {
-        let mut keys = BTreeSet::new();
+        Ok(self.certification_since(graph, branch, since)?.writes)
+    }
+
+    /// Full write plus asymmetric-constraint summary visible after `since`.
+    ///
+    /// This walks the same capped lineage as [`conflict_keys_since`](Self::conflict_keys_since).
+    /// Constraint certification that ignored inherited commits would recreate
+    /// the historical-child apply-error window under a different key family.
+    pub(crate) fn certification_since(
+        &self,
+        graph: GraphId,
+        branch: BranchId,
+        since: CommitSeq,
+    ) -> Result<CertificationSummary, SnapshotError> {
+        let mut summary = CertificationSummary::default();
         let frontier = self
             .applied_through(graph, branch)
             .ok_or(SnapshotError::NoSuchCoordinate { graph, branch })?;
@@ -1500,7 +1605,7 @@ impl ReferenceDatabase {
             .and_then(|records| records.first())
             .is_some_and(|first| first.seq.0 > since.0)
         {
-            keys.insert(ConflictKey::CoordinateExistence);
+            summary.writes.insert(ConflictKey::CoordinateExistence);
         }
 
         for (key, cap) in self.lineage(graph, branch, frontier)? {
@@ -1515,11 +1620,11 @@ impl ReferenceDatabase {
                     break;
                 }
                 for row in &record.entry.rows {
-                    collect_conflict_keys(row, &mut keys);
+                    summary.collect_row(row);
                 }
             }
         }
-        Ok(keys)
+        Ok(summary)
     }
 
     /// How many commits this coordinate recorded **itself**.

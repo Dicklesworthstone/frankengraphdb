@@ -67,6 +67,20 @@ fn set(vid: u128, value: i64) -> Statement {
     }])
 }
 
+fn add_edge(eid: u128, src: u128, dst: u128) -> Statement {
+    Statement::new(vec![Intent::AddEdge {
+        eid: EId(eid),
+        src: VId(src),
+        etype: REL,
+        dst: VId(dst),
+        props: vec![],
+    }])
+}
+
+fn delete_vertex(vid: u128) -> Statement {
+    Statement::new(vec![Intent::DeleteVertex { vid: VId(vid) }])
+}
+
 /// Commit a transaction that is expected to succeed, at `seq`.
 fn commit_ok(db: &mut ReferenceDatabase, txn: Transaction, seq: u64) -> (CommitSeq, usize, usize) {
     txn.commit(db, REL, SEMANTICS, CommitSeq(seq))
@@ -312,6 +326,172 @@ fn a_concurrent_commit_on_another_branch_never_conflicts() {
 
     assert_eq!(prop_of(&db, MAIN, 1), Some(10));
     assert_eq!(prop_of(&db, OTHER, 1), Some(20));
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint-existence constraint certification
+// ---------------------------------------------------------------------------
+
+fn assert_edge_delete_race_is_a_conflict(
+    src: u128,
+    dst: u128,
+    deleted: u128,
+    edge_commits_first: bool,
+    case: &str,
+) {
+    let mut db = ReferenceDatabase::new();
+    seed(&mut db, &[(1, 0), (2, 0), (3, 0)]);
+
+    let mut edge = Transaction::begin(&db, GRAPH, MAIN).expect("edge begin");
+    let mut delete = Transaction::begin(&db, GRAPH, MAIN).expect("delete begin");
+    edge.execute(&[add_edge(10, src, dst)])
+        .expect("edge executes");
+    delete
+        .execute(&[delete_vertex(deleted)])
+        .expect("delete executes");
+
+    let loser = if edge_commits_first {
+        commit_ok(&mut db, edge, 2);
+        delete
+    } else {
+        commit_ok(&mut db, delete, 2);
+        edge
+    };
+    let before = db.clone();
+    let commits_before = db.recorded_commits(GRAPH, MAIN);
+
+    let outcome = loser
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
+        .expect("a lost endpoint race is an outcome, not an apply error");
+    assert_eq!(
+        outcome,
+        TxnOutcome::Conflicted {
+            conflicts: vec![ConflictKey::EndpointExistence(VId(deleted))],
+        },
+        "{case}: the endpoint-existence dependency must lose explicitly"
+    );
+    assert_eq!(
+        db, before,
+        "{case}: the losing commit leaves materialized state and history unchanged"
+    );
+    assert_eq!(
+        db.recorded_commits(GRAPH, MAIN),
+        commits_before,
+        "{case}: the losing commit appends no history record"
+    );
+}
+
+/// Edge creation depends on BOTH endpoints continuing to exist, regardless of
+/// which endpoint is the canonical source.
+///
+/// The durable reference row always stores canonical `src` and `dst`; the plan's
+/// undirected edge posture is a view/semantics flag over that same row, not a
+/// second materialization shape. Exercising deletion of each endpoint therefore
+/// covers directed orientation and the undirected view without inventing a
+/// direction bit the oracle does not have. The self-loop case additionally
+/// proves that taking the same shared dependency twice is harmless.
+#[test]
+fn endpoint_existence_conflicts_cover_both_commit_orders_and_edge_views() {
+    for (case, src, dst, deleted) in [
+        ("canonical source", 1, 2, 1),
+        ("canonical destination", 1, 2, 2),
+        ("self-loop", 1, 1, 1),
+    ] {
+        assert_edge_delete_race_is_a_conflict(src, dst, deleted, true, case);
+        assert_edge_delete_race_is_a_conflict(src, dst, deleted, false, case);
+    }
+}
+
+/// The endpoint domain is exact. Deleting an unrelated vertex must not turn a
+/// concurrent edge insertion into a branch-wide or adjacency-wide conflict.
+#[test]
+fn deleting_an_unrelated_vertex_does_not_conflict_with_edge_creation() {
+    for edge_commits_first in [true, false] {
+        let mut db = ReferenceDatabase::new();
+        seed(&mut db, &[(1, 0), (2, 0), (3, 0)]);
+        let mut edge = Transaction::begin(&db, GRAPH, MAIN).expect("edge begin");
+        let mut delete = Transaction::begin(&db, GRAPH, MAIN).expect("delete begin");
+        edge.execute(&[add_edge(10, 1, 2)]).expect("edge executes");
+        delete
+            .execute(&[delete_vertex(3)])
+            .expect("delete executes");
+
+        if edge_commits_first {
+            commit_ok(&mut db, edge, 2);
+            commit_ok(&mut db, delete, 3);
+        } else {
+            commit_ok(&mut db, delete, 2);
+            commit_ok(&mut db, edge, 3);
+        }
+
+        let graph = db.graph(GRAPH, MAIN).expect("coordinate exists");
+        assert!(graph.edge(EId(10)).is_some(), "the edge committed");
+        assert!(
+            graph.vertex(VId(3)).is_none(),
+            "the unrelated deletion committed"
+        );
+        assert_eq!(
+            db.recorded_commits(GRAPH, MAIN),
+            3,
+            "both commits are durable"
+        );
+    }
+}
+
+/// Mutating an endpoint without deleting it preserves the existence fact. This
+/// catches an over-broad exclusive rule that treats every vertex write as an
+/// endpoint invalidation.
+#[test]
+fn writing_an_endpoint_property_does_not_conflict_with_edge_creation() {
+    for edge_commits_first in [true, false] {
+        let mut db = ReferenceDatabase::new();
+        seed(&mut db, &[(1, 0), (2, 0)]);
+        let mut edge = Transaction::begin(&db, GRAPH, MAIN).expect("edge begin");
+        let mut property = Transaction::begin(&db, GRAPH, MAIN).expect("property begin");
+        edge.execute(&[add_edge(10, 1, 2)]).expect("edge executes");
+        property.execute(&[set(1, 7)]).expect("property executes");
+
+        if edge_commits_first {
+            commit_ok(&mut db, edge, 2);
+            commit_ok(&mut db, property, 3);
+        } else {
+            commit_ok(&mut db, property, 2);
+            commit_ok(&mut db, edge, 3);
+        }
+
+        assert_eq!(prop_of(&db, MAIN, 1), Some(7));
+        assert!(
+            db.graph(GRAPH, MAIN)
+                .and_then(|graph| graph.edge(EId(10)))
+                .is_some(),
+            "the endpoint remained valid for the edge"
+        );
+    }
+}
+
+/// Shared endpoint-existence access is genuinely shared: two inserts at one hub
+/// may both commit. Treating an endpoint key as an ordinary write would pass the
+/// refusal law and fail this one by turning every supernode into a serialization
+/// point.
+#[test]
+fn concurrent_edge_creations_at_one_vertex_do_not_conflict() {
+    let mut db = ReferenceDatabase::new();
+    seed(&mut db, &[(1, 0), (2, 0), (3, 0)]);
+    let mut first = Transaction::begin(&db, GRAPH, MAIN).expect("first begin");
+    let mut second = Transaction::begin(&db, GRAPH, MAIN).expect("second begin");
+    first
+        .execute(&[add_edge(10, 1, 2)])
+        .expect("first edge executes");
+    second
+        .execute(&[add_edge(11, 1, 3)])
+        .expect("second edge executes");
+
+    commit_ok(&mut db, first, 2);
+    commit_ok(&mut db, second, 3);
+
+    let graph = db.graph(GRAPH, MAIN).expect("coordinate exists");
+    assert!(graph.edge(EId(10)).is_some());
+    assert!(graph.edge(EId(11)).is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -658,17 +838,22 @@ fn every_row_family_names_a_conflict_key() {
     );
     assert_eq!(rows.len(), 12, "a new row family must be added here too");
 
-    // AND NO ROW MAY NAME CoordinateExistence. It is a claim about the coordinate
-    // rather than about its contents — only a genesis transaction asserts it. A
-    // row that emitted it would make every ordinary commit collide with every
-    // genesis claim, which is a phantom conflict rather than a missed one, so it
-    // would show up as unexplained refusals rather than as lost updates.
+    // AND NO ROW MAY NAME either special certification key through the ordinary
+    // write-set collector. CoordinateExistence is a claim about the coordinate,
+    // while EndpointExistence has shared/exclusive access modes that a plain set
+    // cannot represent. Emitting either here creates phantom conflicts.
     for (name, row) in &rows {
         let mut keys = BTreeSet::new();
         collect_conflict_keys(row, &mut keys);
         assert!(
             !keys.contains(&ConflictKey::CoordinateExistence),
             "{name} names coordinate existence, which no row may"
+        );
+        assert!(
+            !keys
+                .iter()
+                .any(|key| matches!(key, ConflictKey::EndpointExistence(_))),
+            "{name} puts an asymmetric endpoint dependency in the ordinary write set"
         );
     }
 }

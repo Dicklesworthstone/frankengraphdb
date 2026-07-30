@@ -24,11 +24,19 @@
 //! work no rule requires losing; allowing both is lost update. The rule is
 //! evaluated at commit time against the branch's recorded history, which is why
 //! it needed the history model to exist.
+//!
+//! **CONSTRAINT CERTIFICATION IS A SEPARATE DOMAIN.** Edge creation depends on
+//! both endpoints continuing to exist, while vertex deletion invalidates that
+//! fact. That dependency is shared/exclusive rather than an ordinary write key:
+//! two edge creations at one hub may both commit, but either ordering of edge
+//! creation versus endpoint deletion must refuse the loser before durable apply.
+//! This is endpoint-specific referential integrity, not a claim that this SI
+//! oracle protects general adjacency or neighbour phantoms.
 
 use crate::intents::{Outcome, Statement, StatementFailure, evaluate};
 use crate::{
-    ApplyError, ConflictKey, ReferenceDatabase, ReferenceGraph, Snapshot, SnapshotError, Vertex,
-    collect_conflict_keys,
+    ApplyError, CertificationSummary, ConflictKey, ReferenceDatabase, ReferenceGraph, Snapshot,
+    SnapshotError, Vertex, collect_conflict_keys,
 };
 use fgdb_delta_types::{
     CanonicalError, CoordinateEntry, DeltaRow, ElementId, LogicalDeltaTemplate, PropertyKeyId,
@@ -81,9 +89,10 @@ pub enum TxnOutcome {
         effects: usize,
         statement_failures: usize,
     },
-    /// Refused: something this transaction wrote was also written after its
-    /// snapshot. The keys are reported because "you conflicted" is not
-    /// actionable and "you conflicted on this vertex" is.
+    /// Refused: either an ordinary write collided or an asymmetric constraint
+    /// dependency was invalidated after this transaction's snapshot. The keys
+    /// are reported because "you conflicted" is not actionable and "your edge
+    /// endpoint was deleted" is.
     Conflicted { conflicts: Vec<ConflictKey> },
     /// A statement aborted the transaction. Nothing durable, and NOT a
     /// conflict: the transaction did exactly what its guard told it to.
@@ -284,7 +293,11 @@ impl Transaction {
         self.aborted_at.is_some()
     }
 
-    /// Every conflict key this transaction has written so far.
+    /// Every ordinary first-committer-wins key this transaction has written.
+    ///
+    /// Shared endpoint-existence dependencies deliberately do not appear here:
+    /// they participate in commit certification with access modes, while this
+    /// set is also the ordinary SI write set consumed by the SSI trace.
     pub fn write_set(&self) -> BTreeSet<ConflictKey> {
         let mut keys = BTreeSet::new();
         if self.claims_genesis {
@@ -363,20 +376,20 @@ impl Transaction {
             return Ok(TxnOutcome::Aborted { statement });
         }
 
-        let mine = self.write_set();
+        let mine = CertificationSummary::from_transaction(&self.effects, self.claims_genesis);
         if !mine.is_empty() {
             // A coordinate that does not exist yet has nothing to conflict with,
             // and asking is a NoSuchCoordinate refusal rather than an empty set —
             // so the genesis case is answered here instead of failing open.
-            let theirs = match db.conflict_keys_since(self.graph, self.branch, self.snapshot.high())
+            let theirs = match db.certification_since(self.graph, self.branch, self.snapshot.high())
             {
-                Ok(keys) => keys,
+                Ok(summary) => summary,
                 Err(SnapshotError::NoSuchCoordinate { .. }) if self.claims_genesis => {
-                    BTreeSet::new()
+                    CertificationSummary::default()
                 }
                 Err(error) => return Err(TxnError::Snapshot(error)),
             };
-            let conflicts: Vec<ConflictKey> = mine.intersection(&theirs).copied().collect();
+            let conflicts = mine.conflicts_with(&theirs);
             if !conflicts.is_empty() {
                 return Ok(TxnOutcome::Conflicted { conflicts });
             }
