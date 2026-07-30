@@ -12,6 +12,7 @@
 //! file describes itself; the commit *stream* says which object it must be. A
 //! header that disagrees can only fail.
 
+use fgdb_chronicle::IdentifiedObject;
 use fgdb_chronicle::capsule::{
     CAPSULE_MAGIC, CapsuleError, CapsuleProfile, decode_container, encode_container, recover, seal,
 };
@@ -99,7 +100,7 @@ fn different_plaintext_is_a_different_object() {
 #[test]
 fn losing_up_to_the_budget_still_recovers() {
     let capsule = sealed();
-    let budget = capsule.descriptor.claimed_erasure_budget();
+    let budget = profile().erasure_budget();
     assert!(budget > 0, "a zero budget would make this test vacuous");
 
     // Failures are collected so the sweep reports EVERY loss count that
@@ -127,7 +128,7 @@ fn losing_up_to_the_budget_still_recovers() {
 #[test]
 fn losing_one_more_than_the_budget_fails_closed() {
     let capsule = sealed();
-    let budget = capsule.descriptor.claimed_erasure_budget();
+    let budget = profile().erasure_budget();
     let surviving: Vec<Vec<u8>> = capsule.symbols[budget + 1..].to_vec();
     let result = recover_from(&surviving, &capsule.descriptor, capsule.object_id);
     assert!(
@@ -146,7 +147,7 @@ fn losing_one_more_than_the_budget_fails_closed() {
 #[test]
 fn corrupt_symbols_cost_the_same_as_lost_ones() {
     let capsule = sealed();
-    let budget = capsule.descriptor.claimed_erasure_budget();
+    let budget = profile().erasure_budget();
 
     let mut damaged = capsule.symbols.clone();
     for symbol in damaged.iter_mut().take(budget) {
@@ -245,6 +246,59 @@ fn a_rewritten_transfer_length_is_refused() {
     ));
 }
 
+/// The declared repair budget is fixed by the authenticated `fec_profile`.
+/// Rewriting the redundant count must therefore fail rather than changing a
+/// durability decision without changing the `EncodingId`.
+#[test]
+fn a_rewritten_repair_symbols_is_refused() {
+    let capsule = sealed();
+    let mut descriptor = capsule.descriptor.clone();
+    descriptor.repair_symbols = descriptor.repair_symbols.wrapping_add(1);
+    let declared_repair_symbols = descriptor.repair_symbols;
+    let registered_repair_symbols = capsule.descriptor.repair_symbols;
+    assert!(
+        matches!(
+            recover_from(&capsule.symbols, &descriptor, capsule.object_id),
+            Err(CapsuleError::RepairBudgetMismatch {
+                fec_profile,
+                declared_repair_symbols: declared,
+                registered_repair_symbols: registered,
+            }) if fec_profile == capsule.descriptor.fec_profile
+                && declared == declared_repair_symbols
+                && registered == registered_repair_symbols
+        ),
+        "a repair-symbol count that disagrees with the authenticated FEC profile \
+         must be refused"
+    );
+}
+
+/// Recomputing the `EncodingId` does not let a frame invent a new repair
+/// policy. The profile registry is closed independently of descriptor
+/// self-consistency.
+#[test]
+fn a_self_consistent_unregistered_fec_profile_is_refused() {
+    let capsule = sealed();
+    let mut descriptor = capsule.descriptor.clone();
+    descriptor.fec_profile = 2;
+
+    let identified = IdentifiedObject::new(&K_OID, NAMESPACE, KIND, &[], &plaintext());
+    let protected = identified.protect(&DEK, descriptor.cipher_descriptor(), &plaintext());
+    assert_eq!(
+        protected.ciphertext_id().0,
+        descriptor.ciphertext_id,
+        "the control must preserve the capsule's authenticated ciphertext"
+    );
+    descriptor.encoding_id = protected
+        .encode(descriptor.encoding_descriptor())
+        .encoding_id()
+        .0;
+
+    assert!(matches!(
+        recover_from(&capsule.symbols, &descriptor, capsule.object_id),
+        Err(CapsuleError::UnsupportedFecProfile { fec_profile: 2 })
+    ));
+}
+
 /// Recovery proves it produced the object that was ASKED for, not merely some
 /// object. The expected id comes from the commit marker, so a capsule that is
 /// internally perfect but belongs to a different commit is still refused.
@@ -305,7 +359,7 @@ fn an_unsupported_container_version_is_refused() {
 fn a_container_truncated_in_its_symbols_still_recovers_within_budget() {
     let capsule = sealed();
     let bytes = encode_container(&capsule);
-    let budget = capsule.descriptor.claimed_erasure_budget();
+    let budget = profile().erasure_budget();
 
     // Cut one symbol's worth of bytes off the end, well within the budget.
     let symbol_frame = 4 + capsule.symbols[0].len();

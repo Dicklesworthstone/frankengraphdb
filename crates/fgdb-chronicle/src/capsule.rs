@@ -72,6 +72,8 @@ pub struct CapsuleDescriptor {
     pub source_block_count: u16,
     pub symbol_auth_profile: u16,
     pub encoding_id: [u8; 32],
+    /// Redundant V1 inventory count. Recovery accepts it only when it equals
+    /// the registered budget selected by the authenticated `fec_profile`.
     pub repair_symbols: u32,
 }
 
@@ -117,51 +119,43 @@ impl CapsuleDescriptor {
             symbol_auth_profile: self.symbol_auth_profile,
         }
     }
-
-    /// How many symbols may be lost or corrupt and still recover, **as the
-    /// container claims**.
-    ///
-    /// UNAUTHENTICATED — do not make a durability decision on this. Every other
-    /// field of this descriptor is covered by an integrity transcript: the
-    /// cipher fields ride the AEAD's AAD, and the encoding fields plus
-    /// `ciphertext_id` ride the `EncodingId` that
-    /// [`recover`](super::capsule::recover) recomputes. `repair_symbols` rides
-    /// neither, so a rewritten container can name any budget it likes.
-    ///
-    /// It is not removable the way the duplicated length was (fgdb-a6cv): the
-    /// original repair count is genuinely NOT derivable from a damaged
-    /// container, because the surviving symbol count cannot distinguish "eight
-    /// repair symbols, all lost" from "no repair symbols". A scrub needs the
-    /// declared figure to say how many symbols are *missing* at all. So the fix
-    /// is to authenticate it, which means putting it inside a transcript —
-    /// tracked as fgdb-km17.
-    ///
-    /// Until then this is advisory: safe for a test that sealed the capsule
-    /// itself and knows the profile, not safe for a recovery path deciding
-    /// Degraded versus Lost.
-    pub fn claimed_erasure_budget(&self) -> usize {
-        self.repair_symbols as usize
-    }
 }
 
 /// The coding profile a capsule is written under.
 ///
-/// `repair_symbols` is priced by the caller because the plan makes the repair
-/// budget a policy decision per reconstructibility tier, not a constant.
+/// The plan makes repair overhead a registered `fec_profile` decision. Keeping
+/// these fields private prevents callers from manufacturing a profile whose
+/// repair count disagrees with its authenticated profile id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapsuleProfile {
-    pub symbol_size: u16,
-    pub repair_symbols: u32,
+    fec_profile: u16,
+    symbol_size: u16,
+    repair_symbols: u32,
 }
 
 impl CapsuleProfile {
-    /// A profile that survives losing a quarter of a small object's symbols.
-    /// Deliberately explicit rather than a `Default`: a durability parameter
-    /// nobody chose is a durability parameter nobody reviewed.
+    const BALANCED: Self = Self {
+        fec_profile: 1,
+        symbol_size: 256,
+        repair_symbols: 8,
+    };
+
+    /// The currently registered full-repair capsule profile. Deliberately
+    /// explicit rather than a `Default`: a durability parameter nobody chose
+    /// is a durability parameter nobody reviewed.
     pub const fn balanced() -> Self {
-        Self {
-            symbol_size: 256,
-            repair_symbols: 8,
+        Self::BALANCED
+    }
+
+    /// The registered number of symbols this trusted write policy adds.
+    pub const fn erasure_budget(self) -> usize {
+        self.repair_symbols as usize
+    }
+
+    fn registered(fec_profile: u16) -> Option<Self> {
+        match fec_profile {
+            1 => Some(Self::BALANCED),
+            _ => None,
         }
     }
 }
@@ -178,6 +172,17 @@ pub enum CapsuleError {
     /// A declared identity does not recompute from its descriptors — the frame
     /// was rewritten.
     DescriptorMismatch(IdentityMismatch),
+    /// The authenticated descriptor names no registered repair policy.
+    UnsupportedFecProfile {
+        fec_profile: u16,
+    },
+    /// The V1 container's redundant repair count disagrees with the registered
+    /// policy selected by its authenticated `fec_profile`.
+    RepairBudgetMismatch {
+        fec_profile: u16,
+        declared_repair_symbols: u32,
+        registered_repair_symbols: u32,
+    },
     /// Recovery failed: too many symbols lost or corrupt, or the recovered
     /// bytes are not the object that was asked for.
     Recovery(SymbolizeError),
@@ -197,6 +202,19 @@ impl core::fmt::Display for CapsuleError {
                     "capsule descriptors are not self-consistent: {mismatch:?}"
                 )
             }
+            Self::UnsupportedFecProfile { fec_profile } => {
+                write!(f, "unsupported capsule FEC profile {fec_profile}")
+            }
+            Self::RepairBudgetMismatch {
+                fec_profile,
+                declared_repair_symbols,
+                registered_repair_symbols,
+            } => write!(
+                f,
+                "capsule FEC profile {fec_profile} requires \
+                 {registered_repair_symbols} repair symbols, but the container \
+                 declares {declared_repair_symbols}"
+            ),
             Self::Recovery(error) => write!(f, "capsule recovery failed: {error:?}"),
         }
     }
@@ -311,7 +329,7 @@ pub fn seal(
     let protected_len = protected.protected_bytes().len();
 
     let encoding_descriptor = EncodingDescriptor {
-        fec_profile: 1,
+        fec_profile: profile.fec_profile,
         transfer_length: protected_len as u64,
         oti_common: 0,
         oti_scheme: 0,
@@ -478,7 +496,26 @@ pub fn recover(
     )
     .map_err(CapsuleError::DescriptorMismatch)?;
 
-    // Step 2: DROP the symbols that do not authenticate.
+    // Step 2: bind the V1 container's redundant repair count to the registered
+    // policy selected by the now-authenticated `fec_profile`. The count cannot
+    // simply be removed: after damage, surviving symbols do not reveal how
+    // many repair symbols originally existed. Equality to a closed profile
+    // registry preserves that information without letting the frame choose
+    // its own durability classification.
+    let registered_profile = CapsuleProfile::registered(descriptor.fec_profile).ok_or(
+        CapsuleError::UnsupportedFecProfile {
+            fec_profile: descriptor.fec_profile,
+        },
+    )?;
+    if descriptor.repair_symbols != registered_profile.repair_symbols {
+        return Err(CapsuleError::RepairBudgetMismatch {
+            fec_profile: descriptor.fec_profile,
+            declared_repair_symbols: descriptor.repair_symbols,
+            registered_repair_symbols: registered_profile.repair_symbols,
+        });
+    }
+
+    // Step 3: DROP the symbols that do not authenticate.
     //
     // This is where doctrine 5's "RaptorQ heals corrupt symbols" actually
     // happens, and it has to be here rather than in `decode_object`. That
@@ -502,7 +539,7 @@ pub fn recover(
         .cloned()
         .collect();
 
-    // Steps 3-5: decode, open the AEAD, and recompute the keyed ObjectId.
+    // Steps 4-6: decode, open the AEAD, and recompute the keyed ObjectId.
     // `decode_object` owns that sequence and fails closed at each stage.
     decode_object(
         &encoding,
