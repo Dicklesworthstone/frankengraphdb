@@ -70,6 +70,10 @@ pub struct Transaction {
     /// is exactly the shape write-write conflict detection cannot see.
     read_set: BTreeSet<ConflictKey>,
     statement_failures: usize,
+    /// Transaction-global index of the next statement submitted through
+    /// `execute`. Evaluator outcomes use slice-local indexes, so every boundary
+    /// must translate through this cursor before an abort becomes observable.
+    next_statement_index: usize,
     /// Did this transaction claim to be the FIRST write to the branch?
     ///
     /// Carried to commit rather than checked only at begin
@@ -199,6 +203,7 @@ impl Transaction {
             last_intent_ordinal: 0,
             read_set: BTreeSet::new(),
             statement_failures: 0,
+            next_statement_index: 0,
             aborted_at: None,
         })
     }
@@ -327,11 +332,14 @@ impl Transaction {
         if let Some(statement) = self.aborted_at {
             return Err(TxnError::AlreadyAborted { statement });
         }
+        let statement_base = self.next_statement_index;
         let (outcome, last_intent_ordinal) =
             evaluate_from_intent_ordinal(&self.workspace, statements, self.last_intent_ordinal);
         match outcome {
             Outcome::Aborted { statement, .. } => {
                 self.last_intent_ordinal = last_intent_ordinal;
+                let statement = statement_base + statement;
+                self.next_statement_index = statement + 1;
                 self.aborted_at = Some(statement);
                 // The workspace is deliberately left as it was. An aborted
                 // transaction has no state worth inspecting, and clearing it
@@ -348,6 +356,7 @@ impl Transaction {
                         .map_err(|error| TxnError::Apply(Box::new(error)))?;
                 }
                 self.last_intent_ordinal = last_intent_ordinal;
+                self.next_statement_index = statement_base + statements.len();
                 self.statement_failures += statement_failures.len();
                 self.effects.extend(effects);
                 Ok(())

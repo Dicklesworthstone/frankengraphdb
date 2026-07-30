@@ -635,8 +635,47 @@ fn an_aborted_transaction_is_not_reported_as_a_conflict() {
     let outcome = doomed
         .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
         .expect("no error");
-    assert_eq!(outcome, TxnOutcome::Aborted { statement: 0 });
+    assert_eq!(outcome, TxnOutcome::Aborted { statement: 1 });
     assert_eq!(prop_of(&db, MAIN, 1), Some(99));
+}
+
+/// The transaction-global statement index counts prior failures and no-ops too:
+/// neither disappears merely because it emitted no durable effect.
+#[test]
+fn a_later_abort_index_counts_prior_statement_errors_and_no_ops() {
+    let db = seeded();
+    let mut txn = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+
+    txn.execute(&[
+        Statement::new(vec![Intent::CompareAndSet {
+            elem: ElementId::Vertex(VId(1)),
+            name: PROP,
+            expected: Some(int(999)),
+            value: int(1),
+            mismatch: MismatchPolicy::StatementError,
+        }]),
+        set(1, 0),
+    ])
+    .expect("the first batch completes");
+    assert_eq!(txn.statement_failures(), 1);
+
+    txn.execute(&[
+        set(1, 0),
+        Statement::new(vec![Intent::CompareAndSet {
+            elem: ElementId::Vertex(VId(1)),
+            name: PROP,
+            expected: Some(int(999)),
+            value: int(1),
+            mismatch: MismatchPolicy::TxnAbort,
+        }]),
+    ])
+    .expect("the second batch records the abort");
+
+    assert_eq!(
+        txn.execute(&[set(1, 1)]),
+        Err(TxnError::AlreadyAborted { statement: 3 }),
+        "the abort includes the second batch's leading no-op too"
+    );
 }
 
 /// Statements issued after an abort are refused, not silently ignored: a caller
