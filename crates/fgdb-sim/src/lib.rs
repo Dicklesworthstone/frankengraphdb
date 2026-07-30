@@ -29,12 +29,14 @@ use fgdb_chronicle::identity::IdentifiedObject;
 use fgdb_chronicle::marker::{CommitMarker, EffectSource, MarkerRef};
 use fgdb_crypto::Digest;
 use fgdb_delta_types::{
-    CanonicalError, CommittedMarker, IndexError, LocalDeltaBatchIndex, LogicalDeltaBatch,
-    LogicalDeltaTemplate,
+    CanonicalError, CommittedMarker, CoordinateEntry, IndexError, LocalDeltaBatchIndex,
+    LogicalDeltaBatch, LogicalDeltaTemplate, RelationId, SchemaEpoch,
 };
-use fgdb_reference::{ApplyError, ReferenceDatabase};
+use fgdb_reference::intents::{Statement, evaluate};
+use fgdb_reference::{ApplyError, ReferenceDatabase, ReferenceGraph};
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
+use fgdb_types::{BranchId, GraphId};
 
 /// Object kind for a committed effect capsule. `0x0274` is the Appendix A
 /// reservation for `CommittedEffectCapsule`; it is spelled here as a constant
@@ -219,6 +221,115 @@ pub fn commit_capsule(
     // that would be lost if this simply trusted one of them.
     coordinator.commit(cx, &capsule.bytes, |seq, oid| {
         marker_for_capsule(seq, oid, capsule, head_updates)
+    })
+}
+
+/// What committing a user transaction did.
+///
+/// `Aborted` is a first-class outcome, not an error: a transaction whose
+/// `TxnAbort` guard fired did exactly what it was told to do. The distinction
+/// that matters is that it wrote NOTHING durable — see [`commit_transaction`].
+#[derive(Debug)]
+pub enum TransactionCommit {
+    Committed {
+        marker: MarkerRef,
+        effects: usize,
+        statement_failures: usize,
+    },
+    /// The transaction aborted, or finalized to no effects. No capsule was
+    /// sealed and no marker was written.
+    NothingToCommit { aborted: bool },
+}
+
+impl TransactionCommit {
+    /// `(effects, statement_failures)` if this committed, `None` otherwise.
+    ///
+    /// An accessor so tests assert via `expect` rather than a `panic!` arm,
+    /// which keeps the UBS panic-class ratchet where it is without weakening
+    /// the assertion.
+    pub fn committed_counts(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Committed {
+                effects,
+                statement_failures,
+                ..
+            } => Some((*effects, *statement_failures)),
+            Self::NothingToCommit { .. } => None,
+        }
+    }
+
+    pub fn marker(&self) -> Option<MarkerRef> {
+        match self {
+            Self::Committed { marker, .. } => Some(*marker),
+            Self::NothingToCommit { .. } => None,
+        }
+    }
+}
+
+/// Finalize a user transaction and commit whatever it produced.
+///
+/// This is the whole write path in one call: statements of Appendix B intents →
+/// finalization against the CURRENT materialized state → canonical effects →
+/// a `LogicalDeltaTemplate` → a sealed erasure-coded capsule → the two-fsync
+/// protocol.
+///
+/// **AN ABORTED TRANSACTION WRITES NOTHING.** Not an empty capsule, not a marker
+/// with no effects — nothing at all. That is the load-bearing rule here, because
+/// the alternative is seductive: it is easy to build the capsule first and let
+/// the commit proceed with an empty effect set, which leaves the stream carrying
+/// a commit that happened for no reason and inflates every sequence downstream.
+/// The same applies to a transaction that finalizes to zero effects for ordinary
+/// reasons (every `SetProp` was a no-op write): there is nothing to record, so
+/// nothing is recorded.
+pub fn commit_transaction(
+    coordinator: &mut CommitCoordinator,
+    cx: &CommitCx,
+    basis: &ReferenceGraph,
+    statements: &[Statement],
+    coordinate: (GraphId, BranchId, RelationId),
+    intent_semantics: ObjectId,
+) -> Result<TransactionCommit, ReplayError> {
+    let outcome = evaluate(basis, statements);
+    let Some((effects, statement_failures)) = outcome.committed_parts() else {
+        return Ok(TransactionCommit::NothingToCommit { aborted: true });
+    };
+    if effects.is_empty() {
+        return Ok(TransactionCommit::NothingToCommit { aborted: false });
+    }
+
+    let (graph, branch, relation) = coordinate;
+    let template = LogicalDeltaTemplate::build(
+        intent_semantics,
+        [0u8; 32],
+        vec![CoordinateEntry {
+            graph,
+            branch,
+            relation,
+            schema_epoch: SchemaEpoch(0),
+            schema_transition: None,
+            rows: effects.to_vec(),
+        }],
+    )
+    .map_err(|error| ReplayError::Decode {
+        commit_seq: coordinator.next_commit_seq(),
+        error,
+    })?;
+
+    let capsule = prepare_capsule(
+        &coordinator.keys().k_oid,
+        coordinator.keys().namespace,
+        &template,
+    )
+    .map_err(|error| ReplayError::Decode {
+        commit_seq: coordinator.next_commit_seq(),
+        error,
+    })?;
+
+    let marker = commit_capsule(coordinator, cx, &capsule, vec![])?;
+    Ok(TransactionCommit::Committed {
+        marker,
+        effects: effects.len(),
+        statement_failures: statement_failures.len(),
     })
 }
 
