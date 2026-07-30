@@ -5934,8 +5934,9 @@ mod tests {
             let field = census
                 .fields
                 .iter()
-                .find(|candidate| candidate.key.path.eq(&format!("PayloadReceipt.{name}")))
-                .unwrap_or_else(|| panic!("the receipt member {name} is not censused"));
+                .find(|candidate| candidate.key.path.eq(&format!("PayloadReceipt.{name}")));
+            assert!(field.is_some(), "the receipt member {name} is not censused");
+            let field = field.expect("asserted present above");
             match exact_type {
                 Some(ty) => assert_eq!(
                     field.exact_types,
