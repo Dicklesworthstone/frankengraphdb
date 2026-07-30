@@ -5897,3 +5897,12 @@ status = "reserved"
 encoding_context = "generated tag-refined discriminant whose validator admits only the LocalAbort arm (arm_tag 0x0002) of the FinalCertificationSelection union; the required_selection precondition carries the refined union's u8 tag and never the arm payload, while required_selected_terminal_digest and the referenced Active reservation bind the selected terminal body (a03:1538, a07:1746)"
 allowed_containing_schemas = ["AdmittedTxnAbortCommand"]
 max_size_bytes = 1
+
+[[type]]
+wire_type_id = 0x0563
+name = "RemotePreparedIdentity"
+kind = "record"
+status = "reserved"
+encoding_context = "embedded RemotePreparedIdentity record naming the stable signed ownership promise {storage_member,prepared_ownership_id,base_closure_inventory_digest,latest_record_observation?}; the optional NonRetainingRemoteObservation diagnostic is neither a local ObjectId nor a reachability edge, and its sole containing schema is the PayloadReceipt record that carries prepared_owner by value (a14:2035)"
+allowed_containing_schemas = ["PayloadReceipt"]
+max_size_bytes = 256

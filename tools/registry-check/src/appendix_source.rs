@@ -1864,21 +1864,55 @@ fn leading_record(text: &str) -> Option<(String, usize)> {
     (bytes.get(cursor) == Some(&b'{')).then_some((display, cursor))
 }
 
-/// The ONE anonymous body the Appendix defines by phrase rather than by name
-/// (fgdb-ckb9). a03:1468 spells "The generated common header of every
-/// Local/Meta/Shard payload also contains `{...}`": the phrase is the
-/// definition cue, and the owner it encodes is `GeneratedPayloadCommonHeader`
-/// — the census's own generated-family spelling (`GeneratedResultDelivery
-/// Owner`, `GeneratedMetadataTreeBootstrapSet`), not a role token, so no
-/// false top-level `Local`/`Meta`/`Shard` schema is minted. Every other
-/// anonymous brace body keeps its current reading: an unowned structural
-/// fragment, never a durable schema.
-fn generated_payload_common_header_owner(before: &str) -> Option<&'static str> {
-    normalize_whitespace(before)
-        .eq_ignore_ascii_case(
-            "The generated common header of every Local/Meta/Shard payload also contains",
-        )
-        .then_some("GeneratedPayloadCommonHeader")
+/// The anonymous bodies the Appendix defines by phrase rather than by name.
+/// Each phrase is the definition cue and encodes its owner; every other
+/// anonymous brace body stays an unowned structural fragment, never a durable
+/// schema. The population is closed: a new entry needs a measured unique
+/// source phrase and a census test, not a hunch.
+///
+///   * fgdb-ckb9 — a03:1468: "The generated common header of every
+///     Local/Meta/Shard payload also contains `{...}`". The owner is the
+///     census's own generated-family spelling (`GeneratedResultDelivery
+///     Owner`, `GeneratedMetadataTreeBootstrapSet`), not a role token, so no
+///     false top-level `Local`/`Meta`/`Shard` schema is minted.
+///   * fgdb-gpzz — a14:2035: "A receipt binds `{...}`". The paragraph's bold
+///     heading is `PayloadReceipt / ...` and the receipt body is the only
+///     consumer of RemotePreparedIdentity; the noun IS the heading's first
+///     name, and no role token or wrapper is invented.
+///
+/// Matching is full-phrase-or-trailing-phrase with a whitespace boundary, so
+/// the cue can introduce the body from inside a paragraph tail without ever
+/// matching as a substring of a longer word.
+const PHRASE_DEFINED_OWNERS: &[(&str, &str)] = &[
+    (
+        "The generated common header of every Local/Meta/Shard payload also contains",
+        "GeneratedPayloadCommonHeader",
+    ),
+    ("A receipt binds", "PayloadReceipt"),
+];
+
+/// The owner a phrase-defined anonymous body encodes, if it is one. A match
+/// is the whole `before`, or its tail at a whitespace boundary — never a
+/// substring of a longer word, and never a slice through a multi-byte char.
+fn phrase_defined_owner(before: &str) -> Option<&'static str> {
+    let normalized = normalize_whitespace(before);
+    PHRASE_DEFINED_OWNERS
+        .iter()
+        .find(|(phrase, _)| {
+            if normalized.eq_ignore_ascii_case(phrase) {
+                return true;
+            }
+            if normalized.len() <= phrase.len() {
+                return false;
+            }
+            normalized
+                .get(normalized.len() - phrase.len()..)
+                .is_some_and(|tail| {
+                    let head = &normalized[..normalized.len() - phrase.len()];
+                    head.ends_with(char::is_whitespace) && tail.eq_ignore_ascii_case(phrase)
+                })
+        })
+        .map(|(_, owner)| *owner)
 }
 
 /// The opening brace of a fragment that IS one anonymous brace body and
@@ -2006,14 +2040,14 @@ fn direct_schemas_from_inline(
             continue;
         }
         let Some((display, open_index)) = leading_record(text) else {
-            // fgdb-ckb9: the one anonymous body the Appendix defines by
-            // phrase. `Local{...}`/`Meta{...}`/`Shard{...}` heads are role
-            // metavariables, not schema names (is_schema_metavariable), so
-            // this occurrence is the only route that censuses the common
-            // header's nested `time_authority_binding` union without minting
-            // false top-level role schemas. A malformed body is left to the
-            // unclaimed-range pass, which records it exactly as before.
-            let Some(owner) = generated_payload_common_header_owner(&fragment.before) else {
+            // fgdb-ckb9 / fgdb-gpzz: the anonymous bodies the Appendix defines
+            // by phrase. `Local{...}`/`Meta{...}`/`Shard{...}` heads are role
+            // metavariables, not schema names (is_schema_metavariable), and
+            // prose-introduced bodies have no name of their own, so these
+            // occurrences are the only route that censuses them without
+            // minting false top-level schemas. A malformed body is left to
+            // the unclaimed-range pass, which records it exactly as before.
+            let Some(owner) = phrase_defined_owner(&fragment.before) else {
                 continue;
             };
             let Some(open_index) = anonymous_brace_body_open(text) else {
@@ -5829,6 +5863,117 @@ mod tests {
                 .fields
                 .iter()
                 .all(|candidate| !candidate.key.stable_name.eq("fabricated_u27g_control")),
+            "fabricated-absent control unexpectedly matched"
+        );
+    }
+
+    /// fgdb-gpzz: "A receipt binds `{...}`" (a14:2035) is the phrase-defined
+    /// PayloadReceipt body — the only consumer of RemotePreparedIdentity.
+    /// The phrase-encoded owner censuses the record and its prepared_owner:
+    /// RemotePreparedIdentity member without minting a false top-level
+    /// schema; every unrelated anonymous illustrative record stays unowned.
+    #[test]
+    fn appendix_payload_receipt_recovers_the_remote_prepared_identity_consumer() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let slices = [SourceSliceSpec {
+            id: "appendix-a",
+            start_line: 1388,
+            end_line: 2728,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the pinned Appendix A source must census");
+
+        let owner = census
+            .schemas
+            .iter()
+            .find(|candidate| candidate.key.family.eq("PayloadReceipt"))
+            .expect("the phrase-defined receipt must have a source-derived owner");
+        assert!(
+            owner
+                .owner_statuses
+                .contains(&SchemaOwnerStatus::ConfirmedTopLevel),
+            "the phrase is the definition cue; the owner is confirmed, not ambiguous"
+        );
+
+        // Every source-spelled member, and the consumer member that makes
+        // RemotePreparedIdentity wire-mintable.
+        for (name, exact_type) in [
+            ("database_id", None),
+            ("database_security_namespace_id", None),
+            ("cluster_incarnation", None),
+            (
+                "configuration_state_ref",
+                Some("StrongRef<ConfigurationState>"),
+            ),
+            ("payload_predicate_digest", None),
+            ("storage_member", None),
+            ("failure_domain", None),
+            ("local_writer_fence_epoch", None),
+            ("prepared_owner", Some("RemotePreparedIdentity")),
+            ("fsync_generation", None),
+            (
+                "proposal_freshness_basis_ref",
+                Some("StrongRef<PayloadReceiptProposalFreshnessBasis>"),
+            ),
+            (
+                "proposal_freshness_evidence_ref",
+                Some("StrongRef<TimeValidationEvidence>"),
+            ),
+            ("nonce", None),
+        ] {
+            let field = census
+                .fields
+                .iter()
+                .find(|candidate| candidate.key.path.eq(&format!("PayloadReceipt.{name}")))
+                .unwrap_or_else(|| panic!("the receipt member {name} is not censused"));
+            match exact_type {
+                Some(ty) => assert_eq!(
+                    field.exact_types,
+                    [ty.to_owned()],
+                    "PayloadReceipt.{name} exact type"
+                ),
+                None => assert!(
+                    field.exact_types.is_empty(),
+                    "PayloadReceipt.{name} is a shorthand member"
+                ),
+            }
+        }
+
+        // The claimed body no longer reads as an unowned fragment.
+        assert!(
+            census
+                .ambiguities
+                .iter()
+                .all(|candidate| !candidate.raw.starts_with("{database_id,database_security_namespace_id,cluster_incarnation,configuration_state_ref")),
+            "the owned receipt is still reported as an unowned structural fragment"
+        );
+
+        // Unrelated anonymous illustrative records remain unowned (a04:1544
+        // keeps its reading; no broadening of every brace body).
+        assert!(
+            census.ambiguities.iter().any(|candidate| {
+                matches!(candidate.key.kind, AmbiguityKind::UnownedStructuralFragment)
+                    && candidate.raw.starts_with("{generation,database_id")
+            }),
+            "the unrelated a04:1544 anonymous header lost its unowned reading"
+        );
+
+        // Fabricated-absent control.
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| !candidate.key.stable_name.eq("fabricated_gpzz_control")),
             "fabricated-absent control unexpectedly matched"
         );
     }

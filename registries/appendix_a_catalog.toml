@@ -39,9 +39,9 @@ occurrence_count = 2454
 occurrence_transcript_sha256 = "64535886e6dbb525694d6676b315397b959291e2901b9bcd456ae0e61861d4d3"
 
 [target_manifest]
-target_count = 3715
+target_count = 3716
 projection_fallback_count = 135
-target_source_assignment_sha256 = "04519b8c2053fb12efbc57f4df1aacad326271137796c66d4176422089b19a1c"
+target_source_assignment_sha256 = "6e0db06e77c1772e30220d8988650fe7b18534fc72238a8ea49a380c88413518"
 
 [maintenance_proof]
 row_id = "catalog:maintenance-proof:appendix-a"
@@ -437,16 +437,16 @@ predecessor = "a13"
 successor = "a15"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 18
-top_level_candidate_ids_sha256 = "cd6c91e2598fa0d6a76bf7c607c134b03d5697324fef1ec2121fcd304c03d6e4"
-field_candidate_count = 127
-field_candidate_ids_sha256 = "42614e4db93e303977f57c7172a0c9ce1c7e43f0d4cee4e4fd884a641d393743"
+top_level_candidate_count = 19
+top_level_candidate_ids_sha256 = "73c39c678ed24ef427f8db7aa41449616ed7f79e72e24a4216b2facaa248b018"
+field_candidate_count = 141
+field_candidate_ids_sha256 = "613a6860db585b897f217566aea407ed58521fe31f1f2879be36e244f5a94fa8"
 union_candidate_count = 5
 union_candidate_ids_sha256 = "15e303a3e58a1840bb506926c05b7cb208a699ec1a1bb3deab7e0b013acc8fab"
 arm_candidate_count = 14
 arm_candidate_ids_sha256 = "c7df914eb8691036d5d60156878e4b216c4cc223434d4dd70e37b61a999f8a8e"
-ambiguity_count = 85
-ambiguity_ids_sha256 = "2d031394de0aab84a9aefc8c8294aa194247b51d205cd05041500c131c362d53"
+ambiguity_count = 94
+ambiguity_ids_sha256 = "8b5c0d6090c04fbbd7bbaca88171b9254caccf65c89ac8c867651c52527b7a66"
 
 [[slice]]
 ordinal = 15
@@ -54771,6 +54771,16 @@ identity_class = "unclassified"
 source_locations = ["a01:1410"]
 
 [[top_level_candidate]]
+row_id = "a14:top-level-candidate:payload-receipt-02e93ee9409f388f"
+slice_id = "a14"
+symbol = "PayloadReceipt"
+generic_signature = ""
+source_key = "top|PayloadReceipt"
+source_kind = "confirmed"
+identity_class = "unclassified"
+source_locations = ["a14:2035"]
+
+[[top_level_candidate]]
 row_id = "a16:top-level-candidate:payload-receipt-proposal-freshness-basis-e13a87f98f48add2"
 slice_id = "a16"
 symbol = "PayloadReceiptProposalFreshnessBasis"
@@ -56387,7 +56397,7 @@ symbol = "RemotePreparedIdentity"
 generic_signature = ""
 source_key = "top|RemotePreparedIdentity"
 source_kind = "confirmed"
-identity_class = "unclassified"
+identity_class = "wire"
 source_locations = ["a14:2035"]
 
 [[top_level_candidate]]
@@ -112816,6 +112826,25 @@ row_id = "a03:target:wire-type-local-abort-final-certification-selection"
 target_row_id = "a03:wire-type:local-abort-final-certification-selection"
 slice_id = "a03"
 source_key = "projection|wire_types|LocalAbortFinalCertificationSelection"
+target_kind = "wire-type"
+definition_status = "declared"
+
+[[wire_type]]
+slice_id = "a14"
+row_id = "a14:wire-type:remote-prepared-identity"
+wire_type_id = 0x0563
+name = "RemotePreparedIdentity"
+kind = "record"
+status = "reserved"
+encoding_context = "embedded RemotePreparedIdentity record naming the stable signed ownership promise {storage_member,prepared_ownership_id,base_closure_inventory_digest,latest_record_observation?}; the optional NonRetainingRemoteObservation diagnostic is neither a local ObjectId nor a reachability edge, and its sole containing schema is the PayloadReceipt record that carries prepared_owner by value (a14:2035)"
+allowed_containing_schemas = ["PayloadReceipt"]
+max_size_bytes = 256
+
+[[target]]
+row_id = "a14:target:wire-type-remote-prepared-identity"
+target_row_id = "a14:wire-type:remote-prepared-identity"
+slice_id = "a14"
+source_key = "top|RemotePreparedIdentity"
 target_kind = "wire-type"
 definition_status = "declared"
 

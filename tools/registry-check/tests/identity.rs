@@ -2125,7 +2125,11 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     // top|GeneratedPayloadCommonHeader, censusing the nested
     // time_authority_binding union and all six arm members without minting
     // false top-level Local/Meta/Shard schemas.
-    assert_eq!(baseline.top_level_candidates.len(), 1_253);
+    // 1_253 -> 1_254: fgdb-gpzz encoded the second phrase-defined body — "A
+    // receipt binds `{...}`" (a14:2035) — as top|PayloadReceipt, the sole
+    // consumer of RemotePreparedIdentity, and minted the record wire type
+    // 0x0563 it contains by value.
+    assert_eq!(baseline.top_level_candidates.len(), 1_254);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT
@@ -4420,6 +4424,73 @@ fn idr_a13_collection_reference_fields_follow_the_k3sa_carrier_contract() {
     assert!(
         strong_many >= 13,
         "the StrongRef+many population shrank below the landed K3SA+A13 cohort: {strong_many}"
+    );
+}
+
+/// fgdb-gpzz: RemotePreparedIdentity is class-FORCED WIRE by the containment
+/// law — the source spells prepared_owner:RemotePreparedIdentity by value,
+/// no wrapper, inside the "A receipt binds {...}" body (a14:2035). The mint
+/// is one record wire type, one top| target, and the candidate flip; its
+/// sole containing schema is the phrase-censused PayloadReceipt.
+#[test]
+fn idr_remote_prepared_identity_is_minted_wire_with_its_receipt_consumer() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+
+    let wire = identity
+        .wire
+        .iter()
+        .filter(|row| row.name.eq("RemotePreparedIdentity"))
+        .collect::<Vec<_>>();
+    assert_eq!(wire.len(), 1, "RemotePreparedIdentity mints exactly once");
+    let row = wire[0];
+    assert_eq!(row.wire_type_id, 0x0563);
+    assert_eq!(row.kind, "record");
+    assert_eq!(row.status, "reserved");
+    assert_eq!(
+        row.allowed_containing_schemas,
+        ["PayloadReceipt".to_owned()],
+        "a wire type's containing closure names its consumer — never *"
+    );
+    assert!(row.max_size_bytes > 0);
+
+    let source_key = "top|RemotePreparedIdentity";
+    let targets = catalog
+        .targets
+        .iter()
+        .filter(|target| target.source_key.eq(source_key))
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 1, "{source_key} maps exactly once");
+    let target = targets[0];
+    assert_eq!(
+        target.row_id,
+        "a14:target:wire-type-remote-prepared-identity"
+    );
+    assert_eq!(
+        target.target_row_id,
+        "a14:wire-type:remote-prepared-identity"
+    );
+    assert_eq!(target.slice_id, "a14");
+    assert_eq!(target.target_kind, "wire-type");
+    assert_eq!(target.definition_status, "declared");
+
+    let candidate = catalog
+        .top_level_candidates
+        .iter()
+        .find(|candidate| candidate.symbol.eq("RemotePreparedIdentity"))
+        .expect("the wire-forced candidate is registered");
+    assert_eq!(candidate.identity_class, "wire");
+
+    // The census half of the contract: the receipt body is censused, so the
+    // containing schema the closure names actually exists — the law-B score
+    // of zero was the blind spot, not an absence.
+    assert!(
+        catalog
+            .top_level_candidates
+            .iter()
+            .any(|candidate| candidate.symbol.eq("PayloadReceipt")
+                && candidate.source_kind.eq("confirmed")),
+        "PayloadReceipt is a confirmed top-level candidate"
     );
 }
 
