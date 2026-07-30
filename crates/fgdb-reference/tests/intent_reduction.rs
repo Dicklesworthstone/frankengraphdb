@@ -783,3 +783,319 @@ fn ensure_vertex_is_idempotent() {
         "a duplicate create is a statement error"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The birth ordinal is a property of the REQUEST, not of the basis
+// ---------------------------------------------------------------------------
+//
+// fgdb-intent-birth-ordinal-cardinality-spa1. Appendix B defines a
+// sequence-neutral BirthOrdinal from intent_ordinal, merge_ordinal and
+// element_id. `state.vertex_count() + 1` is none of those, and the laws below are
+// each a way that shows.
+
+/// Birth ordinals for the same statement are IDENTICAL across bases that differ
+/// only by elements the statement never mentions.
+///
+/// Under a cardinality derivation they differ, which means the same request
+/// produces different durable bytes depending on unrelated population — and the
+/// template digest is the identity the capsule, the marker and every downstream
+/// cross-check compare.
+#[test]
+fn birth_ordinals_do_not_depend_on_unrelated_population() {
+    let request = || {
+        Statement::new(vec![Intent::CreateVertex {
+            vid: VId(500),
+            labels: vec![LABEL],
+            props: vec![],
+        }])
+    };
+
+    let empty = ReferenceGraph::new();
+    let populated = graph(vec![
+        vertex(1, "ada"),
+        vertex(2, "grace"),
+        vertex(3, "hopper"),
+    ]);
+
+    let from_empty = evaluate(&empty, &[request()]);
+    let from_populated = evaluate(&populated, &[request()]);
+    assert_eq!(
+        from_empty.effects(),
+        from_populated.effects(),
+        "the same request against different unrelated population must emit the \
+         same effects, byte for byte"
+    );
+}
+
+/// THE DELETE-HOLE DISCRIMINATOR: retiring an unrelated element must not make a
+/// later birth field move BACKWARD, which is how a cardinality derivation aliases
+/// two distinct source intents.
+#[test]
+fn a_retired_element_cannot_move_a_later_birth_ordinal_backward() {
+    let full = graph(vec![vertex(1, "ada"), vertex(2, "grace")]);
+    let mut holed = full.clone();
+    holed
+        .apply_row(&DeltaRow::DeleteVertex {
+            vid: VId(2),
+            before_version: ObjectId([0u8; 32]),
+            sorted_retired_incident_edges: vec![],
+        })
+        .expect("applies");
+    assert_eq!(holed.vertex_count(), 1, "the hole is real");
+
+    let request = || {
+        Statement::new(vec![Intent::CreateVertex {
+            vid: VId(500),
+            labels: vec![LABEL],
+            props: vec![],
+        }])
+    };
+    assert_eq!(
+        birth_ordinals(&evaluate(&full, &[request()])),
+        birth_ordinals(&evaluate(&holed, &[request()])),
+        "a delete elsewhere must not renumber this create"
+    );
+}
+
+/// Distinct create intents get DISTINCT ordinals matching statement/intent order,
+/// including mixed vertex and edge creates in one statement.
+///
+/// A cardinality derivation keeps separate counters per element kind, so a mixed
+/// statement mints colliding ordinals — two different source intents carrying the
+/// same birth order.
+#[test]
+fn mixed_creates_receive_distinct_ordinals_in_request_order() {
+    let basis = ReferenceGraph::new();
+    let outcome = evaluate(
+        &basis,
+        &[
+            Statement::new(vec![
+                Intent::CreateVertex {
+                    vid: VId(1),
+                    labels: vec![LABEL],
+                    props: vec![],
+                },
+                Intent::CreateVertex {
+                    vid: VId(2),
+                    labels: vec![LABEL],
+                    props: vec![],
+                },
+                Intent::AddEdge {
+                    eid: EId(1),
+                    src: VId(1),
+                    etype: REL,
+                    dst: VId(2),
+                    props: vec![],
+                },
+            ]),
+            Statement::new(vec![Intent::CreateVertex {
+                vid: VId(3),
+                labels: vec![LABEL],
+                props: vec![],
+            }]),
+        ],
+    );
+    let ordinals = birth_ordinals(&outcome);
+    assert_eq!(
+        ordinals,
+        vec![1, 2, 3, 4],
+        "one counter across the whole evaluation, in request order, with the edge \
+         NOT sharing an ordinal with a vertex"
+    );
+    let unique: std::collections::BTreeSet<u64> = ordinals.iter().copied().collect();
+    assert_eq!(unique.len(), ordinals.len(), "and all distinct");
+}
+
+/// The ordinal counts every intent VISITED, so a no-op does not renumber what
+/// follows it — the published order is the request's order, not the order of the
+/// intents that happened to emit something.
+#[test]
+fn a_no_op_intent_still_occupies_its_ordinal() {
+    let basis = graph(vec![vertex(1, "ada")]);
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![
+            // Emits nothing: the value is already "ada".
+            Intent::SetProp {
+                elem: ElementId::Vertex(VId(1)),
+                name: NAME,
+                value: text("ada"),
+            },
+            Intent::CreateVertex {
+                vid: VId(2),
+                labels: vec![LABEL],
+                props: vec![],
+            },
+        ])],
+    );
+    assert_eq!(
+        birth_ordinals(&outcome),
+        vec![2],
+        "the create is the SECOND intent in the request and carries ordinal 2"
+    );
+}
+
+/// Every birth ordinal emitted by an outcome, in effect order.
+fn birth_ordinals(outcome: &Outcome) -> Vec<u64> {
+    outcome
+        .effects()
+        .iter()
+        .filter_map(|row| match row {
+            DeltaRow::CreateVertex { birth_ordinal, .. }
+            | DeltaRow::CreateEdge { birth_ordinal, .. } => Some(*birth_ordinal),
+            _ => None,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Conflicting duplicate properties are refused, not resolved
+// ---------------------------------------------------------------------------
+
+/// fgdb-intent-conflicting-property-order-btxr, the reproducer as filed.
+///
+/// The same logical request with its property list in the two possible orders. A
+/// stable sort plus a dedup keeps whichever the caller listed FIRST, so the two
+/// submissions produced different values — and therefore different effect digests
+/// for one request, which is the identity the capsule and the marker compare. Both
+/// orders are now refused, so they agree.
+#[test]
+fn conflicting_duplicate_properties_are_refused_in_either_order() {
+    let basis = ReferenceGraph::new();
+    let forward = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::CreateVertex {
+            vid: VId(1),
+            labels: vec![LABEL],
+            props: vec![(NAME, text("a")), (NAME, text("b"))],
+        }])],
+    );
+    let reversed = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::CreateVertex {
+            vid: VId(1),
+            labels: vec![LABEL],
+            props: vec![(NAME, text("b")), (NAME, text("a"))],
+        }])],
+    );
+
+    for outcome in [&forward, &reversed] {
+        let (effects, failures) = outcome.committed_parts().expect("committed");
+        assert!(effects.is_empty(), "a contradictory request emits nothing");
+        assert_eq!(failures.len(), 1);
+        let (property, _, _) = failures[0]
+            .1
+            .conflicting_values()
+            .expect("the refusal names the property and both values");
+        assert_eq!(property, NAME);
+    }
+    assert_eq!(
+        forward.effects(),
+        reversed.effects(),
+        "and the two submission orders agree, which was the whole defect"
+    );
+}
+
+/// THE CONTROL: IDENTICAL duplicates are collapsed, not refused.
+///
+/// Without this the fix could be "reject any repeated key", which would refuse a
+/// request that states one fact twice — and pass the law above.
+#[test]
+fn identical_duplicate_properties_are_collapsed() {
+    let basis = ReferenceGraph::new();
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::CreateVertex {
+            vid: VId(1),
+            labels: vec![LABEL],
+            props: vec![(NAME, text("a")), (NAME, text("a"))],
+        }])],
+    );
+    let (effects, failures) = outcome.committed_parts().expect("committed");
+    assert!(
+        failures.is_empty(),
+        "one fact stated twice is not a conflict"
+    );
+    assert_eq!(effects.len(), 1);
+    let props = create_props(&effects[0]).expect("a CreateVertex row");
+    assert_eq!(props.len(), 1, "collapsed to one entry: {props:?}");
+    assert_eq!(props[0], (NAME, text("a")));
+}
+
+/// The property list of a create row, or `None` for any other row. An accessor so
+/// the law above asserts via `expect` rather than an `assert!(false, ..)` arm.
+fn create_props(row: &DeltaRow) -> Option<&Vec<(PropertyKeyId, CanonicalScalar)>> {
+    match row {
+        DeltaRow::CreateVertex { props, .. } | DeltaRow::CreateEdge { props, .. } => Some(props),
+        _ => None,
+    }
+}
+
+/// A conflicting duplicate is a STATEMENT error, so earlier statements keep their
+/// effects and later ones still run — it is a malformed request, not a reason to
+/// destroy unrelated work.
+#[test]
+fn a_conflicting_duplicate_kills_only_its_own_statement() {
+    let basis = ReferenceGraph::new();
+    let outcome = evaluate(
+        &basis,
+        &[
+            Statement::new(vec![Intent::CreateVertex {
+                vid: VId(1),
+                labels: vec![LABEL],
+                props: vec![(NAME, text("ada"))],
+            }]),
+            Statement::new(vec![Intent::CreateVertex {
+                vid: VId(2),
+                labels: vec![LABEL],
+                props: vec![
+                    (RANK, CanonicalScalar::Int(1)),
+                    (RANK, CanonicalScalar::Int(2)),
+                ],
+            }]),
+            Statement::new(vec![Intent::CreateVertex {
+                vid: VId(3),
+                labels: vec![LABEL],
+                props: vec![(NAME, text("grace"))],
+            }]),
+        ],
+    );
+    let (effects, failures) = outcome.committed_parts().expect("committed");
+    assert_eq!(effects.len(), 2, "statements 0 and 2 survive: {effects:?}");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].0, 1, "and the failure names statement 1");
+}
+
+/// The same refusal applies to edge creates, both AddEdge and EnsureEdge — the
+/// bead names all three call sites and a fix at one is not a fix.
+#[test]
+fn conflicting_duplicates_are_refused_on_edge_intents_too() {
+    let basis = graph(vec![vertex(1, "ada"), vertex(2, "grace")]);
+    let clashing = vec![
+        (RANK, CanonicalScalar::Int(1)),
+        (RANK, CanonicalScalar::Int(2)),
+    ];
+    for intent in [
+        Intent::AddEdge {
+            eid: EId(50),
+            src: VId(1),
+            etype: REL,
+            dst: VId(2),
+            props: clashing.clone(),
+        },
+        Intent::EnsureEdge {
+            eid: EId(51),
+            src: VId(1),
+            etype: REL,
+            dst: VId(2),
+            constraint_id: ObjectId([0u8; 32]),
+            props: clashing.clone(),
+        },
+    ] {
+        let outcome = evaluate(&basis, &[Statement::new(vec![intent])]);
+        let (effects, failures) = outcome.committed_parts().expect("committed");
+        assert!(effects.is_empty(), "no effects: {effects:?}");
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].1.conflicting_values().is_some());
+    }
+}

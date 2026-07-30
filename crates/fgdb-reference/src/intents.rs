@@ -158,6 +158,28 @@ pub enum StatementFailure {
     },
     /// An intent reduced to an effect the graph refused.
     Rejected(ApplyError),
+    /// One intent named the same property twice with DIFFERENT values
+    /// (fgdb-intent-conflicting-property-order-btxr).
+    ///
+    /// Refused rather than resolved. The previous implementation sorted by key and
+    /// deduplicated, which — because the sort is stable — silently kept whichever
+    /// value the caller listed first. That invents a first-write policy Appendix B
+    /// never specified, and it means the SAME logical request submitted with its
+    /// property list in a different order produces a different effect digest. Since
+    /// the digest is the object identity the capsule, the marker and every
+    /// downstream cross-check compare, "the same request" would name two different
+    /// durable objects.
+    ///
+    /// `fgdb-delta-types`' canonical form already declares repeated property keys
+    /// invalid and plan:2805 requires the net-effect normal form to reject
+    /// incompatible terminal values, so refusing is what the surrounding contracts
+    /// already say. Identical duplicates are still collapsed: they express one
+    /// fact twice rather than two conflicting facts.
+    ConflictingPropertyValues {
+        property: PropertyKeyId,
+        first: Box<CanonicalScalar>,
+        second: Box<CanonicalScalar>,
+    },
 }
 
 impl StatementFailure {
@@ -170,7 +192,24 @@ impl StatementFailure {
             Self::Mismatch {
                 expected, actual, ..
             } => Some((expected.as_deref(), actual.as_deref())),
-            Self::Rejected(_) => None,
+            // Exhaustive rather than a wildcard: a new failure variant should stop
+            // this crate compiling until someone decides whether it carries a
+            // before/after pair, instead of silently reporting that it does not.
+            Self::Rejected(_) | Self::ConflictingPropertyValues { .. } => None,
+        }
+    }
+
+    /// The property and both values of a conflicting-duplicate refusal.
+    pub fn conflicting_values(
+        &self,
+    ) -> Option<(PropertyKeyId, &CanonicalScalar, &CanonicalScalar)> {
+        match self {
+            Self::ConflictingPropertyValues {
+                property,
+                first,
+                second,
+            } => Some((*property, first, second)),
+            Self::Mismatch { .. } | Self::Rejected(_) => None,
         }
     }
 }
@@ -248,6 +287,30 @@ pub fn evaluate(basis: &ReferenceGraph, statements: &[Statement]) -> Outcome {
     let mut scratch = basis.clone();
     let mut effects: Vec<DeltaRow> = Vec::new();
     let mut statement_failures: Vec<(usize, StatementFailure)> = Vec::new();
+    // THE CANONICAL INTENT ORDINAL, and it is deliberately not a graph
+    // cardinality (fgdb-intent-birth-ordinal-cardinality-spa1).
+    //
+    // Appendix B and plan:223 define a sequence-neutral BirthOrdinal from
+    // intent_ordinal, merge_ordinal and element_id; a later CommitSeq creates
+    // OriginBirthOrder. `state.vertex_count() + 1` is none of those facts. It
+    // moves when unrelated elements are present or retired, so deleting something
+    // untouched could make a later birth field move BACKWARD and alias a
+    // different source intent; it kept separate counters for vertex and edge
+    // creates, so a mixed statement minted colliding ordinals; and it was bound
+    // to mutable population rather than to the published intent order. The
+    // comment defending it — "never supplied by a caller, two callers choosing
+    // their own would collide" — argued for the wrong property: being derived
+    // rather than supplied does not make a derivation sound.
+    //
+    // Counted over EVERY intent visited, in statement/intent order, whatever each
+    // one reduces to. That makes the ordinal a property of the request, so it is
+    // stable across any basis and unique per source intent — which is exactly what
+    // the sequence-neutral definition asks of it.
+    //
+    // SUBSET NOTE (doctrine 7): merge_ordinal and permanent element identity are
+    // still absent, and are not fabricated from state to stand in for the missing
+    // pieces. This is the intent_ordinal component alone, honestly narrow.
+    let mut intent_ordinal: u64 = 0;
 
     for (index, statement) in statements.iter().enumerate() {
         // Each statement is evaluated on its own scratch so that a
@@ -258,7 +321,8 @@ pub fn evaluate(basis: &ReferenceGraph, statements: &[Statement]) -> Outcome {
         let mut failure: Option<StatementFailure> = None;
 
         for intent in &statement.intents {
-            match reduce(&statement_scratch, intent) {
+            intent_ordinal += 1;
+            match reduce(&statement_scratch, intent, intent_ordinal) {
                 Reduction::Effects(rows) => {
                     for row in rows {
                         if let Err(error) = statement_scratch.apply_row(&row) {
@@ -312,17 +376,23 @@ enum Reduction {
     Abort(StatementFailure),
 }
 
-fn reduce(state: &ReferenceGraph, intent: &Intent) -> Reduction {
+/// Reduce one intent against `state`, at canonical intent ordinal `ordinal`.
+///
+/// `ordinal` is the intent's POSITION IN THE PUBLISHED ORDER of this evaluation,
+/// counted over every intent visited in statement/intent order. It is a property
+/// of the request and not of the basis, which is the whole point — see the birth
+/// ordinal note in `evaluate`.
+fn reduce(state: &ReferenceGraph, intent: &Intent, ordinal: u64) -> Reduction {
     match intent {
         Intent::CreateVertex { vid, labels, props } => {
             Reduction::Effects(vec![DeltaRow::CreateVertex {
                 vid: *vid,
-                // Birth ordinal is derived from the state the intent is
-                // finalized against, never supplied by a caller: two callers
-                // choosing their own would collide.
-                birth_ordinal: state.vertex_count() as u64 + 1,
+                birth_ordinal: ordinal,
                 labels: sorted_labels(labels),
-                props: sorted_props(props),
+                props: match canonical_props(props) {
+                    Ok(props) => props,
+                    Err(failure) => return Reduction::Failed(failure),
+                },
                 valid_time: None,
             }])
         }
@@ -334,12 +404,15 @@ fn reduce(state: &ReferenceGraph, intent: &Intent) -> Reduction {
             props,
         } => Reduction::Effects(vec![DeltaRow::CreateEdge {
             eid: *eid,
-            birth_ordinal: state.edge_count() as u64 + 1,
+            birth_ordinal: ordinal,
             src: *src,
             relation: *etype,
             dst: *dst,
             canonical_key: None,
-            props: sorted_props(props),
+            props: match canonical_props(props) {
+                Ok(props) => props,
+                Err(failure) => return Reduction::Failed(failure),
+            },
             valid_time: None,
         }]),
         Intent::SetProp { elem, name, value } => {
@@ -373,12 +446,15 @@ fn reduce(state: &ReferenceGraph, intent: &Intent) -> Reduction {
             }
             Reduction::Effects(vec![DeltaRow::CreateEdge {
                 eid: *eid,
-                birth_ordinal: state.edge_count() as u64 + 1,
+                birth_ordinal: ordinal,
                 src: *src,
                 relation: *etype,
                 dst: *dst,
                 canonical_key: None,
-                props: sorted_props(props),
+                props: match canonical_props(props) {
+                    Ok(props) => props,
+                    Err(failure) => return Reduction::Failed(failure),
+                },
                 valid_time: None,
             }])
         }
@@ -427,9 +503,12 @@ fn reduce(state: &ReferenceGraph, intent: &Intent) -> Reduction {
             }
             Reduction::Effects(vec![DeltaRow::CreateVertex {
                 vid: *vid,
-                birth_ordinal: state.vertex_count() as u64 + 1,
+                birth_ordinal: ordinal,
                 labels: sorted_labels(labels),
-                props: sorted_props(props),
+                props: match canonical_props(props) {
+                    Ok(props) => props,
+                    Err(failure) => return Reduction::Failed(failure),
+                },
                 valid_time: None,
             }])
         }
@@ -497,11 +576,33 @@ fn sorted_labels(labels: &[LabelId]) -> Vec<LabelId> {
     out
 }
 
-fn sorted_props(
+/// Canonicalize one intent's property list, or refuse it.
+///
+/// Sorting alone is not canonicalization when the input can be contradictory: a
+/// stable sort preserves the caller's relative order among duplicates, so a
+/// dedup silently resolves a conflict by submission order. Identical duplicates
+/// collapse; conflicting ones are a statement failure naming the property and both
+/// values.
+fn canonical_props(
     props: &[(PropertyKeyId, CanonicalScalar)],
-) -> Vec<(PropertyKeyId, CanonicalScalar)> {
+) -> Result<Vec<(PropertyKeyId, CanonicalScalar)>, StatementFailure> {
     let mut out = props.to_vec();
     out.sort_by_key(|(key, _)| *key);
-    out.dedup_by_key(|(key, _)| *key);
-    out
+    let mut deduped: Vec<(PropertyKeyId, CanonicalScalar)> = Vec::with_capacity(out.len());
+    for (key, value) in out {
+        match deduped.last() {
+            Some((previous, seen)) if *previous == key => {
+                if seen != &value {
+                    return Err(StatementFailure::ConflictingPropertyValues {
+                        property: key,
+                        first: Box::new(seen.clone()),
+                        second: Box::new(value),
+                    });
+                }
+                // Identical: one fact stated twice.
+            }
+            _ => deduped.push((key, value)),
+        }
+    }
+    Ok(deduped)
 }
