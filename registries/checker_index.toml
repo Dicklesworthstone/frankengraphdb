@@ -710,6 +710,11 @@ role = "advisory"
 reason = "fgdb-wv3v: the operator entrypoint for an explicit, landing-lease-aware beads export, not a repository checker. Registering this state-mutating helper would make check.sh rewrite tracked .beads/issues.jsonl during its own frozen-input window. Its fail-closed BINDING path, loud fail-open degraded paths, real-br composition, and mutation control are exercised by the registered scripts/g0_tree_stability_e2e.sh gate"
 
 [[script_disposition]]
+path = "scripts/token.sh"
+role = "advisory"
+reason = "fgdb-token-script-disposition-jsc4: operator coordination for advisory catalog, build-slot, and landing leases, not a repository checker. Its acquire, renew, release, and steal commands mutate out-of-tree token state under /data/tmp/fgdb_swarm/tokens; invoking it from check.sh would either contend for a live lease or change coordination state while asserting no repository property"
+
+[[script_disposition]]
 path = "scripts/bead_provenance_preflight.sh"
 role = "advisory"
 reason = "pre-commit advisory for .beads/ authors, not part of any gate chain; its own header says 'Run it BEFORE you commit'. The defect that used to be recorded here (exit 0 on the case it exists to catch) is FIXED — fgdb-bead-provenance-preflight-misses-pin-drift-a5kb: its probe now reports validate_architecture's own bead_provenance verdict and red-proves itself on every run. It stays advisory rather than registered on purpose: check.sh already runs architecture-check, which reports the same violations, and a second reader of one fact inside the gate chain is the defect this project keeps closing"
