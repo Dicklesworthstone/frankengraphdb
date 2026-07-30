@@ -69,6 +69,12 @@ pub struct Transaction {
     /// rw-antidependency needs both, and a transaction that reads x and writes y
     /// is exactly the shape write-write conflict detection cannot see.
     read_set: BTreeSet<ConflictKey>,
+    /// Predicate domains changed by final effects, for the SSI trace only.
+    ///
+    /// Deliberately separate from [`CertificationSummary`]: two edge creators
+    /// may write one adjacency without conflicting under SI. The domain becomes
+    /// a dependency only when another transaction READ it.
+    ssi_predicate_writes: BTreeSet<ConflictKey>,
     statement_failures: usize,
     /// Transaction-global index of the next statement submitted through
     /// `execute`. Evaluator outcomes use slice-local indexes, so every boundary
@@ -156,6 +162,58 @@ impl core::fmt::Display for TxnError {
 
 impl core::error::Error for TxnError {}
 
+/// Predicate domains one final effect may change.
+///
+/// Deletes need the PRE-EFFECT workspace: their durable row names the retired
+/// edge identity but not the removed edge's source/relation. Collecting after
+/// apply would therefore lose exactly the information the phantom witness needs.
+/// Missing edges are not guessed here; the immediately following materializer
+/// check rejects the malformed delete, and its transaction never gains a
+/// committed trace.
+fn ssi_predicate_writes_for(row: &DeltaRow, workspace: &ReferenceGraph) -> BTreeSet<ConflictKey> {
+    let mut keys = BTreeSet::new();
+
+    match row {
+        DeltaRow::CreateEdge { src, relation, .. } => {
+            keys.insert(ConflictKey::Adjacency {
+                vertex: *src,
+                relation: *relation,
+            });
+        }
+        DeltaRow::DeleteEdge { eid, .. } => {
+            if let Some(edge) = workspace.edge(*eid) {
+                keys.insert(ConflictKey::Adjacency {
+                    vertex: edge.src,
+                    relation: edge.relation,
+                });
+            }
+        }
+        DeltaRow::DeleteVertex {
+            sorted_retired_incident_edges,
+            ..
+        } => {
+            for eid in sorted_retired_incident_edges {
+                if let Some(edge) = workspace.edge(*eid) {
+                    keys.insert(ConflictKey::Adjacency {
+                        vertex: edge.src,
+                        relation: edge.relation,
+                    });
+                }
+            }
+        }
+        DeltaRow::CreateVertex { .. }
+        | DeltaRow::LabelMembership { .. }
+        | DeltaRow::Property { .. }
+        | DeltaRow::ValidTime { .. }
+        | DeltaRow::Counter { .. }
+        | DeltaRow::Escrow { .. }
+        | DeltaRow::Sketch { .. }
+        | DeltaRow::Schema { .. }
+        | DeltaRow::Constraint { .. } => {}
+    }
+    keys
+}
+
 impl Transaction {
     /// Begin at the coordinate's current frontier.
     pub fn begin(
@@ -202,6 +260,7 @@ impl Transaction {
             effects: Vec::new(),
             last_intent_ordinal: 0,
             read_set: BTreeSet::new(),
+            ssi_predicate_writes: BTreeSet::new(),
             statement_failures: 0,
             next_statement_index: 0,
             aborted_at: None,
@@ -259,22 +318,30 @@ impl Transaction {
         }
     }
 
-    /// Read the neighbours of a vertex over one relation, recording the vertex
-    /// and every edge traversed.
+    /// Read the outgoing neighbours of a vertex over one relation.
     ///
-    /// SCOPED, and the limit matters: recording the edges that EXIST cannot
-    /// express a dependency on an edge that does not. A concurrent transaction
-    /// inserting a new neighbour therefore forms no rw edge here, so this read
-    /// set catches write skew over existing elements and NOT predicate phantoms.
-    /// Full phantom detection needs predicate or index-range tracking, which
-    /// belongs with Strata's adjacency structures; claiming it here would be a
-    /// substitute for a mechanism this crate does not have.
+    /// Three dependencies are distinct and all load-bearing: the source vertex,
+    /// every matching edge that supplied a positive result, and the logical
+    /// adjacency predicate — including its observed absences. Incoming edges and
+    /// edges of other relations are not traversed and therefore are not element
+    /// reads. The relation-qualified predicate is the reference counterpart of
+    /// §7.3's production adjacency-range witness.
     pub fn read_neighbours(&mut self, vid: VId, relation: RelationId) -> Vec<VId> {
         self.read_set
             .insert(ConflictKey::Element(ElementId::Vertex(vid)));
-        for eid in self.workspace.incident_edges(vid) {
-            self.read_set
-                .insert(ConflictKey::Element(ElementId::Edge(eid)));
+        self.read_set.insert(ConflictKey::Adjacency {
+            vertex: vid,
+            relation,
+        });
+        for eid in self.workspace.out_edges(vid) {
+            if self
+                .workspace
+                .edge(eid)
+                .is_some_and(|edge| edge.relation == relation)
+            {
+                self.read_set
+                    .insert(ConflictKey::Element(ElementId::Edge(eid)));
+            }
         }
         self.workspace.neighbours(vid, relation)
     }
@@ -287,12 +354,14 @@ impl Transaction {
     /// that is never marked committed models a transaction that did not commit,
     /// and forms no edges.
     pub fn trace(&self, id: usize) -> crate::ssi::TxnTrace {
+        let mut writes = self.write_set();
+        writes.extend(self.ssi_predicate_writes.iter().copied());
         crate::ssi::TxnTrace {
             id,
             snapshot_high: self.snapshot.high(),
             commit_seq: None,
             reads: self.read_set.clone(),
-            writes: self.write_set(),
+            writes,
         }
     }
 
@@ -306,9 +375,12 @@ impl Transaction {
 
     /// Every ordinary first-committer-wins key this transaction has written.
     ///
-    /// Shared endpoint-existence dependencies deliberately do not appear here:
-    /// they participate in commit certification with access modes, while this
-    /// set is also the ordinary SI write set consumed by the SSI trace.
+    /// Shared endpoint-existence dependencies and SSI adjacency predicates
+    /// deliberately do not appear here. The former participate in commit
+    /// certification with access modes; the latter become meaningful only
+    /// against a predicate READ and are merged into [`trace`](Self::trace)
+    /// separately. Keeping both out is what lets two writers add distinct edges
+    /// at one hub without a write/write conflict.
     pub fn write_set(&self) -> BTreeSet<ConflictKey> {
         let mut keys = BTreeSet::new();
         if self.claims_genesis {
@@ -351,9 +423,11 @@ impl Transaction {
                 statement_failures,
             } => {
                 for row in &effects {
+                    let predicate_writes = ssi_predicate_writes_for(row, &self.workspace);
                     self.workspace
                         .apply_row(row)
                         .map_err(|error| TxnError::Apply(Box::new(error)))?;
+                    self.ssi_predicate_writes.extend(predicate_writes);
                 }
                 self.last_intent_ordinal = last_intent_ordinal;
                 self.next_statement_index = statement_base + statements.len();

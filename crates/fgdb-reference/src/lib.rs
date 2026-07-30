@@ -1386,12 +1386,13 @@ pub struct ReferenceDatabase {
 /// **A CONFLICT DOMAIN IS COARSER THAN A ROW AND FINER THAN A BRANCH,** and
 /// which is which is a semantic decision per family rather than a mechanical one.
 /// Most variants are ordinary first-committer-wins write domains: two rows
-/// collide when they name the same key. [`EndpointExistence`](Self::EndpointExistence)
-/// is different because its shared/exclusive access mode cannot be represented
-/// by set intersection; it is produced only by the constraint-certification
-/// summary below. That makes omissions the interesting part, so both collectors
-/// have no wildcard arm — a new row family is a compile error rather than a
-/// silent hole that lets two conflicting transactions both commit.
+/// collide when they name the same key. Two are intentionally trace-only or
+/// mode-bearing instead. [`Adjacency`](Self::Adjacency) is an SSI predicate
+/// domain and never an SI write/write key; [`EndpointExistence`](Self::EndpointExistence)
+/// has shared/exclusive access that cannot be represented by set intersection.
+/// That makes omissions the interesting part, so both collectors have no
+/// wildcard arm — a new row family is a compile error rather than a silent hole
+/// that lets two conflicting transactions both commit.
 ///
 /// [`DeltaRow::conflict_keys`]: ReferenceDatabase::conflict_keys_since
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1402,6 +1403,16 @@ pub enum ConflictKey {
     /// also precisely how phantoms slip through it. Detecting those is SSI's
     /// job, over adjacency, and it is not this rule.
     Element(ElementId),
+    /// The outgoing-neighbour predicate for one vertex and relation.
+    ///
+    /// This is a logical SIREAD domain, not an ordinary write/write domain.
+    /// [`crate::txn::Transaction::read_neighbours`] records it even when no edge
+    /// exists, while the transaction trace records final edge creates/deletes
+    /// that may change it. It is deliberately absent from
+    /// [`CertificationSummary`]: two concurrent writers adding distinct edges
+    /// to one adjacency are independent under SI, while either one forms an rw
+    /// antidependency with a reader of this predicate.
+    Adjacency { vertex: VId, relation: RelationId },
     /// One escrow domain.
     ///
     /// WORTH RECORDING: escrow exists in the plan so that concurrent
@@ -1438,13 +1449,15 @@ pub enum ConflictKey {
     CoordinateRoots,
 }
 
-/// The commit-time domains that cannot be represented by one ordinary write set.
+/// The SI commit-time domains that cannot be represented by one ordinary write
+/// set.
 ///
 /// Creating an edge reads the continued existence of both endpoints (shared);
 /// deleting a vertex invalidates that fact (exclusive). Shared/shared is legal,
 /// while either shared/exclusive ordering is a conflict. Keeping the modes in
 /// separate sets is the part that prevents hub vertices from becoming
-/// serialization points.
+/// serialization points. SSI adjacency predicates are also intentionally absent
+/// here: they live only in [`crate::ssi::TxnTrace`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CertificationSummary {
     writes: BTreeSet<ConflictKey>,
@@ -1523,9 +1536,10 @@ impl CertificationSummary {
 /// `DeltaRow` variant stops this crate compiling instead of quietly writing
 /// nothing. Asymmetric constraint accesses are collected separately by
 /// [`CertificationSummary`]; putting a shared dependency in this set would turn
-/// it into an exclusive write. A conflict rule that silently omits a family does
-/// not report a missing conflict — it reports "no conflict", and both
-/// transactions commit.
+/// it into an exclusive write. SSI adjacency predicates are collected from the
+/// pre-effect workspace by [`crate::txn::Transaction`] and likewise stay out of
+/// this SI set. A conflict rule that silently omits a family does not report a
+/// missing conflict — it reports "no conflict", and both transactions commit.
 pub fn collect_conflict_keys(row: &DeltaRow, keys: &mut BTreeSet<ConflictKey>) {
     match row {
         DeltaRow::CreateVertex { vid, .. } => {

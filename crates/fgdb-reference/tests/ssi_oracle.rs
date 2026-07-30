@@ -26,12 +26,14 @@ use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_reference::intents::{Intent, Statement};
 use fgdb_reference::ssi::{DangerousStructure, TxnTrace, dangerous_structures};
 use fgdb_reference::txn::{Transaction, TxnOutcome};
-use fgdb_reference::{ReferenceDatabase, ssi};
-use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, GraphId, ObjectId, VId};
+use fgdb_reference::{ConflictKey, ReferenceDatabase, ssi};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
+use std::collections::BTreeSet;
 
 const GRAPH: GraphId = GraphId(1);
 const MAIN: BranchId = BranchId(1);
 const REL: RelationId = RelationId(1);
+const OTHER_REL: RelationId = RelationId(2);
 const LABEL: LabelId = LabelId(10);
 const PROP: PropertyKeyId = PropertyKeyId(100);
 const SEMANTICS: ObjectId = ObjectId([0x11; 32]);
@@ -54,6 +56,24 @@ fn set(vid: u128, value: i64) -> Statement {
         name: PROP,
         value: int(value),
     }])
+}
+
+fn add_edge(eid: u128, src: u128, relation: RelationId, dst: u128) -> Statement {
+    Statement::new(vec![Intent::AddEdge {
+        eid: EId(eid),
+        src: VId(src),
+        etype: relation,
+        dst: VId(dst),
+        props: vec![],
+    }])
+}
+
+fn delete_edge(eid: u128) -> Statement {
+    Statement::new(vec![Intent::DeleteEdge { eid: EId(eid) }])
+}
+
+fn delete_vertex(vid: u128) -> Statement {
+    Statement::new(vec![Intent::DeleteVertex { vid: VId(vid) }])
 }
 
 /// Two vertices at 1, committed at sequence 1.
@@ -423,8 +443,9 @@ fn an_untracked_read_creates_no_dependency() {
     );
 }
 
-/// A tracked neighbour read records the vertex and every edge traversed, so an
-/// adjacency read participates in rw edges over EXISTING elements.
+/// A tracked neighbour read records exactly its positive and negative
+/// dependencies: the source vertex, matching outgoing edges, and the
+/// relation-qualified adjacency predicate even when the result is empty.
 #[test]
 fn a_neighbour_read_records_the_edges_it_traversed() {
     let mut db = ReferenceDatabase::new();
@@ -432,13 +453,10 @@ fn a_neighbour_read_records_the_edges_it_traversed() {
     seed.execute(&[
         create(1, 1),
         create(2, 1),
-        Statement::new(vec![Intent::AddEdge {
-            eid: fgdb_types::EId(50),
-            src: VId(1),
-            etype: REL,
-            dst: VId(2),
-            props: vec![],
-        }]),
+        create(3, 1),
+        add_edge(50, 1, REL, 2),
+        add_edge(51, 1, OTHER_REL, 3),
+        add_edge(52, 3, REL, 1),
     ])
     .expect("executes");
     commit(&mut db, seed, 1, 0);
@@ -447,17 +465,221 @@ fn a_neighbour_read_records_the_edges_it_traversed() {
     assert_eq!(txn.read_neighbours(VId(1), REL), vec![VId(2)]);
     assert!(
         txn.read_set()
-            .contains(&fgdb_reference::ConflictKey::Element(ElementId::Edge(
-                fgdb_types::EId(50)
-            ))),
+            .contains(&ConflictKey::Element(ElementId::Edge(EId(50)))),
         "the traversed edge is a dependency: {:?}",
         txn.read_set()
     );
     assert!(
         txn.read_set()
-            .contains(&fgdb_reference::ConflictKey::Element(ElementId::Vertex(
-                VId(1)
-            )))
+            .contains(&ConflictKey::Element(ElementId::Vertex(VId(1))))
+    );
+    assert!(
+        !txn.read_set()
+            .contains(&ConflictKey::Element(ElementId::Edge(EId(51)))),
+        "another relation is not traversed: {:?}",
+        txn.read_set()
+    );
+    assert!(
+        !txn.read_set()
+            .contains(&ConflictKey::Element(ElementId::Edge(EId(52)))),
+        "an incoming edge is not traversed: {:?}",
+        txn.read_set()
+    );
+    assert!(
+        txn.read_set().contains(&ConflictKey::Adjacency {
+            vertex: VId(1),
+            relation: REL,
+        }),
+        "the predicate itself is a dependency: {:?}",
+        txn.read_set()
+    );
+}
+
+/// A reader that observes an empty adjacency and a concurrent inserter now form
+/// the same two-rw-edge dangerous structure as element-level write skew.
+///
+/// The first edge is the formerly missing phantom: `reader --rw--> inserter`
+/// because the inserter changed the predicate the reader observed as empty. The
+/// return edge is element-grained: the inserter read v2 and the reader wrote it.
+#[test]
+fn an_empty_adjacency_read_and_insert_complete_a_dangerous_structure() {
+    let mut db = ReferenceDatabase::new();
+    let mut seed = Transaction::begin_genesis(&db, GRAPH, MAIN).expect("genesis");
+    seed.execute(&[create(1, 1), create(2, 1), create(3, 1)])
+        .expect("executes");
+    commit(&mut db, seed, 1, 0);
+
+    let mut reader = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    let mut inserter = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    assert_eq!(reader.read_neighbours(VId(1), REL), vec![]);
+    reader.execute(&[set(2, 2)]).expect("executes");
+    assert_eq!(
+        inserter.read_property(ElementId::Vertex(VId(2)), PROP),
+        Some(int(1))
+    );
+    inserter
+        .execute(&[add_edge(50, 1, REL, 3)])
+        .expect("executes");
+
+    let (read_outcome, reader_trace) = commit(&mut db, reader, 2, 1);
+    let (insert_outcome, inserter_trace) = commit(&mut db, inserter, 3, 2);
+    assert!(
+        read_outcome.is_committed() && insert_outcome.is_committed(),
+        "SI admits disjoint ordinary writes"
+    );
+    let adjacency = ConflictKey::Adjacency {
+        vertex: VId(1),
+        relation: REL,
+    };
+    assert!(reader_trace.reads.contains(&adjacency));
+    assert!(inserter_trace.writes.contains(&adjacency));
+    assert_eq!(
+        dangerous_structures(&[reader_trace, inserter_trace]),
+        vec![DangerousStructure {
+            pivot: 2,
+            incoming_from: 1,
+            outgoing_to: 1,
+        }]
+    );
+}
+
+/// Predicate writes are SSI evidence, not SI first-committer-wins domains.
+///
+/// Both transactions change the same logical adjacency, but neither read it and
+/// their edge identities differ. They must both commit and form no rw edge. This
+/// is also the mutation control: moving `Adjacency` into
+/// `CertificationSummary` makes the second commit fail.
+#[test]
+fn two_inserters_into_one_adjacency_both_commit_under_si() {
+    let mut db = ReferenceDatabase::new();
+    let mut seed = Transaction::begin_genesis(&db, GRAPH, MAIN).expect("genesis");
+    seed.execute(&[create(1, 1), create(2, 1), create(3, 1)])
+        .expect("executes");
+    commit(&mut db, seed, 1, 0);
+
+    let mut left = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    let mut right = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    left.execute(&[add_edge(50, 1, REL, 2)]).expect("executes");
+    right.execute(&[add_edge(51, 1, REL, 3)]).expect("executes");
+
+    let (left_outcome, left_trace) = commit(&mut db, left, 2, 1);
+    let (right_outcome, right_trace) = commit(&mut db, right, 3, 2);
+    assert!(
+        left_outcome.is_committed() && right_outcome.is_committed(),
+        "same-adjacency writes are independent under SI"
+    );
+    let adjacency = ConflictKey::Adjacency {
+        vertex: VId(1),
+        relation: REL,
+    };
+    assert!(left_trace.writes.contains(&adjacency));
+    assert!(right_trace.writes.contains(&adjacency));
+    assert_eq!(dangerous_structures(&[left_trace, right_trace]), vec![]);
+}
+
+/// Adjacency predicates are relation-qualified. A write through another
+/// relation supplies no phantom edge, leaving only the real element-level rw
+/// edge and therefore no dangerous structure.
+#[test]
+fn another_relation_does_not_satisfy_the_adjacency_predicate() {
+    let mut db = ReferenceDatabase::new();
+    let mut seed = Transaction::begin_genesis(&db, GRAPH, MAIN).expect("genesis");
+    seed.execute(&[create(1, 1), create(2, 1), create(3, 1)])
+        .expect("executes");
+    commit(&mut db, seed, 1, 0);
+
+    let mut reader = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    let mut inserter = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    assert_eq!(reader.read_neighbours(VId(1), OTHER_REL), vec![]);
+    reader.execute(&[set(2, 2)]).expect("executes");
+    inserter.read_property(ElementId::Vertex(VId(2)), PROP);
+    inserter
+        .execute(&[add_edge(50, 1, REL, 3)])
+        .expect("executes");
+
+    let (read_outcome, reader_trace) = commit(&mut db, reader, 2, 1);
+    let (insert_outcome, inserter_trace) = commit(&mut db, inserter, 3, 2);
+    assert!(read_outcome.is_committed() && insert_outcome.is_committed());
+    assert!(reader_trace.reads.contains(&ConflictKey::Adjacency {
+        vertex: VId(1),
+        relation: OTHER_REL,
+    }));
+    assert!(inserter_trace.writes.contains(&ConflictKey::Adjacency {
+        vertex: VId(1),
+        relation: REL,
+    }));
+    assert_eq!(
+        dangerous_structures(&[reader_trace, inserter_trace]),
+        vec![],
+        "different relations cannot manufacture the missing rw edge"
+    );
+}
+
+/// A delete row carries only the edge identity, so its SSI predicate witness
+/// must be recovered from the pre-effect workspace.
+#[test]
+fn deleting_an_edge_writes_its_source_adjacency_predicate() {
+    let mut db = ReferenceDatabase::new();
+    let mut seed = Transaction::begin_genesis(&db, GRAPH, MAIN).expect("genesis");
+    seed.execute(&[create(1, 1), create(2, 1), add_edge(50, 1, REL, 2)])
+        .expect("executes");
+    commit(&mut db, seed, 1, 0);
+
+    let mut deletion = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    deletion.execute(&[delete_edge(50)]).expect("executes");
+    let (outcome, trace) = commit(&mut db, deletion, 2, 1);
+    assert!(outcome.is_committed());
+    assert!(trace.writes.contains(&ConflictKey::Adjacency {
+        vertex: VId(1),
+        relation: REL,
+    }));
+}
+
+/// A vertex deletion retires both incoming and outgoing edges. Every retired
+/// edge changes its SOURCE adjacency, not necessarily the deleted vertex's
+/// adjacency, and relations remain distinct.
+#[test]
+fn a_vertex_delete_cascade_writes_every_retired_source_adjacency() {
+    let mut db = ReferenceDatabase::new();
+    let mut seed = Transaction::begin_genesis(&db, GRAPH, MAIN).expect("genesis");
+    seed.execute(&[
+        create(1, 1),
+        create(2, 1),
+        create(3, 1),
+        add_edge(50, 1, REL, 2),
+        add_edge(51, 3, OTHER_REL, 2),
+        add_edge(52, 2, REL, 3),
+    ])
+    .expect("executes");
+    commit(&mut db, seed, 1, 0);
+
+    let mut deletion = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    deletion.execute(&[delete_vertex(2)]).expect("executes");
+    let (outcome, trace) = commit(&mut db, deletion, 2, 1);
+    assert!(outcome.is_committed());
+
+    let actual: BTreeSet<_> = trace
+        .writes
+        .iter()
+        .filter(|key| matches!(key, ConflictKey::Adjacency { .. }))
+        .copied()
+        .collect();
+    assert_eq!(
+        actual,
+        BTreeSet::from([
+            ConflictKey::Adjacency {
+                vertex: VId(1),
+                relation: REL,
+            },
+            ConflictKey::Adjacency {
+                vertex: VId(2),
+                relation: REL,
+            },
+            ConflictKey::Adjacency {
+                vertex: VId(3),
+                relation: OTHER_REL,
+            },
+        ])
     );
 }
 

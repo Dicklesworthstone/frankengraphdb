@@ -32,10 +32,15 @@
 //! rule until it goes away, which converts a conservative-and-correct checker
 //! into an unsound one.
 //!
-//! What this does NOT catch is written down where the gap is created:
-//! [`crate::txn::Transaction::read_neighbours`] records the edges that exist and
-//! therefore cannot express a dependency on an edge that does not, so predicate
-//! phantoms form no edge here.
+//! **PREDICATE READS ARE LOGICAL, NOT PHYSICAL.**
+//! [`crate::txn::Transaction::read_neighbours`] records a relation-qualified
+//! adjacency domain even when the result is empty, and final edge creates or
+//! deletes add that same domain only to the transaction TRACE write set. It is
+//! deliberately absent from SI first-committer-wins certification: two writers
+//! adding distinct edges at one hub remain independent, while either conflicts
+//! with a reader that depended on the adjacency predicate. This is the reference
+//! oracle's coarse logical witness; production witnesses retain §7.3's exact
+//! ranges, gaps, generations, and refinement evidence.
 
 use crate::ConflictKey;
 use fgdb_types::CommitSeq;
@@ -56,7 +61,9 @@ pub struct TxnTrace {
     /// An `Option` rather than a sentinel sequence: "did not commit" is not a
     /// point on the timeline, and a sentinel would sort somewhere and form edges.
     pub commit_seq: Option<CommitSeq>,
+    /// Logical elements and predicates this transaction observed.
     pub reads: BTreeSet<ConflictKey>,
+    /// Final logical effects, including trace-only predicate domains.
     pub writes: BTreeSet<ConflictKey>,
 }
 
