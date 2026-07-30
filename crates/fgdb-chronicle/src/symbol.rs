@@ -259,6 +259,9 @@ impl SymbolRecord {
         if bytes.len() < record_len_usize {
             return Err(SymbolError::Truncated);
         }
+        if bytes.len() != record_len_usize {
+            return Err(SymbolError::InconsistentLengths);
+        }
 
         let payload_end = cursor + usize::try_from(symbol_len).expect("symbol_len fits usize");
         let payload = bytes[cursor..payload_end].to_vec();

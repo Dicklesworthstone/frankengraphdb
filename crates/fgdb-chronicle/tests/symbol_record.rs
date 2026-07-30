@@ -196,6 +196,15 @@ fn truncated_and_inconsistent_records_fail_closed() {
         SymbolRecord::verify(&oversized_bytes, &encoding, &dek()),
         Err(SymbolError::InconsistentLengths)
     );
+
+    // A valid authenticated record is still one exact record, not an
+    // authenticated prefix followed by bytes outside its MAC transcript.
+    let mut suffixed = bytes.clone();
+    suffixed.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    assert_eq!(
+        SymbolRecord::verify(&suffixed, &encoding, &dek()),
+        Err(SymbolError::InconsistentLengths)
+    );
 }
 
 /// Unknown framing is rejected, never ignored: a future version, a foreign
