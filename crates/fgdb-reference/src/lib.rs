@@ -1035,9 +1035,17 @@ impl ReferenceGraph {
 /// sequence-neutral materializer: it tracks neither committed parent heads nor
 /// logical-command history, and the reservation belongs to W4's certification
 /// machinery. This slice therefore models only a fork of the parent's current
-/// materialized state. Historical-boundary selection must land with the
-/// missing history/head model; a caller-supplied sequence would be an
-/// unauthenticated label, not oracle evidence.
+/// materialized state.
+///
+/// FORKING FROM AN EARLIER SEQUENCE IS NOW IMPLEMENTABLE and is not yet
+/// implemented. The blocker used to be real — there was no history to select a
+/// boundary in, so a caller-supplied sequence would have been an unauthenticated
+/// label rather than oracle evidence. [`ReferenceDatabase::read`] removes it: a
+/// boundary can now be checked against the parent's frontier and *used*, by
+/// materializing the parent at that sequence. That is a capability this type
+/// should grow, and until it does, the restriction is a missing feature rather
+/// than an impossibility — recorded here so the distinction does not decay back
+/// into "cannot".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchOrigin {
     Genesis,
@@ -1052,6 +1060,12 @@ pub enum BranchOrigin {
         /// forking (fgdb-vyb0). This is the honest version — it records the
         /// sequence the parent had actually applied, which is a fact the
         /// database owns and can check.
+        ///
+        /// It is now LOAD-BEARING as well as recorded: [`ReferenceDatabase::read`]
+        /// caps each ancestor's contribution at its boundary, so this value is
+        /// what keeps a parent's post-fork commits out of a child's historical
+        /// reads. Deleting it would not merely drop a label — it would make every
+        /// cross-fork read wrong.
         parent_applied_through: CommitSeq,
     },
 }
@@ -1097,13 +1111,160 @@ pub struct ReferenceDatabase {
     /// branch's origin is metadata about history, not part of the graph.
     origins: BTreeMap<(GraphId, BranchId), BranchOrigin>,
     /// The highest commit sequence each coordinate has applied.
-    ///
-    /// This is the honest half of a history model: it says how FAR a coordinate
-    /// has been advanced, without claiming the ability to read it AS OF an
-    /// earlier sequence. Snapshot reads need per-element version history, which
-    /// this slice does not have — see the note on `applied_through`.
     applied_through: BTreeMap<(GraphId, BranchId), CommitSeq>,
+    /// What each coordinate applied, at which sequence, oldest first.
+    ///
+    /// **THIS IS THE HISTORY MODEL, and its shape is the whole point.** B1's
+    /// claim is that MVCC versions, time-travel, replication and branches are
+    /// *the same mechanism* — an append-only commit stream — rather than four
+    /// features that happen to coexist. An oracle that kept version chains
+    /// beside the materialized state would be asserting that claim with a
+    /// second, independent representation that could disagree with the stream.
+    /// So the oracle keeps the stream, and every historical read is defined as
+    /// the fold of it: **the state as of sequence S is what you get by applying
+    /// every record through S, and nothing else.** That is a definition, not an
+    /// algorithm, which is what §15 asks this crate to be.
+    ///
+    /// A forked branch's vector holds **only its own** commits, never a copy of
+    /// its parent's. Reads follow the branch-parent link backwards and cap each
+    /// ancestor at its fork boundary, so the child's pre-fork history *is* the
+    /// parent's — the git semantics, and the one place this crate matches
+    /// plan:451's "reads select the branch head and follow explicit
+    /// branch-parent links" instead of copying.
+    history: BTreeMap<(GraphId, BranchId), Vec<CommitRecord>>,
 }
+
+/// A `(graph, branch)` pair: one materialization coordinate.
+type Coordinate = (GraphId, BranchId);
+
+/// One ancestor of a lineage walk, with the highest sequence it may contribute
+/// through — its own fork boundary, or the requested `high` if that is lower.
+type CappedAncestor = (Coordinate, CommitSeq);
+
+/// One coordinate's contribution at one commit sequence.
+///
+/// The whole entry is retained rather than a summary of it: replay must be the
+/// same operation as the original apply, or the fold is a re-implementation of
+/// the materializer and can drift from it.
+#[derive(Clone, Debug, PartialEq)]
+struct CommitRecord {
+    seq: CommitSeq,
+    entry: CoordinateEntry,
+}
+
+/// A read capability pinned to one coordinate at one commit sequence.
+///
+/// **THE SI ORACLE'S INVARIANT IS STRUCTURAL HERE, NOT CHECKED.** §15 asks for
+/// an oracle asserting that no read sees a sequence above the snapshot. A
+/// `Snapshot` is minted only by [`ReferenceDatabase::snapshot`] or
+/// [`ReferenceDatabase::snapshot_at`], both of which refuse a `high` above the
+/// coordinate's frontier, and [`ReferenceDatabase::read`] folds only records at
+/// or below it. There is no constructor and no mutator, so "a read above the
+/// snapshot" is not a condition to detect — it is a state the type cannot
+/// reach. The alternative, passing a bare sequence to every read, makes the
+/// invariant a discipline that every future call site has to remember.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    graph: GraphId,
+    branch: BranchId,
+    high: CommitSeq,
+}
+
+impl Snapshot {
+    pub fn graph(&self) -> GraphId {
+        self.graph
+    }
+
+    pub fn branch(&self) -> BranchId {
+        self.branch
+    }
+
+    /// The highest commit sequence this snapshot can observe.
+    pub fn high(&self) -> CommitSeq {
+        self.high
+    }
+}
+
+/// Why a snapshot could not be minted or read.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SnapshotError {
+    /// No such coordinate. Distinct from an empty graph: "this branch does not
+    /// exist" and "this branch has no vertices" are different answers, and
+    /// collapsing them would let a typo read as a legitimately empty database.
+    NoSuchCoordinate { graph: GraphId, branch: BranchId },
+    /// The requested sequence is above what this coordinate has applied — a
+    /// read of the future. Refused rather than clamped to the frontier, because
+    /// a clamped answer is indistinguishable from a correct one: every "as of a
+    /// later sequence" assertion would pass while measuring the present.
+    BeyondFrontier {
+        graph: GraphId,
+        branch: BranchId,
+        applied_through: CommitSeq,
+        requested: CommitSeq,
+    },
+    /// A fork's parent is not in the database.
+    ///
+    /// Unreachable while branches are never removed, and kept deliberately: the
+    /// lineage walk must be total, and the tempting total answer — treat the
+    /// missing ancestor as contributing nothing — would silently return a graph
+    /// missing all of its inherited state, which is a wrong answer rather than a
+    /// refused one. If branch deletion ever lands, this is the arm it must hit.
+    BrokenLineage {
+        graph: GraphId,
+        branch: BranchId,
+        parent: BranchId,
+    },
+    /// A recorded commit failed to re-apply during replay. An internal
+    /// contradiction — the stream that built the live state must rebuild it —
+    /// surfaced as a typed error naming the record rather than a panic.
+    HistoryNotApplicable {
+        graph: GraphId,
+        branch: BranchId,
+        seq: CommitSeq,
+        /// Boxed: an `ApplyError` is wide, this arm is the coldest one here, and
+        /// every read in the crate returns this type by value.
+        cause: Box<ApplyError>,
+    },
+}
+
+impl core::fmt::Display for SnapshotError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoSuchCoordinate { graph, branch } => {
+                write!(f, "no coordinate {graph:?}/{branch:?}")
+            }
+            Self::BeyondFrontier {
+                graph,
+                branch,
+                applied_through,
+                requested,
+            } => write!(
+                f,
+                "coordinate {graph:?}/{branch:?} has applied through {applied_through:?}, \
+                 cannot read as of {requested:?}"
+            ),
+            Self::BrokenLineage {
+                graph,
+                branch,
+                parent,
+            } => write!(
+                f,
+                "coordinate {graph:?}/{branch:?} forked from missing parent {parent:?}"
+            ),
+            Self::HistoryNotApplicable {
+                graph,
+                branch,
+                seq,
+                cause,
+            } => write!(
+                f,
+                "recorded commit {seq:?} of {graph:?}/{branch:?} did not re-apply: {cause}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for SnapshotError {}
 
 impl ReferenceDatabase {
     pub fn new() -> Self {
@@ -1114,17 +1275,163 @@ impl ReferenceDatabase {
         self.coordinates.get(&(graph, branch))
     }
 
-    /// The highest commit sequence this coordinate has applied.
+    /// The highest commit sequence this coordinate has applied — its frontier.
     ///
-    /// NOT a snapshot capability. It answers "how far has this branch been
-    /// advanced", which is what the SI oracle's precondition needs (no read may
-    /// see a sequence above the snapshot) and what a fork boundary can honestly
-    /// record. It does NOT let a caller read the graph as it stood at an
-    /// earlier sequence: that needs per-element version history, which this
-    /// materializer does not keep. Anything claiming AS OF <sequence> must land
-    /// with that history, not with this.
+    /// This is the *bound* on visibility, not visibility itself: it is the
+    /// largest `high` [`snapshot_at`](Self::snapshot_at) will mint, and the
+    /// sequence a fork boundary honestly records. Reading the graph as it stood
+    /// at an earlier sequence goes through [`read`](Self::read).
     pub fn applied_through(&self, graph: GraphId, branch: BranchId) -> Option<CommitSeq> {
         self.applied_through.get(&(graph, branch)).copied()
+    }
+
+    /// How many commits this coordinate recorded **itself**.
+    ///
+    /// A forked child reports 0 until it is written to, however large its
+    /// inherited state: its history is its parent's, reached by link. Exposed so
+    /// that "the fork shared history rather than copying it" is an assertion a
+    /// test can make about the mechanism, not only about the answers.
+    pub fn recorded_commits(&self, graph: GraphId, branch: BranchId) -> usize {
+        self.history
+            .get(&(graph, branch))
+            .map_or(0, |records| records.len())
+    }
+
+    /// Mint a snapshot at this coordinate's current frontier.
+    ///
+    /// The read-your-own-writes position: everything committed so far, nothing
+    /// after.
+    pub fn snapshot(&self, graph: GraphId, branch: BranchId) -> Result<Snapshot, SnapshotError> {
+        let high = self
+            .applied_through(graph, branch)
+            .ok_or(SnapshotError::NoSuchCoordinate { graph, branch })?;
+        Ok(Snapshot {
+            graph,
+            branch,
+            high,
+        })
+    }
+
+    /// Mint a snapshot as of an earlier sequence — `FOR SYSTEM_TIME AS OF`.
+    ///
+    /// Refuses a sequence above the frontier. `CommitSeq(0)` is legal and names
+    /// the state before this coordinate's first commit.
+    pub fn snapshot_at(
+        &self,
+        graph: GraphId,
+        branch: BranchId,
+        high: CommitSeq,
+    ) -> Result<Snapshot, SnapshotError> {
+        let frontier = self
+            .applied_through(graph, branch)
+            .ok_or(SnapshotError::NoSuchCoordinate { graph, branch })?;
+        if high.0 > frontier.0 {
+            return Err(SnapshotError::BeyondFrontier {
+                graph,
+                branch,
+                applied_through: frontier,
+                requested: high,
+            });
+        }
+        Ok(Snapshot {
+            graph,
+            branch,
+            high,
+        })
+    }
+
+    /// Materialize what a snapshot observes.
+    ///
+    /// Returns an owned [`ReferenceGraph`], so every existing read — property
+    /// lookups, adjacency, path modes, valid-time selectors — applies to a
+    /// historical state with no second implementation. That is why the result is
+    /// a graph and not a bundle of specialized accessors: `AS OF <sequence>`
+    /// (system time) and `AS OF <instant>` (valid time) are independent
+    /// dimensions, and composing them must not require a bitemporal method per
+    /// read.
+    ///
+    /// A snapshot at the frontier reconstructs the live graph exactly. That
+    /// equality is the load-bearing internal check on this whole mechanism: it
+    /// says the recorded stream and the materialized state are two views of one
+    /// fact rather than two facts that must be kept in step.
+    pub fn read(&self, snapshot: &Snapshot) -> Result<ReferenceGraph, SnapshotError> {
+        let mut graph = ReferenceGraph::new();
+        for (key, cap) in self.lineage(snapshot.graph, snapshot.branch, snapshot.high)? {
+            let Some(records) = self.history.get(&key) else {
+                continue;
+            };
+            for record in records {
+                // Ascending by construction: `apply_template` refuses a
+                // sequence that does not advance the coordinate, so a record
+                // above the cap means every later one is too.
+                if record.seq.0 > cap.0 {
+                    break;
+                }
+                graph.apply_entry(&record.entry).map_err(|cause| {
+                    SnapshotError::HistoryNotApplicable {
+                        graph: key.0,
+                        branch: key.1,
+                        seq: record.seq,
+                        cause: Box::new(cause),
+                    }
+                })?;
+            }
+        }
+        Ok(graph)
+    }
+
+    /// The ancestor chain from genesis to `branch`, each capped at the sequence
+    /// it may contribute through.
+    ///
+    /// Each ancestor's cap is the minimum of the requested `high` and every fork
+    /// boundary below it. Taking the minimum is what makes a child's pre-fork
+    /// read equal its parent's read at the same sequence *without* letting the
+    /// parent's post-fork commits leak in — the two facts a branch model has to
+    /// deliver at once, and the reason the cap is per-ancestor rather than one
+    /// global filter.
+    ///
+    /// Iterative, not recursive: the depth is the fork depth, which is
+    /// user-controlled.
+    fn lineage(
+        &self,
+        graph: GraphId,
+        branch: BranchId,
+        high: CommitSeq,
+    ) -> Result<Vec<CappedAncestor>, SnapshotError> {
+        let mut chain: Vec<CappedAncestor> = Vec::new();
+        let mut key = (graph, branch);
+        let mut cap = high;
+        loop {
+            chain.push((key, cap));
+            match self.origins.get(&key) {
+                None => {
+                    return Err(SnapshotError::NoSuchCoordinate {
+                        graph: key.0,
+                        branch: key.1,
+                    });
+                }
+                Some(BranchOrigin::Genesis) => break,
+                Some(BranchOrigin::Fork {
+                    parent_branch,
+                    parent_applied_through,
+                }) => {
+                    let parent_key = (key.0, *parent_branch);
+                    if !self.origins.contains_key(&parent_key) {
+                        return Err(SnapshotError::BrokenLineage {
+                            graph: key.0,
+                            branch: key.1,
+                            parent: *parent_branch,
+                        });
+                    }
+                    if parent_applied_through.0 < cap.0 {
+                        cap = *parent_applied_through;
+                    }
+                    key = parent_key;
+                }
+            }
+        }
+        chain.reverse();
+        Ok(chain)
     }
 
     /// How this branch came to exist, if it exists.
@@ -1142,9 +1449,9 @@ impl ReferenceDatabase {
     /// from then on the two diverge with no leakage in either direction. That
     /// is the current-state subset of B1's git-style branching and B6's
     /// branch-per-agent isolation, and it is what the laws in
-    /// `tests/branch_fork.rs` pin. This method deliberately accepts no commit
-    /// sequence: the reference database cannot yet select or verify a
-    /// historical boundary.
+    /// `tests/branch_fork.rs` pin. This method accepts no commit sequence, which
+    /// is now a scope limit rather than an impossibility — see the note on
+    /// [`BranchOrigin::Fork`].
     ///
     /// **THE COMPLEXITY, which the real engine must NOT match.** This copies the
     /// parent's state, which is O(n). plan:451 is explicit that branch creation
@@ -1187,6 +1494,11 @@ impl ReferenceDatabase {
             .copied()
             .unwrap_or(CommitSeq(0));
 
+        // The child's materialized state is copied; its HISTORY is not. The
+        // child owns an empty record vector and reaches everything before the
+        // boundary through the parent link, so a fork costs one metadata row in
+        // the dimension that time-travel reads — the mechanism plan:451
+        // describes, even though the state copy beside it is not.
         self.coordinates.insert((graph, child), inherited);
         self.applied_through
             .insert((graph, child), parent_applied_through);
@@ -1247,6 +1559,18 @@ impl ReferenceDatabase {
                 .or_default()
                 .apply_entry(entry)?;
             candidate.applied_through.insert(key, commit_seq);
+            // Recorded only on the path that actually applied it, inside the
+            // all-or-nothing candidate: a refused template must leave no trace
+            // in the stream, or a later historical read would fold in effects
+            // that were never committed.
+            candidate
+                .history
+                .entry(key)
+                .or_default()
+                .push(CommitRecord {
+                    seq: commit_seq,
+                    entry: entry.clone(),
+                });
         }
         *self = candidate;
         Ok(())
