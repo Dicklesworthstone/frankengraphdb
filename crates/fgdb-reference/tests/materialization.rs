@@ -116,6 +116,61 @@ fn replaying_the_same_stream_yields_identical_state() {
     assert_eq!(social_graph(), social_graph());
 }
 
+/// Version identity is a history identity, not a population counter or a digest
+/// of only the currently visible payload.
+#[test]
+fn version_identity_is_replayable_history_sensitive_and_population_independent() {
+    let mut sparse = ReferenceGraph::new();
+    sparse
+        .apply_row(&create_vertex(1, 1, "ada"))
+        .expect("create applies");
+    let initial = sparse.vertex(VId(1)).expect("vertex exists").version;
+    let update = DeltaRow::Property {
+        elem: ElementId::Vertex(VId(1)),
+        property: PROP_NAME,
+        before: Some(text("ada")),
+        after: Some(text("ada-updated")),
+    };
+    sparse.apply_row(&update).expect("update applies");
+    let successor = sparse.vertex(VId(1)).expect("vertex exists").version;
+
+    let mut populated = ReferenceGraph::new();
+    populated
+        .apply_row(&create_vertex(1, 1, "ada"))
+        .expect("same create applies");
+    populated
+        .apply_row(&create_vertex(2, 2, "unrelated"))
+        .expect("unrelated create applies");
+    populated.apply_row(&update).expect("same update applies");
+    assert_eq!(
+        populated.vertex(VId(1)).expect("vertex exists").version,
+        successor,
+        "unrelated population must not enter an element version identity"
+    );
+
+    sparse
+        .apply_row(&DeltaRow::Property {
+            elem: ElementId::Vertex(VId(1)),
+            property: PROP_NAME,
+            before: Some(text("ada-updated")),
+            after: Some(text("ada")),
+        })
+        .expect("return update applies");
+    assert_eq!(
+        sparse
+            .vertex(VId(1))
+            .expect("vertex exists")
+            .props
+            .get(&PROP_NAME),
+        Some(&text("ada"))
+    );
+    assert_ne!(
+        sparse.vertex(VId(1)).expect("vertex exists").version,
+        initial,
+        "returning to the same payload is still a later system-time version"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Before-images are checked, not trusted
 // ---------------------------------------------------------------------------
@@ -189,12 +244,13 @@ fn a_label_row_with_a_false_before_image_is_refused() {
 #[test]
 fn a_vertex_deletion_must_declare_its_exact_cascade_image() {
     let mut graph = social_graph();
+    let version = graph.vertex(VId(1)).expect("ada exists").version;
     let before = graph.clone();
 
     // Ada is incident to edges 10 and 11.
     let too_few = DeltaRow::DeleteVertex {
         vid: VId(1),
-        before_version: oid(0x01),
+        before_version: version,
         sorted_retired_incident_edges: vec![EId(10)],
     };
     assert!(
@@ -208,7 +264,7 @@ fn a_vertex_deletion_must_declare_its_exact_cascade_image() {
 
     let too_many = DeltaRow::DeleteVertex {
         vid: VId(1),
-        before_version: oid(0x01),
+        before_version: version,
         sorted_retired_incident_edges: vec![EId(10), EId(11), EId(12)],
     };
     assert!(
@@ -223,7 +279,7 @@ fn a_vertex_deletion_must_declare_its_exact_cascade_image() {
     // Exactly right applies, and takes the edges with it.
     let exact = DeltaRow::DeleteVertex {
         vid: VId(1),
-        before_version: oid(0x01),
+        before_version: version,
         sorted_retired_incident_edges: vec![EId(10), EId(11)],
     };
     graph.apply_row(&exact).expect("exact cascade applies");
@@ -235,6 +291,161 @@ fn a_vertex_deletion_must_declare_its_exact_cascade_image() {
         "an unrelated edge must survive"
     );
     assert_eq!(graph.edge_count(), 1);
+}
+
+/// Delete effects are compare-and-set operations over complete element
+/// versions. A stale identity must refuse before either the element or its
+/// cascade moves, even when every other before-image is exact.
+#[test]
+fn stale_delete_versions_are_refused_without_moving_state() {
+    let mut graph = social_graph();
+    let settled = graph.clone();
+
+    let mut stale_edge_version = graph.edge(EId(10)).expect("edge exists").version;
+    stale_edge_version.0[0] ^= 0x01;
+    let edge_result = graph.apply_row(&DeltaRow::DeleteEdge {
+        eid: EId(10),
+        before_version: stale_edge_version,
+    });
+    assert!(matches!(
+        edge_result,
+        Err(ApplyError::ElementVersionMismatch {
+            elem: ElementId::Edge(EId(10)),
+            ..
+        })
+    ));
+    assert_eq!(graph, settled, "a refused edge delete is atomic");
+
+    let mut stale_vertex_version = graph.vertex(VId(1)).expect("vertex exists").version;
+    stale_vertex_version.0[0] ^= 0x01;
+    let vertex_result = graph.apply_row(&DeltaRow::DeleteVertex {
+        vid: VId(1),
+        before_version: stale_vertex_version,
+        sorted_retired_incident_edges: vec![EId(10), EId(11)],
+    });
+    assert!(matches!(
+        vertex_result,
+        Err(ApplyError::ElementVersionMismatch {
+            elem: ElementId::Vertex(VId(1)),
+            ..
+        })
+    ));
+    assert_eq!(graph, settled, "a refused vertex delete is atomic");
+}
+
+/// A complete version identity advances with an element mutation. Reusing the
+/// identity captured before that mutation must not retire the newer version.
+#[test]
+fn an_element_mutation_makes_an_earlier_delete_version_stale() {
+    let mut graph = social_graph();
+    let stale = graph.vertex(VId(1)).expect("ada exists").version;
+    graph
+        .apply_row(&DeltaRow::Property {
+            elem: ElementId::Vertex(VId(1)),
+            property: PROP_NAME,
+            before: Some(text("ada")),
+            after: Some(text("ada-updated")),
+        })
+        .expect("property successor applies");
+    assert_ne!(
+        graph.vertex(VId(1)).expect("ada remains").version,
+        stale,
+        "a payload successor must have a distinct version identity"
+    );
+
+    let settled = graph.clone();
+    assert!(matches!(
+        graph.apply_row(&DeltaRow::DeleteVertex {
+            vid: VId(1),
+            before_version: stale,
+            sorted_retired_incident_edges: vec![EId(10), EId(11)],
+        }),
+        Err(ApplyError::ElementVersionMismatch { .. })
+    ));
+    assert_eq!(graph, settled);
+}
+
+/// Every row family that changes a materialized vertex or edge record advances
+/// the same version chain. Coordinate-level escrow, sketch, schema, and
+/// constraint state are separate reference-model records.
+#[test]
+fn every_materialized_element_mutation_family_advances_its_version() {
+    let mut graph = social_graph();
+    let vertex = ElementId::Vertex(VId(1));
+    let mut vertex_version = graph.element_version(vertex).expect("vertex version");
+    let vertex_rows = [
+        DeltaRow::LabelMembership {
+            vid: VId(1),
+            label: LabelId(11),
+            before: false,
+            after: true,
+        },
+        DeltaRow::Property {
+            elem: vertex,
+            property: PROP_NAME,
+            before: Some(text("ada")),
+            after: Some(text("ada-updated")),
+        },
+        DeltaRow::ValidTime {
+            elem: vertex,
+            contract_id: oid(0x61),
+            before: None,
+            after: Some(ValidTimePeriod {
+                start_micros: 10,
+                end_micros: Some(20),
+            }),
+        },
+        DeltaRow::Counter {
+            operation_key: OperationKey([0x62; 32]),
+            elem: vertex,
+            property: PROP_VISITS,
+            algebra_profile: oid(0x63),
+            delta: 1,
+            before: 0,
+            after: 1,
+        },
+    ];
+    for row in vertex_rows {
+        graph.apply_row(&row).expect("vertex successor applies");
+        let successor = graph.element_version(vertex).expect("vertex version");
+        assert_ne!(successor, vertex_version, "row did not advance: {row:?}");
+        vertex_version = successor;
+    }
+
+    let edge = ElementId::Edge(EId(10));
+    let mut edge_version = graph.element_version(edge).expect("edge version");
+    let edge_rows = [
+        DeltaRow::Property {
+            elem: edge,
+            property: PROP_NAME,
+            before: None,
+            after: Some(text("edge")),
+        },
+        DeltaRow::ValidTime {
+            elem: edge,
+            contract_id: oid(0x64),
+            before: None,
+            after: Some(ValidTimePeriod {
+                start_micros: 30,
+                end_micros: None,
+            }),
+        },
+        DeltaRow::Counter {
+            operation_key: OperationKey([0x65; 32]),
+            elem: edge,
+            property: PROP_VISITS,
+            algebra_profile: oid(0x66),
+            delta: 2,
+            before: 0,
+            after: 2,
+        },
+    ];
+    for row in edge_rows {
+        graph.apply_row(&row).expect("edge successor applies");
+        let successor = graph.element_version(edge).expect("edge version");
+        assert_ne!(successor, edge_version, "row did not advance: {row:?}");
+        edge_version = successor;
+    }
 }
 
 #[test]

@@ -557,6 +557,15 @@ fn cascade_of(row: &DeltaRow) -> Option<&Vec<EId>> {
     }
 }
 
+/// Exact current version captured by either delete family.
+fn delete_before_version(row: &DeltaRow) -> Option<ObjectId> {
+    match row {
+        DeltaRow::DeleteVertex { before_version, .. }
+        | DeltaRow::DeleteEdge { before_version, .. } => Some(*before_version),
+        _ => None,
+    }
+}
+
 /// The `(before, after)` images of a `Property` row.
 fn property_images(row: &DeltaRow) -> Option<(&Option<CanonicalScalar>, &Option<CanonicalScalar>)> {
     match row {
@@ -591,6 +600,11 @@ fn a_delete_vertex_intent_computes_its_own_cascade() {
         cascade_of(&effects[0]).expect("a DeleteVertex row"),
         &vec![EId(10), EId(11)],
         "both incident edges, sorted, and NOT the edge between 2 and 3"
+    );
+    assert_eq!(
+        delete_before_version(&effects[0]).expect("delete carries a version"),
+        basis.vertex(VId(1)).expect("vertex exists").version,
+        "finalization captures the exact current vertex version"
     );
 
     // And the computed image is exactly what the materializer accepts.
@@ -655,6 +669,11 @@ fn a_delete_edge_intent_leaves_its_endpoints() {
         &[Statement::new(vec![Intent::DeleteEdge { eid: EId(10) }])],
     );
     let (effects, _) = outcome.committed_parts().expect("committed");
+    assert_eq!(
+        delete_before_version(&effects[0]).expect("delete carries a version"),
+        basis.edge(EId(10)).expect("edge exists").version,
+        "finalization captures the exact current edge version"
+    );
     let mut applied = basis.clone();
     for row in effects {
         applied.apply_row(row).expect("applies");
@@ -833,10 +852,11 @@ fn birth_ordinals_do_not_depend_on_unrelated_population() {
 fn a_retired_element_cannot_move_a_later_birth_ordinal_backward() {
     let full = graph(vec![vertex(1, "ada"), vertex(2, "grace")]);
     let mut holed = full.clone();
+    let retired_version = holed.vertex(VId(2)).expect("vertex exists").version;
     holed
         .apply_row(&DeltaRow::DeleteVertex {
             vid: VId(2),
-            before_version: ObjectId([0u8; 32]),
+            before_version: retired_version,
             sorted_retired_incident_edges: vec![],
         })
         .expect("applies");

@@ -155,22 +155,34 @@ fn rich_history() -> ReferenceDatabase {
             after: true,
         }],
     );
+    let edge_version = db
+        .graph(GRAPH, MAIN)
+        .expect("main exists")
+        .edge(EId(11))
+        .expect("edge exists")
+        .version;
     apply_at(
         &mut db,
         MAIN,
         5,
         vec![DeltaRow::DeleteEdge {
             eid: EId(11),
-            before_version: ObjectId([0x33; 32]),
+            before_version: edge_version,
         }],
     );
+    let vertex_version = db
+        .graph(GRAPH, MAIN)
+        .expect("main exists")
+        .vertex(VId(1))
+        .expect("vertex exists")
+        .version;
     apply_at(
         &mut db,
         MAIN,
         6,
         vec![DeltaRow::DeleteVertex {
             vid: VId(1),
-            before_version: ObjectId([0x44; 32]),
+            before_version: vertex_version,
             sorted_retired_incident_edges: vec![],
         }],
     );

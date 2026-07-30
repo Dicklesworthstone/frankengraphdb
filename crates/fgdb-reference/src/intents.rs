@@ -42,7 +42,7 @@
 
 use crate::{ApplyError, ReferenceGraph};
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, ObjectId, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 
 /// What a failed `CompareAndSet` precondition means (Appendix B, verbatim
 /// vocabulary: `mismatch: NoOp|StatementError|TxnAbort`).
@@ -504,16 +504,19 @@ fn reduce(state: &ReferenceGraph, intent: &Intent, ordinal: u64) -> Reduction {
             }])
         }
         Intent::DeleteVertex { vid } => {
-            if state.vertex(*vid).is_none() {
+            let Some(vertex) = state.vertex(*vid) else {
                 // Deleting what is not there emits nothing rather than failing.
                 // A delete is a statement about the END state, and the end state
                 // is already what was asked for — the same reading that makes
                 // SetProp-to-the-current-value a no-op.
                 return Reduction::Nothing;
-            }
+            };
             Reduction::Effects(vec![DeltaRow::DeleteVertex {
                 vid: *vid,
-                before_version: ObjectId([0u8; 32]),
+                // The stable VId names every version. Finalization captures the
+                // exact current system-time version so materialization is a
+                // compare-and-set rather than an unconditional retirement.
+                before_version: vertex.version,
                 // COMPUTED from the state being finalized against. `incident_edges`
                 // returns them sorted and deduplicated, which is what the
                 // materializer's equality check demands — a self-loop appears once,
@@ -522,12 +525,12 @@ fn reduce(state: &ReferenceGraph, intent: &Intent, ordinal: u64) -> Reduction {
             }])
         }
         Intent::DeleteEdge { eid } => {
-            if state.edge(*eid).is_none() {
+            let Some(edge) = state.edge(*eid) else {
                 return Reduction::Nothing;
-            }
+            };
             Reduction::Effects(vec![DeltaRow::DeleteEdge {
                 eid: *eid,
-                before_version: ObjectId([0u8; 32]),
+                before_version: edge.version,
             }])
         }
         Intent::RemoveProp { elem, name } => {

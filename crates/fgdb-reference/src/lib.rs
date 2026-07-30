@@ -48,10 +48,19 @@ use std::sync::Arc;
 /// collide with any other transcript that happens to hash the same material.
 const PREFIX_DIGEST_DOMAIN: &[u8] = b"fgdb.reference.stream-prefix.v1";
 const LINEAGE_DIGEST_DOMAIN: &[u8] = b"fgdb.reference.snapshot-lineage.v1";
+const ELEMENT_VERSION_DOMAIN: &[u8] = b"fgdb.reference.element-version.v1";
 
 /// A materialized vertex.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Vertex {
+    /// Identity of this exact system-time version.
+    ///
+    /// The reference model derives it from the complete canonical effect chain,
+    /// not from the stable vertex ID or an ambient commit sequence. Replaying
+    /// the same effects therefore reproduces it, while any intervening mutation
+    /// creates a distinct successor even when the visible payload later returns
+    /// to an earlier value.
+    pub version: ObjectId,
     pub birth_ordinal: u64,
     pub labels: BTreeSet<LabelId>,
     pub props: BTreeMap<PropertyKeyId, CanonicalScalar>,
@@ -61,6 +70,8 @@ pub struct Vertex {
 /// A materialized edge.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Edge {
+    /// Identity of this exact system-time version. See [`Vertex::version`].
+    pub version: ObjectId,
     pub birth_ordinal: u64,
     pub src: VId,
     pub relation: RelationId,
@@ -175,6 +186,21 @@ pub enum ApplyError {
     NoSuchEdge {
         eid: EId,
     },
+    /// A delete effect was finalized against a different element version.
+    ///
+    /// The stable VId/EId is deliberately insufficient: it names every version
+    /// of the element. Deletion is a compare-and-set against the exact current
+    /// version and must leave the graph untouched on disagreement.
+    ElementVersionMismatch {
+        elem: ElementId,
+        declared: ObjectId,
+        actual: ObjectId,
+    },
+    /// A row could not supply canonical bytes for the version-identity chain.
+    ///
+    /// This is checked before mutation so malformed input cannot move state and
+    /// then fail while deriving the successor version.
+    VersionIdentityEncoding(fgdb_delta_types::CanonicalError),
     /// An edge names an endpoint that does not exist. Referential integrity is
     /// checked here because a graph with a dangling endpoint is not a graph.
     DanglingEndpoint {
@@ -332,6 +358,12 @@ impl core::fmt::Display for ApplyError {
             Self::EdgeAlreadyExists { eid } => write!(f, "edge {eid:?} already exists"),
             Self::NoSuchVertex { vid } => write!(f, "no such vertex {vid:?}"),
             Self::NoSuchEdge { eid } => write!(f, "no such edge {eid:?}"),
+            Self::ElementVersionMismatch { elem, .. } => {
+                write!(f, "delete before-version disagrees with current {elem:?}")
+            }
+            Self::VersionIdentityEncoding(cause) => {
+                write!(f, "element version identity could not be encoded: {cause}")
+            }
             Self::DanglingEndpoint { eid, endpoint } => {
                 write!(f, "edge {eid:?} names missing endpoint {endpoint:?}")
             }
@@ -511,6 +543,14 @@ impl ReferenceGraph {
 
     pub fn edge(&self, eid: EId) -> Option<&Edge> {
         self.edges.get(&eid)
+    }
+
+    /// Exact current system-time version identity of an element.
+    pub fn element_version(&self, elem: ElementId) -> Option<ObjectId> {
+        match elem {
+            ElementId::Vertex(vid) => self.vertices.get(&vid).map(|vertex| vertex.version),
+            ElementId::Edge(eid) => self.edges.get(&eid).map(|edge| edge.version),
+        }
     }
 
     pub fn vertex_count(&self) -> usize {
@@ -747,6 +787,59 @@ impl ReferenceGraph {
 
     // ---- apply -----------------------------------------------------------
 
+    /// Extend one element's version chain with one canonical effect.
+    ///
+    /// The predecessor tag distinguishes creation from a successor whose prior
+    /// digest happens to be all-zero. The row length makes the transcript
+    /// self-delimiting, and the row's canonical bytes include its family and
+    /// stable element identity. No branch population, wall clock, or commit
+    /// sequence enters this derivation.
+    fn successor_version(
+        previous: Option<ObjectId>,
+        row: &DeltaRow,
+    ) -> Result<ObjectId, ApplyError> {
+        let canonical = row
+            .canonical_bytes()
+            .map_err(ApplyError::VersionIdentityEncoding)?;
+        let mut hasher = fgdb_crypto::Hasher::new();
+        hasher.update(ELEMENT_VERSION_DOMAIN);
+        match previous {
+            None => {
+                hasher.update(&[0]);
+            }
+            Some(version) => {
+                hasher.update(&[1]);
+                hasher.update(&version.0);
+            }
+        }
+        hasher.update(&(canonical.len() as u64).to_le_bytes());
+        hasher.update(&canonical);
+        Ok(ObjectId(hasher.finalize().0))
+    }
+
+    /// Install a version already derived and validated for an existing element.
+    fn set_element_version(
+        &mut self,
+        elem: ElementId,
+        version: ObjectId,
+    ) -> Result<(), ApplyError> {
+        match elem {
+            ElementId::Vertex(vid) => {
+                self.vertices
+                    .get_mut(&vid)
+                    .ok_or(ApplyError::NoSuchVertex { vid })?
+                    .version = version;
+            }
+            ElementId::Edge(eid) => {
+                self.edges
+                    .get_mut(&eid)
+                    .ok_or(ApplyError::NoSuchEdge { eid })?
+                    .version = version;
+            }
+        }
+        Ok(())
+    }
+
     /// Apply one row, or refuse and leave the state untouched.
     ///
     /// Every mutation is computed and every check passed before anything is
@@ -764,9 +857,11 @@ impl ReferenceGraph {
                 if self.vertices.contains_key(vid) {
                     return Err(ApplyError::VertexAlreadyExists { vid: *vid });
                 }
+                let version = Self::successor_version(None, row)?;
                 self.vertices.insert(
                     *vid,
                     Vertex {
+                        version,
                         birth_ordinal: *birth_ordinal,
                         labels: labels.iter().copied().collect(),
                         props: props.iter().cloned().collect(),
@@ -798,9 +893,11 @@ impl ReferenceGraph {
                         });
                     }
                 }
+                let version = Self::successor_version(None, row)?;
                 self.edges.insert(
                     *eid,
                     Edge {
+                        version,
                         birth_ordinal: *birth_ordinal,
                         src: *src,
                         relation: *relation,
@@ -813,11 +910,20 @@ impl ReferenceGraph {
             }
             DeltaRow::DeleteVertex {
                 vid,
+                before_version,
                 sorted_retired_incident_edges,
-                ..
             } => {
-                if !self.vertices.contains_key(vid) {
-                    return Err(ApplyError::NoSuchVertex { vid: *vid });
+                let actual_version = self
+                    .vertices
+                    .get(vid)
+                    .ok_or(ApplyError::NoSuchVertex { vid: *vid })?
+                    .version;
+                if actual_version != *before_version {
+                    return Err(ApplyError::ElementVersionMismatch {
+                        elem: ElementId::Vertex(*vid),
+                        declared: *before_version,
+                        actual: actual_version,
+                    });
                 }
                 // THE CASCADE LAW. The declared image must be EXACTLY the
                 // incident set. Too few would leave a dangling edge; too many
@@ -838,10 +944,23 @@ impl ReferenceGraph {
                 }
                 self.vertices.remove(vid);
             }
-            DeltaRow::DeleteEdge { eid, .. } => {
-                if self.edges.remove(eid).is_none() {
-                    return Err(ApplyError::NoSuchEdge { eid: *eid });
+            DeltaRow::DeleteEdge {
+                eid,
+                before_version,
+            } => {
+                let actual_version = self
+                    .edges
+                    .get(eid)
+                    .ok_or(ApplyError::NoSuchEdge { eid: *eid })?
+                    .version;
+                if actual_version != *before_version {
+                    return Err(ApplyError::ElementVersionMismatch {
+                        elem: ElementId::Edge(*eid),
+                        declared: *before_version,
+                        actual: actual_version,
+                    });
                 }
+                self.edges.remove(eid);
             }
             DeltaRow::LabelMembership {
                 vid,
@@ -849,6 +968,12 @@ impl ReferenceGraph {
                 before,
                 after,
             } => {
+                let previous = self
+                    .vertices
+                    .get(vid)
+                    .ok_or(ApplyError::NoSuchVertex { vid: *vid })?
+                    .version;
+                let version = Self::successor_version(Some(previous), row)?;
                 let vertex = self
                     .vertices
                     .get_mut(vid)
@@ -867,6 +992,7 @@ impl ReferenceGraph {
                 } else {
                     vertex.labels.remove(label);
                 }
+                vertex.version = version;
             }
             DeltaRow::Property {
                 elem,
@@ -874,22 +1000,59 @@ impl ReferenceGraph {
                 before,
                 after,
             } => {
-                let props = self.props_mut(*elem)?;
-                let actual = props.get(property).cloned();
-                if actual != *before {
-                    return Err(ApplyError::PropertyBeforeMismatch {
-                        elem: *elem,
-                        property: *property,
-                        declared: before.clone().map(Box::new),
-                        actual: actual.map(Box::new),
-                    });
-                }
-                match after {
-                    Some(value) => {
-                        props.insert(*property, value.clone());
+                let previous = self.element_version(*elem).ok_or(match elem {
+                    ElementId::Vertex(vid) => ApplyError::NoSuchVertex { vid: *vid },
+                    ElementId::Edge(eid) => ApplyError::NoSuchEdge { eid: *eid },
+                })?;
+                let version = Self::successor_version(Some(previous), row)?;
+                match elem {
+                    ElementId::Vertex(vid) => {
+                        let vertex = self
+                            .vertices
+                            .get_mut(vid)
+                            .ok_or(ApplyError::NoSuchVertex { vid: *vid })?;
+                        let actual = vertex.props.get(property).cloned();
+                        if actual != *before {
+                            return Err(ApplyError::PropertyBeforeMismatch {
+                                elem: *elem,
+                                property: *property,
+                                declared: before.clone().map(Box::new),
+                                actual: actual.map(Box::new),
+                            });
+                        }
+                        match after {
+                            Some(value) => {
+                                vertex.props.insert(*property, value.clone());
+                            }
+                            None => {
+                                vertex.props.remove(property);
+                            }
+                        }
+                        vertex.version = version;
                     }
-                    None => {
-                        props.remove(property);
+                    ElementId::Edge(eid) => {
+                        let edge = self
+                            .edges
+                            .get_mut(eid)
+                            .ok_or(ApplyError::NoSuchEdge { eid: *eid })?;
+                        let actual = edge.props.get(property).cloned();
+                        if actual != *before {
+                            return Err(ApplyError::PropertyBeforeMismatch {
+                                elem: *elem,
+                                property: *property,
+                                declared: before.clone().map(Box::new),
+                                actual: actual.map(Box::new),
+                            });
+                        }
+                        match after {
+                            Some(value) => {
+                                edge.props.insert(*property, value.clone());
+                            }
+                            None => {
+                                edge.props.remove(property);
+                            }
+                        }
+                        edge.version = version;
                     }
                 }
             }
@@ -898,17 +1061,42 @@ impl ReferenceGraph {
                 before,
                 after,
                 ..
-            } => {
-                let actual = self.valid_time_of(*elem)?;
-                if actual != *before {
-                    return Err(ApplyError::ValidTimeBeforeMismatch {
-                        elem: *elem,
-                        declared: *before,
-                        actual,
-                    });
+            } => match elem {
+                ElementId::Vertex(vid) => {
+                    let vertex = self
+                        .vertices
+                        .get_mut(vid)
+                        .ok_or(ApplyError::NoSuchVertex { vid: *vid })?;
+                    let version = Self::successor_version(Some(vertex.version), row)?;
+                    let actual = vertex.valid_time;
+                    if actual != *before {
+                        return Err(ApplyError::ValidTimeBeforeMismatch {
+                            elem: *elem,
+                            declared: *before,
+                            actual,
+                        });
+                    }
+                    vertex.valid_time = *after;
+                    vertex.version = version;
                 }
-                self.set_valid_time(*elem, *after)?;
-            }
+                ElementId::Edge(eid) => {
+                    let edge = self
+                        .edges
+                        .get_mut(eid)
+                        .ok_or(ApplyError::NoSuchEdge { eid: *eid })?;
+                    let version = Self::successor_version(Some(edge.version), row)?;
+                    let actual = edge.valid_time;
+                    if actual != *before {
+                        return Err(ApplyError::ValidTimeBeforeMismatch {
+                            elem: *elem,
+                            declared: *before,
+                            actual,
+                        });
+                    }
+                    edge.valid_time = *after;
+                    edge.version = version;
+                }
+            },
             DeltaRow::Counter {
                 operation_key,
                 elem,
@@ -926,6 +1114,11 @@ impl ReferenceGraph {
                     return Ok(());
                 }
                 self.require_element(*elem)?;
+                let previous = self.element_version(*elem).ok_or(match elem {
+                    ElementId::Vertex(vid) => ApplyError::NoSuchVertex { vid: *vid },
+                    ElementId::Edge(eid) => ApplyError::NoSuchEdge { eid: *eid },
+                })?;
+                let version = Self::successor_version(Some(previous), row)?;
                 Self::require_closing(*before, *delta, *after)?;
                 let actual = self.counter(*elem, *property).unwrap_or(0);
                 if actual != *before {
@@ -936,6 +1129,7 @@ impl ReferenceGraph {
                         actual,
                     });
                 }
+                self.set_element_version(*elem, version)?;
                 self.counters.insert((*elem, *property), *after);
                 self.operation_keys.insert(*operation_key, row.clone());
             }
@@ -1073,61 +1267,6 @@ impl ReferenceGraph {
             }
             _ => Ok(()),
         }
-    }
-
-    fn props_mut(
-        &mut self,
-        elem: ElementId,
-    ) -> Result<&mut BTreeMap<PropertyKeyId, CanonicalScalar>, ApplyError> {
-        match elem {
-            ElementId::Vertex(vid) => self
-                .vertices
-                .get_mut(&vid)
-                .map(|v| &mut v.props)
-                .ok_or(ApplyError::NoSuchVertex { vid }),
-            ElementId::Edge(eid) => self
-                .edges
-                .get_mut(&eid)
-                .map(|e| &mut e.props)
-                .ok_or(ApplyError::NoSuchEdge { eid }),
-        }
-    }
-
-    fn valid_time_of(&self, elem: ElementId) -> Result<Option<ValidTimePeriod>, ApplyError> {
-        match elem {
-            ElementId::Vertex(vid) => self
-                .vertices
-                .get(&vid)
-                .map(|v| v.valid_time)
-                .ok_or(ApplyError::NoSuchVertex { vid }),
-            ElementId::Edge(eid) => self
-                .edges
-                .get(&eid)
-                .map(|e| e.valid_time)
-                .ok_or(ApplyError::NoSuchEdge { eid }),
-        }
-    }
-
-    fn set_valid_time(
-        &mut self,
-        elem: ElementId,
-        period: Option<ValidTimePeriod>,
-    ) -> Result<(), ApplyError> {
-        match elem {
-            ElementId::Vertex(vid) => {
-                self.vertices
-                    .get_mut(&vid)
-                    .ok_or(ApplyError::NoSuchVertex { vid })?
-                    .valid_time = period;
-            }
-            ElementId::Edge(eid) => {
-                self.edges
-                    .get_mut(&eid)
-                    .ok_or(ApplyError::NoSuchEdge { eid })?
-                    .valid_time = period;
-            }
-        }
-        Ok(())
     }
 }
 
