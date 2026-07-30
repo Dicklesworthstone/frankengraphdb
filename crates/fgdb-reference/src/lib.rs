@@ -32,6 +32,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod intents;
+
 use fgdb_delta_types::{
     CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId, LogicalDeltaTemplate,
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
