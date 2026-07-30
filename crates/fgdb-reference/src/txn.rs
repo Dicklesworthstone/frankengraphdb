@@ -57,6 +57,14 @@ pub struct Transaction {
     /// is exactly the shape write-write conflict detection cannot see.
     read_set: BTreeSet<ConflictKey>,
     statement_failures: usize,
+    /// Did this transaction claim to be the FIRST write to the branch?
+    ///
+    /// Carried to commit rather than checked only at begin
+    /// (fgdb-reference-genesis-transaction-race-dfk3): two transactions can both
+    /// find the coordinate absent, and the one that commits second computed every
+    /// before-image against a state that no longer exists. The claim has to be
+    /// certified where the decision is made.
+    claims_genesis: bool,
     /// Which statement aborted, if one did. Once set, the transaction is
     /// finished: further `execute` calls are refused rather than ignored, since
     /// a caller that keeps issuing statements after an abort has misunderstood
@@ -101,9 +109,17 @@ pub enum TxnError {
     AlreadyAborted { statement: usize },
     /// The effects did not form a canonical template.
     Canonical(CanonicalError),
-    /// The effects did not apply to the committed state, even though no
-    /// conflict was detected. An internal contradiction: the conflict rule is
-    /// supposed to be exactly the condition under which they would not.
+    /// The effects did not apply to the committed state even though no conflict
+    /// was detected.
+    ///
+    /// AN EARLIER VERSION OF THIS COMMENT CALLED THAT AN INTERNAL CONTRADICTION,
+    /// and it was reachable: a historical child transaction whose inherited
+    /// lineage had moved landed here rather than being reported as a conflict
+    /// (fgdb-reference-historical-fork-conflict-lineage-re6w). The conflict rule
+    /// now covers that window, so this arm is expected to be unreachable — but
+    /// "expected" is the honest word. It is a typed refusal that names the row
+    /// rather than a claim that the rule is complete, and a new reachable path to
+    /// it is a defect in the rule rather than in this arm.
     Apply(Box<ApplyError>),
 }
 
@@ -154,11 +170,17 @@ impl Transaction {
     /// read of the present.
     pub fn begin_at(db: &ReferenceDatabase, snapshot: Snapshot) -> Result<Self, TxnError> {
         let workspace = db.read(&snapshot).map_err(TxnError::Snapshot)?;
+        // A basis on a coordinate with no origin is a genesis claim, however the
+        // snapshot was minted.
+        let claims_genesis = db
+            .branch_origin(snapshot.graph(), snapshot.branch())
+            .is_none();
         Ok(Self {
             graph: snapshot.graph(),
             branch: snapshot.branch(),
             snapshot,
             workspace,
+            claims_genesis,
             effects: Vec::new(),
             read_set: BTreeSet::new(),
             statement_failures: 0,
@@ -265,6 +287,11 @@ impl Transaction {
     /// Every conflict key this transaction has written so far.
     pub fn write_set(&self) -> BTreeSet<ConflictKey> {
         let mut keys = BTreeSet::new();
+        if self.claims_genesis {
+            // The claim is part of what this transaction wrote: it asserted the
+            // branch did not exist, and that assertion has to be able to lose.
+            keys.insert(ConflictKey::CoordinateExistence);
+        }
         for row in &self.effects {
             collect_conflict_keys(row, &mut keys);
         }
@@ -338,7 +365,17 @@ impl Transaction {
 
         let mine = self.write_set();
         if !mine.is_empty() {
-            let theirs = db.conflict_keys_since(self.graph, self.branch, self.snapshot.high());
+            // A coordinate that does not exist yet has nothing to conflict with,
+            // and asking is a NoSuchCoordinate refusal rather than an empty set —
+            // so the genesis case is answered here instead of failing open.
+            let theirs = match db.conflict_keys_since(self.graph, self.branch, self.snapshot.high())
+            {
+                Ok(keys) => keys,
+                Err(SnapshotError::NoSuchCoordinate { .. }) if self.claims_genesis => {
+                    BTreeSet::new()
+                }
+                Err(error) => return Err(TxnError::Snapshot(error)),
+            };
             let conflicts: Vec<ConflictKey> = mine.intersection(&theirs).copied().collect();
             if !conflicts.is_empty() {
                 return Ok(TxnOutcome::Conflicted { conflicts });

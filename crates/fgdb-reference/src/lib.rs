@@ -1223,6 +1223,14 @@ pub enum ConflictKey {
     Escrow(EscrowDomainId),
     /// One sketch profile's state, named by its profile object.
     Sketch(ObjectId),
+    /// The coordinate's existence.
+    ///
+    /// Named by a transaction that claims to be the FIRST write to a branch, and
+    /// by the window of any coordinate that came into existence after a
+    /// transaction's basis. No row emits it — it is a claim about the coordinate
+    /// rather than about its contents, which is exactly why element keys cannot
+    /// catch two racing genesis transactions whose effects happen to be disjoint.
+    CoordinateExistence,
     /// The coordinate's schema and constraint roots, which the `Schema` and
     /// `Constraint` families both move. One key rather than two, because a
     /// transaction that moves the schema root and one that moves the constraint
@@ -1444,33 +1452,74 @@ impl ReferenceDatabase {
         self.applied_through.get(&(graph, branch)).copied()
     }
 
-    /// Everything committed to this coordinate **after** `since` wrote, as
-    /// conflict keys.
+    /// Everything **visible to this coordinate** that was committed after `since`
+    /// wrote, as conflict keys.
     ///
     /// This is the raw material of first-committer-wins: a transaction that read
-    /// at `since` conflicts exactly when its own write set meets this. Only the
-    /// coordinate's OWN records are consulted — an ancestor cannot commit into a
-    /// branch after the fork, so a parent's later commits are not a conflict for
-    /// a child, they are simply not in its history.
+    /// at `since` conflicts exactly when its own write set meets this.
+    ///
+    /// **IT WALKS THE LINEAGE, and the first version did not — that was a real
+    /// defect (fgdb-reference-historical-fork-conflict-lineage-re6w), found by
+    /// another pane reading 4f860e9.** Consulting only the coordinate's own
+    /// records is correct for a transaction reading at the frontier, and wrong for
+    /// one reading BELOW a fork boundary: the inherited records in
+    /// `(since, boundary]` are visible to the child and invisible to its own
+    /// history, so the check reported "disjoint" and the stale before-image then
+    /// failed at apply time as `TxnError::Apply` — a concurrency outcome wearing
+    /// the label of an internal contradiction.
+    ///
+    /// Each ancestor is still capped at its own fork boundary, so a parent's
+    /// commits AFTER the fork are not conflicts for the child: they are not
+    /// visible to it at all. For a transaction reading at the frontier the
+    /// per-ancestor window `(since, cap]` is empty, so nothing about the
+    /// non-historical case changes.
+    ///
+    /// Returns an error rather than an empty set when the lineage cannot be
+    /// walked. An empty set means "no conflicts", which is the answer that lets a
+    /// commit through — exactly the wrong default for a question that could not be
+    /// answered.
     pub fn conflict_keys_since(
         &self,
         graph: GraphId,
         branch: BranchId,
         since: CommitSeq,
-    ) -> BTreeSet<ConflictKey> {
+    ) -> Result<BTreeSet<ConflictKey>, SnapshotError> {
         let mut keys = BTreeSet::new();
-        let Some(records) = self.history.get(&(graph, branch)) else {
-            return keys;
-        };
-        for record in records {
-            if record.seq.0 <= since.0 {
+        let frontier = self
+            .applied_through(graph, branch)
+            .ok_or(SnapshotError::NoSuchCoordinate { graph, branch })?;
+
+        // COORDINATE CREATION IS ITSELF A CONFLICT DOMAIN
+        // (fgdb-reference-genesis-transaction-race-dfk3). Two transactions each
+        // claiming to be the first write to a branch both used an empty basis, so
+        // whichever loses computed every before-image against a state that never
+        // existed. Their effects can be disjoint, so no element key catches it.
+        if self
+            .history
+            .get(&(graph, branch))
+            .and_then(|records| records.first())
+            .is_some_and(|first| first.seq.0 > since.0)
+        {
+            keys.insert(ConflictKey::CoordinateExistence);
+        }
+
+        for (key, cap) in self.lineage(graph, branch, frontier)? {
+            let Some(records) = self.history.get(&key) else {
                 continue;
-            }
-            for row in &record.entry.rows {
-                collect_conflict_keys(row, &mut keys);
+            };
+            for record in records {
+                if record.seq.0 <= since.0 {
+                    continue;
+                }
+                if record.seq.0 > cap.0 {
+                    break;
+                }
+                for row in &record.entry.rows {
+                    collect_conflict_keys(row, &mut keys);
+                }
             }
         }
-        keys
+        Ok(keys)
     }
 
     /// How many commits this coordinate recorded **itself**.

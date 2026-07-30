@@ -41,6 +41,7 @@ use std::collections::BTreeSet;
 const GRAPH: GraphId = GraphId(1);
 const MAIN: BranchId = BranchId(1);
 const OTHER: BranchId = BranchId(2);
+const NESTED: BranchId = BranchId(3);
 const REL: RelationId = RelationId(1);
 const LABEL: LabelId = LabelId(10);
 const PROP: PropertyKeyId = PropertyKeyId(100);
@@ -656,6 +657,20 @@ fn every_row_family_names_a_conflict_key() {
          would both commit: {silent:?}"
     );
     assert_eq!(rows.len(), 12, "a new row family must be added here too");
+
+    // AND NO ROW MAY NAME CoordinateExistence. It is a claim about the coordinate
+    // rather than about its contents — only a genesis transaction asserts it. A
+    // row that emitted it would make every ordinary commit collide with every
+    // genesis claim, which is a phantom conflict rather than a missed one, so it
+    // would show up as unexplained refusals rather than as lost updates.
+    for (name, row) in &rows {
+        let mut keys = BTreeSet::new();
+        collect_conflict_keys(row, &mut keys);
+        assert!(
+            !keys.contains(&ConflictKey::CoordinateExistence),
+            "{name} names coordinate existence, which no row may"
+        );
+    }
 }
 
 /// The escrow row names BOTH its domain and its subject, since it is checked
@@ -743,4 +758,166 @@ fn a_genesis_transaction_on_an_existing_branch_is_refused() {
     );
     // And the ordinary path is the one that works on an existing branch.
     assert!(Transaction::begin(&db, GRAPH, MAIN).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Two defects another pane found in 4f860e9, and the laws that close them
+// ---------------------------------------------------------------------------
+
+/// fgdb-reference-historical-fork-conflict-lineage-re6w, the exact history filed.
+///
+/// A child forked at boundary 2, and a transaction reading the child AS OF 1. The
+/// parent's sequence-2 write is VISIBLE to the child through its lineage and
+/// occurred after the transaction's basis, but it is absent from the child's own
+/// history — so a conflict check consulting only the coordinate's own records
+/// reported "disjoint", and the stale before-image then failed at apply time as
+/// `TxnError::Apply`. A concurrency outcome wearing the label of an internal
+/// contradiction, which is the worst kind of wrong answer: it tells the caller its
+/// effects are malformed when in fact it lost a race.
+#[test]
+fn a_historical_child_transaction_conflicts_with_its_inherited_lineage() {
+    let mut db = ReferenceDatabase::new();
+    seed(&mut db, &[(1, 0)]);
+    let mut advance = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    advance.execute(&[set(1, 1)]).expect("executes");
+    commit_ok(&mut db, advance, 2);
+    db.fork_branch(GRAPH, MAIN, OTHER).expect("forks at 2");
+
+    let stale = db
+        .snapshot_at(GRAPH, OTHER, CommitSeq(1))
+        .expect("a historical child snapshot is legal");
+    let mut txn = Transaction::begin_at(&db, stale).expect("begin");
+    assert_eq!(
+        read(txn.workspace(), 1),
+        Some(0),
+        "it reads the value as of sequence 1"
+    );
+    txn.execute(&[set(1, 2)]).expect("executes");
+
+    let before = db.clone();
+    let outcome = txn
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
+        .expect("a lost race is an outcome, not an error");
+    assert_eq!(
+        outcome,
+        TxnOutcome::Conflicted {
+            conflicts: vec![ConflictKey::Element(ElementId::Vertex(VId(1)))],
+        },
+        "the inherited sequence-2 write is a conflict"
+    );
+    assert_eq!(db, before, "and nothing moved");
+}
+
+/// The other side of the same window: a child transaction at the CURRENT boundary
+/// must NOT conflict with the parent's post-boundary commits.
+///
+/// Without this law the fix above could be "consult the parent's whole history",
+/// which would make every child transaction conflict with a parent that kept
+/// working — turning branch isolation into branch serialization. The parent's
+/// later commits are not conflicts for the child because they are not visible to
+/// it at all.
+#[test]
+fn a_child_transaction_does_not_conflict_with_the_parents_post_fork_commits() {
+    let mut db = ReferenceDatabase::new();
+    seed(&mut db, &[(1, 0), (2, 0)]);
+    db.fork_branch(GRAPH, MAIN, OTHER).expect("forks at 1");
+
+    // The parent writes the SAME element the child is about to write.
+    let mut parent = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    parent.execute(&[set(1, 10)]).expect("executes");
+    commit_ok(&mut db, parent, 2);
+
+    let mut child = Transaction::begin(&db, GRAPH, OTHER).expect("begin");
+    child.execute(&[set(1, 20)]).expect("executes");
+    let (seq, effects, _) = commit_ok(&mut db, child, 3);
+    assert_eq!((seq, effects), (CommitSeq(3), 1));
+    assert_eq!(prop_of(&db, OTHER, 1), Some(20));
+    assert_eq!(
+        prop_of(&db, MAIN, 1),
+        Some(10),
+        "and the parent is untouched"
+    );
+}
+
+/// Nested forks: the window is per-ancestor, so a grandchild reading below the
+/// middle boundary conflicts with the MIDDLE ancestor's inherited writes.
+#[test]
+fn a_grandchild_conflicts_with_the_middle_ancestors_window() {
+    let mut db = ReferenceDatabase::new();
+    seed(&mut db, &[(1, 0)]);
+    db.fork_branch(GRAPH, MAIN, OTHER).expect("forks at 1");
+    let mut middle = Transaction::begin(&db, GRAPH, OTHER).expect("begin");
+    middle.execute(&[set(1, 5)]).expect("executes");
+    commit_ok(&mut db, middle, 2);
+    db.fork_branch(GRAPH, OTHER, NESTED).expect("forks at 2");
+
+    // The grandchild reads as of 1 — below the middle branch's sequence-2 write,
+    // which it nonetheless inherits.
+    let stale = db
+        .snapshot_at(GRAPH, NESTED, CommitSeq(1))
+        .expect("historical grandchild snapshot");
+    let mut txn = Transaction::begin_at(&db, stale).expect("begin");
+    assert_eq!(read(txn.workspace(), 1), Some(0));
+    txn.execute(&[set(1, 9)]).expect("executes");
+    let outcome = txn
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(3))
+        .expect("outcome");
+    assert!(
+        outcome.conflicts().is_some(),
+        "the middle ancestor's inherited write is a conflict: {outcome:?}"
+    );
+}
+
+/// fgdb-reference-genesis-transaction-race-dfk3.
+///
+/// Two transactions both find the branch absent and both claim to be its first
+/// write. Their EFFECTS are disjoint, so no element key catches them — and the
+/// loser computed every before-image against a state that no longer exists by the
+/// time it commits. Coordinate existence is therefore its own conflict domain: a
+/// claim about the coordinate rather than about its contents.
+#[test]
+fn concurrent_genesis_transactions_cannot_both_create_the_branch() {
+    let mut db = ReferenceDatabase::new();
+    let mut first = Transaction::begin_genesis(&db, GRAPH, MAIN).expect("genesis");
+    let mut second = Transaction::begin_genesis(&db, GRAPH, MAIN).expect("genesis");
+    // DISJOINT effects: nothing an element-grained rule could catch.
+    first.execute(&[create(1, 1)]).expect("executes");
+    second.execute(&[create(2, 2)]).expect("executes");
+
+    let (seq, _, _) = commit_ok(&mut db, first, 1);
+    assert_eq!(seq, CommitSeq(1));
+
+    let before = db.clone();
+    let outcome = second
+        .commit(&mut db, REL, SEMANTICS, CommitSeq(2))
+        .expect("outcome");
+    assert_eq!(
+        outcome,
+        TxnOutcome::Conflicted {
+            conflicts: vec![ConflictKey::CoordinateExistence],
+        },
+        "the loser's claim to be the first write has to be able to lose"
+    );
+    assert_eq!(db, before, "and it appends nothing to the winner's branch");
+    assert!(prop_of(&db, MAIN, 2).is_none());
+}
+
+/// CONTROL for the law above: an UNCONTESTED genesis transaction still commits.
+///
+/// Without it, the existence key could be refusing every genesis transaction and
+/// the law above would pass for the wrong reason — and nothing would work.
+#[test]
+fn an_uncontested_genesis_transaction_still_commits() {
+    let mut db = ReferenceDatabase::new();
+    let mut txn = Transaction::begin_genesis(&db, GRAPH, MAIN).expect("genesis");
+    txn.execute(&[create(1, 1)]).expect("executes");
+    let (seq, effects, _) = commit_ok(&mut db, txn, 1);
+    assert_eq!((seq, effects), (CommitSeq(1), 1));
+    assert_eq!(prop_of(&db, MAIN, 1), Some(1));
+
+    // And a second, ORDINARY transaction on the now-existing branch commits too:
+    // the existence key must not linger as a permanent conflict.
+    let mut next = Transaction::begin(&db, GRAPH, MAIN).expect("begin");
+    next.execute(&[create(2, 2)]).expect("executes");
+    assert_eq!(commit_ok(&mut db, next, 2).0, CommitSeq(2));
 }
