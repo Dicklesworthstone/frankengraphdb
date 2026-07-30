@@ -1061,17 +1061,27 @@ pub enum BranchOrigin {
         /// sequence the parent had actually applied, which is a fact the
         /// database owns and can check.
         ///
-        /// It is now LOAD-BEARING as well as recorded: [`ReferenceDatabase::read`]
+        /// It is LOAD-BEARING as well as recorded: [`ReferenceDatabase::read`]
         /// caps each ancestor's contribution at its boundary, so this value is
         /// what keeps a parent's post-fork commits out of a child's historical
         /// reads. Deleting it would not merely drop a label — it would make every
         /// cross-fork read wrong.
-        parent_applied_through: CommitSeq,
+        ///
+        /// It is the parent's frontier for a [`fork_branch`] and an earlier
+        /// sequence for a [`fork_branch_at`]; either way it is the sequence the
+        /// child's inherited state was materialized at, which is what makes it
+        /// checkable. plan:2000 calls this
+        /// `fork_boundary_logical_command_seq`; commit sequences are the
+        /// analogue this materializer has.
+        ///
+        /// [`fork_branch`]: ReferenceDatabase::fork_branch
+        /// [`fork_branch_at`]: ReferenceDatabase::fork_branch_at
+        fork_boundary: CommitSeq,
     },
 }
 
 /// Why a branch operation was refused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum BranchError {
     /// The parent named by a fork does not exist. Forking from nothing would
     /// produce a branch whose history has no origin.
@@ -1081,6 +1091,31 @@ pub enum BranchError {
     BranchExists { graph: GraphId, branch: BranchId },
     /// A branch may not fork from itself.
     SelfFork { branch: BranchId },
+    /// The requested boundary is above what the parent has applied — a fork from
+    /// the parent's future.
+    ///
+    /// Refused rather than clamped to the frontier. Clamping would make a fork
+    /// silently mean something other than what it said, and the difference is
+    /// invisible afterwards: the child's recorded boundary would be the frontier
+    /// and nothing would show that a different one was asked for.
+    BoundaryBeyondParentFrontier {
+        graph: GraphId,
+        parent: BranchId,
+        applied_through: CommitSeq,
+        requested: CommitSeq,
+    },
+    /// The parent's state at the boundary could not be materialized.
+    ///
+    /// An internal contradiction, since the boundary was checked against the
+    /// parent's frontier first — surfaced with its cause rather than collapsed
+    /// into one of the arms above, because "the boundary was wrong" and "the
+    /// recorded stream does not re-apply" call for opposite responses.
+    BoundaryNotMaterializable {
+        graph: GraphId,
+        parent: BranchId,
+        boundary: CommitSeq,
+        cause: Box<SnapshotError>,
+    },
 }
 
 impl core::fmt::Display for BranchError {
@@ -1093,6 +1128,26 @@ impl core::fmt::Display for BranchError {
                 write!(f, "branch {branch:?} in graph {graph:?} already exists")
             }
             Self::SelfFork { branch } => write!(f, "branch {branch:?} cannot fork from itself"),
+            Self::BoundaryBeyondParentFrontier {
+                graph,
+                parent,
+                applied_through,
+                requested,
+            } => write!(
+                f,
+                "parent {parent:?} in graph {graph:?} has applied through \
+                 {applied_through:?}, cannot fork at {requested:?}"
+            ),
+            Self::BoundaryNotMaterializable {
+                graph,
+                parent,
+                boundary,
+                cause,
+            } => write!(
+                f,
+                "parent {parent:?} in graph {graph:?} did not materialize at \
+                 {boundary:?}: {cause}"
+            ),
         }
     }
 }
@@ -1413,7 +1468,7 @@ impl ReferenceDatabase {
                 Some(BranchOrigin::Genesis) => break,
                 Some(BranchOrigin::Fork {
                     parent_branch,
-                    parent_applied_through,
+                    fork_boundary,
                 }) => {
                     let parent_key = (key.0, *parent_branch);
                     if !self.origins.contains_key(&parent_key) {
@@ -1423,8 +1478,8 @@ impl ReferenceDatabase {
                             parent: *parent_branch,
                         });
                     }
-                    if parent_applied_through.0 < cap.0 {
-                        cap = *parent_applied_through;
+                    if fork_boundary.0 < cap.0 {
+                        cap = *fork_boundary;
                     }
                     key = parent_key;
                 }
@@ -1447,29 +1502,65 @@ impl ReferenceDatabase {
     /// **THE SEMANTICS, which is what the real engine must match:** the child
     /// begins as exactly the parent's state when this method is called, and
     /// from then on the two diverge with no leakage in either direction. That
-    /// is the current-state subset of B1's git-style branching and B6's
-    /// branch-per-agent isolation, and it is what the laws in
-    /// `tests/branch_fork.rs` pin. This method accepts no commit sequence, which
-    /// is now a scope limit rather than an impossibility — see the note on
-    /// [`BranchOrigin::Fork`].
+    /// is B1's git-style branching and B6's branch-per-agent isolation, and it
+    /// is what the laws in `tests/branch_fork.rs` pin.
     ///
-    /// **THE COMPLEXITY, which the real engine must NOT match.** This copies the
-    /// parent's state, which is O(n). plan:451 is explicit that branch creation
-    /// "adds only metadata and key wraps, so its data-copy complexity is O(1)"
-    /// and that "reads select the branch head and follow explicit branch-parent
-    /// links atop structurally shared objects". A copy produces identical
-    /// OBSERVABLE behaviour by a mechanism the engine may not use. That is
-    /// legitimate here and only here: §15 defines this crate as deliberately
-    /// simple, single-threaded and never optimized, existing so that "what
-    /// should this return" is a program. It would be a doctrine-7 substitute
-    /// anywhere else, and the same plan paragraph warns specifically against
-    /// falsely claiming O(1), so nothing in this crate should ever be cited as
-    /// evidence about fork cost.
+    /// Defined as [`fork_branch_at`](Self::fork_branch_at) at the parent's
+    /// frontier, so there is one fork mechanism rather than two that must agree.
+    /// The boundary stays DERIVED here — supplying it is what fgdb-vyb0 got
+    /// wrong — and the historical form is a separate method precisely so that
+    /// "fork here" cannot be spelled by accidentally passing a stale sequence.
+    ///
+    /// **THE COMPLEXITY, which the real engine must NOT match.** The child's
+    /// state is materialized in full, which is O(n). plan:451 is explicit that
+    /// branch creation "adds only metadata and key wraps, so its data-copy
+    /// complexity is O(1)" and that "reads select the branch head and follow
+    /// explicit branch-parent links atop structurally shared objects". This
+    /// produces identical OBSERVABLE behaviour by a mechanism the engine may not
+    /// use. That is legitimate here and only here: §15 defines this crate as
+    /// deliberately simple, single-threaded and never optimized, existing so that
+    /// "what should this return" is a program. It would be a doctrine-7
+    /// substitute anywhere else, and the same plan paragraph warns specifically
+    /// against falsely claiming O(1), so nothing in this crate should ever be
+    /// cited as evidence about fork cost.
     pub fn fork_branch(
         &mut self,
         graph: GraphId,
         parent: BranchId,
         child: BranchId,
+    ) -> Result<(), BranchError> {
+        // Read before the shape checks so a missing parent is still reported as
+        // NoSuchParent rather than as a boundary problem.
+        let frontier = self
+            .applied_through
+            .get(&(graph, parent))
+            .copied()
+            .ok_or(BranchError::NoSuchParent { graph, parent })?;
+        self.fork_branch_at(graph, parent, child, frontier)
+    }
+
+    /// Fork `child` from `parent` **as the parent stood at `boundary`** — a
+    /// branch rooted at a point in history, not only at the present.
+    ///
+    /// This is what plan:2000's `fork_boundary_logical_command_seq` asks for, and
+    /// it was genuinely unlandable until [`read`](Self::read) existed: with no
+    /// history to select in, a caller-supplied boundary could only be stored,
+    /// which made it an unauthenticated label rather than oracle evidence
+    /// (fgdb-vyb0). It is landable now for exactly one reason — the boundary is
+    /// *used*: the child's state is the parent's fold at that sequence, and the
+    /// boundary is checked against the parent's frontier first. Delete the
+    /// parameter and the child inherits a different graph.
+    ///
+    /// `CommitSeq(0)` is a legal boundary and produces an empty child: a branch
+    /// taken from before the parent's first commit. Refusing zero would be
+    /// arbitrary — the parent's state at zero is a state the parent genuinely
+    /// had.
+    pub fn fork_branch_at(
+        &mut self,
+        graph: GraphId,
+        parent: BranchId,
+        child: BranchId,
+        boundary: CommitSeq,
     ) -> Result<(), BranchError> {
         if parent == child {
             return Err(BranchError::SelfFork { branch: child });
@@ -1482,31 +1573,54 @@ impl ReferenceDatabase {
                 branch: child,
             });
         }
-        let inherited = self
-            .coordinates
-            .get(&(graph, parent))
-            .cloned()
-            .ok_or(BranchError::NoSuchParent { graph, parent })?;
-        // DERIVED, not supplied: the boundary is where the parent actually is.
-        let parent_applied_through = self
+        let frontier = self
             .applied_through
             .get(&(graph, parent))
             .copied()
-            .unwrap_or(CommitSeq(0));
+            .ok_or(BranchError::NoSuchParent { graph, parent })?;
+        if boundary.0 > frontier.0 {
+            return Err(BranchError::BoundaryBeyondParentFrontier {
+                graph,
+                parent,
+                applied_through: frontier,
+                requested: boundary,
+            });
+        }
 
-        // The child's materialized state is copied; its HISTORY is not. The
-        // child owns an empty record vector and reaches everything before the
-        // boundary through the parent link, so a fork costs one metadata row in
-        // the dimension that time-travel reads — the mechanism plan:451
-        // describes, even though the state copy beside it is not.
+        // The child's state is the parent's HISTORY folded to the boundary, not
+        // a copy of the parent's present. At the frontier the two are equal —
+        // that is the faithfulness law — so routing the current-state fork
+        // through here costs nothing and removes the second implementation that
+        // could drift from this one.
+        let snapshot = self.snapshot_at(graph, parent, boundary).map_err(|cause| {
+            BranchError::BoundaryNotMaterializable {
+                graph,
+                parent,
+                boundary,
+                cause: Box::new(cause),
+            }
+        })?;
+        let inherited =
+            self.read(&snapshot)
+                .map_err(|cause| BranchError::BoundaryNotMaterializable {
+                    graph,
+                    parent,
+                    boundary,
+                    cause: Box::new(cause),
+                })?;
+
+        // The child's state is materialized; its HISTORY is not copied. The child
+        // owns an empty record vector and reaches everything before the boundary
+        // through the parent link, so a fork costs one metadata row in the
+        // dimension that time-travel reads — the mechanism plan:451 describes,
+        // even though the state materialization beside it is not.
         self.coordinates.insert((graph, child), inherited);
-        self.applied_through
-            .insert((graph, child), parent_applied_through);
+        self.applied_through.insert((graph, child), boundary);
         self.origins.insert(
             (graph, child),
             BranchOrigin::Fork {
                 parent_branch: parent,
-                parent_applied_through,
+                fork_boundary: boundary,
             },
         );
         Ok(())
