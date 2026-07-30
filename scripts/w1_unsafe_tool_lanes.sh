@@ -49,8 +49,70 @@ if [ "$PLAN_COUNT" -eq 0 ]; then
 fi
 gate_pass "checked plan contains $PLAN_COUNT workload(s)"
 
+# miri_outcome_from_rc <exit-status>
+#
+# Cargo/Miri uses ordinary non-zero statuses for a completed negative verdict,
+# including an assertion failure or a Miri UB finding. Those are FAIL. Process
+# interruption and runner-invocation statuses say that no verdict completed;
+# those are UNRUN. Keeping this translation in one function prevents the two
+# checked cells that share the arena workload from classifying the same exit
+# differently.
+miri_outcome_from_rc() {
+  local rc="$1"
+  case "$rc" in
+    0)
+      printf 'passed\n'
+      ;;
+    124 | 125 | 126 | 127)
+      printf 'unrun\n'
+      ;;
+    *)
+      if [ "$rc" -ge 129 ] && [ "$rc" -le 192 ]; then
+        printf 'unrun\n'
+      else
+        printf 'failed\n'
+      fi
+      ;;
+  esac
+}
+
+miri_unrun_detail() {
+  local rc="$1"
+  case "$rc" in
+    124)
+      printf 'timed out (exit 124)'
+      ;;
+    125)
+      printf 'runner failed to determine an outcome (exit 125)'
+      ;;
+    126)
+      printf 'runner command could not be invoked (exit 126)'
+      ;;
+    127)
+      printf 'runner command was not found (exit 127)'
+      ;;
+    *)
+      printf 'was interrupted by signal %d (exit %d)' "$((rc - 128))" "$rc"
+      ;;
+  esac
+}
+
+if [ "$(miri_outcome_from_rc 0)" = "passed" ] \
+  && [ "$(miri_outcome_from_rc 101)" = "failed" ] \
+  && [ "$(miri_outcome_from_rc 124)" = "unrun" ] \
+  && [ "$(miri_outcome_from_rc 126)" = "unrun" ] \
+  && [ "$(miri_outcome_from_rc 130)" = "unrun" ] \
+  && [ "$(miri_outcome_from_rc 137)" = "unrun" ] \
+  && [ "$(miri_outcome_from_rc 143)" = "unrun" ]; then
+  gate_pass "Miri outcome classifier distinguishes completed failures from unrun workloads"
+else
+  gate_fail "Miri outcome classifier does not preserve pass/fail/unrun"
+fi
+
 EXECUTED=0
-MIRI_ARENA_STATUS="unrun"
+MIRI_ARENA_STATUS="not-started"
+MIRI_ARENA_RC=0
+MIRI_ARENA_UNRUN_DETAIL=""
 MIRI_ARENA_LOG="$EVIDENCE_DIR/miri-arena-edit-path.log"
 while IFS=$'\t' read -r tool site workload; do
   [ -n "$tool" ] || continue
@@ -65,21 +127,37 @@ while IFS=$'\t' read -r tool site workload; do
         gate_unrun "$tool $site: pinned rust-src component is not installed"
         continue
       fi
-      if [ "$MIRI_ARENA_STATUS" = "unrun" ]; then
+      if [ "$MIRI_ARENA_STATUS" = "not-started" ]; then
         if cargo miri test --locked -p fgdb-unsafe-arena \
           --test edit_path_differential >"$MIRI_ARENA_LOG" 2>&1; then
-          MIRI_ARENA_STATUS="passed"
+          MIRI_ARENA_RC=0
         else
-          MIRI_ARENA_STATUS="failed"
+          MIRI_ARENA_RC=$?
+        fi
+        MIRI_ARENA_STATUS="$(miri_outcome_from_rc "$MIRI_ARENA_RC")"
+        if [ "$MIRI_ARENA_STATUS" = "unrun" ]; then
+          MIRI_ARENA_UNRUN_DETAIL="$(miri_unrun_detail "$MIRI_ARENA_RC")"
         fi
       fi
-      if [ "$MIRI_ARENA_STATUS" = "passed" ]; then
-        EXECUTED=$((EXECUTED + 1))
-        gate_pass "$tool $site: arena edit-path and typed-region differential passed"
-      else
-        gate_fail "$tool $site: edit-path differential failed"
-        gate_diag "  Miri transcript: $MIRI_ARENA_LOG"
-      fi
+      case "$MIRI_ARENA_STATUS" in
+        passed)
+          EXECUTED=$((EXECUTED + 1))
+          gate_pass "$tool $site: arena edit-path and typed-region differential passed"
+          ;;
+        failed)
+          EXECUTED=$((EXECUTED + 1))
+          gate_fail "$tool $site: edit-path differential failed"
+          gate_diag "  Miri transcript: $MIRI_ARENA_LOG"
+          ;;
+        unrun)
+          gate_unrun "$tool $site: Miri workload $MIRI_ARENA_UNRUN_DETAIL before completing"
+          gate_diag "  Miri transcript: $MIRI_ARENA_LOG"
+          ;;
+        *)
+          gate_unrun "$tool $site: Miri outcome classifier returned an unknown state"
+          gate_diag "  Miri transcript: $MIRI_ARENA_LOG"
+          ;;
+      esac
       ;;
     *)
       gate_unrun "$tool $site: checked workload has no fail-closed runner dispatch"
