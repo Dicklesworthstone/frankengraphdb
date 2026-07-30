@@ -580,14 +580,16 @@ fn sorted_labels(labels: &[LabelId]) -> Vec<LabelId> {
 ///
 /// Sorting alone is not canonicalization when the input can be contradictory: a
 /// stable sort preserves the caller's relative order among duplicates, so a
-/// dedup silently resolves a conflict by submission order. Identical duplicates
-/// collapse; conflicting ones are a statement failure naming the property and both
-/// values.
+/// dedup silently resolves a conflict by submission order. Sorting the complete
+/// `(key, value)` pair also gives a conflicting refusal one canonical value
+/// order: the failure payload is observable and must not retain caller order
+/// after the effects have been discarded. Identical duplicates collapse;
+/// conflicting ones are a statement failure naming the property and both values.
 fn canonical_props(
     props: &[(PropertyKeyId, CanonicalScalar)],
 ) -> Result<Vec<(PropertyKeyId, CanonicalScalar)>, StatementFailure> {
     let mut out = props.to_vec();
-    out.sort_by_key(|(key, _)| *key);
+    out.sort();
     let mut deduped: Vec<(PropertyKeyId, CanonicalScalar)> = Vec::with_capacity(out.len());
     for (key, value) in out {
         match deduped.last() {

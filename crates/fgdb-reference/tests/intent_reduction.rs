@@ -990,9 +990,8 @@ fn conflicting_duplicate_properties_are_refused_in_either_order() {
         assert_eq!(property, NAME);
     }
     assert_eq!(
-        forward.effects(),
-        reversed.effects(),
-        "and the two submission orders agree, which was the whole defect"
+        forward, reversed,
+        "the complete observable outcomes agree across submission order"
     );
 }
 
@@ -1071,31 +1070,58 @@ fn a_conflicting_duplicate_kills_only_its_own_statement() {
 #[test]
 fn conflicting_duplicates_are_refused_on_edge_intents_too() {
     let basis = graph(vec![vertex(1, "ada"), vertex(2, "grace")]);
-    let clashing = vec![
+    let forward_props = vec![
         (RANK, CanonicalScalar::Int(1)),
         (RANK, CanonicalScalar::Int(2)),
     ];
-    for intent in [
-        Intent::AddEdge {
-            eid: EId(50),
-            src: VId(1),
-            etype: REL,
-            dst: VId(2),
-            props: clashing.clone(),
-        },
-        Intent::EnsureEdge {
-            eid: EId(51),
-            src: VId(1),
-            etype: REL,
-            dst: VId(2),
-            constraint_id: ObjectId([0u8; 32]),
-            props: clashing.clone(),
-        },
+    let reversed_props = forward_props.iter().cloned().rev().collect::<Vec<_>>();
+    for (forward_intent, reversed_intent) in [
+        (
+            Intent::AddEdge {
+                eid: EId(50),
+                src: VId(1),
+                etype: REL,
+                dst: VId(2),
+                props: forward_props.clone(),
+            },
+            Intent::AddEdge {
+                eid: EId(50),
+                src: VId(1),
+                etype: REL,
+                dst: VId(2),
+                props: reversed_props.clone(),
+            },
+        ),
+        (
+            Intent::EnsureEdge {
+                eid: EId(51),
+                src: VId(1),
+                etype: REL,
+                dst: VId(2),
+                constraint_id: ObjectId([0u8; 32]),
+                props: forward_props.clone(),
+            },
+            Intent::EnsureEdge {
+                eid: EId(51),
+                src: VId(1),
+                etype: REL,
+                dst: VId(2),
+                constraint_id: ObjectId([0u8; 32]),
+                props: reversed_props.clone(),
+            },
+        ),
     ] {
-        let outcome = evaluate(&basis, &[Statement::new(vec![intent])]);
-        let (effects, failures) = outcome.committed_parts().expect("committed");
-        assert!(effects.is_empty(), "no effects: {effects:?}");
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].1.conflicting_values().is_some());
+        let forward = evaluate(&basis, &[Statement::new(vec![forward_intent])]);
+        let reversed = evaluate(&basis, &[Statement::new(vec![reversed_intent])]);
+        for outcome in [&forward, &reversed] {
+            let (effects, failures) = outcome.committed_parts().expect("committed");
+            assert!(effects.is_empty(), "no effects: {effects:?}");
+            assert_eq!(failures.len(), 1);
+            assert!(failures[0].1.conflicting_values().is_some());
+        }
+        assert_eq!(
+            forward, reversed,
+            "edge-intent refusal payloads are canonical too"
+        );
     }
 }
