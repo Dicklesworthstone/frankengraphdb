@@ -10,7 +10,7 @@ This record freezes the reasoning that governs FrankenGraphDB's architecture. Th
 
 The source excerpts are historical evidence, not proof that an implementation or gate is complete. Time-sensitive market, foundation, and research statements retain their original review date; changing one requires a fresh external-source review rather than silently rewriting the frozen rationale. Neither of those two sentences is mechanically checked, and neither is written as if it were: no artifact can contradict a claim about what is *not* proven, and a checker can observe that an `[[external_review]]` row was added but never that a review happened.
 
-`architecture-check` verifies the excerpts byte-for-byte against the master plan, pins the decision identity and semantic tables, validates live owner and claim references, prevents research citations from authorizing dependencies, regenerates this document, and emits deterministic decision-to-owner, owner-to-decision, and every-Bead-to-rationale NDJSON. Run it from the repository root with `cargo run -p registry-check --bin architecture-check -- --root .`.
+`architecture-check` verifies the excerpts byte-for-byte against the master plan, pins the decision identity and semantic tables, validates live owner and claim references, prevents research citations from authorizing dependencies, regenerates this document, and emits deterministic decision-to-owner, owner-to-decision, and every-Bead-to-rationale NDJSON. The exact fail-closed codes behind those enforcement claims are `source_bytes_mismatch`, `id_table_hash_mismatch`, `semantic_contract_hash_mismatch`, `owner_bead_unresolved`, `live_verification_checker_missing`, `research_dependency_promotion`, `document_drift`. Every cited code has a paired control-and-mutation witness. Run it from the repository root with `cargo run -p registry-check --bin architecture-check -- --root .`.
 
 ## Decision categories
 
@@ -65,7 +65,7 @@ Each issue resolves through exactly one precedence tier, tried in this order. Tw
 | `exact_override` | a named `[[bead_override]]` row for that exact Bead |
 | `family_rule` | exactly one disjoint `[[bead_family]]` prefix or Appendix-A rule |
 
-The bet-label vocabulary is closed to `b1`, `b2`, `b3`, `b4`, `b5`, `b6`. The rule-binding table is pinned by exact equality at `fnv1a64:66a303ca1f79e606` — keyed by rule rather than by Bead, so no Bead can move it and a rule edit must. An unknown bet label, a shadowed override, an ambiguous rule, a missing decision, profile, or rationale, or an unresolved Bead fails the architecture gate.
+The bet-label vocabulary is closed to `b1`, `b2`, `b3`, `b4`, `b5`, `b6`. The rule-binding table is pinned by exact equality at `fnv1a64:66a303ca1f79e606` — keyed by rule rather than by Bead, so no Bead can move it and a rule edit must. An unknown bet label, a shadowed override, an ambiguous rule, a missing decision, profile, or rationale, or an unresolved Bead fails the architecture gate. The exact codes behind those failure claims are `bead_bet_label_set`, `bead_bet_label_unknown`, `bead_override_shadowed`, `bead_family_ambiguous`, `provenance_rationale_missing`, `bead_provenance_not_total`.
 
 ## Frozen source blocks
 

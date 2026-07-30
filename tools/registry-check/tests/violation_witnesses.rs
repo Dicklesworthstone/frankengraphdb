@@ -24,12 +24,13 @@
 //!
 //! # The shape every row keeps
 //!
-//! * the control is the REAL registry, and it must produce **zero** violations —
-//!   so a row that fires without its mutation is impossible, not merely unlikely;
+//! * the control is the real registry or a controlled tree fixture, and its
+//!   exact target-code count is recorded before mutation;
 //! * the mutation changes ONE load-bearing fact, through the same public owner
 //!   the production binary calls;
-//! * the assertion names the exact violation code.  A string-only or
-//!   count-only assertion would pass against the wrong law.
+//! * the assertion names the exact violation code and requires the mutation to
+//!   add it beyond the control count. A string-only census would pass against a
+//!   law that exists in source but can never fire.
 //!
 //! A table rather than one function per law is deliberate: the control is loaded
 //! once and each row is applied to a fresh clone, so the suite cannot drift into
@@ -57,6 +58,7 @@
 //! reachable only by breaking the reader's source, and is proved that way in the
 //! bead rather than checked in.
 
+use registry_check::architecture::{self, ArchitectureRegistry};
 use registry_check::model::{self, Registries, ScriptDisposition};
 use registry_check::threat::{self, ThreatRegistry};
 use registry_check::topology::{self, TopologyRegistry, WorkspaceScan};
@@ -83,6 +85,258 @@ fn assert_code(codes: &[String], expected: &str) {
         codes.iter().any(|code| code == expected),
         "expected violation {expected:?}, got {codes:?}"
     );
+}
+
+// ===========================================================================
+// Architecture-decision claims rendered into the ADR — `architecture`
+// ===========================================================================
+
+struct ArchitectureRegistryWitness {
+    code: &'static str,
+    fact: &'static str,
+    mutate: fn(&mut ArchitectureRegistry),
+}
+
+#[rustfmt::skip]
+fn architecture_registry_witnesses() -> Vec<ArchitectureRegistryWitness> {
+    vec![
+    ArchitectureRegistryWitness { code: "source_bytes_mismatch", fact: "a frozen source block's declared digest is changed", mutate: |r| r.source_blocks[0].fnv1a64 = "0x0000000000000000".into() },
+    ArchitectureRegistryWitness { code: "id_table_hash_mismatch", fact: "the decision identity-table digest is changed", mutate: |r| r.registry.id_table_hash = "fnv1a64:0000000000000000".into() },
+    ArchitectureRegistryWitness { code: "semantic_contract_hash_mismatch", fact: "one decision summary changes without moving the independent semantic pin", mutate: |r| r.decisions[0].summary.push_str(" [witness mutation]") },
+    ArchitectureRegistryWitness { code: "owner_bead_unresolved", fact: "one explicit owner edge names a Bead absent from the corpus", mutate: |r| r.decisions.iter_mut().find(|decision| !decision.owner_beads.is_empty()).expect("an owned decision exists").owner_beads[0] = "fgdb-no-such-owner-witness-7cem".into() },
+    ArchitectureRegistryWitness { code: "live_verification_checker_missing", fact: "one live verification declaration loses its checker binding", mutate: |r| r.verification_entrypoints.iter_mut().find(|entry| entry.status.as_str().eq("live")).expect("a live verification entrypoint exists").checker_id = None },
+    ArchitectureRegistryWitness { code: "research_dependency_promotion", fact: "one bibliography citation is promoted into runtime crate ownership", mutate: |r| r.decisions.iter_mut().find(|decision| decision.category == "bibliography").expect("a bibliography decision exists").owner_crates.push("fgdb-types".into()) },
+    ArchitectureRegistryWitness { code: "bead_bet_label_set", fact: "the configured bet-label vocabulary loses one member", mutate: |r| { r.bead_provenance.allowed_bet_labels.pop(); } },
+    ArchitectureRegistryWitness { code: "provenance_rationale_missing", fact: "one owner-bearing decision's profile row is removed", mutate: |r| { let profile_id = r.decisions.iter().find(|decision| !decision.owner_beads.is_empty()).expect("an owned decision exists").profile.clone(); r.profiles.retain(|profile| profile.id != profile_id); } },
+    ]
+}
+
+struct ArchitectureTreeWitness {
+    code: &'static str,
+    fact: &'static str,
+    run: fn(&ArchitectureRegistry, &Path) -> Result<(), String>,
+}
+
+fn architecture_code_count(registry: &ArchitectureRegistry, root: &Path, code: &str) -> usize {
+    architecture::validate_architecture(registry, root)
+        .iter()
+        .filter(|violation| violation.code == code)
+        .count()
+}
+
+fn require_architecture_code_increase(
+    code: &str,
+    control_registry: &ArchitectureRegistry,
+    control_root: &Path,
+    mutated_registry: &ArchitectureRegistry,
+    mutated_root: &Path,
+) -> Result<(), String> {
+    let control = architecture_code_count(control_registry, control_root, code);
+    let mutated = architecture_code_count(mutated_registry, mutated_root, code);
+    if mutated > control {
+        Ok(())
+    } else {
+        Err(format!(
+            "{code} count did not increase: control={control}, mutation={mutated}"
+        ))
+    }
+}
+
+fn bead_record(id: &str, labels: &[&str]) -> String {
+    let labels = labels
+        .iter()
+        .map(|label| format!("\"{label}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{\"id\":\"{id}\",\"status\":\"open\",\"labels\":[{labels}]}}\n")
+}
+
+fn witness_unknown_bet_label(registry: &ArchitectureRegistry, _: &Path) -> Result<(), String> {
+    let root = scratch_root("architecture-unknown-bet-label");
+    let path = ".beads/issues.jsonl";
+    write_fixture(
+        &root,
+        path,
+        &bead_record("fgdb-witness-unknown-bet", &["b1"]),
+    );
+    let control = architecture_code_count(registry, &root, "bead_bet_label_unknown");
+    write_fixture(
+        &root,
+        path,
+        &bead_record("fgdb-witness-unknown-bet", &["b7"]),
+    );
+    let mutated = architecture_code_count(registry, &root, "bead_bet_label_unknown");
+    if mutated > control {
+        Ok(())
+    } else {
+        Err(format!(
+            "bead_bet_label_unknown count did not increase: control={control}, mutation={mutated}"
+        ))
+    }
+}
+
+fn witness_shadowed_override(registry: &ArchitectureRegistry, _: &Path) -> Result<(), String> {
+    let direct = architecture::owner_decision_index(registry);
+    let override_rule = registry
+        .bead_overrides
+        .iter()
+        .find(|rule| !direct.contains_key(&rule.bead_id))
+        .ok_or_else(|| "no unshadowed exact override exists for the control".to_string())?;
+    let root = scratch_root("architecture-shadowed-override");
+    let path = ".beads/issues.jsonl";
+    write_fixture(&root, path, &bead_record(&override_rule.bead_id, &[]));
+    let control = architecture_code_count(registry, &root, "bead_override_shadowed");
+    write_fixture(&root, path, &bead_record(&override_rule.bead_id, &["b1"]));
+    let mutated = architecture_code_count(registry, &root, "bead_override_shadowed");
+    if mutated > control {
+        Ok(())
+    } else {
+        Err(format!(
+            "bead_override_shadowed count did not increase: control={control}, mutation={mutated}"
+        ))
+    }
+}
+
+fn witness_ambiguous_family(registry: &ArchitectureRegistry, _: &Path) -> Result<(), String> {
+    let root = scratch_root("architecture-ambiguous-family");
+    write_fixture(
+        &root,
+        ".beads/issues.jsonl",
+        &bead_record("fgdb-risk-witness-7cem", &[]),
+    );
+    let mut mutated = registry.clone();
+    mutated
+        .bead_families
+        .iter_mut()
+        .find(|family| family.id == "workstream-w1")
+        .ok_or_else(|| "workstream-w1 family exists for the mutation".to_string())?
+        .pattern = "fgdb-risk-".into();
+    require_architecture_code_increase("bead_family_ambiguous", registry, &root, &mutated, &root)
+}
+
+fn witness_provenance_not_total(registry: &ArchitectureRegistry, _: &Path) -> Result<(), String> {
+    let root = scratch_root("architecture-provenance-not-total");
+    let path = ".beads/issues.jsonl";
+    let id = "fgdb-witness-provenance-total-7cem";
+    write_fixture(&root, path, &bead_record(id, &["b1"]));
+    let control = architecture_code_count(registry, &root, "bead_provenance_not_total");
+    write_fixture(&root, path, &bead_record(id, &[]));
+    let mutated = architecture_code_count(registry, &root, "bead_provenance_not_total");
+    if mutated > control {
+        Ok(())
+    } else {
+        Err(format!(
+            "bead_provenance_not_total count did not increase: control={control}, mutation={mutated}"
+        ))
+    }
+}
+
+fn witness_document_drift(registry: &ArchitectureRegistry, repo: &Path) -> Result<(), String> {
+    let fixture = scratch_root("architecture-document-drift");
+    for block in &registry.source_blocks {
+        let destination = fixture.join(&block.plan_path);
+        fs::create_dir_all(destination.parent().expect("plan path has a parent"))
+            .map_err(|error| format!("create plan fixture parent: {error}"))?;
+        fs::copy(repo.join(&block.plan_path), &destination)
+            .map_err(|error| format!("copy {}: {error}", block.plan_path))?;
+    }
+    let generated = architecture::generate_document(registry, repo)?;
+    write_fixture(&fixture, architecture::DOCUMENT_PATH, &generated);
+    if !architecture::check_document(registry, &fixture)? {
+        return Err("generated document failed its unmodified control".into());
+    }
+    let edited = format!("{generated}\n<!-- one-defect witness -->\n");
+    write_fixture(&fixture, architecture::DOCUMENT_PATH, &edited);
+    if architecture::check_document(registry, &fixture)? {
+        return Err("one-byte-class document mutation was accepted".into());
+    }
+    let violation = architecture::document_drift_violation();
+    if violation.code == "document_drift" {
+        Ok(())
+    } else {
+        Err(format!(
+            "document drift constructor emitted {:?}",
+            violation.code
+        ))
+    }
+}
+
+#[rustfmt::skip]
+fn architecture_tree_witnesses() -> Vec<ArchitectureTreeWitness> {
+    vec![
+    ArchitectureTreeWitness { code: "bead_bet_label_unknown", fact: "one controlled Bead changes from b1 to the out-of-vocabulary b7", run: witness_unknown_bet_label },
+    ArchitectureTreeWitness { code: "bead_override_shadowed", fact: "one exact-override Bead gains a higher-precedence b1 label", run: witness_shadowed_override },
+    ArchitectureTreeWitness { code: "bead_family_ambiguous", fact: "one controlled Bead matches two prefix rules instead of one", run: witness_ambiguous_family },
+    ArchitectureTreeWitness { code: "bead_provenance_not_total", fact: "one controlled Bead loses its only provenance mechanism", run: witness_provenance_not_total },
+    ArchitectureTreeWitness { code: "document_drift", fact: "one edit is made to the generated ADR bytes", run: witness_document_drift },
+    ]
+}
+
+#[test]
+fn architecture_registry_claims_are_seen_to_fire() {
+    let root = repo_root();
+    let base = architecture::load_from_repo(&root).expect("architecture registry loads");
+    let mut silent = Vec::new();
+    for row in architecture_registry_witnesses() {
+        let mut mutated = base.clone();
+        (row.mutate)(&mut mutated);
+        if let Err(error) =
+            require_architecture_code_increase(row.code, &base, &root, &mutated, &root)
+        {
+            silent.push(format!("{} [{}] -> {error}", row.code, row.fact));
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "{} architecture registry claims did not fire on their one-defect mutations:\n{}",
+        silent.len(),
+        silent.join("\n")
+    );
+}
+
+#[test]
+fn architecture_tree_claims_are_seen_to_fire() {
+    let root = repo_root();
+    let registry = architecture::load_from_repo(&root).expect("architecture registry loads");
+    let mut silent = Vec::new();
+    for row in architecture_tree_witnesses() {
+        if let Err(error) = (row.run)(&registry, &root) {
+            silent.push(format!("{} [{}] -> {error}", row.code, row.fact));
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "{} architecture tree claims did not fire on their one-defect mutations:\n{}",
+        silent.len(),
+        silent.join("\n")
+    );
+}
+
+#[test]
+fn architecture_document_citations_equal_the_executed_witness_set() {
+    let cited: BTreeSet<&str> = architecture::DOCUMENT_ENFORCEMENT_VIOLATION_CODES
+        .into_iter()
+        .chain(architecture::DOCUMENT_FAILURE_VIOLATION_CODES)
+        .collect();
+    let witnessed: BTreeSet<&str> = architecture_registry_witnesses()
+        .iter()
+        .map(|row| row.code)
+        .chain(architecture_tree_witnesses().iter().map(|row| row.code))
+        .collect();
+    assert_eq!(
+        cited, witnessed,
+        "every ADR citation must have one executed witness and every witness must be cited"
+    );
+
+    let root = repo_root();
+    let registry = architecture::load_from_repo(&root).expect("architecture registry loads");
+    let document = architecture::generate_document(&registry, &root).expect("document generates");
+    for code in cited {
+        assert!(
+            document.contains(&format!("`{code}`")),
+            "generated ADR does not cite witnessed code {code:?}"
+        );
+    }
 }
 
 #[test]
@@ -1069,8 +1323,10 @@ fn every_witness_row_names_a_distinct_law() {
     );
     codes.extend(threat_witnesses().iter().map(|row| row.code));
     codes.extend(registry_witnesses().iter().map(|row| row.code));
+    codes.extend(architecture_registry_witnesses().iter().map(|row| row.code));
+    codes.extend(architecture_tree_witnesses().iter().map(|row| row.code));
 
-    assert_eq!(codes.len(), 118, "table row count moved");
+    assert_eq!(codes.len(), 131, "table row count moved");
     let distinct: BTreeSet<&str> = codes.iter().copied().collect();
     // `active_not_a_member`/`active_manifest_missing` are two laws reached by
     // one fact. The island rows above deliberately use separate scan facts.

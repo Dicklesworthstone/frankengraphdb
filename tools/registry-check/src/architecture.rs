@@ -6008,6 +6008,36 @@ pub fn validate_architecture(registry: &ArchitectureRegistry, root: &Path) -> Ve
 /// The one document this registry renders.
 pub const DOCUMENT_PATH: &str = "docs/ARCHITECTURE_DECISION_RECORD.md";
 
+/// Exact fail-closed mechanisms behind the document's checker-capability claim.
+///
+/// These are rendered into the ADR rather than hidden behind prose. The
+/// cross-validator mutation suite owns a paired control and one-defect witness
+/// for every code and asserts exact set equality with this list, so renaming or
+/// removing a mechanism cannot leave a plausible stale sentence behind.
+pub const DOCUMENT_ENFORCEMENT_VIOLATION_CODES: [&str; 7] = [
+    "source_bytes_mismatch",
+    "id_table_hash_mismatch",
+    "semantic_contract_hash_mismatch",
+    "owner_bead_unresolved",
+    "live_verification_checker_missing",
+    "research_dependency_promotion",
+    "document_drift",
+];
+
+/// Exact fail-closed mechanisms behind the document's Bead-resolution claim.
+///
+/// `bead_bet_label_set` pins the configured vocabulary and
+/// `bead_bet_label_unknown` rejects a live record outside it; both are needed
+/// for the prose's "unknown bet label" statement to be true in both directions.
+pub const DOCUMENT_FAILURE_VIOLATION_CODES: [&str; 6] = [
+    "bead_bet_label_set",
+    "bead_bet_label_unknown",
+    "bead_override_shadowed",
+    "bead_family_ambiguous",
+    "provenance_rationale_missing",
+    "bead_provenance_not_total",
+];
+
 /// One prose gloss per `allowed_categories` member.
 ///
 /// The rendered vocabulary tables are how the document states what it binds
@@ -6196,6 +6226,14 @@ fn gloss_table(out: &mut String, headers: &[&str], gloss: &[(&str, &str)], order
     }
 }
 
+fn inline_code_list(codes: &[&str]) -> String {
+    codes
+        .iter()
+        .map(|code| format!("`{code}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Generate the published architecture-decision record.  Deterministic: the same
 /// registry plus the same plan bytes produce the same document, byte for byte.
 pub fn generate_document(registry: &ArchitectureRegistry, root: &Path) -> Result<String, String> {
@@ -6221,8 +6259,10 @@ pub fn generate_document(registry: &ArchitectureRegistry, root: &Path) -> Result
         "The source excerpts are historical evidence, not proof that an implementation or gate is complete. Time-sensitive market, foundation, and research statements retain their original review date; changing one requires a fresh external-source review rather than silently rewriting the frozen rationale. Neither of those two sentences is mechanically checked, and neither is written as if it were: no artifact can contradict a claim about what is *not* proven, and a checker can observe that an `[[external_review]]` row was added but never that a review happened.\n\n",
     );
     out.push_str(
-        "`architecture-check` verifies the excerpts byte-for-byte against the master plan, pins the decision identity and semantic tables, validates live owner and claim references, prevents research citations from authorizing dependencies, regenerates this document, and emits deterministic decision-to-owner, owner-to-decision, and every-Bead-to-rationale NDJSON. Run it from the repository root with `",
+        "`architecture-check` verifies the excerpts byte-for-byte against the master plan, pins the decision identity and semantic tables, validates live owner and claim references, prevents research citations from authorizing dependencies, regenerates this document, and emits deterministic decision-to-owner, owner-to-decision, and every-Bead-to-rationale NDJSON. The exact fail-closed codes behind those enforcement claims are ",
     );
+    out.push_str(&inline_code_list(&DOCUMENT_ENFORCEMENT_VIOLATION_CODES));
+    out.push_str(". Every cited code has a paired control-and-mutation witness. Run it from the repository root with `");
     out.push_str(REPLAY_COMMAND);
     out.push_str("`.\n");
 
@@ -6279,7 +6319,7 @@ pub fn generate_document(registry: &ArchitectureRegistry, root: &Path) -> Result
         &provenance.resolution_precedence,
     );
     out.push_str(&format!(
-        "\nThe bet-label vocabulary is closed to {}. The rule-binding table is pinned by exact equality at `{}` — keyed by rule rather than by Bead, so no Bead can move it and a rule edit must. An unknown bet label, a shadowed override, an ambiguous rule, a missing decision, profile, or rationale, or an unresolved Bead fails the architecture gate.\n",
+        "\nThe bet-label vocabulary is closed to {}. The rule-binding table is pinned by exact equality at `{}` — keyed by rule rather than by Bead, so no Bead can move it and a rule edit must. An unknown bet label, a shadowed override, an ambiguous rule, a missing decision, profile, or rationale, or an unresolved Bead fails the architecture gate. The exact codes behind those failure claims are {}.\n",
         provenance
             .allowed_bet_labels
             .iter()
@@ -6287,6 +6327,7 @@ pub fn generate_document(registry: &ArchitectureRegistry, root: &Path) -> Result
             .collect::<Vec<_>>()
             .join(", "),
         provenance.rule_binding_hash,
+        inline_code_list(&DOCUMENT_FAILURE_VIOLATION_CODES),
     ));
 
     heading(&mut out, 2, "Frozen source blocks");
