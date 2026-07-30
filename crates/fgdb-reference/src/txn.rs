@@ -33,7 +33,7 @@
 //! This is endpoint-specific referential integrity, not a claim that this SI
 //! oracle protects general adjacency or neighbour phantoms.
 
-use crate::intents::{Outcome, Statement, StatementFailure, evaluate};
+use crate::intents::{Outcome, Statement, StatementFailure, evaluate_from_intent_ordinal};
 use crate::{
     ApplyError, CertificationSummary, ConflictKey, ReferenceDatabase, ReferenceGraph, Snapshot,
     SnapshotError, Vertex, collect_conflict_keys,
@@ -60,6 +60,11 @@ pub struct Transaction {
     /// workspace, never against the basis or the live database.
     workspace: ReferenceGraph,
     effects: Vec<DeltaRow>,
+    /// The last canonical source-intent ordinal consumed across every
+    /// `execute` call. This belongs to the transaction, not to one evaluator
+    /// invocation: resetting it would give two published creates the same
+    /// sequence-neutral birth order.
+    last_intent_ordinal: u64,
     /// What this transaction depended on. Separate from the write set because an
     /// rw-antidependency needs both, and a transaction that reads x and writes y
     /// is exactly the shape write-write conflict detection cannot see.
@@ -191,6 +196,7 @@ impl Transaction {
             workspace,
             claims_genesis,
             effects: Vec::new(),
+            last_intent_ordinal: 0,
             read_set: BTreeSet::new(),
             statement_failures: 0,
             aborted_at: None,
@@ -321,8 +327,11 @@ impl Transaction {
         if let Some(statement) = self.aborted_at {
             return Err(TxnError::AlreadyAborted { statement });
         }
-        match evaluate(&self.workspace, statements) {
+        let (outcome, last_intent_ordinal) =
+            evaluate_from_intent_ordinal(&self.workspace, statements, self.last_intent_ordinal);
+        match outcome {
             Outcome::Aborted { statement, .. } => {
+                self.last_intent_ordinal = last_intent_ordinal;
                 self.aborted_at = Some(statement);
                 // The workspace is deliberately left as it was. An aborted
                 // transaction has no state worth inspecting, and clearing it
@@ -338,6 +347,7 @@ impl Transaction {
                         .apply_row(row)
                         .map_err(|error| TxnError::Apply(Box::new(error)))?;
                 }
+                self.last_intent_ordinal = last_intent_ordinal;
                 self.statement_failures += statement_failures.len();
                 self.effects.extend(effects);
                 Ok(())

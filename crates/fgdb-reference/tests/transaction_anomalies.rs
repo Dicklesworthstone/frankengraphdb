@@ -185,6 +185,70 @@ fn a_transaction_sees_its_own_writes() {
     );
 }
 
+/// Repeated `execute` calls are one published transaction-order stream, not
+/// three independent evaluator invocations.
+///
+/// The first implementation of intent-derived birth ordinals correctly stopped
+/// consulting graph cardinality, but initialized its ordinal inside `evaluate`.
+/// `Transaction::execute` is deliberately repeatable, so that reset assigned 1
+/// to every create below. Mixed vertex/edge creates make the control catch both
+/// the reset and any return to per-element-kind counters.
+#[test]
+fn separate_execute_calls_share_one_intent_ordinal_stream() {
+    let db = ReferenceDatabase::new();
+    let mut txn = Transaction::begin_genesis(&db, GRAPH, MAIN).expect("genesis begin");
+
+    txn.execute(&[create(1, 0)]).expect("first execute");
+    txn.execute(&[create(2, 0)]).expect("second execute");
+    txn.execute(&[add_edge(10, 1, 2)]).expect("third execute");
+
+    let birth_ordinals = txn
+        .effects()
+        .iter()
+        .filter_map(|row| match row {
+            DeltaRow::CreateVertex { birth_ordinal, .. }
+            | DeltaRow::CreateEdge { birth_ordinal, .. } => Some(*birth_ordinal),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        birth_ordinals,
+        vec![1, 2, 3],
+        "transaction order continues across execute-call boundaries"
+    );
+}
+
+/// A no-op is still a source intent and occupies its canonical position even
+/// when the next effective create arrives through a later `execute` call.
+#[test]
+fn a_no_op_execute_still_consumes_its_source_intent_ordinal() {
+    let db = ReferenceDatabase::new();
+    let mut txn = Transaction::begin_genesis(&db, GRAPH, MAIN).expect("genesis begin");
+
+    txn.execute(&[create(1, 0)]).expect("first execute");
+    txn.execute(&[Statement::new(vec![Intent::EnsureVertex {
+        vid: VId(1),
+        labels: vec![LABEL],
+        props: vec![(PROP, int(0))],
+    }])])
+    .expect("no-op execute");
+    txn.execute(&[create(2, 0)]).expect("third execute");
+
+    let birth_ordinals = txn
+        .effects()
+        .iter()
+        .filter_map(|row| match row {
+            DeltaRow::CreateVertex { birth_ordinal, .. } => Some(*birth_ordinal),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        birth_ordinals,
+        vec![1, 3],
+        "the no-op source intent owns ordinal 2 even though it emits no row"
+    );
+}
+
 /// Read skew is impossible under SI: two reads separated by a concurrent commit
 /// that touched both elements still agree with each other.
 #[test]

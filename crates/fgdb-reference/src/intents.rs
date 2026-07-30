@@ -284,6 +284,20 @@ impl Outcome {
 /// matters: finalization must be able to produce effects without committing
 /// them, because the commit protocol needs the capsule built before D1.
 pub fn evaluate(basis: &ReferenceGraph, statements: &[Statement]) -> Outcome {
+    evaluate_from_intent_ordinal(basis, statements, 0).0
+}
+
+/// Evaluate from the last intent ordinal already consumed by this transaction.
+///
+/// The returned ordinal is the last intent actually visited, including no-ops
+/// and statement failures. [`evaluate`] starts a standalone evaluation at zero;
+/// [`crate::txn::Transaction`] carries the returned cursor across its repeatable
+/// `execute` calls so splitting one statement stream cannot reset birth order.
+pub(crate) fn evaluate_from_intent_ordinal(
+    basis: &ReferenceGraph,
+    statements: &[Statement],
+    mut intent_ordinal: u64,
+) -> (Outcome, u64) {
     let mut scratch = basis.clone();
     let mut effects: Vec<DeltaRow> = Vec::new();
     let mut statement_failures: Vec<(usize, StatementFailure)> = Vec::new();
@@ -310,8 +324,6 @@ pub fn evaluate(basis: &ReferenceGraph, statements: &[Statement]) -> Outcome {
     // SUBSET NOTE (doctrine 7): merge_ordinal and permanent element identity are
     // still absent, and are not fabricated from state to stand in for the missing
     // pieces. This is the intent_ordinal component alone, honestly narrow.
-    let mut intent_ordinal: u64 = 0;
-
     for (index, statement) in statements.iter().enumerate() {
         // Each statement is evaluated on its own scratch so that a
         // StatementError can discard exactly its own effects — a statement is
@@ -341,10 +353,13 @@ pub fn evaluate(basis: &ReferenceGraph, statements: &[Statement]) -> Outcome {
                     break;
                 }
                 Reduction::Abort(f) => {
-                    return Outcome::Aborted {
-                        statement: index,
-                        failure: f,
-                    };
+                    return (
+                        Outcome::Aborted {
+                            statement: index,
+                            failure: f,
+                        },
+                        intent_ordinal,
+                    );
                 }
             }
         }
@@ -360,10 +375,13 @@ pub fn evaluate(basis: &ReferenceGraph, statements: &[Statement]) -> Outcome {
         }
     }
 
-    Outcome::Committed {
-        effects,
-        statement_failures,
-    }
+    (
+        Outcome::Committed {
+            effects,
+            statement_failures,
+        },
+        intent_ordinal,
+    )
 }
 
 /// What one intent reduces to against a given state.
