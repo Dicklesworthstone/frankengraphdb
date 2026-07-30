@@ -60,9 +60,9 @@ pub const COMPLETION_LAYER_SCHEMA_VERSION: i64 = 1;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT: usize = 4;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 450;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 455;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "03d312017d950cbf7a58a7a7011467b547887827d24269eb1f1688d35bbab899";
+    "53f282596c615b683d9112a3b35a97bf8cb665a606b686c926fd4f5cbdf3c3c2";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 446;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 367;
@@ -378,7 +378,7 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 0] = [];
 const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 0] = [];
 const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 0] = [];
 const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 0] = [];
-static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] = [
+static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 455] = [
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459",
         slice_id: "a01",
@@ -4730,6 +4730,46 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 450] 
             "field|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>|KeyEnvelopeGrantRecord<Role:AuthorityOwningRole>.nonretaining_predecessor_digest|nonretaining_predecessor_digest",
         ],
         rationale_sha256: "3810555a449ca3b41f582767c776ad09b69e6b4478fb31405cf029eb986953ad",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a14:ambiguity-adjudication:1de8f2d9c62b0e47c8eb4a5a86a59d68aba9c9d016b8e5b6b5fb9e9e31d686c0",
+        slice_id: "a14",
+        source_locations: &["a14:2051"],
+        resolution: "not-a-durable-schema",
+        resolved_source_keys: &["top|GcIrreversibleDispatchGuard"],
+        rationale_sha256: "ea0069268d6dfd0c719bfe79c82d519180bcf0ac5bcd1e17163a74d4e807eb23",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a14:ambiguity-adjudication:2c72169ab8552322c9326b333646ffbf6a3bd9cc23e84d7647ade80a6ebc68d0",
+        slice_id: "a14",
+        source_locations: &["a14:2041"],
+        resolution: "not-a-durable-schema",
+        resolved_source_keys: &["top|RetiredLocal"],
+        rationale_sha256: "0a5f7542efebcde95c4f2fe14286204695473c3d5a883ce705fc21c0bb06b425",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a14:ambiguity-adjudication:2eb676b7aa2eb0af2c3fda973cc90532720a8e5d1adc7876693d376fd37f9383",
+        slice_id: "a14",
+        source_locations: &["a14:2039"],
+        resolution: "not-a-durable-schema",
+        resolved_source_keys: &["top|RegisteredStrongRef"],
+        rationale_sha256: "e8160251b05a4ec7acd90d97737d64d2f5a00e70b4f0dc639e85950e13f464fa",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a14:ambiguity-adjudication:3d80f045a0983b8ca77fd53a8327bcd88286839b395f20f78a77dc5001081e67",
+        slice_id: "a14",
+        source_locations: &["a14:2043"],
+        resolution: "not-a-durable-schema",
+        resolved_source_keys: &["top|CurrentCheckpointObservation"],
+        rationale_sha256: "0706ca5c4e537022d8016e6257116783d6ba2586cdafb35e9cf0f1ac8556380b",
+    },
+    AmbiguityAdjudicationContractPin {
+        row_id: "a14:ambiguity-adjudication:95eef7c080056b2c1c15358eefed88f9657bff7fbb56976704f5761451d314d8",
+        slice_id: "a14",
+        source_locations: &["a14:2039"],
+        resolution: "not-a-durable-schema",
+        resolved_source_keys: &["top|MandatoryInventoryClassRegistry"],
+        rationale_sha256: "c0d0e6354b66fd71dfcf92e2735558953e2e2487c6fd3d3affd28322e66c8be1",
     },
 ];
 

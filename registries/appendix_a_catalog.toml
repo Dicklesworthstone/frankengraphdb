@@ -90246,6 +90246,51 @@ disposition = "reference-only"
 source_locations = ["plan:234"]
 
 [[ambiguity_adjudication]]
+row_id = "a14:ambiguity-adjudication:1de8f2d9c62b0e47c8eb4a5a86a59d68aba9c9d016b8e5b6b5fb9e9e31d686c0"
+slice_id = "a14"
+ambiguity_source_key = "ambiguity|definition-without-structural-body|GcIrreversibleDispatchGuard||e2221498a775ad894213f82da0acf978d89d7bf8141de988e785d0d8ad454484|1|342963b07a08d34dc5a6a36ab49af2247da90920ee599092cea36f9c79b3731f|definitional prose names a type but supplies no adjacent structural expression"
+source_locations = ["a14:2051"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["top|GcIrreversibleDispatchGuard"]
+rationale = "a14:2051: the mention is definitional prose naming the GC specialization of the universal guard with no adjacent structural body, so top|GcIrreversibleDispatchGuard is not a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a14:ambiguity-adjudication:2c72169ab8552322c9326b333646ffbf6a3bd9cc23e84d7647ade80a6ebc68d0"
+slice_id = "a14"
+ambiguity_source_key = "ambiguity|definition-without-structural-body|RetiredLocal||fe441f450a459008c019d7900bb1932259eeb595d11ca3eb4c2862fa9a3b4241|1|03e7bfae8db7d76750a6134af516bbc0c1609bacf4a171f23681018dc7a19c9f|definitional prose names a type but supplies no adjacent structural expression"
+source_locations = ["a14:2041"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["top|RetiredLocal"]
+rationale = "a14:2041: the top-level mention is definitional prose; RetiredLocal exists structurally only as a unit arm of the group_role field union at plan:1544 in its own slice, so top|RetiredLocal is not a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a14:ambiguity-adjudication:2eb676b7aa2eb0af2c3fda973cc90532720a8e5d1adc7876693d376fd37f9383"
+slice_id = "a14"
+ambiguity_source_key = "ambiguity|definition-without-structural-body|RegisteredStrongRef||80a4417b138903aca1e9547dce66c696247629b094ac26fb57c5d70e74db988f|1|3316c1f65160bb3d66e1857421e61277867bf3c26386ecac48618c026c0cb31a|definitional prose names a type but supplies no adjacent structural expression"
+source_locations = ["a14:2039"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["top|RegisteredStrongRef"]
+rationale = "a14:2039: the mention is definitional prose naming the closed generated union of role-legal typed strong-reference encodings with no adjacent structural body; the vocabulary erratum is filed separately, so top|RegisteredStrongRef is not a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a14:ambiguity-adjudication:3d80f045a0983b8ca77fd53a8327bcd88286839b395f20f78a77dc5001081e67"
+slice_id = "a14"
+ambiguity_source_key = "ambiguity|definition-without-structural-body|CurrentCheckpointObservation||298b0479c053943ce62ae7abd2adcea5e68a36d00483e8ff6174e69092a4d542|1|5ddc5bfb8f890228eb6d5e13b1741fb2aae2b89b3bbd982d6e1ea88c56822a89|definitional prose names a type but supplies no adjacent structural expression"
+source_locations = ["a14:2043"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["top|CurrentCheckpointObservation"]
+rationale = "a14:2043: the top-level mention is definitional prose naming the weak-checkpoint exception with no adjacent structural body; the structural body lives under a different source key, arm|MandatoryInventoryEntry|MandatoryInventoryEntry.value|CurrentCheckpointObservation, released by the MandatoryInventoryEntry wire mint (fgdb-27sr), so the top| key is not a durable schema."
+
+[[ambiguity_adjudication]]
+row_id = "a14:ambiguity-adjudication:95eef7c080056b2c1c15358eefed88f9657bff7fbb56976704f5761451d314d8"
+slice_id = "a14"
+ambiguity_source_key = "ambiguity|definition-without-structural-body|MandatoryInventoryClassRegistry||a580f53597d632a8d98db0411f2fa32b35533542129a9963256f376a4ab9bf10|1|e5f04a0d6171f8e91b20900d8ebe6ffc4aba491c6cc4eed73174634a8e57025f|definitional prose names a type but supplies no adjacent structural expression"
+source_locations = ["a14:2039"]
+resolution = "not-a-durable-schema"
+resolved_source_keys = ["top|MandatoryInventoryClassRegistry"]
+rationale = "a14:2039: the mention is definitional prose naming the class-tag mapping registry with no adjacent structural body, so top|MandatoryInventoryClassRegistry is not a durable schema."
+
+[[ambiguity_adjudication]]
 row_id = "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459"
 slice_id = "a01"
 ambiguity_source_key = "ambiguity|field-type-ambiguous|ExportLeaf|ExportLeaf<T>.authority_ledger_floor|c4bc39c591a9d281324c07f586b397d3f220f760fd3a710901241bb520821a36|1|b38933c6686aeb4d3685cd28e45711bba35d89372cdc71fbbe206366f4c8d5fe|shorthand field has no exact type"

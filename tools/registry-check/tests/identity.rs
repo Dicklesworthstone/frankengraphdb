@@ -4494,6 +4494,129 @@ fn idr_remote_prepared_identity_is_minted_wire_with_its_receipt_consumer() {
     );
 }
 
+/// fgdb-1bhc: five bodyless a14 candidates take the precedented
+/// RemoteGrantTargetRef route — leave the key unprojected, and the
+/// adjudication is FORCED not-a-durable-schema by catalog state (a resolved
+/// key that IS projected would make the resolution a violation, so the
+/// choice cannot drift).
+#[test]
+fn idr_five_bodyless_a14_candidates_are_forced_not_a_durable_schema() {
+    let identity = real_identity();
+    let catalog = real_appendix_catalog();
+    let cases = [
+        (
+            "CurrentCheckpointObservation",
+            "a14:2043",
+            "a14:ambiguity-adjudication:3d80f045a0983b8ca77fd53a8327bcd88286839b395f20f78a77dc5001081e67",
+        ),
+        (
+            "GcIrreversibleDispatchGuard",
+            "a14:2051",
+            "a14:ambiguity-adjudication:1de8f2d9c62b0e47c8eb4a5a86a59d68aba9c9d016b8e5b6b5fb9e9e31d686c0",
+        ),
+        (
+            "MandatoryInventoryClassRegistry",
+            "a14:2039",
+            "a14:ambiguity-adjudication:95eef7c080056b2c1c15358eefed88f9657bff7fbb56976704f5761451d314d8",
+        ),
+        (
+            "RegisteredStrongRef",
+            "a14:2039",
+            "a14:ambiguity-adjudication:2eb676b7aa2eb0af2c3fda973cc90532720a8e5d1adc7876693d376fd37f9383",
+        ),
+        (
+            "RetiredLocal",
+            "a14:2041",
+            "a14:ambiguity-adjudication:2c72169ab8552322c9326b333646ffbf6a3bd9cc23e84d7647ade80a6ebc68d0",
+        ),
+    ];
+
+    assert_eq!(cases.len(), 5);
+    for (symbol, location, row_id) in cases {
+        let rows = catalog
+            .ambiguity_adjudications
+            .iter()
+            .filter(|row| row.row_id.eq(row_id))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1, "adjudication {row_id} exists exactly once");
+        let row = rows[0];
+        assert_eq!(row.slice_id, "a14");
+        assert_eq!(row.source_locations, &[location.to_owned()]);
+        assert_eq!(row.resolution, "not-a-durable-schema");
+        assert_eq!(
+            row.resolved_source_keys,
+            &[format!("top|{symbol}")],
+            "{symbol} resolves to its own top-level key only"
+        );
+
+        // FORCED, not chosen: no projection row may name the symbol, or the
+        // not-a-durable-schema resolution would itself be a violation.
+        assert!(
+            !identity.logical.iter().any(|kind| kind.name.eq(symbol))
+                && !identity.wire.iter().any(|wire| wire.name.eq(symbol)),
+            "{symbol} is projected, contradicting its not-a-durable-schema adjudication"
+        );
+    }
+
+    // The two real structural homes elsewhere are consistent, not
+    // contradictions: CurrentCheckpointObservation's body lives under the
+    // MandatoryInventoryEntry value arm, and RetiredLocal is a unit arm of
+    // the RootManifest group_role union in its own slice. Both are asserted
+    // at the census level, the same key shape the bead names.
+    use registry_check::appendix_source::{SourceSliceSpec, census_appendix_source};
+    let plan = real_plan_source();
+    let appendix = source_range(
+        &plan,
+        catalog.source_manifest.start_line,
+        catalog.source_manifest.end_line,
+    );
+    let specs = catalog
+        .slices
+        .iter()
+        .map(|slice| SourceSliceSpec {
+            id: &slice.id,
+            start_line: usize::try_from(slice.start_line).expect("slice start fits"),
+            end_line: usize::try_from(slice.end_line).expect("slice end fits"),
+        })
+        .collect::<Vec<_>>();
+    let census = census_appendix_source(
+        &appendix,
+        usize::try_from(catalog.source_manifest.start_line).expect("source start fits"),
+        &specs,
+    )
+    .expect("source census");
+    let value_union = census
+        .unions
+        .iter()
+        .find(|union| union.key.union_path.eq("MandatoryInventoryEntry.value"))
+        .expect("the entry's value union is censused");
+    assert!(
+        value_union
+            .arm_names
+            .iter()
+            .any(|arm| arm.eq("CurrentCheckpointObservation")),
+        "the arm-bodied CurrentCheckpointObservation remains under MandatoryInventoryEntry"
+    );
+    let group_role_union_censused = census
+        .unions
+        .iter()
+        .any(|union| union.arm_names.iter().any(|arm| arm.eq("RetiredLocal")));
+    assert!(
+        !group_role_union_censused,
+        "no censused union may carry RetiredLocal; it is top-level bodyless, not an arm body"
+    );
+    // Its only structural home is the RootManifest common-header
+    // group_role union at plan:1544 — a unit alternative, source-text
+    // spelled, inside the anonymous header the census keeps unowned.
+    let retired_local_unit_arm = String::from_utf8_lossy(&appendix)
+        .lines()
+        .any(|line| line.contains("group_role:Local|Meta|Shard{shard_id}|RetiredLocal"));
+    assert!(
+        retired_local_unit_arm,
+        "plan:1544 must spell RetiredLocal as the unit group_role alternative"
+    );
+}
+
 #[test]
 fn idr_a13_branch_install_specs_are_forced_logical_at_the_source_floor() {
     let identity = real_identity();
