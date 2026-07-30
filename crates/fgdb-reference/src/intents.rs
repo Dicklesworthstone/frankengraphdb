@@ -29,7 +29,8 @@
 //!    transaction.
 //!
 //! SUBSET NOTE (doctrine 7). Appendix B lists eighteen intent kinds; nine are
-//! here — the ones whose reduction has semantics rather than being a direct
+//! here — one of them narrowed to a name that does not overclaim
+//! (`EnsureEdgeByTriple`, see its own note) — the ones whose reduction has semantics rather than being a direct
 //! transcription. The delete family earns its place on the cascade alone: the
 //! retired-edge image is COMPUTED by finalization and checked for equality by the
 //! materializer, so it is the sharpest instance in the vocabulary of the rule that
@@ -81,14 +82,41 @@ pub enum Intent {
         name: PropertyKeyId,
         value: CanonicalScalar,
     },
-    /// Create the edge only if no edge with this `(src, etype, dst)` already
-    /// exists. IDEMPOTENT by construction: the second evaluation emits nothing.
-    EnsureEdge {
+    /// Create the edge only if no edge with this exact `(src, etype, dst)` triple
+    /// already exists. IDEMPOTENT by construction: the second evaluation emits
+    /// nothing.
+    ///
+    /// **RENAMED FROM `EnsureEdge`, AND THE RENAME IS THE FIX**
+    /// (fgdb-ensure-edge-constraint-counterfeit-xa2x). Appendix B defines
+    /// `EnsureEdge {src, etype, dst, constraint_id, props}`, where the named
+    /// constraint decides what "already exists" MEANS — which key the uniqueness is
+    /// evaluated over, and whether properties participate in it. The variant here
+    /// destructured `constraint_id` with `..` and matched on the raw triple, so an
+    /// unknown constraint, a wrong-domain constraint and the right constraint all
+    /// produced the same answer, and an unrelated existing triple could suppress a
+    /// creation no validated key observation supports. Deleting the field changed no
+    /// behaviour and left every test green: the counterfeit signature exactly.
+    ///
+    /// Honest triple-uniqueness is a genuinely useful primitive, so the capability
+    /// stays and the CLAIM is what shrinks. Doctrine 7 permits a subset of a final
+    /// abstraction and forbids a substitute for it; a variant named `EnsureEdge`
+    /// that ignores its constraint is a substitute, while one named
+    /// `EnsureEdgeByTriple` that takes no constraint is a subset — it does less and
+    /// says so, and cannot be mistaken for the full thing.
+    ///
+    /// The constraint-keyed form needs canonical constraint state and key
+    /// evaluation, which belong to the schema catalog (fgdb-w4-schema-catalog); it
+    /// must land with those facts rather than by adding the parameter back.
+    ///
+    /// `eid` is caller-supplied, as it is for every create in this crate, and
+    /// Appendix B's arm allocates identity instead. That is a modelling shortcut the
+    /// whole crate shares — not a claim that this is the normative allocation
+    /// contract.
+    EnsureEdgeByTriple {
         eid: EId,
         src: VId,
         etype: RelationId,
         dst: VId,
-        constraint_id: ObjectId,
         props: Vec<(PropertyKeyId, CanonicalScalar)>,
     },
     /// Retire a vertex and everything hanging off it.
@@ -114,7 +142,7 @@ pub enum Intent {
         name: PropertyKeyId,
     },
     /// Create the vertex only if it does not already exist. IDEMPOTENT by
-    /// construction, the vertex counterpart of `EnsureEdge`.
+    /// construction, the vertex counterpart of `EnsureEdgeByTriple`.
     EnsureVertex {
         vid: VId,
         labels: Vec<LabelId>,
@@ -387,7 +415,7 @@ pub(crate) fn evaluate_from_intent_ordinal(
 /// What one intent reduces to against a given state.
 enum Reduction {
     Effects(Vec<DeltaRow>),
-    /// The intent legitimately produces nothing — `EnsureEdge` on an existing
+    /// The intent legitimately produces nothing — `EnsureEdgeByTriple` on an existing
     /// edge, or a `NoOp` mismatch. Distinct from failure: nothing went wrong.
     Nothing,
     Failed(StatementFailure),
@@ -451,13 +479,12 @@ fn reduce(state: &ReferenceGraph, intent: &Intent, ordinal: u64) -> Reduction {
                 after: Some(value.clone()),
             }])
         }
-        Intent::EnsureEdge {
+        Intent::EnsureEdgeByTriple {
             eid,
             src,
             etype,
             dst,
             props,
-            ..
         } => {
             if edge_exists(state, *src, *etype, *dst) {
                 return Reduction::Nothing;

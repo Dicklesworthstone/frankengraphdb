@@ -128,17 +128,16 @@ fn a_no_op_write_emits_no_effect() {
     assert!(!outcome.is_aborted());
 }
 
-/// `EnsureEdge` is idempotent: it emits an edge when none matches and nothing
+/// `EnsureEdgeByTriple` is idempotent: it emits an edge when none matches and nothing
 /// when one does. Checked in both directions, since an implementation that
 /// always emits and one that never emits each pass half of this.
 #[test]
 fn ensure_edge_is_idempotent() {
-    let ensure = |eid: u128, dst: u128| Intent::EnsureEdge {
+    let ensure = |eid: u128, dst: u128| Intent::EnsureEdgeByTriple {
         eid: EId(eid),
         src: VId(1),
         etype: REL,
         dst: VId(dst),
-        constraint_id: ObjectId([0x70; 32]),
         props: vec![],
     };
 
@@ -1065,7 +1064,7 @@ fn a_conflicting_duplicate_kills_only_its_own_statement() {
     assert_eq!(failures[0].0, 1, "and the failure names statement 1");
 }
 
-/// The same refusal applies to edge creates, both AddEdge and EnsureEdge — the
+/// The same refusal applies to edge creates, both AddEdge and EnsureEdgeByTriple — the
 /// bead names all three call sites and a fix at one is not a fix.
 #[test]
 fn conflicting_duplicates_are_refused_on_edge_intents_too() {
@@ -1093,20 +1092,18 @@ fn conflicting_duplicates_are_refused_on_edge_intents_too() {
             },
         ),
         (
-            Intent::EnsureEdge {
+            Intent::EnsureEdgeByTriple {
                 eid: EId(51),
                 src: VId(1),
                 etype: REL,
                 dst: VId(2),
-                constraint_id: ObjectId([0u8; 32]),
                 props: forward_props.clone(),
             },
-            Intent::EnsureEdge {
+            Intent::EnsureEdgeByTriple {
                 eid: EId(51),
                 src: VId(1),
                 etype: REL,
                 dst: VId(2),
-                constraint_id: ObjectId([0u8; 32]),
                 props: reversed_props.clone(),
             },
         ),
@@ -1124,4 +1121,89 @@ fn conflicting_duplicates_are_refused_on_edge_intents_too() {
             "edge-intent refusal payloads are canonical too"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// EnsureEdgeByTriple: the subset's boundary, pinned
+// ---------------------------------------------------------------------------
+//
+// fgdb-ensure-edge-constraint-counterfeit-xa2x. The variant used to carry a
+// `constraint_id` it destructured with `..` and never read, so an unknown, a
+// wrong-domain and the correct constraint all produced identical answers — the
+// counterfeit signature exactly. The field is gone and the name says what remains.
+//
+// These laws exist because "it matches the raw triple" is now the WHOLE claim, and
+// a claim that narrow needs to be testable: a future constraint-keyed form must
+// CHANGE one of these answers rather than being added silently beside them.
+
+/// Properties do NOT participate in the uniqueness. An existing edge with the same
+/// triple and different properties still suppresses the creation.
+///
+/// This is the honest reading of triple-uniqueness and precisely the answer a
+/// constraint could legitimately change — Appendix B lets a constraint say that
+/// properties are part of its key. Pinning it here is what makes the difference
+/// between the subset and the full form observable.
+#[test]
+fn ensure_edge_by_triple_ignores_properties_in_its_uniqueness() {
+    let basis = basis(); // v1 --REL--> v2 already exists, with no props
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::EnsureEdgeByTriple {
+            eid: EId(77),
+            src: VId(1),
+            etype: REL,
+            dst: VId(2),
+            props: vec![(NAME, text("different"))],
+        }])],
+    );
+    let (effects, failures) = outcome.committed_parts().expect("committed");
+    assert!(
+        effects.is_empty() && failures.is_empty(),
+        "the triple already exists, whatever the properties say: {effects:?}"
+    );
+}
+
+/// The RELATION is part of the triple: a different relation between the same pair
+/// is a different edge.
+#[test]
+fn ensure_edge_by_triple_distinguishes_the_relation() {
+    let basis = basis();
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::EnsureEdgeByTriple {
+            eid: EId(78),
+            src: VId(1),
+            etype: RelationId(999),
+            dst: VId(2),
+            props: vec![],
+        }])],
+    );
+    let (effects, _) = outcome.committed_parts().expect("committed");
+    assert_eq!(
+        effects.len(),
+        1,
+        "a different relation is a different triple"
+    );
+}
+
+/// DIRECTION is part of the triple: the reverse edge is a different edge.
+#[test]
+fn ensure_edge_by_triple_distinguishes_direction() {
+    let basis = basis();
+    let outcome = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::EnsureEdgeByTriple {
+            eid: EId(79),
+            src: VId(2),
+            etype: REL,
+            dst: VId(1),
+            props: vec![],
+        }])],
+    );
+    let (effects, _) = outcome.committed_parts().expect("committed");
+    assert_eq!(
+        effects.len(),
+        1,
+        "v2 -> v1 is not the v1 -> v2 that already exists"
+    );
 }
