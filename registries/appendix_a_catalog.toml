@@ -162,16 +162,16 @@ predecessor = "a02"
 successor = "a04"
 expected_projection_classes = ["logical_object_kinds", "wire_types", "durable_fields"]
 definition_status = "declared"
-top_level_candidate_count = 91
-top_level_candidate_ids_sha256 = "1d64220f3ab2b7405c61126d4db586399a1ad0dbc34896cc4ce18742516679e4"
-field_candidate_count = 732
-field_candidate_ids_sha256 = "021ee818d79404870457a16e423c987c2b3e904ed69c4bcc82acde85e566dc1f"
-union_candidate_count = 49
-union_candidate_ids_sha256 = "65e427afafb289ecfd92449f4f73381f84ea574f8f905560a2432372d79be485"
-arm_candidate_count = 129
-arm_candidate_ids_sha256 = "6c40ce7f70b31633b96fc946cfd8759e34b5ed1efad53239b69f7f76d9b09e24"
-ambiguity_count = 490
-ambiguity_ids_sha256 = "a982fa21771e8e41b3829560decab030b1e80a3d368f8f822b257e882575310a"
+top_level_candidate_count = 92
+top_level_candidate_ids_sha256 = "f95ce38004b8210d78a8b666f0c4df2b4f125f8650adfa3d0d29b4a2c1647c28"
+field_candidate_count = 746
+field_candidate_ids_sha256 = "eb134d74fd49109b3cc347d8c014887a716bdd0c6843612cae7522a418bac7ca"
+union_candidate_count = 50
+union_candidate_ids_sha256 = "ec76ad225e6cc2de283f1f6f3571438ea45375af46143a96bdc97d235210a1ad"
+arm_candidate_count = 132
+arm_candidate_ids_sha256 = "8e189a7503f20ff2aed51990204ae587e2fc1a4b8a31cc7ca67df5db6747c95e"
+ambiguity_count = 496
+ambiguity_ids_sha256 = "ecb55da2065c6db1e1bc08040b97d93f6f765f78423d97f311e2d21d6dd4d382"
 
 [[slice]]
 ordinal = 4
@@ -51849,6 +51849,16 @@ source_key = "top|GcSemanticState<Role>"
 source_kind = "confirmed"
 identity_class = "logical"
 source_locations = ["a14:2047"]
+
+[[top_level_candidate]]
+row_id = "a03:top-level-candidate:generated-payload-common-header-26e966fee6052e5a"
+slice_id = "a03"
+symbol = "GeneratedPayloadCommonHeader"
+generic_signature = ""
+source_key = "top|GeneratedPayloadCommonHeader"
+source_kind = "confirmed"
+identity_class = "unclassified"
+source_locations = ["a03:1468"]
 
 [[top_level_candidate]]
 row_id = "a03:top-level-candidate:generation-root-ref-1df04e0cdd9dc299"

@@ -1840,6 +1840,31 @@ fn leading_record(text: &str) -> Option<(String, usize)> {
     (bytes.get(cursor) == Some(&b'{')).then_some((display, cursor))
 }
 
+/// The ONE anonymous body the Appendix defines by phrase rather than by name
+/// (fgdb-ckb9). a03:1468 spells "The generated common header of every
+/// Local/Meta/Shard payload also contains `{...}`": the phrase is the
+/// definition cue, and the owner it encodes is `GeneratedPayloadCommonHeader`
+/// — the census's own generated-family spelling (`GeneratedResultDelivery
+/// Owner`, `GeneratedMetadataTreeBootstrapSet`), not a role token, so no
+/// false top-level `Local`/`Meta`/`Shard` schema is minted. Every other
+/// anonymous brace body keeps its current reading: an unowned structural
+/// fragment, never a durable schema.
+fn generated_payload_common_header_owner(before: &str) -> Option<&'static str> {
+    normalize_whitespace(before)
+        .eq_ignore_ascii_case(
+            "The generated common header of every Local/Meta/Shard payload also contains",
+        )
+        .then_some("GeneratedPayloadCommonHeader")
+}
+
+/// The opening brace of a fragment that IS one anonymous brace body and
+/// nothing else. A leading-name body is [`leading_record`]'s case; anything
+/// with prose around the braces stays unowned.
+fn anonymous_brace_body_open(text: &str) -> Option<usize> {
+    let start = text.len() - text.trim_start().len();
+    (text.as_bytes().get(start) == Some(&b'{')).then_some(start)
+}
+
 fn direct_schemas_from_inline(
     fragment: &MarkdownFragment,
     source: &str,
@@ -1957,6 +1982,32 @@ fn direct_schemas_from_inline(
             continue;
         }
         let Some((display, open_index)) = leading_record(text) else {
+            // fgdb-ckb9: the one anonymous body the Appendix defines by
+            // phrase. `Local{...}`/`Meta{...}`/`Shard{...}` heads are role
+            // metavariables, not schema names (is_schema_metavariable), so
+            // this occurrence is the only route that censuses the common
+            // header's nested `time_authority_binding` union without minting
+            // false top-level role schemas. A malformed body is left to the
+            // unclaimed-range pass, which records it exactly as before.
+            let Some(owner) = generated_payload_common_header_owner(&fragment.before) else {
+                continue;
+            };
+            let Some(open_index) = anonymous_brace_body_open(text) else {
+                continue;
+            };
+            if matching_delimiter(text, open_index).is_err() {
+                continue;
+            }
+            if let Some(occurrence) = make_schema_occurrence(
+                owner.to_owned(),
+                SchemaOwnerStatus::ConfirmedTopLevel,
+                DefinitionKind::InlineRecord,
+                mapped.source_range(0..0),
+                Some(mapped.clone()),
+            ) {
+                occurrences.push(occurrence);
+                claimed_ranges.push(mapped.source_range(0..mapped.text.len()));
+            }
             continue;
         };
         let display_length = parse_type_display(text)
@@ -5469,6 +5520,151 @@ mod tests {
                 .fields
                 .iter()
                 .all(|candidate| !candidate.key.stable_name.eq("fabricated_qh3r_control")),
+            "fabricated-absent control unexpectedly matched"
+        );
+    }
+
+    /// fgdb-ckb9: the generated payload common header at a03:1468 is the one
+    /// anonymous body the Appendix defines by phrase. Its
+    /// `time_authority_binding:Local{registry_ref}|Meta{registry_ref}|Shard{
+    /// active_projection_ref,...}` union was invisible — the fragment had no
+    /// source-derived owner, and `Local`/`Meta`/`Shard` heads are role
+    /// metavariables, never schema names. The phrase-encoded owner
+    /// `GeneratedPayloadCommonHeader` must census the union, all three arms,
+    /// and all six source-spelled arm members, while every unrelated
+    /// anonymous illustrative record stays unowned.
+    #[test]
+    fn appendix_generated_payload_common_header_recovers_all_six_arm_members() {
+        let plan = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
+        ));
+        let source = plan
+            .lines()
+            .skip(1387)
+            .take(2728 - 1388 + 1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let slices = [SourceSliceSpec {
+            id: "appendix-a",
+            start_line: 1388,
+            end_line: 2728,
+        }];
+        let census = census_appendix_source(source.as_bytes(), 1388, &slices)
+            .expect("the pinned Appendix A source must census");
+
+        // The owner: confirmed, top-level, and NOT a role token.
+        let owner = census
+            .schemas
+            .iter()
+            .find(|candidate| candidate.key.family.eq("GeneratedPayloadCommonHeader"))
+            .expect("the phrase-defined common header must have a source-derived owner");
+        assert!(
+            owner
+                .owner_statuses
+                .contains(&SchemaOwnerStatus::ConfirmedTopLevel),
+            "the phrase is the definition cue; the owner is confirmed, not ambiguous"
+        );
+        for role_token in ["Local", "Meta", "Shard"] {
+            assert!(
+                census
+                    .schemas
+                    .iter()
+                    .all(|candidate| !candidate.key.family.eq(role_token)),
+                "role metavariable {role_token} was minted as a top-level schema"
+            );
+        }
+
+        // The union and all three arms at source-derived paths.
+        let union = census
+            .unions
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .key
+                    .union_path
+                    .eq("GeneratedPayloadCommonHeader.time_authority_binding")
+            })
+            .expect("the common header's time_authority_binding union must be censused");
+        assert_eq!(
+            union.arm_names,
+            ["Local".to_owned(), "Meta".to_owned(), "Shard".to_owned()]
+        );
+
+        // All six source-spelled arm members. `active_projection_ref` is the
+        // real-Appendix control: it occurs nowhere else in the Appendix, so
+        // its presence cannot be credited to another site.
+        for path in [
+            "GeneratedPayloadCommonHeader.time_authority_binding.Local.registry_ref",
+            "GeneratedPayloadCommonHeader.time_authority_binding.Meta.registry_ref",
+            "GeneratedPayloadCommonHeader.time_authority_binding.Shard.active_projection_ref",
+            "GeneratedPayloadCommonHeader.time_authority_binding.Shard.projected_registry_digest",
+            "GeneratedPayloadCommonHeader.time_authority_binding.Shard.projected_selected_profile_oid",
+            "GeneratedPayloadCommonHeader.time_authority_binding.Shard.projection_meta_prefix",
+        ] {
+            assert!(
+                census
+                    .fields
+                    .iter()
+                    .any(|candidate| candidate.key.path.eq(path)),
+                "the real-source control {path} is still invisible"
+            );
+        }
+
+        // The header's own record fields ride the same owner.
+        for path in [
+            "GeneratedPayloadCommonHeader.incarnation_continuity_profile_id",
+            "GeneratedPayloadCommonHeader.cluster_incarnation_continuity_record_ref",
+            "GeneratedPayloadCommonHeader.cluster_incarnation_continuity_digest",
+            "GeneratedPayloadCommonHeader.continuity_cas_version",
+            "GeneratedPayloadCommonHeader.service_visibility_epoch",
+            "GeneratedPayloadCommonHeader.restore_registry_root",
+            "GeneratedPayloadCommonHeader.terminal_audit_freeze_index_root",
+        ] {
+            assert!(
+                census
+                    .fields
+                    .iter()
+                    .any(|candidate| candidate.key.path.eq(path)),
+                "the common-header member {path} is not censused"
+            );
+        }
+
+        // The claimed body no longer reads as an unowned fragment.
+        assert!(
+            census.ambiguities.iter().all(|candidate| !candidate
+                .raw
+                .starts_with("{incarnation_continuity_profile_id")),
+            "the owned common header is still reported as an unowned structural fragment"
+        );
+
+        // Unrelated anonymous illustrative records remain unowned. The
+        // RootManifest common header at a04:1544 is introduced by a
+        // possessive pronoun, not by the generated-payload phrase, and must
+        // keep its unowned reading: no broadening of every brace body into a
+        // durable schema.
+        assert!(
+            census.ambiguities.iter().any(|candidate| {
+                matches!(candidate.key.kind, AmbiguityKind::UnownedStructuralFragment)
+                    && candidate.raw.starts_with("{generation,database_id")
+            }),
+            "the unrelated a04:1544 anonymous header lost its unowned reading"
+        );
+        assert!(
+            census
+                .schemas
+                .iter()
+                .all(|candidate| !candidate.key.family.eq("RootManifestCommonHeader")),
+            "an unrelated anonymous header was broadened into a durable schema"
+        );
+
+        // Fabricated-absent control.
+        assert!(
+            census
+                .fields
+                .iter()
+                .all(|candidate| !candidate.key.stable_name.eq("fabricated_ckb9_control")),
             "fabricated-absent control unexpectedly matched"
         );
     }

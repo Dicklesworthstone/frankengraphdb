@@ -2119,7 +2119,13 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     // PortableCertificateProjection<T>, and
     // ImportedNonRequiredAuditEvidence. The mutation-proved source test pins
     // those three additions and rejects incidental or direct-record widening.
-    assert_eq!(baseline.top_level_candidates.len(), 1_252);
+    // 1_252 -> 1_253: fgdb-ckb9 encoded the one anonymous body the Appendix
+    // defines by phrase — "The generated common header of every
+    // Local/Meta/Shard payload also contains `{...}`" (a03:1468) — as
+    // top|GeneratedPayloadCommonHeader, censusing the nested
+    // time_authority_binding union and all six arm members without minting
+    // false top-level Local/Meta/Shard schemas.
+    assert_eq!(baseline.top_level_candidates.len(), 1_253);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT
