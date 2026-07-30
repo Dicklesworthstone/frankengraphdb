@@ -236,7 +236,10 @@ fn both_branches_may_diverge_on_the_same_identity() {
     apply_at(
         &mut db,
         FEATURE,
-        2,
+        // 3, not 2: sequences are the STREAM's, so two branches cannot share one.
+        // The fixture used to reuse 2, which is a history Chronicle could never
+        // produce (fgdb-reference-global-commit-frontier-pjqu).
+        3,
         vec![DeltaRow::Property {
             elem: fgdb_delta_types::ElementId::Vertex(VId(1)),
             property: PROP,
@@ -314,7 +317,9 @@ fn a_sequence_that_does_not_advance_is_refused() {
     let mut db = seeded();
     assert_eq!(db.applied_through(GRAPH, MAIN), Some(CommitSeq(1)));
 
-    for offered in [0u64, 1] {
+    // Below, equal, and ABOVE the next legal sequence. The gap-forward case is the
+    // one the per-coordinate rule could never have caught.
+    for offered in [0u64, 1, 3, 9] {
         let template = LogicalDeltaTemplate::build(
             ObjectId([0x11; 32]),
             [0x22; 32],
@@ -329,14 +334,20 @@ fn a_sequence_that_does_not_advance_is_refused() {
         )
         .expect("builds");
         let result = db.apply_template(&template, CommitSeq(offered));
-        assert!(
-            matches!(
-                result,
-                Err(fgdb_reference::ApplyError::SequenceNotAdvancing { .. })
-            ),
-            "offering {offered} against applied_through 1 must be refused; got {result:?}"
+        assert_eq!(
+            result,
+            Err(fgdb_reference::ApplyError::SequenceNotNext {
+                expected: CommitSeq(2),
+                offered: CommitSeq(offered),
+            }),
+            "offering {offered} when the stream's next commit is 2 must be refused"
         );
     }
+    assert_eq!(
+        db.replay_frontier(),
+        CommitSeq(1),
+        "and no refusal moved the stream frontier"
+    );
 
     assert_eq!(
         db.applied_through(GRAPH, MAIN),
@@ -426,7 +437,7 @@ fn forking_onto_an_existing_branch_is_refused() {
     // Also refused when the target exists only because it was written to.
     let mut written = ReferenceDatabase::new();
     apply_at(&mut written, MAIN, 1, vec![vertex(1, "ada")]);
-    apply_at(&mut written, FEATURE, 1, vec![vertex(9, "independent")]);
+    apply_at(&mut written, FEATURE, 2, vec![vertex(9, "independent")]);
     assert_eq!(
         written.fork_branch(GRAPH, MAIN, FEATURE),
         Err(BranchError::BranchExists {

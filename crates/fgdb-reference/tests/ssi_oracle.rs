@@ -310,7 +310,11 @@ fn a_visible_write_is_not_an_antidependency() {
         Some(int(50))
     );
     t3.read_property(ElementId::Vertex(VId(1)), PROP);
-    t2.execute(&[set(2, 1)]).expect("executes");
+    // 7, not 1: v2 already HOLDS 1, so the old value made this a no-op — which
+    // commits nothing and consumes no sequence, leaving the next hardcoded
+    // sequence one ahead of the stream. A no-op transaction is a legitimate
+    // outcome; a fixture that assumed it lands is not.
+    t2.execute(&[set(2, 7)]).expect("executes");
     t3.execute(&[create(3, 1)]).expect("executes");
 
     let (_, trace2) = commit(&mut db, t2, 3, 2);

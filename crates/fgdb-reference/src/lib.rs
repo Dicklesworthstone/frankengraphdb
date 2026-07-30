@@ -253,6 +253,34 @@ pub enum ApplyError {
         applied_through: CommitSeq,
         offered: CommitSeq,
     },
+    /// The template was offered at a sequence that is not the stream's next one.
+    ///
+    /// PER-COORDINATE MONOTONICITY IS NOT ENOUGH, and the comment above used to
+    /// claim the stream was "gap-free and monotone by construction" while nothing
+    /// checked it (fgdb-reference-global-commit-frontier-pjqu). Comparing only
+    /// against each touched coordinate lets a fresh coordinate accept ANY
+    /// sequence, because it has no `applied_through` to be compared with: seq 2 to
+    /// A then seq 1 to an untouched B was admitted, as was a gap, as was zero.
+    ///
+    /// EXACT-NEXT rather than merely increasing, because that is what the durable
+    /// layer does: Chronicle's `MarkerChain` starts at 1 and demands the exact
+    /// successor, and `LocalDeltaBatchIndex` keeps one global frontier that rejects
+    /// gaps and duplicates alike. A gapped history cannot come from the commit
+    /// stream, so an oracle that admits one can no longer reject — which is the
+    /// specific way an oracle stops being worth having.
+    SequenceNotNext {
+        expected: CommitSeq,
+        offered: CommitSeq,
+    },
+    /// A template with no coordinate entries.
+    ///
+    /// Refused rather than treated as a successful no-op. An empty template
+    /// applies "successfully" while recording nothing, so it consumes no sequence
+    /// and leaves no trace — a commit that happened for no reason, which is
+    /// exactly what the write-path laws in `fgdb-sim` forbid one layer up ("not an
+    /// empty capsule, not a marker with no effects — nothing at all"). Accepting
+    /// it here would let the oracle bless a stream the engine must never produce.
+    EmptyTemplate,
 }
 
 impl core::fmt::Display for ApplyError {
@@ -332,6 +360,13 @@ impl core::fmt::Display for ApplyError {
                 f,
                 "({graph:?}, {branch:?}) has applied through {applied_through:?}; {offered:?} does not advance"
             ),
+            Self::SequenceNotNext { expected, offered } => write!(
+                f,
+                "the stream's next commit is {expected:?}; {offered:?} is not it"
+            ),
+            Self::EmptyTemplate => {
+                write!(f, "a template with no coordinate entries is not a commit")
+            }
             Self::OperationKeyReused { key } => {
                 write!(f, "operation key {key:?} already names a different effect")
             }
@@ -1161,7 +1196,7 @@ impl core::error::Error for BranchError {}
 /// Keyed by coordinate because a template may carry entries for several, and
 /// applying them to one shared map would silently merge two branches — the
 /// error a single-coordinate materializer cannot even represent.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ReferenceDatabase {
     coordinates: BTreeMap<(GraphId, BranchId), ReferenceGraph>,
     /// How each branch came to exist. Separate from the state map because a
@@ -1169,6 +1204,15 @@ pub struct ReferenceDatabase {
     origins: BTreeMap<(GraphId, BranchId), BranchOrigin>,
     /// The highest commit sequence each coordinate has applied.
     applied_through: BTreeMap<(GraphId, BranchId), CommitSeq>,
+    /// The stream's frontier: the highest commit sequence this database has
+    /// applied, across every coordinate.
+    ///
+    /// BESIDE the per-coordinate map, never instead of it. Intervening commits can
+    /// touch other coordinates, so a coordinate's own frontier is genuinely below
+    /// this one — and the fork boundary derivation and the conflict window both
+    /// need the per-coordinate value. Two frontiers answering two different
+    /// questions: "what has this branch seen" and "where is the stream".
+    replay_frontier: CommitSeq,
     /// What each coordinate applied, at which sequence, oldest first.
     ///
     /// **THIS IS THE HISTORY MODEL, and its shape is the whole point.** B1's
@@ -1524,9 +1568,31 @@ impl core::fmt::Display for SnapshotError {
 
 impl core::error::Error for SnapshotError {}
 
+impl Default for ReferenceDatabase {
+    fn default() -> Self {
+        Self {
+            coordinates: BTreeMap::new(),
+            origins: BTreeMap::new(),
+            applied_through: BTreeMap::new(),
+            // Zero is "nothing applied": Chronicle's chain starts at 1, so the
+            // first legal commit is its successor. Written out rather than derived
+            // from a Default impl on CommitSeq, so the starting point of the
+            // stream is stated where it matters.
+            replay_frontier: CommitSeq(0),
+            history: BTreeMap::new(),
+        }
+    }
+}
+
 impl ReferenceDatabase {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The stream's frontier — the highest sequence applied across every
+    /// coordinate. The next legal commit is its successor.
+    pub fn replay_frontier(&self) -> CommitSeq {
+        self.replay_frontier
     }
 
     pub fn graph(&self, graph: GraphId, branch: BranchId) -> Option<&ReferenceGraph> {
@@ -1971,7 +2037,18 @@ impl ReferenceDatabase {
         template: &LogicalDeltaTemplate,
         commit_seq: CommitSeq,
     ) -> Result<(), ApplyError> {
+        if template.coordinate_entries().is_empty() {
+            return Err(ApplyError::EmptyTemplate);
+        }
+        let expected = CommitSeq(self.replay_frontier.0 + 1);
+        if commit_seq.0 != expected.0 {
+            return Err(ApplyError::SequenceNotNext {
+                expected,
+                offered: commit_seq,
+            });
+        }
         let mut candidate = self.clone();
+        candidate.replay_frontier = commit_seq;
         for entry in template.coordinate_entries() {
             let key = (entry.graph, entry.branch);
             // The sequence must ADVANCE for every coordinate this template
