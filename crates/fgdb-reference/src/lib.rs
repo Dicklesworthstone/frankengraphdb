@@ -216,6 +216,24 @@ pub enum ApplyError {
         declared: SchemaEpoch,
         actual: SchemaEpoch,
     },
+    /// A coordinate entry was validated under a schema epoch other than the
+    /// one present before this template began.
+    SchemaBindingMismatch {
+        graph: GraphId,
+        branch: BranchId,
+        relation: RelationId,
+        declared: SchemaEpoch,
+        actual: SchemaEpoch,
+    },
+    /// The entry-level schema-transition reference does not exactly describe
+    /// the schema row carried by that entry.
+    SchemaTransitionMismatch {
+        graph: GraphId,
+        branch: BranchId,
+        relation: RelationId,
+        declared: Option<ObjectId>,
+        schema_rows: Vec<ObjectId>,
+    },
     ConstraintRootMismatch {
         declared_schema_root: ObjectId,
         actual_schema_root: ObjectId,
@@ -335,6 +353,27 @@ impl core::fmt::Display for ApplyError {
             Self::SchemaEpochMismatch { declared, actual } => write!(
                 f,
                 "schema epoch: row declares before={declared:?}, state has {actual:?}"
+            ),
+            Self::SchemaBindingMismatch {
+                graph,
+                branch,
+                relation,
+                declared,
+                actual,
+            } => write!(
+                f,
+                "schema binding for ({graph:?}, {branch:?}, {relation:?}) declares \
+                 {declared:?}, pre-template state has {actual:?}"
+            ),
+            Self::SchemaTransitionMismatch {
+                graph,
+                branch,
+                relation,
+                ..
+            } => write!(
+                f,
+                "schema transition for ({graph:?}, {branch:?}, {relation:?}) \
+                 disagrees with its schema rows"
             ),
             Self::ConstraintRootMismatch { .. } => {
                 write!(f, "constraint transition: before root disagrees with state")
@@ -1700,9 +1739,16 @@ impl ReferenceDatabase {
     /// that "the fork shared history rather than copying it" is an assertion a
     /// test can make about the mechanism, not only about the answers.
     pub fn recorded_commits(&self, graph: GraphId, branch: BranchId) -> usize {
-        self.history
-            .get(&(graph, branch))
-            .map_or(0, |records| records.len())
+        self.history.get(&(graph, branch)).map_or(0, |records| {
+            // History has one record per RELATION entry. Several entries
+            // may share one atomic commit sequence, so record count is not
+            // commit count.
+            records
+                .iter()
+                .map(|record| record.seq)
+                .collect::<BTreeSet<_>>()
+                .len()
+        })
     }
 
     /// Mint a snapshot at this coordinate's current frontier.
@@ -2025,6 +2071,65 @@ impl ReferenceDatabase {
         self.coordinates.len()
     }
 
+    /// Validate every entry against the immutable state on which the whole
+    /// template was prepared.
+    ///
+    /// This cannot happen while applying entries to the candidate: two entries
+    /// may name the same graph/branch under different relations, and an earlier
+    /// schema row would then rewrite the basis checked for a later entry. The
+    /// plan instead binds every entry to the one pre-template schema state.
+    fn preflight_template_schema(&self, template: &LogicalDeltaTemplate) -> Result<(), ApplyError> {
+        for entry in template.coordinate_entries() {
+            let actual = self
+                .coordinates
+                .get(&(entry.graph, entry.branch))
+                .map_or(SchemaEpoch(0), ReferenceGraph::schema_epoch);
+            if entry.schema_epoch != actual {
+                return Err(ApplyError::SchemaBindingMismatch {
+                    graph: entry.graph,
+                    branch: entry.branch,
+                    relation: entry.relation,
+                    declared: entry.schema_epoch,
+                    actual,
+                });
+            }
+
+            let mut schema_rows = Vec::new();
+            for row in &entry.rows {
+                if let DeltaRow::Schema {
+                    transition_oid,
+                    before_epoch,
+                    ..
+                } = row
+                {
+                    schema_rows.push(*transition_oid);
+                    if *before_epoch != entry.schema_epoch {
+                        return Err(ApplyError::SchemaEpochMismatch {
+                            declared: *before_epoch,
+                            actual: entry.schema_epoch,
+                        });
+                    }
+                }
+            }
+
+            let transition_matches = match (entry.schema_transition, schema_rows.as_slice()) {
+                (None, []) => true,
+                (Some(declared), [row]) => declared == *row,
+                _ => false,
+            };
+            if !transition_matches {
+                return Err(ApplyError::SchemaTransitionMismatch {
+                    graph: entry.graph,
+                    branch: entry.branch,
+                    relation: entry.relation,
+                    declared: entry.schema_transition,
+                    schema_rows,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Apply a whole template — every coordinate entry it carries.
     ///
     /// ALL OR NOTHING. The template is validated against a *clone* and only
@@ -2047,15 +2152,16 @@ impl ReferenceDatabase {
                 offered: commit_seq,
             });
         }
+        self.preflight_template_schema(template)?;
         let mut candidate = self.clone();
         candidate.replay_frontier = commit_seq;
         for entry in template.coordinate_entries() {
             let key = (entry.graph, entry.branch);
-            // The sequence must ADVANCE for every coordinate this template
-            // touches. Checked inside the all-or-nothing candidate, so a
-            // template that advances one coordinate and not another applies to
-            // neither.
-            if let Some(applied) = candidate.applied_through.get(&key).copied()
+            // The sequence must ADVANCE from the pre-template state for every
+            // coordinate this template touches. Read from `self`, not the
+            // candidate: one atomic template may carry several relation entries
+            // for the same graph/branch, and those entries share one sequence.
+            if let Some(applied) = self.applied_through.get(&key).copied()
                 && commit_seq.0 <= applied.0
             {
                 return Err(ApplyError::SequenceNotAdvancing {

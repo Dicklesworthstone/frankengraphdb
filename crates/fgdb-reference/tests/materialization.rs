@@ -473,15 +473,26 @@ fn valid_time_transitions_check_their_before_image() {
 // Templates and coordinates
 // ---------------------------------------------------------------------------
 
-fn entry(graph: u128, branch: u128, rows: Vec<DeltaRow>) -> CoordinateEntry {
+fn entry_with_schema(
+    graph: u128,
+    branch: u128,
+    relation: RelationId,
+    schema_epoch: SchemaEpoch,
+    schema_transition: Option<ObjectId>,
+    rows: Vec<DeltaRow>,
+) -> CoordinateEntry {
     CoordinateEntry {
         graph: GraphId(graph),
         branch: BranchId(branch),
-        relation: REL_KNOWS,
-        schema_epoch: SchemaEpoch(0),
-        schema_transition: None,
+        relation,
+        schema_epoch,
+        schema_transition,
         rows,
     }
+}
+
+fn entry(graph: u128, branch: u128, rows: Vec<DeltaRow>) -> CoordinateEntry {
+    entry_with_schema(graph, branch, REL_KNOWS, SchemaEpoch(0), None, rows)
 }
 
 /// A template touching two coordinates lands in two separate graphs. Applying
@@ -561,5 +572,294 @@ fn a_template_that_fails_partway_applies_nothing() {
     assert_eq!(
         db, settled,
         "the applicable first coordinate must not have landed either"
+    );
+}
+
+#[test]
+fn template_schema_binding_is_checked_before_apply() {
+    let bad = LogicalDeltaTemplate::build(
+        oid(0x11),
+        [0x22; 32],
+        vec![entry_with_schema(
+            1,
+            1,
+            REL_KNOWS,
+            SchemaEpoch(9),
+            None,
+            vec![create_vertex(1, 1, "ada")],
+        )],
+    )
+    .expect("template shape is canonical");
+    let mut db = ReferenceDatabase::new();
+    let settled = db.clone();
+
+    assert_eq!(
+        db.apply_template(&bad, CommitSeq(1)),
+        Err(ApplyError::SchemaBindingMismatch {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            relation: REL_KNOWS,
+            declared: SchemaEpoch(9),
+            actual: SchemaEpoch(0),
+        })
+    );
+    assert_eq!(db, settled, "a bad binding must leave no coordinate behind");
+}
+
+#[test]
+fn template_schema_transition_must_exactly_name_its_schema_row() {
+    let transition = oid(0x70);
+    let schema_row = |transition_oid| DeltaRow::Schema {
+        transition_oid,
+        before_epoch: SchemaEpoch(0),
+        after_epoch: SchemaEpoch(1),
+    };
+    let cases = [
+        (
+            "wrong transition identity",
+            Some(transition),
+            vec![schema_row(oid(0x71))],
+            vec![oid(0x71)],
+        ),
+        (
+            "schema row without entry metadata",
+            None,
+            vec![schema_row(oid(0x71))],
+            vec![oid(0x71)],
+        ),
+        (
+            "entry metadata without a schema row",
+            Some(transition),
+            vec![create_vertex(1, 1, "ada")],
+            vec![],
+        ),
+        (
+            "multiple schema rows",
+            Some(transition),
+            vec![schema_row(transition), schema_row(oid(0x71))],
+            vec![transition, oid(0x71)],
+        ),
+    ];
+
+    for (name, declared, rows, schema_rows) in cases {
+        let bad = LogicalDeltaTemplate::build(
+            oid(0x11),
+            [0x22; 32],
+            vec![entry_with_schema(
+                1,
+                1,
+                REL_KNOWS,
+                SchemaEpoch(0),
+                declared,
+                rows,
+            )],
+        )
+        .expect("template shape is canonical");
+        let mut db = ReferenceDatabase::new();
+        let settled = db.clone();
+
+        assert_eq!(
+            db.apply_template(&bad, CommitSeq(1)),
+            Err(ApplyError::SchemaTransitionMismatch {
+                graph: GraphId(1),
+                branch: BranchId(1),
+                relation: REL_KNOWS,
+                declared,
+                schema_rows,
+            }),
+            "{name}"
+        );
+        assert_eq!(db, settled, "{name} must apply no row");
+    }
+}
+
+#[test]
+fn matching_template_schema_transition_applies() {
+    let transition = oid(0x70);
+    let template = LogicalDeltaTemplate::build(
+        oid(0x11),
+        [0x22; 32],
+        vec![entry_with_schema(
+            1,
+            1,
+            REL_KNOWS,
+            SchemaEpoch(0),
+            Some(transition),
+            vec![DeltaRow::Schema {
+                transition_oid: transition,
+                before_epoch: SchemaEpoch(0),
+                after_epoch: SchemaEpoch(1),
+            }],
+        )],
+    )
+    .expect("template builds");
+    let mut db = ReferenceDatabase::new();
+
+    db.apply_template(&template, CommitSeq(1))
+        .expect("matching transition applies");
+    assert_eq!(
+        db.graph(GraphId(1), BranchId(1))
+            .expect("coordinate exists")
+            .schema_epoch(),
+        SchemaEpoch(1)
+    );
+}
+
+#[test]
+fn same_coordinate_relation_entries_share_one_commit_sequence() {
+    let template = LogicalDeltaTemplate::build(
+        oid(0x11),
+        [0x22; 32],
+        vec![
+            entry_with_schema(
+                1,
+                1,
+                REL_WORKS_AT,
+                SchemaEpoch(0),
+                None,
+                vec![create_vertex(2, 2, "grace")],
+            ),
+            entry(1, 1, vec![create_vertex(1, 1, "ada")]),
+        ],
+    )
+    .expect("distinct relations are distinct coordinate entries");
+    let mut db = ReferenceDatabase::new();
+
+    db.apply_template(&template, CommitSeq(1))
+        .expect("one atomic commit may carry both relation entries");
+    let graph = db
+        .graph(GraphId(1), BranchId(1))
+        .expect("coordinate exists");
+    assert_eq!(graph.vertex_count(), 2);
+    assert_eq!(
+        db.applied_through(GraphId(1), BranchId(1)),
+        Some(CommitSeq(1))
+    );
+    assert_eq!(
+        db.recorded_commits(GraphId(1), BranchId(1)),
+        1,
+        "two relation entries still belong to one atomic commit"
+    );
+}
+
+#[test]
+fn earlier_relation_transition_cannot_rewrite_a_later_entrys_validation_basis() {
+    let transition = oid(0x70);
+    let schema_entry = entry_with_schema(
+        1,
+        1,
+        REL_KNOWS,
+        SchemaEpoch(0),
+        Some(transition),
+        vec![DeltaRow::Schema {
+            transition_oid: transition,
+            before_epoch: SchemaEpoch(0),
+            after_epoch: SchemaEpoch(1),
+        }],
+    );
+    let prepared_after_transition = entry_with_schema(
+        1,
+        1,
+        REL_WORKS_AT,
+        SchemaEpoch(1),
+        None,
+        vec![create_vertex(1, 1, "ada")],
+    );
+    let bad = LogicalDeltaTemplate::build(
+        oid(0x11),
+        [0x22; 32],
+        // Reverse source order proves the builder's canonical relation order
+        // cannot change which pre-template state validates either entry.
+        vec![prepared_after_transition, schema_entry.clone()],
+    )
+    .expect("template builds");
+    let mut db = ReferenceDatabase::new();
+    let settled = db.clone();
+
+    assert_eq!(
+        db.apply_template(&bad, CommitSeq(1)),
+        Err(ApplyError::SchemaBindingMismatch {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            relation: REL_WORKS_AT,
+            declared: SchemaEpoch(1),
+            actual: SchemaEpoch(0),
+        })
+    );
+    assert_eq!(db, settled, "preflight refusal must be all-or-nothing");
+
+    let valid = LogicalDeltaTemplate::build(
+        oid(0x11),
+        [0x22; 32],
+        vec![
+            entry_with_schema(
+                1,
+                1,
+                REL_WORKS_AT,
+                SchemaEpoch(0),
+                None,
+                vec![create_vertex(1, 1, "ada")],
+            ),
+            schema_entry,
+        ],
+    )
+    .expect("template builds");
+    db.apply_template(&valid, CommitSeq(1))
+        .expect("both entries share the pre-template binding");
+    let graph = db
+        .graph(GraphId(1), BranchId(1))
+        .expect("coordinate exists");
+    assert_eq!(graph.schema_epoch(), SchemaEpoch(1));
+    assert!(graph.vertex(VId(1)).is_some());
+}
+
+#[test]
+fn schema_rows_cannot_chain_across_relation_entries() {
+    let first_transition = oid(0x70);
+    let second_transition = oid(0x71);
+    let chained = LogicalDeltaTemplate::build(
+        oid(0x11),
+        [0x22; 32],
+        vec![
+            entry_with_schema(
+                1,
+                1,
+                REL_KNOWS,
+                SchemaEpoch(0),
+                Some(first_transition),
+                vec![DeltaRow::Schema {
+                    transition_oid: first_transition,
+                    before_epoch: SchemaEpoch(0),
+                    after_epoch: SchemaEpoch(1),
+                }],
+            ),
+            entry_with_schema(
+                1,
+                1,
+                REL_WORKS_AT,
+                SchemaEpoch(0),
+                Some(second_transition),
+                vec![DeltaRow::Schema {
+                    transition_oid: second_transition,
+                    before_epoch: SchemaEpoch(1),
+                    after_epoch: SchemaEpoch(2),
+                }],
+            ),
+        ],
+    )
+    .expect("template builds");
+    let mut db = ReferenceDatabase::new();
+    let settled = db.clone();
+
+    assert_eq!(
+        db.apply_template(&chained, CommitSeq(1)),
+        Err(ApplyError::SchemaEpochMismatch {
+            declared: SchemaEpoch(1),
+            actual: SchemaEpoch(0),
+        })
+    );
+    assert_eq!(
+        db, settled,
+        "a later relation may not validate against an earlier entry's transition"
     );
 }
