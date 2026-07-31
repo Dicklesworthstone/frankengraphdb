@@ -41,8 +41,8 @@ use fgdb_delta_types::{
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitSeq, DatabaseId, EId, GraphId, LogicalCommandSeq, ObjectId,
-    VId,
+    BranchId, CanonicalScalar, CommitSeq, CommitSeqExhausted as CommitSeqExhaustion, DatabaseId,
+    EId, GraphId, LogicalCommandSeq, ObjectId, VId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -325,6 +325,10 @@ pub enum ApplyError {
         expected: CommitSeq,
         offered: CommitSeq,
     },
+    /// The persisted global frontier is the largest representable sequence.
+    /// No further semantic commit can be assigned without wrapping to the
+    /// reserved origin, so every later apply is permanently refused.
+    CommitSeqExhausted(CommitSeqExhaustion),
     /// The transaction commit did not advance the independent semantic-command
     /// position.
     ///
@@ -473,6 +477,7 @@ impl core::fmt::Display for ApplyError {
                 f,
                 "the stream's next commit is {expected:?}; {offered:?} is not it"
             ),
+            Self::CommitSeqExhausted(cause) => write!(f, "{cause}"),
             Self::LogicalCommandSequenceNotAdvancing { previous, offered } => write!(
                 f,
                 "logical command position {offered:?} does not advance {previous:?}"
@@ -496,6 +501,12 @@ impl core::fmt::Display for ApplyError {
 }
 
 impl core::error::Error for ApplyError {}
+
+impl From<CommitSeqExhaustion> for ApplyError {
+    fn from(cause: CommitSeqExhaustion) -> Self {
+        Self::CommitSeqExhausted(cause)
+    }
+}
 
 /// The materialized state of one coordinate (a graph/branch pair).
 ///
@@ -2774,11 +2785,11 @@ impl ReferenceDatabase {
         commit_seq: CommitSeq,
         logical_command_seq: LogicalCommandSeq,
     ) -> Result<(), ApplyError> {
+        let expected = self.replay_frontier.checked_successor()?;
         if template.coordinate_entries().is_empty() {
             return Err(ApplyError::EmptyTemplate);
         }
-        let expected = CommitSeq(self.replay_frontier.0 + 1);
-        if commit_seq.0 != expected.0 {
+        if commit_seq != expected {
             return Err(ApplyError::SequenceNotNext {
                 expected,
                 offered: commit_seq,
@@ -2870,7 +2881,9 @@ impl ReferenceDatabase {
 mod provenance_internal_tests {
     use super::{ApplyError, ReferenceDatabase, SnapshotError};
     use fgdb_delta_types::{CoordinateEntry, LogicalDeltaTemplate, RelationId, SchemaEpoch};
-    use fgdb_types::{BranchId, CommitSeq, GraphId, LogicalCommandSeq, ObjectId};
+    use fgdb_types::{
+        BranchId, CommitSeq, CommitSeqExhausted, GraphId, LogicalCommandSeq, ObjectId,
+    };
 
     fn rowless_template() -> LogicalDeltaTemplate {
         LogicalDeltaTemplate::build(
@@ -2886,6 +2899,32 @@ mod provenance_internal_tests {
             }],
         )
         .expect("template builds")
+    }
+
+    #[test]
+    fn exhaustion_accepts_max_once_then_permanently_refuses_without_mutation() {
+        let penultimate = CommitSeq(u64::MAX - 1);
+        let maximum = CommitSeq(u64::MAX);
+        let mut db = ReferenceDatabase::new();
+        // Seed the persisted stream boundary directly: iterating a real oracle
+        // through 2^64 commits is impossible in a unit test, while the prefix
+        // digest is the exact predecessor evidence `apply_template` consumes.
+        db.replay_frontier = penultimate;
+        db.prefix_digests.insert(penultimate, [0xAA; 32]);
+
+        db.apply_template(&rowless_template(), maximum, LogicalCommandSeq(1))
+            .expect("the final representable sequence is assignable");
+        assert_eq!(db.replay_frontier, maximum);
+
+        let settled = db.clone();
+        let exhausted = ApplyError::CommitSeqExhausted(CommitSeqExhausted { frontier: maximum });
+        for logical_command_seq in [LogicalCommandSeq(2), LogicalCommandSeq(3)] {
+            assert_eq!(
+                db.apply_template(&rowless_template(), maximum, logical_command_seq),
+                Err(exhausted.clone())
+            );
+            assert_eq!(db, settled, "an exhausted refusal changes no state");
+        }
     }
 
     /// The prefix map is private, so only an internal test can construct this

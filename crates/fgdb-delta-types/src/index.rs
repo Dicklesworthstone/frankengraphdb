@@ -22,9 +22,11 @@
 //! interval the plan says must not exist. The invariant is maintained by
 //! construction rather than checked afterwards.
 //!
-//! Plan:397 also enumerates exactly how an insertion fails — "a missing,
+//! Plan:397 also enumerates the batch/index disagreements — "a missing,
 //! duplicate, gapped, wrong-marker, or wrong-frontier insertion fails apply" —
-//! and [`IndexError`] is that list, one arm each.
+//! and [`IndexError`] preserves that list, one arm each. The independent §5.2
+//! arithmetic law adds the permanent `CommitSeqExhausted` refusal: the list of
+//! malformed insertions does not authorize wrapping the global frontier.
 //!
 //! SUBSET NOTE (doctrine 7). The plan spells entries as
 //! `StrongRef<LogicalDeltaBatch<LocalCommitted>>` and carries a
@@ -39,7 +41,7 @@
 //! could verify, and so one free to lie.
 
 use crate::LogicalDeltaBatch;
-use fgdb_types::CommitSeq;
+use fgdb_types::{CommitSeq, CommitSeqExhausted as CommitSeqExhaustion};
 use std::collections::BTreeMap;
 
 /// Index format version (§16.6: durable formats are versioned from day one).
@@ -47,11 +49,15 @@ pub const INDEX_FORMAT_V1: u16 = 1;
 
 /// Why an insertion or a retirement was refused.
 ///
-/// The arms are plan:397's enumeration verbatim, because a caller that hits one
-/// needs to know which of the five it hit — they have different causes and
-/// different fixes.
+/// The batch-disagreement arms are plan:397's enumeration verbatim, because a
+/// caller that hits one needs to know which condition it hit — they have
+/// different causes and different fixes. Sequence exhaustion is the separate
+/// §5.2 permanent fail-closed condition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexError {
+    /// The persisted frontier is the largest representable sequence, so no
+    /// further batch can be assigned without wrapping to the reserved origin.
+    CommitSeqExhausted(CommitSeqExhaustion),
     /// The batch's sequence is beyond `frontier + 1`: inserting it would leave
     /// a hole, making "the deltas since N" unanswerable for the skipped range.
     Gapped {
@@ -97,6 +103,7 @@ pub enum IndexError {
 impl core::fmt::Display for IndexError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::CommitSeqExhausted(cause) => write!(f, "{cause}"),
             Self::Gapped { expected, found } => write!(
                 f,
                 "gapped insertion: expected commit_seq {expected:?}, found {found:?}"
@@ -137,6 +144,12 @@ impl core::fmt::Display for IndexError {
 
 impl core::error::Error for IndexError {}
 
+impl From<CommitSeqExhaustion> for IndexError {
+    fn from(cause: CommitSeqExhaustion) -> Self {
+        Self::CommitSeqExhausted(cause)
+    }
+}
+
 /// The bounded window of retained local delta batches.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalDeltaBatchIndex {
@@ -159,8 +172,8 @@ impl LocalDeltaBatchIndex {
     pub fn new() -> Self {
         Self {
             format: INDEX_FORMAT_V1,
-            retained_after_commit_seq: CommitSeq(0),
-            frontier: CommitSeq(0),
+            retained_after_commit_seq: CommitSeq::ORIGIN,
+            frontier: CommitSeq::ORIGIN,
             entries: BTreeMap::new(),
         }
     }
@@ -220,8 +233,8 @@ impl LocalDeltaBatchIndex {
     }
 
     /// The sequence the next insertion must carry.
-    pub fn next_commit_seq(&self) -> CommitSeq {
-        CommitSeq(self.frontier.0 + 1)
+    pub fn next_commit_seq(&self) -> Result<CommitSeq, IndexError> {
+        Ok(self.frontier.checked_successor()?)
     }
 
     /// Validate the laws intrinsic to one local batch, independently of where
@@ -259,6 +272,12 @@ impl LocalDeltaBatchIndex {
     pub fn insert(&mut self, batch: LogicalDeltaBatch) -> Result<(), IndexError> {
         let commit_seq = batch.commit_seq();
 
+        // Once the persisted frontier is MAX, every attempted mutation is the
+        // same permanent exhaustion refusal. Check this before inspecting the
+        // offered batch so no diagnostic can make a wrapped/reused sequence
+        // look admissible.
+        let expected = self.next_commit_seq()?;
+
         // A local batch must agree with itself before the index will agree with
         // it: its marker must name its own sequence, and its frontier must be
         // that sequence. Both are cheap here and impossible to check later.
@@ -273,7 +292,6 @@ impl LocalDeltaBatchIndex {
                 found: commit_seq,
             });
         }
-        let expected = self.next_commit_seq();
         if commit_seq != expected {
             return Err(IndexError::Gapped {
                 expected,
@@ -355,16 +373,10 @@ impl LocalDeltaBatchIndex {
                     batch: batch_commit_seq,
                 });
             }
-            let expected = previous
-                .checked_add(1)
-                .ok_or(IndexError::UnretirableInterval {
-                    retained_after: self.retained_after_commit_seq,
-                    frontier: self.frontier,
-                    requested: CommitSeq(previous),
-                })?;
-            if *stored_seq != expected {
+            let expected = CommitSeq(previous).checked_successor()?;
+            if CommitSeq(*stored_seq) != expected {
                 return Err(IndexError::Gapped {
-                    expected: CommitSeq(expected),
+                    expected,
                     found: CommitSeq(*stored_seq),
                 });
             }
@@ -373,15 +385,9 @@ impl LocalDeltaBatchIndex {
         }
 
         if previous != self.frontier.0 {
-            let expected = previous
-                .checked_add(1)
-                .ok_or(IndexError::UnretirableInterval {
-                    retained_after: self.retained_after_commit_seq,
-                    frontier: self.frontier,
-                    requested: CommitSeq(previous),
-                })?;
+            let expected = CommitSeq(previous).checked_successor()?;
             return Err(IndexError::Gapped {
-                expected: CommitSeq(expected),
+                expected,
                 found: self.frontier,
             });
         }

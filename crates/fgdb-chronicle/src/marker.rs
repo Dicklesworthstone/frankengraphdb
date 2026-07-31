@@ -31,7 +31,9 @@
 //! substitute for it (doctrine 7).
 
 use fgdb_crypto::Digest;
-use fgdb_types::{BranchId, CommitSeq, GraphId, MarkerRef, ObjectId};
+use fgdb_types::{
+    BranchId, CommitSeq, CommitSeqExhausted as CommitSeqExhaustion, GraphId, MarkerRef, ObjectId,
+};
 
 /// Domain separator for the marker chain hash.
 pub const MARKER_CHAIN_DOMAIN: &[u8] = b"fgdb:commit-marker-chain:v2";
@@ -206,6 +208,9 @@ pub struct HeadCasMismatch {
 /// Why a marker could not be appended to a chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainError {
+    /// The persisted chain frontier is the largest representable sequence, so
+    /// no next marker exists in the gap-free commit domain.
+    CommitSeqExhausted(CommitSeqExhaustion),
     /// `commit_seq` is not exactly one past the current tail. The commit
     /// sequence is gap-free by construction: a gap would make "the history up
     /// to N" ambiguous, and a repeat would make it contradictory.
@@ -225,6 +230,7 @@ pub enum ChainError {
 impl core::fmt::Display for ChainError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::CommitSeqExhausted(cause) => write!(f, "{cause}"),
             Self::NonContiguousCommitSeq { expected, found } => {
                 write!(f, "commit_seq {found} is not the expected {expected}")
             }
@@ -244,6 +250,12 @@ impl core::fmt::Display for ChainError {
 }
 
 impl core::error::Error for ChainError {}
+
+impl From<CommitSeqExhaustion> for ChainError {
+    fn from(cause: CommitSeqExhaustion) -> Self {
+        Self::CommitSeqExhausted(cause)
+    }
+}
 
 /// Why a whole-chain verification failed, and where.
 ///
@@ -321,10 +333,11 @@ impl MarkerChain {
     /// The next `commit_seq` this chain will accept. Sequences start at 1, so
     /// 0 can never be a valid commit and an uninitialised field cannot look
     /// like the first commit.
-    pub fn next_commit_seq(&self) -> u64 {
-        self.entries
-            .last()
-            .map_or(1, |entry| entry.marker.commit_seq + 1)
+    pub fn next_commit_seq(&self) -> Result<CommitSeq, ChainError> {
+        match self.entries.last() {
+            None => Ok(CommitSeq::FIRST),
+            Some(entry) => Ok(CommitSeq(entry.marker.commit_seq).checked_successor()?),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -428,10 +441,10 @@ impl MarkerChain {
     /// and it is what lets the coordinator avoid cloning the whole chain per
     /// commit just to have something safe to validate against.
     pub fn validate(&self, marker: &CommitMarker) -> Result<ChainedMarker, ChainError> {
-        let expected_seq = self.next_commit_seq();
-        if marker.commit_seq != expected_seq {
+        let expected_seq = self.next_commit_seq()?;
+        if marker.commit_seq != expected_seq.0 {
             return Err(ChainError::NonContiguousCommitSeq {
-                expected: expected_seq,
+                expected: expected_seq.0,
                 found: marker.commit_seq,
             });
         }
@@ -485,10 +498,10 @@ impl MarkerChain {
     /// hash was computed over a history that has since moved — and adopting it
     /// would silently fork the chain value.
     pub(crate) fn adopt(&mut self, chained: ChainedMarker) -> Result<&ChainedMarker, ChainError> {
-        let expected_seq = self.next_commit_seq();
-        if chained.marker.commit_seq != expected_seq {
+        let expected_seq = self.next_commit_seq()?;
+        if chained.marker.commit_seq != expected_seq.0 {
             return Err(ChainError::NonContiguousCommitSeq {
-                expected: expected_seq,
+                expected: expected_seq.0,
                 found: chained.marker.commit_seq,
             });
         }
@@ -688,6 +701,74 @@ impl<'a> ByteReader<'a> {
                 commit_seq: CommitSeq(self.u64()?),
             })),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod commit_seq_exhaustion_tests {
+    use super::*;
+    use fgdb_types::CommitSeqExhausted;
+
+    fn marker(commit_seq: u64) -> CommitMarker {
+        CommitMarker {
+            logical_command_seq: commit_seq,
+            commit_seq,
+            effect_source: EffectSource::Local {
+                capsule_ref: ObjectId([0x11; 32]),
+                logical_delta_template_digest: Digest([0x22; 32]),
+            },
+            prev_global: None,
+            head_updates: Vec::new(),
+            merge_record_oid: None,
+            coordinate_schema_transition_digest: Digest([0x33; 32]),
+            topology_epoch: 1,
+            policy_epoch: 1,
+            revocation_index: 1,
+            txn_token: [0x44; 16],
+            commit_hlc: commit_seq,
+            final_effect_digest: Digest([0x55; 32]),
+            authorization_decision_digest: Digest([0x66; 32]),
+            resource_effect_digest: Digest([0x77; 32]),
+            payload_availability_certificate_oid: None,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn exhaustion_accepts_max_once_then_permanently_refuses_without_mutation() {
+        // A complete real chain cannot be iterated to this boundary in a unit
+        // test. Seed only its authenticated tail; append's successor law reads
+        // exactly that persisted frontier and is the subject under test.
+        let penultimate = marker(u64::MAX - 1);
+        let mut chain = MarkerChain {
+            entries: vec![ChainedMarker {
+                marker: penultimate,
+                marker_oid: ObjectId([0x88; 32]),
+                chain_hash: Digest([0x99; 32]),
+            }],
+            heads: Vec::new(),
+        };
+
+        assert_eq!(chain.next_commit_seq(), Ok(CommitSeq(u64::MAX)));
+        chain
+            .append(marker(u64::MAX))
+            .expect("the final representable sequence is assignable");
+        let settled = chain.entries.clone();
+        let exhausted = ChainError::CommitSeqExhausted(CommitSeqExhausted {
+            frontier: CommitSeq(u64::MAX),
+        });
+
+        for _ in 0..2 {
+            assert_eq!(chain.next_commit_seq(), Err(exhausted.clone()));
+            assert_eq!(
+                chain.append(marker(u64::MAX)).err(),
+                Some(exhausted.clone())
+            );
+            assert_eq!(
+                chain.entries, settled,
+                "an exhausted refusal changes no state"
+            );
         }
     }
 }

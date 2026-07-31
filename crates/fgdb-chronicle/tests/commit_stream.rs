@@ -88,7 +88,7 @@ fn an_empty_chain_starts_at_the_origin() {
     assert_eq!(chain.chain_value(), CHAIN_ORIGIN);
     // Sequences start at 1, so an uninitialised zero can never look like the
     // first commit.
-    assert_eq!(chain.next_commit_seq(), 1);
+    assert_eq!(chain.next_commit_seq(), Ok(CommitSeq(1)));
 }
 
 #[test]

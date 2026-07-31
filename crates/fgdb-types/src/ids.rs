@@ -74,6 +74,47 @@ u64_scalar! {
     /// Gap-free global commit sequence assigned by the `WriteCoordinator`.
     CommitSeq
 }
+
+/// The gap-free commit-sequence domain has no value after its persisted
+/// frontier.
+///
+/// Exhaustion is a permanent database condition, not an arithmetic detail: a
+/// successor may never wrap to the reserved origin or saturate at the current
+/// commit. The frontier travels with the error so every layer can preserve the
+/// exact refusal evidence in its own error vocabulary.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CommitSeqExhausted {
+    pub frontier: CommitSeq,
+}
+
+impl core::fmt::Display for CommitSeqExhausted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "commit sequence space is exhausted at {:?}",
+            self.frontier
+        )
+    }
+}
+
+impl core::error::Error for CommitSeqExhausted {}
+
+impl CommitSeq {
+    /// The reserved pre-commit frontier.
+    pub const ORIGIN: Self = Self(0);
+
+    /// The first assignable commit sequence.
+    pub const FIRST: Self = Self(1);
+
+    /// Return the one legal successor without wrapping or saturating.
+    pub const fn checked_successor(self) -> Result<Self, CommitSeqExhausted> {
+        match self.0.checked_add(1) {
+            Some(value) => Ok(Self(value)),
+            None => Err(CommitSeqExhausted { frontier: self }),
+        }
+    }
+}
+
 u64_scalar! {
     /// Stream-wide semantic command sequence.
     ///
@@ -113,6 +154,21 @@ mod tests {
         assert_eq!(
             format!("{:?}", ObjectId([0xab; 32])).matches("ab").count(),
             32
+        );
+    }
+
+    #[test]
+    fn commit_sequence_successor_is_exact_and_fail_closed() {
+        assert_eq!(CommitSeq::ORIGIN.checked_successor(), Ok(CommitSeq::FIRST));
+        assert_eq!(
+            CommitSeq(u64::MAX - 1).checked_successor(),
+            Ok(CommitSeq(u64::MAX))
+        );
+        assert_eq!(
+            CommitSeq(u64::MAX).checked_successor(),
+            Err(CommitSeqExhausted {
+                frontier: CommitSeq(u64::MAX)
+            })
         );
     }
 }

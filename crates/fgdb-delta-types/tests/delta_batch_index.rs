@@ -18,8 +18,8 @@ use fgdb_delta_types::{
     LogicalDeltaBatch, LogicalDeltaTemplate, PropertyKeyId, RelationId, SchemaEpoch,
 };
 use fgdb_types::{
-    BranchId, CanonicalScalar, CommitCx, CommitSeq, GraphId, MarkerRef, ObjectId, PurposeContexts,
-    VId,
+    BranchId, CanonicalScalar, CommitCx, CommitSeq, CommitSeqExhausted, GraphId, MarkerRef,
+    ObjectId, PurposeContexts, VId,
 };
 
 fn with_commit_cx<T, F>(seed: u64, run: F) -> T
@@ -82,7 +82,7 @@ fn a_fresh_index_is_an_empty_window_at_the_origin() {
     assert_eq!(index.frontier(), CommitSeq(0));
     assert_eq!(index.retained_after_commit_seq(), CommitSeq(0));
     assert!(index.is_empty());
-    assert_eq!(index.next_commit_seq(), CommitSeq(1));
+    assert_eq!(index.next_commit_seq(), Ok(CommitSeq(1)));
     assert_eq!(index.verify(), Ok(()));
 }
 
@@ -93,7 +93,7 @@ fn insertion_and_the_frontier_advance_together() {
     with_commit_cx(0x1DE1, |cx| {
         let mut index = LocalDeltaBatchIndex::new();
         for seq in 1..=5u64 {
-            assert_eq!(index.next_commit_seq(), CommitSeq(seq));
+            assert_eq!(index.next_commit_seq(), Ok(CommitSeq(seq)));
             index.insert(batch_at(seq, &cx)).expect("insert");
             assert_eq!(
                 index.frontier(),
@@ -107,6 +107,32 @@ fn insertion_and_the_frontier_advance_together() {
             assert_eq!(index.verify(), Ok(()), "the window stays exact");
         }
         assert_eq!(index.len(), 5);
+    });
+}
+
+#[test]
+fn exhaustion_accepts_max_once_then_permanently_refuses_without_mutation() {
+    with_commit_cx(0x1DE0, |cx| {
+        let penultimate = CommitSeq(u64::MAX - 1);
+        let maximum = CommitSeq(u64::MAX);
+        let mut index =
+            LocalDeltaBatchIndex::from_parts_for_test(penultimate, penultimate, Vec::new());
+
+        assert_eq!(index.verify(), Ok(()));
+        assert_eq!(index.next_commit_seq(), Ok(maximum));
+        index
+            .insert(batch_at(u64::MAX, &cx))
+            .expect("the final representable sequence is assignable");
+        assert_eq!(index.frontier(), maximum);
+        assert_eq!(index.verify(), Ok(()));
+
+        let settled = index.clone();
+        let exhausted = IndexError::CommitSeqExhausted(CommitSeqExhausted { frontier: maximum });
+        for _ in 0..2 {
+            assert_eq!(index.next_commit_seq(), Err(exhausted));
+            assert_eq!(index.insert(batch_at(u64::MAX, &cx)), Err(exhausted));
+            assert_eq!(index, settled, "an exhausted refusal changes no state");
+        }
     });
 }
 
@@ -282,7 +308,7 @@ fn retiring_a_prefix_returns_what_it_dropped_and_keeps_the_window_exact() {
         assert_eq!(index.verify(), Ok(()));
 
         // The frontier is untouched, so insertion continues from where it was.
-        assert_eq!(index.next_commit_seq(), CommitSeq(7));
+        assert_eq!(index.next_commit_seq(), Ok(CommitSeq(7)));
         index.insert(batch_at(7, &cx)).expect("still writable");
         assert_eq!(index.verify(), Ok(()));
     });

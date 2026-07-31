@@ -33,8 +33,8 @@ pub use decimal::{
     MIN_DECIMAL_COEFFICIENT, STRICT_PORTABLE_DECIMAL_PRECISION, STRICT_PORTABLE_DECIMAL_SCALE,
 };
 pub use ids::{
-    BranchId, CommitSeq, DatabaseId, DatabaseSecurityNamespaceId, EId, GraphId, LogicalCommandSeq,
-    ObjectId, ServiceVisibilityEpoch, VId, WriterFenceEpoch,
+    BranchId, CommitSeq, CommitSeqExhausted, DatabaseId, DatabaseSecurityNamespaceId, EId, GraphId,
+    LogicalCommandSeq, ObjectId, ServiceVisibilityEpoch, VId, WriterFenceEpoch,
 };
 pub use refs::{
     CommandRef, ConditionalCoordinateRef, ConditionalMarkerAxis, ConditionalMarkerRef,

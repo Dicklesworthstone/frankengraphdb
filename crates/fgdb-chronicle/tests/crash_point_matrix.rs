@@ -281,7 +281,7 @@ fn committed_markers_survive_a_restart() {
 
         let reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
         assert_eq!(reopened.chain().len(), 5);
-        assert_eq!(reopened.next_commit_seq(), 6);
+        assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(6)));
         assert_eq!(reopened.discarded_tail_bytes(), 0);
         assert_eq!(reopened.chain().verify(), Ok(()));
         assert_eq!(
@@ -367,7 +367,7 @@ fn a_conflicting_existing_capsule_path_is_never_overwritten() {
             "the existing path is immutable even when its bytes are wrong"
         );
         assert!(!reopened.is_poisoned());
-        assert_eq!(reopened.next_commit_seq(), 1);
+        assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(1)));
         assert_eq!(reopened.chain().len(), 0);
         assert!(log_bytes(&dir).is_empty(), "no marker may be written");
     });
@@ -467,7 +467,7 @@ fn a_crash_at_any_instant_recovers_the_committed_prefix() {
             assert_eq!(reopened.chain().verify(), Ok(()));
             assert_eq!(
                 reopened.next_commit_seq(),
-                3,
+                Ok(CommitSeq(3)),
                 "{point:?}: the interrupted commit consumed no sequence"
             );
             assert_eq!(
@@ -553,7 +553,11 @@ fn a_torn_tail_from_an_interrupted_d2_is_discarded() {
             2,
             "the interrupted commit is not a commit"
         );
-        assert_eq!(reopened.next_commit_seq(), 3, "its sequence is still free");
+        assert_eq!(
+            reopened.next_commit_seq(),
+            Ok(CommitSeq(3)),
+            "its sequence is still free"
+        );
         assert_eq!(reopened.chain().verify(), Ok(()));
         assert_eq!(
             reopened.discarded_tail_bytes(),
@@ -672,7 +676,7 @@ fn the_next_commit_after_a_crash_is_gap_free() {
         drop(coordinator);
 
         let mut reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
-        assert_eq!(reopened.next_commit_seq(), 2);
+        assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(2)));
         commit_ok(&mut reopened, cx, 2);
         commit_ok(&mut reopened, cx, 3);
 
@@ -720,7 +724,7 @@ fn a_marker_that_names_another_capsule_is_rejected_before_any_write() {
             "the mismatch must be typed and preserve both identities; got {result:?}"
         );
         assert!(!coordinator.is_poisoned());
-        assert_eq!(coordinator.next_commit_seq(), 1);
+        assert_eq!(coordinator.next_commit_seq(), Ok(CommitSeq(1)));
         assert_eq!(capsule_file_count(&dir), 0, "no capsule may be written");
         assert!(log_bytes(&dir).is_empty(), "no marker may be written");
 
@@ -761,7 +765,7 @@ fn a_marker_above_the_recovery_bound_is_rejected_before_any_write() {
             "the writer must enforce recovery's framing limit; got {result:?}"
         );
         assert!(!coordinator.is_poisoned());
-        assert_eq!(coordinator.next_commit_seq(), 1);
+        assert_eq!(coordinator.next_commit_seq(), Ok(CommitSeq(1)));
         assert_eq!(capsule_file_count(&dir), 0, "no capsule may be written");
         assert!(log_bytes(&dir).is_empty(), "no marker may be written");
 
@@ -791,7 +795,7 @@ fn repeated_crashes_leave_a_verifiable_chain() {
         for round in 0..10u64 {
             let mut coordinator = CommitCoordinator::open(&dir, keys()).expect("open");
             let expected_seq = round + 1;
-            assert_eq!(coordinator.next_commit_seq(), expected_seq);
+            assert_eq!(coordinator.next_commit_seq(), Ok(CommitSeq(expected_seq)));
 
             let point = points[(round % 3) as usize];
             if point != CrashPoint::BeforeCapsule {
@@ -810,7 +814,7 @@ fn repeated_crashes_leave_a_verifiable_chain() {
             drop(coordinator);
 
             let mut reopened = CommitCoordinator::open(&dir, keys()).expect("reopen");
-            assert_eq!(reopened.next_commit_seq(), expected_seq);
+            assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(expected_seq)));
             commit_ok(&mut reopened, cx, expected_seq);
             assert_eq!(reopened.chain().verify(), Ok(()));
         }

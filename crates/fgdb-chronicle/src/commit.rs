@@ -269,7 +269,7 @@ impl CommitCoordinator {
         self.poisoned
     }
 
-    pub fn next_commit_seq(&self) -> u64 {
+    pub fn next_commit_seq(&self) -> Result<CommitSeq, ChainError> {
         self.chain.next_commit_seq()
     }
 
@@ -422,7 +422,7 @@ impl CommitCoordinator {
         if self.poisoned {
             return Err(CommitError::Poisoned);
         }
-        let commit_seq = self.next_commit_seq();
+        let commit_seq = self.next_commit_seq()?.0;
         if crash_at == Some(CrashPoint::BeforeCapsule) {
             return Err(CommitError::Io(std::io::Error::other(
                 "crash: before capsule",
@@ -594,7 +594,7 @@ impl CommitCoordinator {
                 Err(EntryDefect::Truncated) => break,
                 Err(EntryDefect::Corrupt) => {
                     return Err(CommitError::CorruptLogEntry {
-                        commit_seq: chain.next_commit_seq(),
+                        commit_seq: chain.next_commit_seq()?.0,
                     });
                 }
             };

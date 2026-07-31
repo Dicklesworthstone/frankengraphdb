@@ -29,7 +29,7 @@ use fgdb_sim::{
 };
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId, VId};
+use fgdb_types::{BranchId, CanonicalScalar, CommitSeq, EId, GraphId, ObjectId, VId};
 use std::path::{Path, PathBuf};
 
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -362,7 +362,7 @@ fn a_torn_tail_removes_its_effects_and_the_sequence_is_reused() {
 
         // And the database is still writable: committing the third template
         // again lands at the sequence the torn one abandoned.
-        assert_eq!(reopened.next_commit_seq(), 3);
+        assert_eq!(reopened.next_commit_seq(), Ok(CommitSeq(3)));
         commit_capsule(&mut reopened, cx, &capsules[2], vec![]).expect("recommit");
         expect_graph_after(&materialize(cx, &reopened).expect("materializes"), 3);
     });
