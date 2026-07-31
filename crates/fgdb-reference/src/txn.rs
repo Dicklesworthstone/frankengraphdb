@@ -379,16 +379,17 @@ impl Transaction {
         let claims_genesis = db
             .branch_origin(snapshot.graph(), snapshot.branch())
             .is_none();
-        // The binding these effects will be evaluated under. `None` is the
-        // genesis claim: the coordinate does not exist until this
-        // transaction (or a concurrent winner) creates it.
-        let schema_binding_at_begin =
-            db.graph(snapshot.graph(), snapshot.branch())
-                .map(|coordinate| SchemaBindingAtBegin {
-                    epoch: coordinate.schema_epoch(),
-                    schema_root: coordinate.schema_root(),
-                    constraint_root: coordinate.constraint_root(),
-                });
+        // The binding these effects will be evaluated under. It must come
+        // from the materialized workspace, not the live coordinate: an
+        // explicit historical snapshot retains its historical binding even
+        // when `begin_at` is called after the live head has moved (fgdb-hdgw).
+        // `None` is reserved for a genuine genesis claim, where no coordinate
+        // existed for the snapshot to bind.
+        let schema_binding_at_begin = (!claims_genesis).then_some(SchemaBindingAtBegin {
+            epoch: workspace.schema_epoch(),
+            schema_root: workspace.schema_root(),
+            constraint_root: workspace.constraint_root(),
+        });
         Ok(Self {
             graph: snapshot.graph(),
             branch: snapshot.branch(),
@@ -806,9 +807,8 @@ impl Transaction {
                 at_begin.epoch
             }
             // The genesis claim: the coordinate did not exist at begin. The
-            // first-committer-wins machinery owns the race to create it, and
-            // the preflight binds the entry to whatever epoch the winner's
-            // coordinate actually has.
+            // first-committer-wins machinery refuses a loser before apply, so
+            // the surviving first commit establishes the initial epoch.
             None => SchemaEpoch(0),
         };
         let template = LogicalDeltaTemplate::build(

@@ -1501,6 +1501,135 @@ fn a_schema_transition_after_begin_invalidates_the_commit_without_applying() {
     );
 }
 
+/// fgdb-hdgw historical control: `begin_at` evaluates effects against the
+/// materialized snapshot, so it must capture that workspace's binding rather
+/// than the live coordinate's. Minting an epoch-0 snapshot after epoch 1 is
+/// already live must not let old semantics be restamped onto the new epoch.
+#[test]
+fn a_historical_begin_after_transition_keeps_the_historical_schema_binding() {
+    let mut db = seeded();
+    let bump = LogicalDeltaTemplate::build(
+        SEMANTICS,
+        [0x22; 32],
+        vec![CoordinateEntry {
+            graph: GRAPH,
+            branch: MAIN,
+            relation: REL,
+            schema_epoch: SchemaEpoch(0),
+            schema_transition: Some(ObjectId([0x72; 32])),
+            rows: vec![DeltaRow::Schema {
+                transition_oid: ObjectId([0x72; 32]),
+                before_epoch: SchemaEpoch(0),
+                after_epoch: SchemaEpoch(1),
+            }],
+        }],
+    )
+    .expect("bump template builds");
+    db.apply_template(&bump, CommitSeq(2), LogicalCommandSeq(20))
+        .expect("schema transition applies");
+
+    let historical = db
+        .snapshot_at(GRAPH, MAIN, CommitSeq(1))
+        .expect("epoch-0 historical snapshot");
+    let mut txn = Transaction::begin_at(&db, historical).expect("historical begin");
+    assert_eq!(
+        txn.workspace().schema_epoch(),
+        SchemaEpoch(0),
+        "the workspace is materialized under the historical binding"
+    );
+    txn.execute(&[create(3, 30)])
+        .expect("executes against epoch-0 state");
+
+    let outcome = txn.commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30));
+    assert!(
+        matches!(
+            outcome,
+            Err(TxnError::Apply(ref error))
+                if matches!(
+                    **error,
+                    fgdb_reference::ApplyError::SchemaBindingMismatch {
+                        declared: SchemaEpoch(0),
+                        actual: SchemaEpoch(1),
+                        ..
+                    }
+                )
+        ),
+        "historical effects must retain epoch 0 and be invalidated, got {outcome:?}"
+    );
+    assert_eq!(
+        prop_of(&db, MAIN, 3),
+        None,
+        "the refused commit applied nothing"
+    );
+}
+
+/// The historical binding law covers roots as well as the epoch. A root-only
+/// move after the selected snapshot must invalidate old effects even though
+/// the epoch scalar is unchanged.
+#[test]
+fn a_historical_begin_after_constraint_move_keeps_the_historical_root_binding() {
+    let mut db = seeded();
+    let (schema_root, constraint_root) = {
+        let coordinate = db.graph(GRAPH, MAIN).expect("coordinate");
+        (coordinate.schema_root(), coordinate.constraint_root())
+    };
+    let moved = ObjectId([0x98; 32]);
+    let constraint_move = LogicalDeltaTemplate::build(
+        SEMANTICS,
+        [0x22; 32],
+        vec![CoordinateEntry {
+            graph: GRAPH,
+            branch: MAIN,
+            relation: REL,
+            schema_epoch: SchemaEpoch(0),
+            schema_transition: None,
+            rows: vec![DeltaRow::Constraint {
+                before_schema_root: schema_root,
+                after_schema_root: schema_root,
+                before_constraint_root: constraint_root,
+                after_constraint_root: moved,
+            }],
+        }],
+    )
+    .expect("constraint template builds");
+    db.apply_template(&constraint_move, CommitSeq(2), LogicalCommandSeq(20))
+        .expect("constraint move applies");
+
+    let historical = db
+        .snapshot_at(GRAPH, MAIN, CommitSeq(1))
+        .expect("pre-move historical snapshot");
+    let mut txn = Transaction::begin_at(&db, historical).expect("historical begin");
+    assert_eq!(
+        txn.workspace().constraint_root(),
+        constraint_root,
+        "the workspace retains the historical constraint root"
+    );
+    txn.execute(&[create(3, 30)])
+        .expect("executes against the historical root");
+
+    let outcome = txn.commit(&mut db, REL, SEMANTICS, CommitSeq(3), LogicalCommandSeq(30));
+    assert!(
+        matches!(
+            outcome,
+            Err(TxnError::Apply(ref error))
+                if matches!(
+                    **error,
+                    fgdb_reference::ApplyError::ConstraintBindingMismatch {
+                        declared_constraint_root,
+                        actual_constraint_root,
+                    } if declared_constraint_root == constraint_root
+                        && actual_constraint_root == moved
+                )
+        ),
+        "historical effects must retain the old root and be invalidated, got {outcome:?}"
+    );
+    assert_eq!(
+        prop_of(&db, MAIN, 3),
+        None,
+        "the refused commit applied nothing"
+    );
+}
+
 /// fgdb-hdgw control (c) — a constraint-root-only move (no epoch bump) also
 /// invalidates: the binding is epoch PLUS roots, not the scalar alone.
 #[test]
