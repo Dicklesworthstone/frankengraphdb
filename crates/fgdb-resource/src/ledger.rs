@@ -412,13 +412,23 @@ impl fmt::Display for QuotaPathError {
 impl std::error::Error for QuotaPathError {}
 
 /// One quota bucket's exact accounting state.
+///
+/// Committed usage is class-scoped, and that is the whole point of the
+/// reserve: a charge keeps the class its reservation held, so capacity
+/// consumed under the maintenance lane bills against the maintenance reserve
+/// across the entire reserve→charge→adjust→release lifecycle. A single
+/// classless pool would bill maintenance usage against the ordinary band at
+/// charge time — making a valid reservation unchargeable under ordinary
+/// pressure, and letting maintenance eat the ordinary band when it is empty
+/// (fgdb-a61t).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BucketState {
     hard_limit: DurableChargeVector,
     protected_maintenance_reserve: DurableChargeVector,
     ordinary_reserved: DurableChargeVector,
     maintenance_reserved: DurableChargeVector,
-    committed: DurableChargeVector,
+    ordinary_committed: DurableChargeVector,
+    maintenance_committed: DurableChargeVector,
 }
 
 impl BucketState {
@@ -427,14 +437,16 @@ impl BucketState {
         protected_maintenance_reserve: DurableChargeVector,
         ordinary_reserved: DurableChargeVector,
         maintenance_reserved: DurableChargeVector,
-        committed: DurableChargeVector,
+        ordinary_committed: DurableChargeVector,
+        maintenance_committed: DurableChargeVector,
     ) -> Result<Self, BucketStateError> {
         let state = Self {
             hard_limit,
             protected_maintenance_reserve,
             ordinary_reserved,
             maintenance_reserved,
-            committed,
+            ordinary_committed,
+            maintenance_committed,
         };
         state.validate()?;
         Ok(state)
@@ -447,6 +459,7 @@ impl BucketState {
         Self::try_new(
             hard_limit,
             protected_maintenance_reserve,
+            DurableChargeVector::ZERO,
             DurableChargeVector::ZERO,
             DurableChargeVector::ZERO,
             DurableChargeVector::ZERO,
@@ -469,8 +482,30 @@ impl BucketState {
         self.maintenance_reserved
     }
 
-    pub const fn committed(self) -> DurableChargeVector {
-        self.committed
+    pub const fn ordinary_committed(self) -> DurableChargeVector {
+        self.ordinary_committed
+    }
+
+    pub const fn maintenance_committed(self) -> DurableChargeVector {
+        self.maintenance_committed
+    }
+
+    /// Total committed usage across both classes. Never overflows on a
+    /// constructible state: validation bounds the sum by `hard_limit`.
+    pub fn committed(self) -> DurableChargeVector {
+        let mut total = DurableChargeVector::ZERO;
+        for axis in DurableChargeAxis::ALL {
+            let value = self.ordinary_committed.axis(axis) + self.maintenance_committed.axis(axis);
+            match axis {
+                DurableChargeAxis::CanonicalDurableBytes => total.canonical_durable_bytes = value,
+                DurableChargeAxis::RetainedHistoryBytes => total.retained_history_bytes = value,
+                DurableChargeAxis::BranchCount => total.branch_count = value,
+                DurableChargeAxis::IndexCount => total.index_count = value,
+                DurableChargeAxis::ViewCount => total.view_count = value,
+                DurableChargeAxis::SubscriptionCount => total.subscription_count = value,
+            }
+        }
+        total
     }
 
     fn validate(self) -> Result<(), BucketStateError> {
@@ -484,13 +519,15 @@ impl BucketState {
                     hard_limit: hard,
                 });
             }
+            // The ordinary band: everything that is not the protected
+            // reserve. Only ordinary usage bills against it.
             let ordinary_limit = hard - reserve;
-            let committed = self.committed.axis(axis);
+            let ordinary_committed = self.ordinary_committed.axis(axis);
             let ordinary_reserved = self.ordinary_reserved.axis(axis);
-            let ordinary_use = committed.checked_add(ordinary_reserved).ok_or(
+            let ordinary_use = ordinary_committed.checked_add(ordinary_reserved).ok_or(
                 BucketStateError::UsageOverflow {
                     axis,
-                    first: committed,
+                    first: ordinary_committed,
                     second: ordinary_reserved,
                 },
             )?;
@@ -501,19 +538,32 @@ impl BucketState {
                     limit: ordinary_limit,
                 });
             }
+            // The maintenance lane: reservations AND committed charges both
+            // bill against the reserve, so a reservation always guarantees
+            // chargeability and maintenance can never eat the ordinary band.
+            let maintenance_committed = self.maintenance_committed.axis(axis);
             let maintenance_reserved = self.maintenance_reserved.axis(axis);
-            if maintenance_reserved > reserve {
+            let maintenance_use = maintenance_committed
+                .checked_add(maintenance_reserved)
+                .ok_or(BucketStateError::UsageOverflow {
+                    axis,
+                    first: maintenance_committed,
+                    second: maintenance_reserved,
+                })?;
+            if maintenance_use > reserve {
                 return Err(BucketStateError::MaintenanceReserveExceeded {
                     axis,
-                    usage: maintenance_reserved,
+                    usage: maintenance_use,
                     reserve,
                 });
             }
-            let total = ordinary_use.checked_add(maintenance_reserved).ok_or(
+            // Implied by the two class laws above, kept as the explicit
+            // backstop the hard limit deserves.
+            let total = ordinary_use.checked_add(maintenance_use).ok_or(
                 BucketStateError::UsageOverflow {
                     axis,
                     first: ordinary_use,
-                    second: maintenance_reserved,
+                    second: maintenance_use,
                 },
             )?;
             if total > hard {
@@ -601,7 +651,8 @@ impl ResourceBucketPolicy {
             protected_maintenance_reserve: self.protected_maintenance_reserve,
             ordinary_reserved: DurableChargeVector::ZERO,
             maintenance_reserved: DurableChargeVector::ZERO,
-            committed: DurableChargeVector::ZERO,
+            ordinary_committed: DurableChargeVector::ZERO,
+            maintenance_committed: DurableChargeVector::ZERO,
         }
     }
 }
@@ -1404,6 +1455,7 @@ impl ResourceLedger {
         add_committed_path_change(
             &mut changes,
             &reservation.path,
+            reservation.class,
             ChangeDirection::Add,
             charged,
         )?;
@@ -1596,12 +1648,14 @@ impl ResourceLedger {
         add_committed_path_change(
             &mut changes,
             &charge.path,
+            charge.class,
             ChangeDirection::Subtract,
             before_vector,
         )?;
         add_committed_path_change(
             &mut changes,
             &charge.path,
+            charge.class,
             ChangeDirection::Add,
             after_vector,
         )?;
@@ -1683,8 +1737,18 @@ impl ResourceLedger {
             state.maintenance_reserved = state
                 .maintenance_reserved
                 .checked_add(change.maintenance_add)?;
-            state.committed = state.committed.checked_sub(change.committed_sub)?;
-            state.committed = state.committed.checked_add(change.committed_add)?;
+            state.ordinary_committed = state
+                .ordinary_committed
+                .checked_sub(change.ordinary_committed_sub)?;
+            state.ordinary_committed = state
+                .ordinary_committed
+                .checked_add(change.ordinary_committed_add)?;
+            state.maintenance_committed = state
+                .maintenance_committed
+                .checked_sub(change.maintenance_committed_sub)?;
+            state.maintenance_committed = state
+                .maintenance_committed
+                .checked_add(change.maintenance_committed_add)?;
             state
                 .validate()
                 .map_err(|cause| LedgerError::BucketRejected {
@@ -1813,7 +1877,7 @@ impl SubjectSnapshot {
                 add_path_change(changes, path, self.class, direction, self.vector)
             }
             SubjectComponent::Committed => {
-                add_committed_path_change(changes, path, direction, self.vector)
+                add_committed_path_change(changes, path, self.class, direction, self.vector)
             }
         }
     }
@@ -1873,8 +1937,10 @@ struct BucketChange {
     ordinary_add: DurableChargeVector,
     maintenance_sub: DurableChargeVector,
     maintenance_add: DurableChargeVector,
-    committed_sub: DurableChargeVector,
-    committed_add: DurableChargeVector,
+    ordinary_committed_sub: DurableChargeVector,
+    ordinary_committed_add: DurableChargeVector,
+    maintenance_committed_sub: DurableChargeVector,
+    maintenance_committed_add: DurableChargeVector,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1910,14 +1976,23 @@ fn add_path_change(
 fn add_committed_path_change(
     changes: &mut BTreeMap<QuotaPath, BucketChange>,
     path: &QuotaPath,
+    class: ResourceClass,
     direction: ChangeDirection,
     vector: DurableChargeVector,
 ) -> Result<(), LedgerError> {
     for ancestor in path.ancestors_inclusive() {
         let change = changes.entry(ancestor).or_default();
-        let target = match direction {
-            ChangeDirection::Add => &mut change.committed_add,
-            ChangeDirection::Subtract => &mut change.committed_sub,
+        let target = match (class, direction) {
+            (ResourceClass::Ordinary, ChangeDirection::Add) => &mut change.ordinary_committed_add,
+            (ResourceClass::Ordinary, ChangeDirection::Subtract) => {
+                &mut change.ordinary_committed_sub
+            }
+            (ResourceClass::RegisteredMaintenance, ChangeDirection::Add) => {
+                &mut change.maintenance_committed_add
+            }
+            (ResourceClass::RegisteredMaintenance, ChangeDirection::Subtract) => {
+                &mut change.maintenance_committed_sub
+            }
         };
         *target = target.checked_add(vector)?;
     }

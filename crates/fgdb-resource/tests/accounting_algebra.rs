@@ -1052,3 +1052,261 @@ fn seeded_transition_storm_never_exposes_a_partial_state() {
         );
     }
 }
+
+// ===========================================================================
+// FAMILY 4 — CLASS-SCOPED PROTECTION (fgdb-a61t)
+//
+// The maintenance reserve must protect across the WHOLE lifecycle, not just
+// the reservation stage. The wrong kernel this family kills is the classless
+// committed pool: apply_charge moved maintenance usage into a single
+// `committed` billed against the ordinary band, which made the reserve void
+// in both directions — a valid maintenance reservation became unchargeable
+// under ordinary pressure, and maintenance could eat the ordinary band when
+// it was empty. Both scenarios below were probe-confirmed against the
+// pre-fix kernel before this fix was written.
+//
+// PROVEN RED BY: erasing the class at charge time — routing apply_charge's
+// committed add through ResourceClass::Ordinary regardless of the
+// reservation's class. Direction 1 then fails with the exact pre-fix
+// signature BucketRejected{OrdinaryCapacityExceeded{CanonicalDurableBytes,
+// usage: 100, limit: 80}} and Direction 2 admits the second reservation,
+// while every conservation property stays green (conservation is
+// class-blind — which is why the defect survived the older suites).
+// ===========================================================================
+
+fn probe_policy() -> ResourceLimitPolicy {
+    // hard = 100 on the bytes axis, reserve = 20; generous elsewhere so the
+    // bytes axis is the only one that can bind.
+    let bucket = ResourceBucketPolicy::try_new(dv(100, 1_000_000, 1_000), dv(20, 0, 0))
+        .expect("probe bucket policy");
+    let all_ops = [
+        LedgerOperationKind::Reserve,
+        LedgerOperationKind::Charge,
+        LedgerOperationKind::Release,
+        LedgerOperationKind::Expire,
+        LedgerOperationKind::Transfer,
+        LedgerOperationKind::Adjust,
+    ];
+    ResourceLimitPolicy::try_new(
+        ResourceLimitPolicyEpoch(1),
+        [(root_path(), bucket)],
+        [
+            ResourceClassRule::try_new(ResourceClass::Ordinary, all_ops).expect("ordinary rule"),
+            ResourceClassRule::try_new(ResourceClass::RegisteredMaintenance, all_ops)
+                .expect("maintenance rule"),
+        ],
+        [1],
+    )
+    .expect("probe policy")
+}
+
+fn probe_ledger() -> ResourceLedger {
+    ResourceLedger::try_new(identity(), probe_policy()).expect("probe ledger")
+}
+
+fn probe_header(generation: u64, tag: u8, class: ResourceClass) -> TransitionHeader {
+    // Maintenance reservations require a policy-registered Maintenance owner
+    // (validate_policy_owner); ordinary traffic uses the attempt key. The
+    // owner is FIXED per class: reserve→charge→release rebinds the entry's
+    // owner, so a per-transition owner would fail OwnerMismatch by design.
+    let owner_key = match class {
+        ResourceClass::RegisteredMaintenance => ResourceOwnerKey::Maintenance {
+            job_id: [SEQUENCE_OWNER; 32],
+            registered_class: 1,
+        },
+        ResourceClass::Ordinary => owner(SEQUENCE_OWNER),
+    };
+    TransitionHeader {
+        expected_ledger_identity: identity(),
+        transition_id: TransitionId([tag; 32]),
+        idempotency_key_digest: [tag; 32],
+        expected_ledger_generation: generation,
+        owner: owner_key,
+        resource_class: class,
+        quota_path: root_path(),
+    }
+}
+
+fn probe_transition(
+    generation: u64,
+    tag: u8,
+    class: ResourceClass,
+    operation: LedgerOperation,
+) -> ResourceLedgerTransition {
+    ResourceLedgerTransition {
+        header: probe_header(generation, tag, class),
+        operation,
+        body_digest: [tag; 32],
+    }
+}
+
+/// DIRECTION 1 (protection fails under pressure, pre-fix): with the ordinary
+/// band full, charging a valid maintenance reservation was REJECTED —
+/// OrdinaryCapacityExceeded{usage: 100, limit: 80} — because the charge
+/// landed in the classless committed pool billed against the band. The
+/// reservation was stuck holding the entire maintenance lane. Post-fix the
+/// charge bills against the reserve it was made under.
+#[test]
+fn a_maintenance_charge_is_guaranteed_by_its_reservation_under_pressure() {
+    let mut led = probe_ledger();
+
+    // Ordinary tenants fill their band: reserve 80, charge 80.
+    let ordinary_reservation = ReservationId([0x01; 32]);
+    let ordinary_charge = ChargeId([0x02; 32]);
+    led.apply(&probe_transition(
+        0,
+        0x10,
+        ResourceClass::Ordinary,
+        LedgerOperation::Reserve {
+            reservation_id: ordinary_reservation,
+            vector: dv(80, 0, 0),
+            hold: OwnerHold::None,
+        },
+    ))
+    .expect("ordinary reserve 80");
+    led.apply(&probe_transition(
+        1,
+        0x11,
+        ResourceClass::Ordinary,
+        LedgerOperation::Charge {
+            reservation_id: ordinary_reservation,
+            expected_reservation_generation: 0,
+            charge_id: ordinary_charge,
+            vector: dv(80, 0, 0),
+            stable_subject_key: StableSubjectKey([0x12; 32]),
+        },
+    ))
+    .expect("ordinary charge 80");
+    assert_eq!(bucket_of(&led).ordinary_committed(), dv(80, 0, 0));
+
+    // Maintenance reserves its full reserve: admitted.
+    let maintenance_reservation = ReservationId([0x03; 32]);
+    let maintenance_charge = ChargeId([0x04; 32]);
+    led.apply(&probe_transition(
+        2,
+        0x13,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Reserve {
+            reservation_id: maintenance_reservation,
+            vector: dv(20, 0, 0),
+            hold: OwnerHold::None,
+        },
+    ))
+    .expect("maintenance reserve 20 inside its reserve");
+
+    // THE LAW: charging that reservation must succeed even though the
+    // ordinary band is full. Pre-fix this was OrdinaryCapacityExceeded.
+    led.apply(&probe_transition(
+        3,
+        0x14,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Charge {
+            reservation_id: maintenance_reservation,
+            expected_reservation_generation: 0,
+            charge_id: maintenance_charge,
+            vector: dv(20, 0, 0),
+            stable_subject_key: StableSubjectKey([0x15; 32]),
+        },
+    ))
+    .expect("a reservation guarantees chargeability — that is its purpose");
+
+    let bucket = bucket_of(&led);
+    assert_eq!(bucket.ordinary_committed(), dv(80, 0, 0));
+    assert_eq!(bucket.maintenance_committed(), dv(20, 0, 0));
+    assert_eq!(bucket.maintenance_reserved(), DurableChargeVector::ZERO);
+    assert_eq!(bucket.committed(), dv(100, 0, 0));
+}
+
+/// DIRECTION 2 (maintenance eats the ordinary band, pre-fix): with the band
+/// empty, five reserve(20)→charge(20) cycles landed committed = 80 — the
+/// ENTIRE ordinary band — and the fifth refusal came from band-fullness, not
+/// the 20-unit reserve. Post-fix, maintenance usage (committed + reserved)
+/// bills against the reserve at every stage, so the second reservation is
+/// refused by MaintenanceReserveExceeded and the ordinary band is untouched.
+#[test]
+fn maintenance_usage_never_bills_against_the_ordinary_band() {
+    let mut led = probe_ledger();
+
+    let reservation = ReservationId([0x21; 32]);
+    let charge = ChargeId([0x22; 32]);
+    led.apply(&probe_transition(
+        0,
+        0x30,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Reserve {
+            reservation_id: reservation,
+            vector: dv(20, 0, 0),
+            hold: OwnerHold::None,
+        },
+    ))
+    .expect("maintenance reserve 20");
+    led.apply(&probe_transition(
+        1,
+        0x31,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Charge {
+            reservation_id: reservation,
+            expected_reservation_generation: 0,
+            charge_id: charge,
+            vector: dv(20, 0, 0),
+            stable_subject_key: StableSubjectKey([0x32; 32]),
+        },
+    ))
+    .expect("maintenance charge 20");
+    assert_eq!(bucket_of(&led).maintenance_committed(), dv(20, 0, 0));
+
+    // A second maintenance reservation must be refused BY THE RESERVE LAW
+    // (committed 20 + reserved 20 = 40 > 20) — pre-fix it was admitted,
+    // because only reservations counted against the reserve.
+    let second = probe_transition(
+        2,
+        0x33,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Reserve {
+            reservation_id: ReservationId([0x23; 32]),
+            vector: dv(20, 0, 0),
+            hold: OwnerHold::None,
+        },
+    );
+    let rejection = led
+        .apply(&second)
+        .expect_err("maintenance committed + reserved must bound the lane");
+    let report = format!("{rejection:?}");
+    assert!(
+        report.contains("MaintenanceReserveExceeded"),
+        "the refusal must name the maintenance reserve, got: {report}"
+    );
+
+    // And the ordinary band is fully intact: an ordinary reserve of the
+    // whole band succeeds beside the committed maintenance usage. Pre-fix,
+    // classless committed billed the band: 20 + 80 > 80 was rejected.
+    // (Generation is still 2: the rejected reserve consumed no id.)
+    let ordinary_reservation = ReservationId([0x24; 32]);
+    led.apply(&probe_transition(
+        2,
+        0x34,
+        ResourceClass::Ordinary,
+        LedgerOperation::Reserve {
+            reservation_id: ordinary_reservation,
+            vector: dv(80, 0, 0),
+            hold: OwnerHold::None,
+        },
+    ))
+    .expect("ordinary band is untouched by maintenance usage");
+
+    // Releasing the charge frees the lane for the next maintenance round.
+    led.apply(&probe_transition(
+        3,
+        0x35,
+        ResourceClass::RegisteredMaintenance,
+        LedgerOperation::Release {
+            subject: LedgerSubject::Charge(charge),
+            expected_generation: 0,
+            exact_vector: dv(20, 0, 0),
+        },
+    ))
+    .expect("release the maintenance charge");
+    let bucket = bucket_of(&led);
+    assert_eq!(bucket.maintenance_committed(), DurableChargeVector::ZERO);
+    assert_eq!(bucket.ordinary_reserved(), dv(80, 0, 0));
+}
