@@ -290,6 +290,57 @@ fn a_self_loop_separates_the_modes() {
 }
 
 // ---------------------------------------------------------------------------
+// fgdb-alyw — the closure is CLOSED
+// ---------------------------------------------------------------------------
+
+/// Once a Simple path has closed, NOTHING may extend it: a further return to
+/// the start repeats the start past the one closure Simple buys, and a hop
+/// anywhere else leaves a walk whose start recurs mid-path. The pre-fix check
+/// admitted both, so the result set exploded with re-bounces and escapes.
+#[test]
+fn a_closed_simple_path_cannot_re_bounce() {
+    // Self-loop at the start plus an out-and-back: the two legitimate
+    // closures are [20] (close immediately) and [21, 22] (go out and
+    // return). Everything longer is a re-bounce or a re-closure.
+    let g = build(&[10, 1], &[(20, 10, 10), (21, 10, 1), (22, 1, 10)]);
+
+    assert_eq!(
+        edge_paths(&g, 10, 10, PathMode::Simple, 5),
+        vec![vec![20], vec![21, 22]],
+        "Simple admits each closure exactly once — pre-fix this set also held \
+         [20,20], [20,21,22], [21,22,21,22], ... up to the hop cap"
+    );
+}
+
+/// The escape direction: after the triangle closes, a hop to a FRESH vertex
+/// must still be refused — the walk is closed, and extending it at all is
+/// wrong, not merely returning to the start again.
+#[test]
+fn a_closed_simple_path_cannot_escape_to_fresh_vertices() {
+    // Triangle 1→2→3→1 with an escape hatch 1→4 and a return 4→1. The only
+    // Simple answer is the triangle; [10,11,12,13,14] is a closed walk with
+    // an excursion glued on, which is a trail, not a simple path.
+    let g = build(
+        &[1, 2, 3, 4],
+        &[(10, 1, 2), (11, 2, 3), (12, 3, 1), (13, 1, 4), (14, 4, 1)],
+    );
+
+    assert_eq!(
+        edge_paths(&g, 1, 1, PathMode::Simple, 6),
+        vec![vec![13, 14], vec![10, 11, 12]],
+        "Simple admits both genuine closures (out-and-back and triangle) and \
+         nothing past them — pre-fix it also admitted [10,11,12,13,14]"
+    );
+    // The excursion remains a legal TRAIL: the escape is not a phantom, the
+    // graph really does contain it — only Simple refuses it.
+    let trail = edge_paths(&g, 1, 1, PathMode::Trail, 6);
+    assert!(
+        trail.contains(&vec![10, 11, 12, 13, 14]),
+        "Trail admits the excursion the Simple set must exclude; got {trail:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Determinism
 // ---------------------------------------------------------------------------
 

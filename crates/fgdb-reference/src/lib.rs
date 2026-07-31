@@ -156,6 +156,16 @@ impl PathMode {
             Self::Walk => true,
             Self::Trail => !current.steps.iter().any(|step| step.edge == edge),
             Self::Simple => {
+                if current.steps.iter().any(|step| step.to == current.start) {
+                    // Already closed. NOTHING may extend a closed walk: a
+                    // further return to the start repeats it past the one
+                    // closure `Simple` buys, and a hop anywhere else leaves
+                    // a walk whose start recurs mid-path. (fgdb-alyw: the
+                    // pre-fix check admitted both, so [10,10] could
+                    // re-bounce 10->1->10->1... and [1,2,1] could escape
+                    // to fresh vertices.)
+                    return false;
+                }
                 if next == current.start {
                     // Closing the walk is allowed only if this is the answer.
                     return next == target;
