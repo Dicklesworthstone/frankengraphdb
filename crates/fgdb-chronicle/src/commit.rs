@@ -29,6 +29,7 @@
 
 use crate::capsule::{CapsuleError, CapsuleKeys, decode_container, encode_container};
 use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain};
+use crate::store::{sync_created_entry, sync_directory, sync_file};
 use fgdb_crypto::Digest;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::ObjectId;
@@ -193,10 +194,19 @@ pub enum CrashPoint {
     BeforeCapsule,
     /// Capsule bytes written, D1 barrier NOT reached.
     AfterCapsuleBeforeD1,
+    /// The capsule inode is durable, but its entry in `capsules/` is not yet
+    /// directory-durable.
+    AfterCapsuleFileSyncBeforeDirectorySync,
+    /// The capsule entry is durable inside `capsules/`, but the database
+    /// directory has not yet made a newly opened capsule directory durable.
+    AfterCapsuleDirectorySyncBeforeParentDirectorySync,
     /// D1 complete: the capsule is durable, but no marker exists yet.
     AfterD1,
     /// Marker bytes appended, D2 barrier NOT reached.
     AfterMarkerBeforeD2,
+    /// The marker-log inode is durable, but a newly created `commits.log`
+    /// entry has not yet been made durable in the database directory.
+    AfterMarkerFileSyncBeforeDirectorySync,
 }
 
 /// The single-actor commit coordinator.
@@ -211,6 +221,8 @@ pub struct CommitCoordinator {
     chain: MarkerChain,
     discarded_tail_bytes: usize,
     poisoned: bool,
+    capsule_directory_parent_sync_pending: bool,
+    commit_log_parent_sync_pending: bool,
 }
 
 /// How an entry failed to decode. The two arms ARE the torn-tail rule: bytes
@@ -229,7 +241,23 @@ impl CommitCoordinator {
     /// durable.
     pub fn open(database_dir: impl AsRef<Path>, keys: CapsuleKeys) -> Result<Self, CommitError> {
         let dir = database_dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(dir.join(CAPSULE_DIR))?;
+        let capsule_dir = dir.join(CAPSULE_DIR);
+        match std::fs::create_dir(&capsule_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !std::fs::symlink_metadata(&capsule_dir)?
+                    .file_type()
+                    .is_dir()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "capsule path exists but is not a directory",
+                    )
+                    .into());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
         let (chain, discarded_tail_bytes) = Self::recover_chain(&dir)?;
         Ok(Self {
             dir,
@@ -237,6 +265,11 @@ impl CommitCoordinator {
             chain,
             discarded_tail_bytes,
             poisoned: false,
+            // Re-sync once after every open. This both closes a newly created
+            // directory/log entry and safely repairs the uncertainty left by
+            // an earlier process that failed between inode and parent sync.
+            capsule_directory_parent_sync_pending: true,
+            commit_log_parent_sync_pending: true,
         })
     }
 
@@ -361,15 +394,17 @@ impl CommitCoordinator {
         Self::capsule_path(&self.dir, capsule_oid).exists()
     }
 
-    /// The durability barrier, named for the same reason `RootStore`'s is: it
-    /// is the step a benchmark is most tempted to drop, and doctrine 7 forbids
-    /// reporting a non-durable mode as a result. Both D1 and D2 are this call.
+    /// The file component of a durability barrier, named for the same reason
+    /// `RootStore`'s is: it is the step a benchmark is most tempted to drop,
+    /// and doctrine 7 forbids reporting a non-durable mode as a result. D1 and
+    /// D2 compose this inode sync with every directory sync their creation
+    /// operations owe.
     ///
     /// It goes through the capability context because that boundary is where a
     /// lab runtime attaches fsync lies, latency, and crash injection — the two
     /// barriers are exactly the instants a durability test needs to control.
     fn barrier(cx: &CommitCx, file: &File) -> Result<(), CommitError> {
-        cx.with_restriction(|| file.sync_all())?;
+        sync_file(cx, file)?;
         Ok(())
     }
 
@@ -494,17 +529,42 @@ impl CommitCoordinator {
         if crash_at == Some(CrashPoint::AfterCapsuleBeforeD1) {
             return Err(CommitError::Io(std::io::Error::other("crash: before D1")));
         }
-        Self::barrier(cx, &capsule_file)?; // D1
+        let capsule_dir = self.dir.join(CAPSULE_DIR);
+        sync_created_entry(cx, &capsule_file, &capsule_dir, || {
+            if crash_at == Some(CrashPoint::AfterCapsuleFileSyncBeforeDirectorySync) {
+                return Err(std::io::Error::other(
+                    "crash: capsule inode durable before directory entry",
+                ));
+            }
+            Ok(())
+        })?;
+        if self.capsule_directory_parent_sync_pending {
+            if crash_at == Some(CrashPoint::AfterCapsuleDirectorySyncBeforeParentDirectorySync) {
+                return Err(CommitError::Io(std::io::Error::other(
+                    "crash: capsule directory durable before database directory entry",
+                )));
+            }
+            sync_directory(cx, &self.dir)?;
+            self.capsule_directory_parent_sync_pending = false;
+        }
         if crash_at == Some(CrashPoint::AfterD1) {
             return Err(CommitError::Io(std::io::Error::other("crash: after D1")));
         }
 
         // ---- The marker. Every structural and framing law was checked before
         // D1, so a log entry that exists is an entry recovery can decode.
-        let mut log = OpenOptions::new()
+        let log_path = self.log_path();
+        let (mut log, log_created) = match OpenOptions::new()
             .append(true)
-            .create(true)
-            .open(self.log_path())?;
+            .create_new(true)
+            .open(&log_path)
+        {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                (OpenOptions::new().append(true).open(&log_path)?, false)
+            }
+            Err(error) => return Err(error.into()),
+        };
 
         // Past this point the durable log MAY contain this entry, so this
         // coordinator can no longer know the truth by looking at itself. It is
@@ -517,7 +577,24 @@ impl CommitCoordinator {
         if crash_at == Some(CrashPoint::AfterMarkerBeforeD2) {
             return Err(CommitError::Io(std::io::Error::other("crash: before D2")));
         }
-        Self::barrier(cx, &log)?; // D2 — the commit point.
+        if log_created || self.commit_log_parent_sync_pending {
+            sync_created_entry(cx, &log, &self.dir, || {
+                if crash_at == Some(CrashPoint::AfterMarkerFileSyncBeforeDirectorySync) {
+                    return Err(std::io::Error::other(
+                        "crash: marker-log inode durable before directory entry",
+                    ));
+                }
+                Ok(())
+            })?;
+            self.commit_log_parent_sync_pending = false;
+        } else {
+            Self::barrier(cx, &log)?;
+            if crash_at == Some(CrashPoint::AfterMarkerFileSyncBeforeDirectorySync) {
+                return Err(CommitError::Io(std::io::Error::other(
+                    "crash: marker-log inode durable",
+                )));
+            }
+        }
 
         // Only now is the commit real, so only now does in-memory state move.
         self.chain.adopt(chained)?;

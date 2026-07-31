@@ -17,7 +17,7 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::root::{NONCE_CAPACITY, OPENER_PAYLOAD_LEN, RootBootstrap, RootSlot};
-use fgdb_chronicle::store::{RootStore, StoreError};
+use fgdb_chronicle::store::{RootCreateCrashPoint, RootStore, StoreError};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use std::path::PathBuf;
 
@@ -128,6 +128,42 @@ fn a_published_root_survives_a_restart() {
             recovered,
             slot(1),
             "every field must survive the round trip"
+        );
+    });
+}
+
+/// Syncing the two root slots is not publication until the parent directory
+/// also makes the new `manifest.root` name durable. The working view proves
+/// the inode bytes were written; the empty crash image models the legal loss
+/// of an unsynced creation dirent without deleting the working fixture.
+#[test]
+fn genesis_is_not_acknowledged_between_inode_and_directory_sync() {
+    let working_dir = scratch_dir("genesis-dirent-working");
+    let crash_image = scratch_dir("genesis-dirent-image");
+    under_lab(11, move |cx| {
+        let store = RootStore::new(&working_dir);
+        let crashed = store.create_with_crash(
+            cx,
+            &slot(1),
+            Some(RootCreateCrashPoint::AfterFileSyncBeforeDirectorySync),
+        );
+        assert!(
+            crashed.is_err(),
+            "the creation barrier must not return green"
+        );
+        assert_eq!(
+            store.current().expect("inode survives in the working view"),
+            slot(1)
+        );
+
+        let lost_dirent = RootStore::new(&crash_image);
+        assert!(
+            matches!(
+                lost_dirent.current(),
+                Err(StoreError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound
+            ),
+            "a crash image without the unsynced dirent has no published root"
         );
     });
 }

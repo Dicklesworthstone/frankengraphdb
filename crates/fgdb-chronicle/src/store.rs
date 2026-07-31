@@ -30,8 +30,59 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+/// Run the ordered durability work for a new or previously uncertain
+/// directory entry.
+///
+/// A file sync makes the inode contents durable; it does not make the name by
+/// which recovery finds that inode durable. Creation therefore owes both
+/// operations, in this order, under the same `CommitCx` boundary. The hook is
+/// test-facing: crash matrices stop after the inode sync and before the
+/// directory sync without maintaining a second, weaker implementation path.
+pub(crate) fn sync_created_entry(
+    cx: &CommitCx,
+    file: &File,
+    parent_directory: &Path,
+    after_file_sync: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    run_created_entry_barrier(
+        || cx.with_restriction(|| file.sync_all()),
+        after_file_sync,
+        || sync_directory(cx, parent_directory),
+    )
+}
+
+/// Sync one already-open file through the commit capability boundary.
+pub(crate) fn sync_file(cx: &CommitCx, file: &File) -> std::io::Result<()> {
+    cx.with_restriction(|| file.sync_all())
+}
+
+/// Make the directory entries in `directory` durable.
+pub(crate) fn sync_directory(cx: &CommitCx, directory: &Path) -> std::io::Result<()> {
+    let directory = File::open(directory)?;
+    cx.with_restriction(|| directory.sync_all())
+}
+
+fn run_created_entry_barrier(
+    sync_file: impl FnOnce() -> std::io::Result<()>,
+    after_file_sync: impl FnOnce() -> std::io::Result<()>,
+    sync_parent_directory: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    sync_file()?;
+    after_file_sync()?;
+    sync_parent_directory()
+}
+
 /// The published root file's name inside a database directory.
 pub const ROOT_FILE_NAME: &str = "manifest.root";
+
+/// The creation-only crash instant that distinguishes inode durability from
+/// namespace durability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootCreateCrashPoint {
+    /// Both root slots and the root inode are durable, but the parent
+    /// directory has not yet made the new `manifest.root` name durable.
+    AfterFileSyncBeforeDirectorySync,
+}
 
 /// Why a durable root operation failed.
 #[derive(Debug)]
@@ -117,7 +168,22 @@ impl RootStore {
     /// its own sake: it means the very first recovery finds an identical pair
     /// rather than one credible slot beside 4096 zero bytes, so the identical-
     /// pair rule covers genesis exactly as it covers any later convergence.
+    /// Creation returns only after both the root inode and its parent-directory
+    /// entry are durable.
     pub fn create(&self, cx: &CommitCx, slot: &RootSlot) -> Result<(), StoreError> {
+        self.create_with_crash(cx, slot, None)
+    }
+
+    /// Create the first root, optionally stopping between inode and directory
+    /// durability. The normal path delegates here so the crash matrix cannot
+    /// accidentally test a different sequence of operations.
+    #[doc(hidden)]
+    pub fn create_with_crash(
+        &self,
+        cx: &CommitCx,
+        slot: &RootSlot,
+        crash_at: Option<RootCreateCrashPoint>,
+    ) -> Result<(), StoreError> {
         let bytes = slot.serialize();
         let mut file = OpenOptions::new()
             .write(true)
@@ -125,7 +191,20 @@ impl RootStore {
             .open(&self.path)?;
         file.write_all(&bytes)?;
         file.write_all(&bytes)?;
-        Self::barrier(cx, &file)?;
+        let parent = self.path.parent().ok_or_else(|| {
+            StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "manifest.root has no parent directory",
+            ))
+        })?;
+        sync_created_entry(cx, &file, parent, || {
+            if crash_at == Some(RootCreateCrashPoint::AfterFileSyncBeforeDirectorySync) {
+                return Err(std::io::Error::other(
+                    "crash: root inode durable before directory entry",
+                ));
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -208,7 +287,7 @@ impl RootStore {
         // The capability context is what a lab runtime swaps to inject fsync
         // lies, latency, and crashes at this exact boundary; the restriction
         // scope is where that interception attaches.
-        cx.with_restriction(|| file.sync_all())?;
+        sync_file(cx, file)?;
         Ok(())
     }
 
@@ -262,5 +341,58 @@ impl RootStore {
         file.write_all(&[0xff])?;
         file.sync_all()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_created_entry_barrier;
+    use std::cell::RefCell;
+
+    #[test]
+    fn creation_barrier_orders_inode_hook_then_parent_directory() {
+        let events = RefCell::new(Vec::new());
+        run_created_entry_barrier(
+            || {
+                events.borrow_mut().push("file");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("crash-hook");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("parent-directory");
+                Ok(())
+            },
+        )
+        .expect("barrier");
+
+        assert_eq!(
+            events.into_inner(),
+            ["file", "crash-hook", "parent-directory"]
+        );
+    }
+
+    #[test]
+    fn a_crash_after_inode_sync_prevents_directory_publication() {
+        let events = RefCell::new(Vec::new());
+        let result = run_created_entry_barrier(
+            || {
+                events.borrow_mut().push("file");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("crash-hook");
+                Err(std::io::Error::other("injected crash"))
+            },
+            || {
+                events.borrow_mut().push("parent-directory");
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(events.into_inner(), ["file", "crash-hook"]);
     }
 }

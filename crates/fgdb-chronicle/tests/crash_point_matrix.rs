@@ -437,6 +437,7 @@ fn a_crash_at_any_instant_recovers_the_committed_prefix() {
     let points = [
         CrashPoint::BeforeCapsule,
         CrashPoint::AfterCapsuleBeforeD1,
+        CrashPoint::AfterCapsuleFileSyncBeforeDirectorySync,
         CrashPoint::AfterD1,
     ];
     for (index, point) in points.into_iter().enumerate() {
@@ -498,6 +499,98 @@ fn a_crash_at_any_instant_recovers_the_committed_prefix() {
             }
         });
     }
+}
+
+/// An inode sync cannot make either of the two namespace links on the first
+/// capsule path durable. Model the loss arm without deleting the live fixture:
+/// a second directory is the crash image and contains only the entries that
+/// had crossed their parent-directory barriers at the named instant.
+#[test]
+fn capsule_namespace_loss_before_d1_recovers_as_no_commit() {
+    let points = [
+        CrashPoint::AfterCapsuleFileSyncBeforeDirectorySync,
+        CrashPoint::AfterCapsuleDirectorySyncBeforeParentDirectorySync,
+    ];
+    for (index, point) in points.into_iter().enumerate() {
+        let working_dir = scratch_dir(&format!("capsule-dirent-working-{index}"));
+        let crash_image = scratch_dir(&format!("capsule-dirent-image-{index}"));
+        under_lab(16 + index as u64, move |cx| {
+            let mut coordinator =
+                CommitCoordinator::open(&working_dir, keys()).expect("open working database");
+            let chain_snapshot = coordinator.chain().clone();
+            let crashed = coordinator.commit_with_crash(
+                cx,
+                &capsule_bytes(1),
+                |seq, oid| marker_for(seq, oid, &chain_snapshot),
+                Some(point),
+            );
+            assert!(crashed.is_err(), "{point:?} must interrupt D1");
+            assert!(
+                coordinator.capsule_exists(capsule_oid(1)),
+                "the inode exists in the working view before the simulated namespace loss"
+            );
+            drop(coordinator);
+
+            // No capsule namespace entry had crossed every directory barrier,
+            // so the crash image intentionally contains neither the capsule
+            // file nor a marker log. Recovery must call that an empty stream.
+            let recovered =
+                CommitCoordinator::open(&crash_image, keys()).expect("open crash image");
+            assert!(recovered.chain().is_empty());
+            assert!(!recovered.capsule_exists(capsule_oid(1)));
+            assert!(recovered.orphan_capsules().expect("scan").is_empty());
+        });
+    }
+}
+
+/// The first marker's inode may be durable while the `commits.log` name is
+/// not. The D1 capsule remains an orphan in the loss arm; if the dirent
+/// survives, ordinary recovery may accept the complete marker. Both outcomes
+/// are safe, and neither is acknowledged before the directory barrier.
+#[test]
+fn first_marker_dirent_loss_never_creates_a_dangling_commit() {
+    let working_dir = scratch_dir("marker-dirent-working");
+    let crash_image = scratch_dir("marker-dirent-image");
+    under_lab(19, move |cx| {
+        let mut coordinator =
+            CommitCoordinator::open(&working_dir, keys()).expect("open working database");
+        let chain_snapshot = coordinator.chain().clone();
+        let crashed = coordinator.commit_with_crash(
+            cx,
+            &capsule_bytes(1),
+            |seq, oid| marker_for(seq, oid, &chain_snapshot),
+            Some(CrashPoint::AfterMarkerFileSyncBeforeDirectorySync),
+        );
+        assert!(crashed.is_err());
+        assert!(coordinator.is_poisoned());
+        assert!(working_dir.join(COMMIT_LOG_NAME).is_file());
+        drop(coordinator);
+
+        // D1 completed before the marker write, so preserve exactly that
+        // durable capsule in the loss-arm image while omitting commits.log.
+        let crash_capsules = crash_image.join(CAPSULE_DIR);
+        std::fs::create_dir_all(&crash_capsules).expect("crash-image capsule directory");
+        let source_capsule = only_capsule_path(&working_dir);
+        let destination_capsule = crash_capsules.join(
+            source_capsule
+                .file_name()
+                .expect("content-addressed capsule filename"),
+        );
+        std::fs::copy(&source_capsule, &destination_capsule).expect("copy durable D1 capsule");
+
+        let lost_log = CommitCoordinator::open(&crash_image, keys()).expect("recover loss arm");
+        assert!(lost_log.chain().is_empty());
+        assert_eq!(lost_log.next_commit_seq(), Ok(CommitSeq(1)));
+        assert_eq!(
+            lost_log.orphan_capsules().expect("scan loss arm"),
+            vec![capsule_oid(1)]
+        );
+
+        let survived_log =
+            CommitCoordinator::open(&working_dir, keys()).expect("recover survival arm");
+        assert_eq!(survived_log.chain().len(), 1);
+        assert!(survived_log.orphan_capsules().expect("scan").is_empty());
+    });
 }
 
 /// A crash between the marker write and D2 has TWO legal outcomes, because
