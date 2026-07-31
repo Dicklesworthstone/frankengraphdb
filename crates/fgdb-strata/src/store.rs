@@ -12,15 +12,16 @@
 //! would return whatever sat at the expected path, which is exactly the failure a
 //! content-addressed store exists to prevent (doctrine 5).
 //!
-//! **A WRITE IS FSYNCED BEFORE IT IS CONSIDERED DONE**, through `&CommitCx` as
-//! doctrine 3 requires — the capability context is what a lab runtime swaps to
-//! inject fsync lies and torn writes at exactly this boundary. Chronicle's root
-//! store established that shape and this follows it rather than inventing a second
-//! one.
+//! **A WRITE IS NOT DONE UNTIL BOTH THE INODE AND ITS NAME ARE DURABLE.** The
+//! block file is synced first, then the `strata-blocks` directory; opening the
+//! store likewise syncs that directory before its entry in the database
+//! directory. Every step runs through `&CommitCx` as doctrine 3 requires — the
+//! capability context is what a lab runtime swaps to inject fsync lies and torn
+//! writes at exactly these boundaries.
 //!
 //! **AN EXISTING BLOCK IS NOT REWRITTEN.** Blocks are immutable and
 //! content-addressed, so a second write of the same identity is either the same
-//! bytes (nothing to do) or a collision (a refusal). Truncating and rewriting
+//! bytes (no content rewrite) or a collision (a refusal). Truncating and rewriting
 //! would take a durable object that is currently readable and make it briefly
 //! absent, to replace it with what it already contained — the hazard
 //! `fgdb-capsule-no-overwrite-pysi` names for capsules, avoided here for the same
@@ -43,6 +44,50 @@ use std::path::{Path, PathBuf};
 
 /// Directory holding a database's Strata blocks.
 pub const BLOCK_DIR: &str = "strata-blocks";
+
+/// Creation-only crash instants that distinguish inode durability from
+/// namespace durability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockStoreCrashPoint {
+    /// The `strata-blocks` directory inode is durable, but the database
+    /// directory has not yet made that name durable.
+    AfterStoreDirectorySyncBeforeDatabaseDirectorySync,
+    /// The block inode is durable, but `strata-blocks` has not yet made the
+    /// block's content-addressed name durable.
+    AfterBlockFileSyncBeforeStoreDirectorySync,
+}
+
+/// Make every directory entry currently visible in `directory` durable.
+fn sync_directory(cx: &CommitCx, directory: &Path) -> std::io::Result<()> {
+    let directory = File::open(directory)?;
+    cx.with_restriction(|| directory.sync_all())
+}
+
+/// Run the ordered durability work for a new or previously uncertain file
+/// entry. The hook lets crash tests stop between inode and namespace durability
+/// without maintaining a second, weaker write path.
+fn sync_file_and_directory(
+    cx: &CommitCx,
+    file: &File,
+    parent_directory: &Path,
+    after_file_sync: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    run_ordered_creation_barrier(
+        || cx.with_restriction(|| file.sync_all()),
+        after_file_sync,
+        || sync_directory(cx, parent_directory),
+    )
+}
+
+fn run_ordered_creation_barrier(
+    sync_created_inode: impl FnOnce() -> std::io::Result<()>,
+    after_inode_sync: impl FnOnce() -> std::io::Result<()>,
+    sync_parent_directory: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    sync_created_inode()?;
+    after_inode_sync()?;
+    sync_parent_directory()
+}
 
 /// Why a block could not be stored or loaded.
 #[derive(Debug)]
@@ -111,12 +156,62 @@ pub struct BlockStore {
 
 impl BlockStore {
     pub fn open(
+        cx: &CommitCx,
         database_dir: impl AsRef<Path>,
         k_oid: [u8; 32],
         namespace: DatabaseSecurityNamespaceId,
     ) -> Result<Self, StoreError> {
-        let dir = database_dir.as_ref().join(BLOCK_DIR);
-        std::fs::create_dir_all(&dir)?;
+        Self::open_with_crash(cx, database_dir, k_oid, namespace, None)
+    }
+
+    /// Open the block store, optionally stopping between durability of the
+    /// store directory and durability of its name in the database directory.
+    /// The normal path delegates here so the crash matrix exercises the exact
+    /// production ordering.
+    #[doc(hidden)]
+    pub fn open_with_crash(
+        cx: &CommitCx,
+        database_dir: impl AsRef<Path>,
+        k_oid: [u8; 32],
+        namespace: DatabaseSecurityNamespaceId,
+        crash_at: Option<BlockStoreCrashPoint>,
+    ) -> Result<Self, StoreError> {
+        let database_dir = database_dir.as_ref().to_path_buf();
+        let dir = database_dir.join(BLOCK_DIR);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !std::fs::symlink_metadata(&dir)?.file_type().is_dir() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "strata block path exists but is not a directory",
+                    )
+                    .into());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+
+        // Re-sync on every open. Besides closing a newly created directory,
+        // this repairs the uncertainty left by an earlier process that failed
+        // between the child-directory and database-directory barriers.
+        run_ordered_creation_barrier(
+            || sync_directory(cx, &dir),
+            || {
+                if crash_at
+                    == Some(
+                        BlockStoreCrashPoint::AfterStoreDirectorySyncBeforeDatabaseDirectorySync,
+                    )
+                {
+                    return Err(std::io::Error::other(
+                        "crash: strata-blocks durable before database directory entry",
+                    ));
+                }
+                Ok(())
+            },
+            || sync_directory(cx, &database_dir),
+        )?;
+
         Ok(Self {
             dir,
             k_oid,
@@ -142,41 +237,54 @@ impl BlockStore {
     ///
     /// The identity is DERIVED from the bytes, never accepted, so a caller cannot
     /// name one block and store another. An existing file holding the same bytes
-    /// is a no-op; one holding different bytes is a refusal.
+    /// is not rewritten, but its durability is re-established before success;
+    /// one holding different bytes is a refusal.
     pub fn put(&self, cx: &CommitCx, bytes: &[u8]) -> Result<ObjectId, StoreError> {
+        self.put_with_crash(cx, bytes, None)
+    }
+
+    /// Store bytes while optionally stopping between block-inode and block-name
+    /// durability. The normal path delegates here so crash tests cannot drift
+    /// from production ordering.
+    #[doc(hidden)]
+    pub fn put_with_crash(
+        &self,
+        cx: &CommitCx,
+        bytes: &[u8],
+        crash_at: Option<BlockStoreCrashPoint>,
+    ) -> Result<ObjectId, StoreError> {
         let id = block_id(&self.k_oid, self.namespace, bytes);
         let path = self.path(id);
 
-        if path.exists() {
-            let mut existing = Vec::new();
-            File::open(&path)?.read_to_end(&mut existing)?;
-            if existing == bytes {
-                return Ok(id);
-            }
-            return Err(StoreError::Collision { block_id: id });
-        }
-
         // create_new: two writers racing on one identity both succeed only if one
-        // of them loses the create and then finds its own bytes already there —
-        // which is the no-op path above, because the bytes are equal by
-        // construction.
-        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => file,
+        // of them loses the create and then finds its own complete bytes already
+        // there. Equal existing bytes are never rewritten, but they are synced:
+        // after a reopen, existence alone does not prove an earlier creation
+        // crossed its durability barriers.
+        let file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                file
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let mut existing = Vec::new();
-                File::open(&path)?.read_to_end(&mut existing)?;
-                if existing == bytes {
-                    return Ok(id);
+                let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
+                file.read_to_end(&mut existing)?;
+                if existing != bytes {
+                    return Err(StoreError::Collision { block_id: id });
                 }
-                return Err(StoreError::Collision { block_id: id });
+                file
             }
             Err(error) => return Err(error.into()),
         };
-        file.write_all(bytes)?;
-        // The capability context is where a lab runtime attaches fsync lies and
-        // torn writes; doctrine 3 requires it and this is the boundary it exists
-        // for.
-        cx.with_restriction(|| file.sync_all())?;
+        sync_file_and_directory(cx, &file, &self.dir, || {
+            if crash_at == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync) {
+                return Err(std::io::Error::other(
+                    "crash: strata block inode durable before directory entry",
+                ));
+            }
+            Ok(())
+        })?;
         Ok(id)
     }
 
@@ -278,5 +386,53 @@ impl BlockStore {
     /// being true, and this crate is never optimized (§15).
     pub fn contains(&self, id: ObjectId) -> bool {
         self.get_bytes(id).is_ok()
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::run_ordered_creation_barrier;
+    use std::cell::RefCell;
+
+    #[test]
+    fn creation_barrier_runs_inode_hook_then_parent() {
+        let order = RefCell::new(Vec::new());
+        run_ordered_creation_barrier(
+            || {
+                order.borrow_mut().push("inode");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("hook");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("parent");
+                Ok(())
+            },
+        )
+        .expect("barrier");
+        assert_eq!(*order.borrow(), ["inode", "hook", "parent"]);
+    }
+
+    #[test]
+    fn crash_hook_prevents_parent_directory_publication() {
+        let order = RefCell::new(Vec::new());
+        let outcome = run_ordered_creation_barrier(
+            || {
+                order.borrow_mut().push("inode");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("hook");
+                Err(std::io::Error::other("crash"))
+            },
+            || {
+                order.borrow_mut().push("parent");
+                Ok(())
+            },
+        );
+        assert!(outcome.is_err());
+        assert_eq!(*order.borrow(), ["inode", "hook"]);
     }
 }

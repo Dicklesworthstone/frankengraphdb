@@ -13,7 +13,7 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb_delta_types::RelationId;
-use fgdb_strata::store::{BlockStore, StoreError};
+use fgdb_strata::store::{BLOCK_DIR, BlockStore, BlockStoreCrashPoint, StoreError};
 use fgdb_strata::{AdjacencyEntry, block_id, encode_block};
 use fgdb_types::context::{CommitCx, PurposeContexts};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
@@ -65,7 +65,7 @@ fn sample() -> Vec<u8> {
 fn a_stored_block_reads_back() {
     let dir = scratch_dir("roundtrip");
     under_lab(31, move |cx| {
-        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let bytes = sample();
         let id = store.put(cx, &bytes).expect("stores");
 
@@ -83,6 +83,133 @@ fn a_stored_block_reads_back() {
     });
 }
 
+/// A durable directory inode is not yet a durable `strata-blocks` name. Model
+/// the loss arm with a second database directory rather than deleting the live
+/// fixture: it contains only namespace entries that crossed the database-parent
+/// barrier at the named instant.
+#[test]
+fn store_directory_creation_waits_for_database_directory_sync() {
+    let working_dir = scratch_dir("store-dirent-working");
+    let crash_image = scratch_dir("store-dirent-image");
+    under_lab(39, move |cx| {
+        let crashed = BlockStore::open_with_crash(
+            cx,
+            &working_dir,
+            K_OID,
+            NAMESPACE,
+            Some(BlockStoreCrashPoint::AfterStoreDirectorySyncBeforeDatabaseDirectorySync),
+        );
+        assert!(
+            crashed.is_err(),
+            "open must not acknowledge before parent sync"
+        );
+        assert!(
+            working_dir.join(BLOCK_DIR).is_dir(),
+            "the directory inode exists in the working view"
+        );
+        assert!(
+            !crash_image.join(BLOCK_DIR).exists(),
+            "the legal loss-arm image has no unsynced directory entry"
+        );
+
+        let lost =
+            BlockStore::open(cx, &crash_image, K_OID, NAMESPACE).expect("reopen loss-arm database");
+        assert!(!lost.contains(ObjectId([0x23; 32])));
+
+        // The other legal outcome is that the unsynced name survived. Reopen
+        // re-establishes both directory barriers before any write is accepted.
+        let survived = BlockStore::open(cx, &working_dir, K_OID, NAMESPACE)
+            .expect("reopen survival-arm database");
+        let bytes = sample();
+        let id = survived.put(cx, &bytes).expect("store after reopen");
+        assert_eq!(survived.get_bytes(id).expect("read"), bytes);
+    });
+}
+
+/// Syncing a block inode does not publish its content-addressed name. The
+/// working view proves the bytes exist; a second store is the legal crash image
+/// in which the unsynced dirent was lost. Neither fixture is deleted or
+/// rewritten to model the crash.
+#[test]
+fn block_creation_waits_for_store_directory_sync() {
+    let working_dir = scratch_dir("block-dirent-working");
+    let crash_image = scratch_dir("block-dirent-image");
+    under_lab(40, move |cx| {
+        let bytes = sample();
+        let id = block_id(&K_OID, NAMESPACE, &bytes);
+        let store = BlockStore::open(cx, &working_dir, K_OID, NAMESPACE).expect("opens");
+        let crashed = store.put_with_crash(
+            cx,
+            &bytes,
+            Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync),
+        );
+        assert!(
+            crashed.is_err(),
+            "put must not acknowledge before directory sync"
+        );
+        assert!(
+            store.path(id).is_file(),
+            "the durable inode exists in the working view"
+        );
+        drop(store);
+
+        let lost =
+            BlockStore::open(cx, &crash_image, K_OID, NAMESPACE).expect("reopen loss-arm database");
+        assert!(
+            !lost.contains(id),
+            "the legal loss arm cannot resolve an unsynced block name"
+        );
+
+        let survived = BlockStore::open(cx, &working_dir, K_OID, NAMESPACE)
+            .expect("reopen survival-arm database");
+        assert_eq!(
+            survived.get_bytes(id).expect("surviving dirent reads"),
+            bytes
+        );
+    });
+}
+
+/// Equal existing bytes are still namespace-uncertain after a reopen. The
+/// idempotent path must re-enter the durability barrier instead of returning
+/// merely because the bytes happen to be visible in the current kernel view.
+#[test]
+fn an_equal_existing_block_reestablishes_durability_after_reopen() {
+    let dir = scratch_dir("idempotent-reopen-barrier");
+    under_lab(44, move |cx| {
+        let bytes = sample();
+        let id = {
+            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+            store.put(cx, &bytes).expect("initial store")
+        };
+        let modified_at = std::fs::metadata(
+            BlockStore::open(cx, &dir, K_OID, NAMESPACE)
+                .expect("reopens")
+                .path(id),
+        )
+        .and_then(|metadata| metadata.modified())
+        .expect("mtime");
+
+        let reopened = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("reopens again");
+        let interrupted = reopened.put_with_crash(
+            cx,
+            &bytes,
+            Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync),
+        );
+        assert!(
+            interrupted.is_err(),
+            "equal existing bytes must not bypass the durability barrier"
+        );
+        assert_eq!(
+            std::fs::metadata(reopened.path(id))
+                .and_then(|metadata| metadata.modified())
+                .expect("mtime after re-put"),
+            modified_at,
+            "re-establishing durability must not rewrite immutable bytes"
+        );
+        assert_eq!(reopened.get_bytes(id).expect("read"), bytes);
+    });
+}
+
 /// **THE LOAD-BEARING LAW: the store does not trust its own path.**
 ///
 /// The file at a block's expected path is replaced with a DIFFERENT lawful block.
@@ -93,7 +220,7 @@ fn a_stored_block_reads_back() {
 fn bytes_at_the_right_path_that_are_the_wrong_block_are_refused() {
     let dir = scratch_dir("wrongblock");
     under_lab(32, move |cx| {
-        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let mine = sample();
         let id = store.put(cx, &mine).expect("stores");
 
@@ -129,7 +256,7 @@ fn bytes_at_the_right_path_that_are_the_wrong_block_are_refused() {
 fn damaged_bytes_are_refused_by_identity_first() {
     let dir = scratch_dir("damaged");
     under_lab(33, move |cx| {
-        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let id = store.put(cx, &sample()).expect("stores");
 
         let mut bytes = std::fs::read(store.path(id)).expect("read");
@@ -154,7 +281,7 @@ fn damaged_bytes_are_refused_by_identity_first() {
 fn storing_the_same_bytes_twice_is_a_no_op() {
     let dir = scratch_dir("idempotent");
     under_lab(34, move |cx| {
-        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let bytes = sample();
         let first = store.put(cx, &bytes).expect("stores");
         let modified_at = std::fs::metadata(store.path(first))
@@ -184,7 +311,7 @@ fn storing_the_same_bytes_twice_is_a_no_op() {
 fn a_collision_is_refused() {
     let dir = scratch_dir("collision");
     under_lab(35, move |cx| {
-        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let bytes = sample();
         let id = store.put(cx, &bytes).expect("stores");
 
@@ -214,8 +341,8 @@ fn a_collision_is_refused() {
 fn two_stores_with_different_keys_do_not_share_blocks() {
     let dir = scratch_dir("scoped");
     under_lab(36, move |cx| {
-        let mine = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
-        let theirs = BlockStore::open(&dir, [0x11; 32], NAMESPACE).expect("opens");
+        let mine = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
+        let theirs = BlockStore::open(cx, &dir, [0x11; 32], NAMESPACE).expect("opens");
         let bytes = sample();
 
         let my_id = mine.put(cx, &bytes).expect("stores");
@@ -241,8 +368,8 @@ fn two_stores_with_different_keys_do_not_share_blocks() {
 #[test]
 fn a_missing_block_is_an_error() {
     let dir = scratch_dir("missing");
-    under_lab(37, move |_cx| {
-        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+    under_lab(37, move |cx| {
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let absent = ObjectId([0xab; 32]);
         assert!(!store.contains(absent));
         assert!(matches!(store.get(absent), Err(StoreError::Io(_))));
@@ -259,7 +386,7 @@ fn a_missing_block_is_an_error() {
 fn stored_bytes_that_are_not_a_block_are_refused_as_malformed() {
     let dir = scratch_dir("notablock");
     under_lab(38, move |cx| {
-        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         // Stored honestly — the store derives the identity, so this IS the object
         // it names. It simply is not a block.
         let id = store
@@ -324,7 +451,7 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
         assert!(blocks.len() >= 2, "the fixture spans more than one block");
 
         let root_id = {
-            let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+            let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
             for block in &blocks {
                 store.put(cx, &block.bytes).expect("stores a block");
             }
@@ -332,7 +459,7 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
         };
 
         // A FRESH handle, holding nothing but the root identity.
-        let reopened = BlockStore::open(&dir, K_OID, NAMESPACE).expect("reopens");
+        let reopened = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("reopens");
         let (loaded_root, loaded_blocks) = reopened.reopen(root_id).expect("reopens the partition");
 
         assert_eq!(loaded_root, root, "the root came back exactly");
@@ -368,7 +495,7 @@ fn reopening_with_a_missing_block_is_refused() {
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
 
-        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         // Store the root and only the FIRST block.
         store.put(cx, &blocks[0].bytes).expect("stores");
         let root_id = store.put_root(cx, &root).expect("stores the root");
@@ -398,7 +525,7 @@ fn a_root_at_the_wrong_identity_is_refused() {
             .publish(strata_keys, CommitSeq(9))
             .expect("publishes");
 
-        let store = BlockStore::open(&dir, K_OID, NAMESPACE).expect("opens");
+        let store = BlockStore::open(cx, &dir, K_OID, NAMESPACE).expect("opens");
         let root_id = store.put_root(cx, &root).expect("stores");
 
         // A different lawful root written over the path.
