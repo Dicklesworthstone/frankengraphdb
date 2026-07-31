@@ -70,6 +70,18 @@ pub struct Compaction {
 /// second precedence rule, or a compacted partition could answer differently from
 /// the one it replaced.
 pub fn compact(blocks: &[Vec<AdjacencyEntry>], floor: CommitSeq) -> Compaction {
+    compact_with_limit(
+        blocks,
+        floor,
+        usize::try_from(crate::MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX),
+    )
+}
+
+fn compact_with_limit(
+    blocks: &[Vec<AdjacencyEntry>],
+    floor: CommitSeq,
+    max_entries: usize,
+) -> Compaction {
     // Collapse to surviving VERSIONS first, keyed the same way the merge is:
     // (key, created_at) identifies a version, and the last block wins for one.
     let mut versions: BTreeMap<
@@ -105,25 +117,67 @@ pub fn compact(blocks: &[Vec<AdjacencyEntry>], floor: CommitSeq) -> Compaction {
         .collect();
     let dropped = before_floor - retained.len();
 
-    // Pack into as few blocks as the one-version-per-key rule allows. Entries
-    // arrive sorted by (key, created_at), so successive entries sharing a key are
-    // adjacent: the Nth version of a key goes into the Nth block, which is the
-    // minimum any packing can achieve.
-    let mut packed: Vec<Vec<AdjacencyEntry>> = Vec::new();
-    let mut previous_key = None;
-    let mut depth = 0usize;
+    let packed = pack_retained(retained, max_entries);
+    Compaction {
+        blocks: packed,
+        dropped,
+        superseded,
+    }
+}
+
+fn pack_retained(retained: Vec<AdjacencyEntry>, max_entries: usize) -> Vec<Vec<AdjacencyEntry>> {
+    if retained.is_empty() {
+        return Vec::new();
+    }
+    debug_assert!(max_entries > 0, "the durable block capacity is nonzero");
+
+    // There are TWO independent lower bounds on the output block count:
+    //
+    // 1. every version of one key needs a different block; and
+    // 2. no block may exceed the durable format's entry ceiling.
+    //
+    // Their maximum is achievable. Entries arrive sorted by (key, created_at),
+    // so assigning them cyclically gives each key's adjacent versions distinct
+    // blocks. The same cycle balances total cardinality to within one entry, so
+    // the capacity lower bound is sufficient too. This is therefore the minimum
+    // block count allowed by BOTH format laws, not merely by version depth.
+    let mut max_versions_for_one_key = 0usize;
+    let mut group_start = 0usize;
+    while group_start < retained.len() {
+        let key = (
+            retained[group_start].src,
+            retained[group_start].relation,
+            retained[group_start].dst,
+        );
+        let mut group_end = group_start + 1;
+        while group_end < retained.len()
+            && (
+                retained[group_end].src,
+                retained[group_end].relation,
+                retained[group_end].dst,
+            ) == key
+        {
+            group_end += 1;
+        }
+        max_versions_for_one_key = max_versions_for_one_key.max(group_end - group_start);
+        group_start = group_end;
+    }
+
+    let capacity_blocks = retained.len().div_ceil(max_entries);
+    let block_count = max_versions_for_one_key.max(capacity_blocks);
+    let base_len = retained.len() / block_count;
+    let longer_blocks = retained.len() % block_count;
+    let mut packed = (0..block_count)
+        .map(|index| Vec::with_capacity(base_len + usize::from(index < longer_blocks)))
+        .collect::<Vec<Vec<AdjacencyEntry>>>();
+
+    let mut next_block = 0usize;
     for entry in retained {
-        let key = (entry.src, entry.relation, entry.dst);
-        if previous_key == Some(key) {
-            depth += 1;
-        } else {
-            depth = 0;
-            previous_key = Some(key);
+        packed[next_block].push(entry);
+        next_block += 1;
+        if next_block == block_count {
+            next_block = 0;
         }
-        if packed.len() == depth {
-            packed.push(Vec::new());
-        }
-        packed[depth].push(entry);
     }
 
     // Each block's entries must be canonically ordered; the pack above preserves
@@ -133,12 +187,12 @@ pub fn compact(blocks: &[Vec<AdjacencyEntry>], floor: CommitSeq) -> Compaction {
     }
 
     // A root's list is publication order, witnessed by nondecreasing `last_seq`.
-    // Packing by per-key version depth does not preserve that order: one key's
-    // third version may be older than another key's second. Supersede has already
+    // Cyclic capacity packing does not preserve that order: one key's third
+    // version may be older than another key's second. Supersede has already
     // collapsed every duplicate statement of a version above, so reordering these
     // blocks cannot change last-wins precedence. Sort by the truthful span before a
-    // root is allowed to name the result; the depth order is the deterministic tie
-    // breaker because `sort_by_key` is stable.
+    // root is allowed to name the result; the cyclic block order is the
+    // deterministic tie breaker because `sort_by_key` is stable.
     packed.sort_by_key(|block| {
         crate::root::span_of(block)
             .map(|(first_seq, last_seq)| (last_seq, first_seq))
@@ -147,9 +201,166 @@ pub fn compact(blocks: &[Vec<AdjacencyEntry>], floor: CommitSeq) -> Compaction {
             // production panic if that construction is ever refactored incorrectly.
             .unwrap_or((CommitSeq(0), CommitSeq(0)))
     });
-    Compaction {
-        blocks: packed,
-        dropped,
-        superseded,
+    packed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fgdb_delta_types::RelationId;
+    use fgdb_types::VId;
+    use std::collections::BTreeSet;
+
+    fn entry(dst: u128) -> AdjacencyEntry {
+        version(dst, 1, None)
+    }
+
+    fn version(dst: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
+        AdjacencyEntry {
+            src: VId(1),
+            relation: RelationId(1),
+            dst: VId(dst),
+            created_at: CommitSeq(created),
+            retired_at: retired.map(CommitSeq),
+        }
+    }
+
+    fn assert_packing_laws(blocks: &[Vec<AdjacencyEntry>], max_entries: usize) {
+        let mut upper_frontiers = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            assert!(
+                block.len() <= max_entries,
+                "a compacted block has {} entries, above {max_entries}",
+                block.len()
+            );
+            let keys = block
+                .iter()
+                .map(|entry| (entry.src, entry.relation, entry.dst))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                keys.len(),
+                block.len(),
+                "one compacted block contains two versions of a key"
+            );
+            crate::encode_block(block).expect("every compacted block remains encodable");
+            upper_frontiers.push(
+                crate::root::span_of(block)
+                    .expect("the packer emits no empty blocks")
+                    .1,
+            );
+        }
+        assert!(
+            upper_frontiers
+                .windows(2)
+                .all(|pair| pair[0].0 <= pair[1].0),
+            "compacted publication frontiers regress: {upper_frontiers:?}"
+        );
+    }
+
+    #[test]
+    fn capacity_is_part_of_the_minimum_block_count() {
+        let before = vec![(1..=5).map(entry).collect()];
+
+        let result = compact_with_limit(&before, CommitSeq(1), 2);
+
+        assert_eq!(
+            result.blocks.len(),
+            3,
+            "five entries need three two-entry blocks"
+        );
+        assert_eq!(result.dropped, 0);
+        assert_eq!(result.superseded, 0);
+        assert_packing_laws(&result.blocks, 2);
+    }
+
+    #[test]
+    fn capacity_and_version_depth_share_one_minimal_packing() {
+        let before = vec![
+            vec![
+                version(2, 1, Some(3)),
+                version(3, 1, None),
+                version(4, 1, None),
+            ],
+            vec![
+                version(2, 4, Some(6)),
+                version(5, 4, None),
+                version(6, 4, None),
+            ],
+            vec![version(2, 7, None), version(7, 7, None)],
+        ];
+
+        let once = compact_with_limit(&before, CommitSeq(1), 2);
+
+        assert_eq!(
+            once.blocks.len(),
+            4,
+            "max(version depth 3, capacity lower bound 4) is exact"
+        );
+        assert_packing_laws(&once.blocks, 2);
+        for as_of in 1..=9 {
+            assert_eq!(
+                crate::root::merge_neighbours(&before, VId(1), RelationId(1), CommitSeq(as_of),),
+                crate::root::merge_neighbours(
+                    &once.blocks,
+                    VId(1),
+                    RelationId(1),
+                    CommitSeq(as_of),
+                ),
+                "capacity packing changed the answer at sequence {as_of}"
+            );
+        }
+
+        let twice = compact_with_limit(&once.blocks, CommitSeq(1), 2);
+        assert_eq!(
+            twice.blocks, once.blocks,
+            "capacity-aware compaction is not a fixed point"
+        );
+        assert_eq!(twice.dropped, 0);
+        assert_eq!(twice.superseded, 0);
+    }
+
+    #[test]
+    fn small_capacity_and_version_products_are_minimal_and_lawful() {
+        for a in 0u8..=3 {
+            for b in 0u8..=3 {
+                for c in 0u8..=3 {
+                    for d in 0u8..=3 {
+                        let multiplicities = [a, b, c, d];
+                        let mut retained = Vec::new();
+                        for (key, count) in (1u128..).zip(multiplicities) {
+                            for version_index in 0..count {
+                                retained.push(version(key, u64::from(version_index) + 1, None));
+                            }
+                        }
+                        if retained.is_empty() {
+                            continue;
+                        }
+
+                        for max_entries in 1usize..=4 {
+                            let expected_blocks = multiplicities
+                                .into_iter()
+                                .max()
+                                .map(usize::from)
+                                .unwrap_or(0)
+                                .max(retained.len().div_ceil(max_entries));
+                            let packed = pack_retained(retained.clone(), max_entries);
+
+                            assert_eq!(
+                                packed.len(),
+                                expected_blocks,
+                                "wrong minimum for {multiplicities:?} at capacity {max_entries}"
+                            );
+                            assert_packing_laws(&packed, max_entries);
+                            assert_eq!(
+                                pack_retained(retained.clone(), max_entries),
+                                packed,
+                                "packing is not deterministic for {multiplicities:?} at capacity \
+                                 {max_entries}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
